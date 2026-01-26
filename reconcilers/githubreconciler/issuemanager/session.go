@@ -12,7 +12,7 @@ import (
 	"slices"
 	"strings"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v75/github"
 )

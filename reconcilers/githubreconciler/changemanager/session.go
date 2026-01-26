@@ -11,7 +11,7 @@ import (
 	"reflect"
 	"time"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v75/github"

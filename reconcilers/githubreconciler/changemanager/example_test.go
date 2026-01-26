@@ -9,8 +9,8 @@ import (
 	"context"
 	"text/template"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
-	"chainguard.dev/driftlessaf/githubreconciler/changemanager"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"github.com/google/go-github/v75/github"
 )
 

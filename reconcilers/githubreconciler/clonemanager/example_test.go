@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
