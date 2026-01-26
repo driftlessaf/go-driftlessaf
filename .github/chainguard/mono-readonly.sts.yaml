@@ -1,0 +1,10 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: repo:chainguard-dev/mono:pull_request
+claim_pattern:
+  workflow_ref: chainguard-dev/mono/.github/workflows/export-go-driftlessaf.yaml@.*
+
+permissions:
+  contents: read

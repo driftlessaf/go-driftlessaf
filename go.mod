@@ -2,10 +2,6 @@ module chainguard.dev/driftlessaf
 
 go 1.25.4
 
-replace chainguard.dev/sdk => ../sdk
-
-replace github.com/chainguard-dev/terraform-infra-common => ../terraform/public-modules
-
 require (
 	chainguard.dev/apko v0.30.34
 	chainguard.dev/go-grpc-kit v0.17.15
@@ -14,7 +10,7 @@ require (
 	cloud.google.com/go/storage v1.58.0
 	github.com/anthropics/anthropic-sdk-go v1.18.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v0.0.0-00010101000000-000000000000
+	github.com/chainguard-dev/terraform-infra-common v0.10.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.1.0
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/go-git/go-git/v5 v5.16.4
