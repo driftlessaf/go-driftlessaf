@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"text/template"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
-	internaltemplate "chainguard.dev/driftlessaf/githubreconciler/internal/template"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 	"github.com/google/go-github/v75/github"
 )
 

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/chainguard-dev/clog"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"

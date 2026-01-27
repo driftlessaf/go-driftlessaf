@@ -15,8 +15,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v75/github"
 
-	"chainguard.dev/driftlessaf/githubreconciler"
-	internaltemplate "chainguard.dev/driftlessaf/githubreconciler/internal/template"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 )
 
 // TestDetails is a test implementation of Details
