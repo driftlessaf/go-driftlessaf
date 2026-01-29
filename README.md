@@ -1,24 +1,35 @@
 # DriftlessAF
 
-DriftlessAF is Chainguard's foundational framework for building AI-powered automation and resilient GitHub reconcilers.
+[DriftlessAF](https://github.com/driftlessaf) is Chainguard's foundational
+agentic framework for building AI-powered automation and resilient GitHub
+reconcilers.
 
 ## Features
 
-### AI Agent Infrastructure
+This project includes the following Go modules and functionality.
 
-- **AI Executors**: Production-ready executors for Google Gemini and Anthropic Claude models (`agents/executor/`)
-- **Evaluation Framework**: Testing and monitoring agent quality with comprehensive metrics (`agents/evals/`)
-- **OpenTelemetry Metrics**: Built-in observability for AI operations (`agents/metrics/`)
-- **Prompt Building**: Utilities for constructing and managing prompts (`agents/promptbuilder/`)
-- **Tool Calling**: Helpers for function/tool calling with Claude and Gemini (`agents/toolcall/`)
-- **Result Parsing**: Structured output extraction from model responses (`agents/result/`)
+### Agentic AI infrastructure
 
-### Reconciler Infrastructure
+- **AI executors**: Production-ready executors for Google Gemini and Anthropic Claude models.
+- **Evaluation framework**: Testing and monitoring agent quality with comprehensive metrics.
+- **OpenTelemetry metrics**: Built-in observability for AI operations.
+- **Prompt building**: Utilities for constructing and managing prompts.
+- **Tool calling**: Helpers for function/tool calling with Claude and Gemini.
+- **Result parsing**: Structured output extraction from model responses.
 
-Production-ready reconciler infrastructure based on the Kubernetes reconciliation pattern, adapted for GitHub automation:
+Find more information in the [agents README](./agents/README.md).
 
-- **Workqueue System**: GCS-backed state persistence with retry, exponential backoff, and concurrency control (`workqueue/`)
-- **GitHub Reconcilers**: Process GitHub pull requests, file paths, APK packages, and OCI artifacts (`reconcilers/`, `githubreconciler/`)
+### Reconciler infrastructure
+
+Production-ready reconciler infrastructure based on the Kubernetes
+reconciliation pattern, adapted for GitHub automation:
+
+- **Workqueue system**: GCS-backed state persistence with retry, exponential
+  backoff, and concurrency control (`workqueue/`). Find more information in the
+  [workqueue README](./workqueue/README.md).
+- **Reconcilers**: Process GitHub pull requests, repository file paths, APK
+  packages, and OCI artifacts (`reconcilers/`). Find more information in the
+  [reconciler README](./reconcilers/README.md).
 
 ## Installation
 
@@ -32,4 +43,4 @@ See the package documentation for examples and API reference.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](./LICENSE)
