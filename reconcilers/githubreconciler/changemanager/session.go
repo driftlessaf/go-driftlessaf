@@ -7,6 +7,7 @@ package changemanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -28,20 +29,30 @@ type Session[T any] struct {
 	existingPR *github.PullRequest
 }
 
-// HasSkipLabel checks if the existing PR has a skip label.
-// Returns false if no existing PR exists.
-func (s *Session[T]) HasSkipLabel() bool {
-	if s.existingPR == nil {
+// skipLabel returns the skip label for this session's identity.
+func (s *Session[T]) skipLabel() string {
+	return "skip:" + s.manager.identity
+}
+
+// hasSkipLabel checks if the given PR has a skip label.
+func (s *Session[T]) hasSkipLabel(pr *github.PullRequest) bool {
+	if pr == nil {
 		return false
 	}
 
-	skipLabel := "skip:" + s.manager.identity
-	for _, label := range s.existingPR.Labels {
+	skipLabel := s.skipLabel()
+	for _, label := range pr.Labels {
 		if label.GetName() == skipLabel {
 			return true
 		}
 	}
 	return false
+}
+
+// HasSkipLabel checks if the existing PR has a skip label.
+// Returns false if no existing PR exists.
+func (s *Session[T]) HasSkipLabel() bool {
+	return s.hasSkipLabel(s.existingPR)
 }
 
 // CloseAnyOutstanding closes the existing PR if one exists.
@@ -77,6 +88,7 @@ func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) er
 // Upsert creates a new PR or updates an existing one with the provided properties.
 // It only calls makeChanges when refresh is needed or when creating a new PR.
 // Returns a RequeueAfter error if GitHub is still computing the PR's mergeable status.
+// Returns an error if the skip label is present on the existing PR.
 func (s *Session[T]) Upsert(
 	ctx context.Context,
 	data *T,
@@ -148,6 +160,17 @@ func (s *Session[T]) Upsert(
 
 	// Update existing PR
 	log.Infof("Updating existing PR #%d", s.existingPR.GetNumber())
+
+	// Refetch PR to check for skip label (could have been added since session creation)
+	freshPR, _, err := s.client.PullRequests.Get(ctx, s.owner, s.repo, s.existingPR.GetNumber())
+	if err != nil {
+		return "", fmt.Errorf("refetching pull request: %w", err)
+	}
+
+	// Check skip label on fresh PR
+	if s.hasSkipLabel(freshPR) {
+		return "", errors.New("PR has skip label, not updating to avoid stomping manual changes")
+	}
 
 	_, _, err = s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.existingPR.GetNumber(), &github.PullRequest{
 		Title: github.Ptr(title),
