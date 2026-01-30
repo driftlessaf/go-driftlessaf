@@ -3,15 +3,12 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package main
+package prvalidation
 
 import (
+	"strings"
 	"testing"
 )
-
-// =============================================================================
-// Unit Tests - Test validation logic in isolation
-// =============================================================================
 
 func TestConventionalCommitRegex(t *testing.T) {
 	valid := []string{
@@ -24,12 +21,12 @@ func TestConventionalCommitRegex(t *testing.T) {
 	}
 
 	for _, title := range valid {
-		if !conventionalCommitRegex.MatchString(title) {
+		if !ConventionalCommitRegex.MatchString(title) {
 			t.Errorf("expected %q to match", title)
 		}
 	}
 	for _, title := range invalid {
-		if conventionalCommitRegex.MatchString(title) {
+		if ConventionalCommitRegex.MatchString(title) {
 			t.Errorf("expected %q to NOT match", title)
 		}
 	}
@@ -89,7 +86,7 @@ func TestValidatePR(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			titleValid, descValid, issues := validatePR(tt.title, tt.body)
+			titleValid, descValid, issues := ValidatePR(tt.title, tt.body)
 
 			if titleValid != tt.wantTitleValid {
 				t.Errorf("titleValid: got %v, want %v", titleValid, tt.wantTitleValid)
@@ -106,26 +103,26 @@ func TestValidatePR(t *testing.T) {
 
 func TestComputeGeneration(t *testing.T) {
 	// Same inputs should produce same output (deterministic)
-	gen1 := computeGeneration("abc123", "feat: title", "body text")
-	gen2 := computeGeneration("abc123", "feat: title", "body text")
+	gen1 := ComputeGeneration("abc123", "feat: title", "body text")
+	gen2 := ComputeGeneration("abc123", "feat: title", "body text")
 	if gen1 != gen2 {
 		t.Errorf("same inputs should produce same generation: got %s and %s", gen1, gen2)
 	}
 
 	// Different SHA should produce different generation
-	gen3 := computeGeneration("def456", "feat: title", "body text")
+	gen3 := ComputeGeneration("def456", "feat: title", "body text")
 	if gen1 == gen3 {
 		t.Error("different SHA should produce different generation")
 	}
 
 	// Different title should produce different generation
-	gen4 := computeGeneration("abc123", "fix: different", "body text")
+	gen4 := ComputeGeneration("abc123", "fix: different", "body text")
 	if gen1 == gen4 {
 		t.Error("different title should produce different generation")
 	}
 
 	// Different body should produce different generation
-	gen5 := computeGeneration("abc123", "feat: title", "different body")
+	gen5 := ComputeGeneration("abc123", "feat: title", "different body")
 	if gen1 == gen5 {
 		t.Error("different body should produce different generation")
 	}
@@ -157,29 +154,38 @@ func TestDetailsMarkdown(t *testing.T) {
 			Issues:           []string{"Title issue"},
 		},
 		contains: []string{"❌ Invalid", "### Issues", "Title issue"},
+	}, {
+		name: "with agent activity",
+		details: Details{
+			TitleValid:       true,
+			DescriptionValid: true,
+			AgentEnabled:     true,
+			FixesApplied:     []string{"Updated title to conventional commit format"},
+			AgentReasoning:   "The title was missing the type prefix",
+			FixAttempts:      1,
+		},
+		contains: []string{"Agent Activity", "Updated title", "type prefix", "**Fix Attempts:** 1"},
+	}, {
+		name: "agent enabled but no fixes",
+		details: Details{
+			TitleValid:       false,
+			DescriptionValid: false,
+			Issues:           []string{"Title invalid", "Description too short"},
+			AgentEnabled:     true,
+			FixAttempts:      2,
+			AgentReasoning:   "Could not determine appropriate fixes",
+		},
+		contains: []string{"Agent Activity", "Could not determine", "**Fix Attempts:** 2"},
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			md := tt.details.Markdown()
 			for _, s := range tt.contains {
-				if !containsString(md, s) {
+				if !strings.Contains(md, s) {
 					t.Errorf("Markdown() missing %q in output:\n%s", s, md)
 				}
 			}
 		})
 	}
-}
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStringHelper(s, substr))
-}
-
-func containsStringHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
