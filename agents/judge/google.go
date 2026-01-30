@@ -61,7 +61,7 @@ func newGoogle(ctx context.Context, projectID, region, model string, opts ...goo
 	}
 
 	// Create golden mode executor
-	goldenOpts := []googleexecutor.Option[*Request, *Judgement]{
+	goldenOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		googleexecutor.WithModel[*Request, *Judgement](model),
 		googleexecutor.WithTemperature[*Request, *Judgement](0.1), // Lower temperature for consistent judgments
 		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
@@ -79,7 +79,7 @@ func newGoogle(ctx context.Context, projectID, region, model string, opts ...goo
 	}
 
 	// Create benchmark mode executor
-	benchmarkOpts := []googleexecutor.Option[*Request, *Judgement]{
+	benchmarkOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		googleexecutor.WithModel[*Request, *Judgement](model),
 		googleexecutor.WithTemperature[*Request, *Judgement](0.1), // Lower temperature for consistent judgments
 		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
@@ -97,7 +97,7 @@ func newGoogle(ctx context.Context, projectID, region, model string, opts ...goo
 	}
 
 	// Create standalone mode executor
-	standaloneOpts := []googleexecutor.Option[*Request, *Judgement]{
+	standaloneOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		googleexecutor.WithModel[*Request, *Judgement](model),
 		googleexecutor.WithTemperature[*Request, *Judgement](0.1), // Lower temperature for consistent judgments
 		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),

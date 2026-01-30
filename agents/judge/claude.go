@@ -32,7 +32,7 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	// Use pre-parsed templates from prompts.go
 
 	// Create golden executor
-	goldenOpts := []claudeexecutor.Option[*Request, *Judgement]{
+	goldenOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithModel[*Request, *Judgement](model),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
@@ -48,7 +48,7 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	}
 
 	// Create benchmark executor
-	benchmarkOpts := []claudeexecutor.Option[*Request, *Judgement]{
+	benchmarkOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithModel[*Request, *Judgement](model),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
@@ -64,7 +64,7 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	}
 
 	// Create standalone executor
-	standaloneOpts := []claudeexecutor.Option[*Request, *Judgement]{
+	standaloneOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithModel[*Request, *Judgement](model),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
