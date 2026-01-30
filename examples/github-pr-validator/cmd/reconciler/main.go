@@ -3,21 +3,18 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Package main implements a GitHub PR validator reconciler.
-// This demonstrates the DriftlessAF pattern for validating PRs and creating check runs.
+// Package main implements a GitHub PR validator using the DriftlessAF reconciler pattern.
+// Validates PR titles (conventional commits) and descriptions, reporting results via check runs.
 package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/signal"
-	"regexp"
-	"strings"
 	"syscall"
 
+	"chainguard.dev/driftlessaf/examples/prvalidation"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
 	"chainguard.dev/driftlessaf/workqueue"
@@ -38,15 +35,6 @@ import (
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-// Conventional commit prefixes
-var conventionalPrefixes = []string{
-	"feat", "fix", "docs", "style", "refactor",
-	"perf", "test", "build", "ci", "chore", "revert",
-}
-
-// conventionalCommitRegex matches titles like "feat: add new feature" or "fix(scope): bug fix"
-var conventionalCommitRegex = regexp.MustCompile(`^(` + strings.Join(conventionalPrefixes, "|") + `)(\(.+\))?:\s+.+`)
-
 type config struct {
 	Port        int  `env:"PORT,default=8080"`
 	MetricsPort int  `env:"METRICS_PORT,default=2112"`
@@ -54,48 +42,6 @@ type config struct {
 
 	// OctoSTS identity for GitHub authentication
 	OctoIdentity string `env:"OCTO_IDENTITY,required"`
-}
-
-// Details holds validation-specific state for the status manager.
-// This is persisted in the check run and can be retrieved on subsequent reconciliations.
-type Details struct {
-	// Generation is a hash of SHA + title + body for idempotency.
-	// This allows re-validation when PR metadata changes, not just code.
-	// Following the pattern from qackage's ElasticBuildChecker.
-	Generation       string   `json:"generation"`
-	TitleValid       bool     `json:"titleValid"`
-	DescriptionValid bool     `json:"descriptionValid"`
-	Issues           []string `json:"issues,omitempty"`
-}
-
-// Markdown renders the validation details as markdown for the check run output.
-func (d Details) Markdown() string {
-	var sb strings.Builder
-	sb.WriteString("## PR Validation Report\n\n")
-	sb.WriteString("| Check | Status |\n")
-	sb.WriteString("|-------|--------|\n")
-
-	titleStatus := "❌ Invalid"
-	if d.TitleValid {
-		titleStatus = "✅ Valid"
-	}
-	sb.WriteString(fmt.Sprintf("| Title (conventional commit) | %s |\n", titleStatus))
-
-	descStatus := "❌ Invalid"
-	if d.DescriptionValid {
-		descStatus = "✅ Valid"
-	}
-	sb.WriteString(fmt.Sprintf("| Description | %s |\n", descStatus))
-
-	if len(d.Issues) > 0 {
-		sb.WriteString("\n### Issues\n\n")
-		for _, issue := range d.Issues {
-			sb.WriteString(issue)
-			sb.WriteString("\n\n---\n\n")
-		}
-	}
-
-	return sb.String()
 }
 
 func main() {
@@ -112,7 +58,7 @@ func main() {
 	}
 
 	// Create the status manager for check run management
-	sm, err := statusmanager.NewStatusManager[Details](ctx, cfg.OctoIdentity)
+	sm, err := statusmanager.NewStatusManager[prvalidation.Details](ctx, cfg.OctoIdentity)
 	if err != nil {
 		clog.FatalContextf(ctx, "creating status manager: %v", err)
 	}
@@ -151,7 +97,7 @@ func main() {
 }
 
 // newReconciler returns a reconciler function that uses the status manager.
-func newReconciler(sm *statusmanager.StatusManager[Details]) githubreconciler.ReconcilerFunc {
+func newReconciler(sm *statusmanager.StatusManager[prvalidation.Details]) githubreconciler.ReconcilerFunc {
 	return func(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
 		return reconcilePR(ctx, res, gh, sm)
 	}
@@ -159,7 +105,7 @@ func newReconciler(sm *statusmanager.StatusManager[Details]) githubreconciler.Re
 
 // reconcilePR validates a PR and creates/updates a check run with the results.
 // This demonstrates the reconciler pattern: fetch state, compute desired state, apply.
-func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[Details]) error {
+func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details]) error {
 	clog.InfoContextf(ctx, "Validating PR: %s/%s#%d", res.Owner, res.Repo, res.Number)
 
 	// Step 1: Fetch current PR state
@@ -183,7 +129,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	// Compute generation key from SHA + title + body
 	// This ensures we re-validate when PR metadata changes, not just code
-	generation := computeGeneration(sha, title, body)
+	generation := prvalidation.ComputeGeneration(sha, title, body)
 
 	session := sm.NewSession(gh, res, sha)
 
@@ -198,7 +144,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 		clog.InfoContextf(ctx, "Already processed generation %s, skipping", generation[:8])
 		return nil
 	}
-	titleValid, descValid, issues := validatePR(title, body)
+	titleValid, descValid, issues := prvalidation.ValidatePR(title, body)
 
 	conclusion := "success"
 	summary := "All checks passed!"
@@ -211,10 +157,10 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	// Step 3: Update status via the status manager
 	// Store generation in Details for idempotency (following qackage pattern)
-	status := &statusmanager.Status[Details]{
+	status := &statusmanager.Status[prvalidation.Details]{
 		Status:     "completed",
 		Conclusion: conclusion,
-		Details: Details{
+		Details: prvalidation.Details{
 			Generation:       generation,
 			TitleValid:       titleValid,
 			DescriptionValid: descValid,
@@ -227,44 +173,4 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 	}
 
 	return nil
-}
-
-// computeGeneration creates a unique key from SHA, title, and body.
-// This ensures idempotency is based on the full PR state, not just the commit.
-func computeGeneration(sha, title, body string) string {
-	h := sha256.New()
-	h.Write([]byte(sha))
-	h.Write([]byte(title))
-	h.Write([]byte(body))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// validatePR checks the PR title and description against our conventions.
-// Returns whether title is valid, description is valid, and a list of issues.
-func validatePR(title, body string) (titleValid, descValid bool, issues []string) {
-	// Validate title follows conventional commit format
-	titleValid = conventionalCommitRegex.MatchString(title)
-	if !titleValid {
-		issues = append(issues, fmt.Sprintf(
-			"**Title** does not follow [conventional commit](https://www.conventionalcommits.org/) format.\n"+
-				"  - Expected: `<type>: <description>` or `<type>(scope): <description>`\n"+
-				"  - Valid types: `%s`\n"+
-				"  - Got: `%s`",
-			strings.Join(conventionalPrefixes, "`, `"),
-			title,
-		))
-	}
-
-	// Validate description is not empty
-	trimmedBody := strings.TrimSpace(body)
-	switch {
-	case trimmedBody == "":
-		issues = append(issues, "**Description** is empty. Please add a description explaining the changes.")
-	case len(trimmedBody) < 20:
-		issues = append(issues, "**Description** is too short. Please provide more context about the changes.")
-	default:
-		descValid = true
-	}
-
-	return titleValid, descValid, issues
 }

@@ -1,16 +1,41 @@
 # DriftlessAF Examples
 
-Minimal hello-world reconcilers demonstrating the DriftlessAF workqueue pattern for GitHub automation.
+Examples demonstrating the DriftlessAF reconciler pattern for GitHub automation.
 
-## GitHub PR Validator (`github-pr-hello/`)
+## Examples
 
-A reconciler that validates GitHub pull requests and creates Check Runs with the validation results.
+### 1. PR Validator (`github-pr-validator/`)
+
+**Reconciler pattern** that validates GitHub pull requests and creates Check Runs with the validation results.
 
 **What it does:**
 - Validates PR title follows [conventional commit](https://www.conventionalcommits.org/) format
 - Validates PR description is not empty or too short
 - Creates a GitHub Check Run showing pass/fail status
 - Uses `statusmanager` for idempotent check run management
+
+### 2. PR Agent (`github-pr-agent/`)
+
+**Reconciler + agentic pattern** that extends the validator with Claude-powered auto-fixing.
+
+**What it does:**
+- Same validation as PR Validator
+- When the `driftlessaf/autofix` label is present, uses **Claude Sonnet 4.5** (via Vertex AI) to automatically fix issues
+- Updates PR title to conventional commit format
+- Generates meaningful descriptions from context
+- Shows model used and reasoning in check run output
+- Max 2 fix attempts per PR state to prevent loops
+
+**Agent tools:**
+- `update_pr_title` - Updates title with validation
+- `update_pr_description` - Updates description with validation
+
+### Shared Validation (`prvalidation/`)
+
+Common validation logic used by both examples:
+- Conventional commit regex matching
+- Description length validation
+- `Details` struct with `Markdown()` for check run output
 
 **Valid title formats:**
 ```
@@ -22,25 +47,21 @@ refactor(api): simplify handlers
 
 ## Architecture
 
+### PR Validator
+
 ```
  ┌──────────┐                              GCP
  │  GitHub  │    ┌────────────────────────────────────────────────────────────────┐
  │          │    │                                                                │
  │  PR open │    │  ┌─────────────┐   ┌──────────────────────┐                    │
- │  PR edit ├────┼─►│github-events├──►│  CloudEvents Bridge  │                    │
+ │  PR edit ├────┼─►│github-events├──►│  CloudEvents Broker  │                    │
  │          │    │  │  (webhook)  │   │  (filter + enqueue)  │                    │
  │          │    │  └─────────────┘   └──────────┬───────────┘                    │
  └────▲─────┘    │                               │                                │
       │          │                               ▼                                │
       │          │                    ┌──────────────────────┐                    │
-      │          │                    │  Workqueue Receiver  │                    │
-      │          │                    │      (-wq-rcv)       │                    │
-      │          │                    └──────────┬───────────┘                    │
-      │          │                               │                                │
-      │          │                               ▼                                │
-      │          │                    ┌──────────────────────┐                    │
-      │          │                    │ Workqueue Dispatcher │                    │
-      │          │                    │      (-wq-dsp)       │                    │
+      │          │                    │     Workqueue        │                    │
+      │          │                    │  (rcv + dispatcher)  │                    │
       │          │                    └──────────┬───────────┘                    │
       │          │                               │                                │
       │          │                               ▼                                │
@@ -57,21 +78,69 @@ refactor(api): simplify handlers
 **Flow:**
 1. GitHub sends webhook when PR is opened/edited
 2. `github-events` converts webhook to CloudEvent
-3. CloudEvents Bridge filters for `dev.chainguard.github.pull_request` events
-4. Workqueue Receiver accepts and deduplicates work items (by PR URL)
-5. Workqueue Dispatcher dispatches work to Reconciler (with concurrency control)
-6. Reconciler requests GitHub token from OctoSTS
-7. Reconciler fetches PR details, validates title/description
-8. Reconciler creates/updates Check Run with validation results
+3. CloudEvents Broker routes to Workqueue
+4. Reconciler validates title/description
+5. Creates Check Run with pass/fail status
+
+### PR Agent
+
+```
+ ┌──────────┐                              GCP
+ │  GitHub  │    ┌────────────────────────────────────────────────────────────────┐
+ │          │    │                                                                │
+ │  PR open │    │  ┌─────────────┐   ┌──────────────────────┐                    │
+ │  PR edit ├────┼─►│github-events├──►│  CloudEvents Broker  │                    │
+ │          │    │  │  (webhook)  │   │  (filter + enqueue)  │                    │
+ │          │    │  └─────────────┘   └──────────┬───────────┘                    │
+ └────▲─────┘    │                               │                                │
+      │          │                               ▼                                │
+      │          │                    ┌──────────────────────┐                    │
+      │          │                    │     Workqueue        │                    │
+      │          │                    │  (rcv + dispatcher)  │                    │
+      │          │                    └──────────┬───────────┘                    │
+      │          │                               │                                │
+      │          │                               ▼                                │
+      │          │  ┌──────────────┐  ┌──────────────────────┐  ┌──────────────┐  │
+      │          │  │   OctoSTS    │◄─│     Reconciler       │─►│Claude Sonnet │  │
+      │          │  │ (get token)  │  │ (validator + agent)  │  │  (Vertex AI) │  │
+      │          │  └──────────────┘  └──────────┬───────────┘  └──────────────┘  │
+      │          │                               │                                │
+      └──────────┼───────────────────────────────┘                                │
+  Check Run +    │    Create/Update Check Run + Update PR via GitHub API          │
+  PR Updates     └────────────────────────────────────────────────────────────────┘
+```
+
+**Flow:**
+1. GitHub sends webhook when PR is opened/edited
+2. `github-events` converts webhook to CloudEvent
+3. CloudEvents Broker routes to Workqueue
+4. Reconciler validates title/description
+5. If `driftlessaf/autofix` label present and issues found:
+   - Calls Claude Sonnet 4.5 via Vertex AI
+   - Agent uses tools to fix PR title/description
+   - Re-validates after fixes
+6. Creates Check Run with results (including model used and reasoning)
 
 ## Project Structure
 
 ```
-github-pr-hello/
-├── cmd/reconciler/
-│   ├── main.go       # Reconciler service implementation
-│   └── main_test.go  # Unit tests
-└── go.mod
+driftlessaf/examples/
+├── github-pr-validator/
+│   └── cmd/reconciler/
+│       ├── main.go           # Validator reconciler
+│       └── main_test.go      # Unit tests
+├── github-pr-agent/
+│   └── cmd/reconciler/
+│       ├── main.go           # Agent reconciler with label gating
+│       ├── agent.go          # Claude executor and tools
+│       ├── prompts.go        # System and user prompts
+│       ├── types.go          # PRContext and PRFixResult types
+│       └── main_test.go      # Unit tests
+├── prvalidation/
+│   ├── validation.go         # Shared validation logic and Details struct
+│   └── validation_test.go    # Validation tests
+├── go.mod
+└── go.sum
 ```
 
 ## Running Tests
