@@ -217,6 +217,22 @@ func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest)
 			}, nil
 		}
 
+		// Check if we have queue keys to enqueue
+		if queueKeys := workqueue.GetQueueKeys(err); len(queueKeys) > 0 {
+			clog.InfoContextf(ctx, "Reconciliation requested queuing %d keys for key: %s", len(queueKeys), req.Key)
+			resp := &workqueue.ProcessResponse{
+				QueueKeys: make([]*workqueue.QueueKeyRequest, 0, len(queueKeys)),
+			}
+			for _, qk := range queueKeys {
+				resp.QueueKeys = append(resp.QueueKeys, &workqueue.QueueKeyRequest{
+					Key:          qk.Key,
+					Priority:     qk.Priority,
+					DelaySeconds: qk.DelaySeconds,
+				})
+			}
+			return resp, nil
+		}
+
 		// Check if this is a non-retriable error
 		if details := workqueue.GetNonRetriableDetails(err); details != nil {
 			clog.WarnContextf(ctx, "Reconciliation failed with non-retriable error for key %s: %v (reason: %s)", req.Key, err, details.Message)
