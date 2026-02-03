@@ -10,7 +10,6 @@ import (
 	"errors"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/evals/testevals"
 )
@@ -22,7 +21,7 @@ func TestTestingObserver(t *testing.T) {
 	})
 
 	// Define a callback that uses the observer interface
-	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
+	callback := func(o evals.Observer, trace *evals.Trace[string]) {
 		o.Log("Starting trace analysis")
 
 		if trace.InputPrompt == "" {
@@ -42,7 +41,7 @@ func TestTestingObserver(t *testing.T) {
 
 	// Inject the observer and pass to ByCode tracer
 	traceCallback := evals.Inject[string](namespacedObs, callback)
-	tracer := agenttrace.ByCode[string](traceCallback)
+	tracer := evals.ByCode[string](traceCallback)
 
 	// Create and complete a successful trace - this will automatically invoke the callback
 	ctx := context.Background()
@@ -57,7 +56,7 @@ func TestTestingObserverWithError(t *testing.T) {
 	})
 
 	// Define a callback that expects to find errors
-	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
+	callback := func(o evals.Observer, trace *evals.Trace[string]) {
 		o.Log("Checking for expected error")
 
 		if trace.Error == nil {
@@ -71,7 +70,7 @@ func TestTestingObserverWithError(t *testing.T) {
 
 	// Inject the observer and pass to ByCode tracer
 	traceCallback := evals.Inject[string](namespacedObs, callback)
-	tracer := agenttrace.ByCode[string](traceCallback)
+	tracer := evals.ByCode[string](traceCallback)
 
 	// Create and complete a trace with error - this will automatically invoke the callback
 	ctx := context.Background()
@@ -86,7 +85,7 @@ func TestTestingObserverWithInject(t *testing.T) {
 	})
 
 	// Define a callback that validates tool calls
-	validateCallback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
+	validateCallback := func(o evals.Observer, trace *evals.Trace[string]) {
 		o.Log("Validating tool calls")
 
 		if len(trace.ToolCalls) == 0 {
@@ -101,7 +100,7 @@ func TestTestingObserverWithInject(t *testing.T) {
 
 	// Inject the observer and pass to ByCode tracer
 	traceCallback := evals.Inject(namespacedObs, validateCallback)
-	tracer := agenttrace.ByCode[string](traceCallback)
+	tracer := evals.ByCode[string](traceCallback)
 
 	// Create a trace with tool calls using proper tracer
 	ctx := context.Background()

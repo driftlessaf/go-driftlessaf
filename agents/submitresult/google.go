@@ -12,17 +12,18 @@ import (
 	"fmt"
 	"reflect"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
 	"google.golang.org/genai"
 )
 
 // GoogleTool constructs the Google executor metadata for the submit_result tool.
-func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Response], error) {
+func GoogleTool[Response any](opts Options[Response]) (googleexecutor.ToolMetadata[Response], error) {
 	opts.setDefaults()
 	if err := opts.validate(); err != nil {
-		return googletool.Metadata[Response]{}, err
+		return googleexecutor.ToolMetadata[Response]{}, err
 	}
 
 	responseSchema := opts.schemaForResponse()
@@ -30,10 +31,10 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 
 	genaiPayload := schemaToGenai(responseSchema)
 	if genaiPayload == nil {
-		return googletool.Metadata[Response]{}, fmt.Errorf("failed to derive payload schema")
+		return googleexecutor.ToolMetadata[Response]{}, fmt.Errorf("failed to derive payload schema")
 	}
 
-	handler := func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], result *Response) *genai.FunctionResponse {
+	handler := func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -93,7 +94,7 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 		return response
 	}
 
-	return googletool.Metadata[Response]{
+	return googleexecutor.ToolMetadata[Response]{
 		Definition: &genai.FunctionDeclaration{
 			Name:        opts.ToolName,
 			Description: opts.Description,
@@ -115,6 +116,6 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 
 // GoogleToolForResponse constructs the submit_result tool using metadata inferred from the
 // response type annotations.
-func GoogleToolForResponse[Response any]() (googletool.Metadata[Response], error) {
+func GoogleToolForResponse[Response any]() (googleexecutor.ToolMetadata[Response], error) {
 	return GoogleTool(OptionsForResponse[Response]())
 }

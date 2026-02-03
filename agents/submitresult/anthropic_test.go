@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/evals"
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
@@ -25,7 +25,7 @@ func TestClaudeToolHandler(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	trace := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	trace := evals.StartTrace[*sampleResult](ctx, "prompt")
 
 	input := map[string]any{
 		"reasoning": "done",

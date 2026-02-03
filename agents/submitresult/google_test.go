@@ -9,7 +9,7 @@ import (
 	"context"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/evals"
 	"google.golang.org/genai"
 )
 
@@ -24,7 +24,7 @@ func TestGoogleToolHandler(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	trace := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	trace := evals.StartTrace[*sampleResult](ctx, "prompt")
 
 	call := &genai.FunctionCall{
 		ID:   "call-1",

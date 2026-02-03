@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 )
 
 // Observer defines an interface for observing and controlling evaluation execution
@@ -31,11 +29,11 @@ type Observer interface {
 }
 
 // ObservableTraceCallback is a function that receives an Observer interface and completed traces
-type ObservableTraceCallback[T any] func(Observer, *agenttrace.Trace[T])
+type ObservableTraceCallback[T any] func(Observer, *Trace[T])
 
 // Inject creates a TraceCallback by injecting an Observer implementation into an ObservableTraceCallback
-func Inject[T any](obs Observer, callback ObservableTraceCallback[T]) agenttrace.TraceCallback[T] {
-	return func(trace *agenttrace.Trace[T]) {
+func Inject[T any](obs Observer, callback ObservableTraceCallback[T]) TraceCallback[T] {
+	return func(trace *Trace[T]) {
 		obs.Increment()
 		callback(obs, trace)
 	}

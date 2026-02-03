@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -119,7 +118,7 @@ func TestNamespacedObserverAsObserver(t *testing.T) {
 	observer := evals.NewNamespacedObserver(factory)
 
 	// Use it as an Observer with an ObservableTraceCallback
-	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
+	callback := func(o evals.Observer, trace *evals.Trace[string]) {
 		o.Log("Processing trace: " + trace.InputPrompt)
 		if trace.Error != nil {
 			o.Fail("Trace failed: " + trace.Error.Error())
@@ -128,7 +127,7 @@ func TestNamespacedObserverAsObserver(t *testing.T) {
 
 	// Inject the NamespacedObserver and pass to ByCode tracer
 	traceCallback := evals.Inject[string](observer, callback)
-	tracer := agenttrace.ByCode[string](traceCallback)
+	tracer := evals.ByCode[string](traceCallback)
 
 	// Create and complete a trace - this will automatically invoke the callback
 	ctx := context.Background()

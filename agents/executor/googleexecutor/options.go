@@ -8,14 +8,10 @@ package googleexecutor
 import (
 	"errors"
 	"fmt"
-	"maps"
-	"os"
 	"strings"
 
-	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
-	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"google.golang.org/genai"
 )
 
@@ -121,7 +117,7 @@ func WithThinking[Request promptbuilder.Bindable, Response any](budgetTokens int
 }
 
 // SubmitResultProvider constructs tool metadata for submit_result.
-type SubmitResultProvider[Response any] func() (googletool.Metadata[Response], error)
+type SubmitResultProvider[Response any] func() (ToolMetadata[Response], error)
 
 // WithSubmitResultProvider registers the submit_result tool using the supplied provider.
 // This is opt-in - agents must explicitly call this to enable submit_result.
@@ -146,56 +142,6 @@ func WithSubmitResultProvider[Request promptbuilder.Bindable, Response any](prov
 func WithAttributeEnricher[Request promptbuilder.Bindable, Response any](enricher metrics.AttributeEnricher) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		e.genaiMetrics.SetAttributeEnricher(enricher)
-		return nil
-	}
-}
-
-// WithRetryConfig sets the retry configuration for handling transient Vertex AI errors.
-// This is particularly useful for handling 429 RESOURCE_EXHAUSTED errors that occur
-// when quota limits are hit. If not set, a default configuration is used.
-func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.RetryConfig) Option[Request, Response] {
-	return func(e *executor[Request, Response]) error {
-		if err := cfg.Validate(); err != nil {
-			return err
-		}
-		e.retryConfig = cfg
-		return nil
-	}
-}
-
-// WithResourceLabels sets labels that are sent with each Vertex AI API request.
-// Automatically includes default labels from environment variables:
-//   - service_name: from K_SERVICE (defaults to "unknown")
-//   - product: from CHAINGUARD_PRODUCT (defaults to "unknown")
-//   - team: from CHAINGUARD_TEAM (defaults to "unknown")
-//
-// Custom labels passed to this function will override defaults if they use the same keys.
-func WithResourceLabels[Request promptbuilder.Bindable, Response any](labels map[string]string) Option[Request, Response] {
-	return func(e *executor[Request, Response]) error {
-		// Start with default labels from environment
-		serviceName := os.Getenv("K_SERVICE")
-		if serviceName == "" {
-			serviceName = "unknown"
-		}
-		productName := os.Getenv("CHAINGUARD_PRODUCT")
-		if productName == "" {
-			productName = "unknown"
-		}
-		teamName := os.Getenv("CHAINGUARD_TEAM")
-		if teamName == "" {
-			teamName = "unknown"
-		}
-
-		e.resourceLabels = map[string]string{
-			"service_name": serviceName,
-			"product":      productName,
-			"team":         teamName,
-		}
-
-		// Merge custom labels (these will override defaults if keys match)
-		if labels != nil {
-			maps.Copy(e.resourceLabels, labels)
-		}
 		return nil
 	}
 }

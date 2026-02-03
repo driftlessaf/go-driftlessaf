@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -71,8 +70,8 @@ func TestExactToolCalls(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			obs := &mockObserver{}
-			trace := &agenttrace.Trace[string]{
-				ToolCalls: make([]*agenttrace.ToolCall[string], tt.toolCalls),
+			trace := &evals.Trace[string]{
+				ToolCalls: make([]*evals.ToolCall[string], tt.toolCalls),
 			}
 
 			callback := evals.ExactToolCalls[string](tt.n)
@@ -121,8 +120,8 @@ func TestMinimumNToolCalls(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			obs := &mockObserver{}
-			trace := &agenttrace.Trace[string]{
-				ToolCalls: make([]*agenttrace.ToolCall[string], tt.toolCalls),
+			trace := &evals.Trace[string]{
+				ToolCalls: make([]*evals.ToolCall[string], tt.toolCalls),
 			}
 
 			callback := evals.MinimumNToolCalls[string](tt.n)
@@ -145,8 +144,8 @@ func TestMinimumNToolCalls(t *testing.T) {
 
 func TestOnlyToolCalls(t *testing.T) {
 	obs := &mockObserver{}
-	trace := &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
+	trace := &evals.Trace[string]{
+		ToolCalls: []*evals.ToolCall[string]{
 			{Name: "read_logs"},
 			{Name: "analyze"},
 			{Name: "summarize"},
@@ -173,8 +172,8 @@ func TestOnlyToolCalls(t *testing.T) {
 
 func TestRequiredToolCalls(t *testing.T) {
 	obs := &mockObserver{}
-	trace := &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
+	trace := &evals.Trace[string]{
+		ToolCalls: []*evals.ToolCall[string]{
 			{Name: "read_logs"},
 			{Name: "analyze"},
 		},
@@ -201,8 +200,8 @@ func TestRequiredToolCalls(t *testing.T) {
 func TestNoErrors(t *testing.T) {
 	// Test with no errors
 	obs := &mockObserver{}
-	trace := &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
+	trace := &evals.Trace[string]{
+		ToolCalls: []*evals.ToolCall[string]{
 			{Name: "read_logs"},
 			{Name: "analyze"},
 		},
@@ -216,7 +215,7 @@ func TestNoErrors(t *testing.T) {
 
 	// Test with trace error
 	obs = &mockObserver{}
-	trace = &agenttrace.Trace[string]{
+	trace = &evals.Trace[string]{
 		Error: errors.New("trace failed"),
 	}
 	callback(obs, trace)
@@ -226,8 +225,8 @@ func TestNoErrors(t *testing.T) {
 
 	// Test with tool call error
 	obs = &mockObserver{}
-	trace = &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
+	trace = &evals.Trace[string]{
+		ToolCalls: []*evals.ToolCall[string]{
 			{Name: "read_logs", Error: errors.New("read failed")},
 		},
 	}
@@ -239,15 +238,15 @@ func TestNoErrors(t *testing.T) {
 
 func TestToolCallValidator(t *testing.T) {
 	obs := &mockObserver{}
-	trace := &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
+	trace := &evals.Trace[string]{
+		ToolCalls: []*evals.ToolCall[string]{
 			{Name: "read_logs", Params: map[string]any{"file": "test.log"}},
 			{Name: "analyze", Params: map[string]any{}},
 		},
 	}
 
 	// Validator that checks for "file" parameter
-	validator := func(o evals.Observer, tc *agenttrace.ToolCall[string]) error {
+	validator := func(o evals.Observer, tc *evals.ToolCall[string]) error {
 		if _, ok := tc.Params["file"]; !ok && tc.Name == "read_logs" {
 			return errors.New("missing file parameter")
 		}
@@ -273,15 +272,15 @@ func TestToolCallValidator(t *testing.T) {
 
 func TestToolCallNamed(t *testing.T) {
 	obs := &mockObserver{}
-	trace := &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
+	trace := &evals.Trace[string]{
+		ToolCalls: []*evals.ToolCall[string]{
 			{Name: "read_logs", Params: map[string]any{"reasoning": "need to read logs"}},
 			{Name: "analyze"},
 		},
 	}
 
 	// Validator that checks for reasoning parameter
-	validator := func(o evals.Observer, tc *agenttrace.ToolCall[string]) error {
+	validator := func(o evals.Observer, tc *evals.ToolCall[string]) error {
 		if _, ok := tc.Params["reasoning"]; !ok {
 			return errors.New("missing reasoning parameter")
 		}
@@ -344,8 +343,8 @@ func TestMaximumNToolCalls(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			obs := &mockObserver{}
-			trace := &agenttrace.Trace[string]{
-				ToolCalls: make([]*agenttrace.ToolCall[string], tt.toolCalls),
+			trace := &evals.Trace[string]{
+				ToolCalls: make([]*evals.ToolCall[string], tt.toolCalls),
 			}
 
 			callback := evals.MaximumNToolCalls[string](tt.n)
@@ -424,8 +423,8 @@ func TestRangeToolCalls(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			obs := &mockObserver{}
-			trace := &agenttrace.Trace[string]{
-				ToolCalls: make([]*agenttrace.ToolCall[string], tt.toolCalls),
+			trace := &evals.Trace[string]{
+				ToolCalls: make([]*evals.ToolCall[string], tt.toolCalls),
 			}
 
 			callback := evals.RangeToolCalls[string](tt.min, tt.max)
@@ -471,8 +470,8 @@ func TestNoToolCalls(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			obs := &mockObserver{}
-			trace := &agenttrace.Trace[string]{
-				ToolCalls: make([]*agenttrace.ToolCall[string], tt.toolCalls),
+			trace := &evals.Trace[string]{
+				ToolCalls: make([]*evals.ToolCall[string], tt.toolCalls),
 			}
 
 			callback := evals.NoToolCalls[string]()

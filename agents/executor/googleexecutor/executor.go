@@ -12,14 +12,12 @@ import (
 	"maps"
 	"reflect"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
-	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
 )
 
@@ -27,7 +25,18 @@ import (
 type Interface[Request promptbuilder.Bindable, Response any] interface {
 	// Execute runs the Google AI conversation with the given request and tools
 	// Optional seed tool calls can be provided - these will be executed and their results prepended to the conversation
-	Execute(ctx context.Context, request Request, tools map[string]googletool.Metadata[Response], seedToolCalls ...*genai.FunctionCall) (Response, error)
+	Execute(ctx context.Context, request Request, tools map[string]ToolMetadata[Response], seedToolCalls ...*genai.FunctionCall) (Response, error)
+}
+
+// ToolMetadata contains metadata for a tool, including its definition and handler
+type ToolMetadata[Response any] struct {
+	// Definition is the Google AI tool definition
+	Definition *genai.FunctionDeclaration
+
+	// Handler is the function that processes tool calls
+	// It receives the context, tool call, trace, and a result pointer
+	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response
+	Handler func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse
 }
 
 // executor is the private implementation of Interface
@@ -40,11 +49,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	systemInstructions *promptbuilder.Prompt
 	responseMIMEType   string
 	responseSchema     *genai.Schema
-	thinkingBudget     *int32                        // nil = disabled, non-nil = enabled with budget
-	submitTool         googletool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics       *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
-	retryConfig        retry.RetryConfig             // retry configuration for transient Vertex AI errors
-	resourceLabels     map[string]string             // resource labels for GCP billing attribution
+	thinkingBudget     *int32                 // nil = disabled, non-nil = enabled with budget
+	submitTool         ToolMetadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics       *metrics.GenAI         // OpenTelemetry metrics for token usage and tool calls
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -69,7 +76,6 @@ func New[Request promptbuilder.Bindable, Response any](
 		temperature:     0.1,                // Default temperature for consistency
 		maxOutputTokens: 8192,               // Default max tokens
 		genaiMetrics:    genaiMetrics,
-		retryConfig:     retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 	}
 
 	// Apply options
@@ -87,7 +93,7 @@ func New[Request promptbuilder.Bindable, Response any](
 func (e *executor[Request, Response]) Execute(
 	ctx context.Context,
 	request Request,
-	tools map[string]googletool.Metadata[Response],
+	tools map[string]ToolMetadata[Response],
 	seedToolCalls ...*genai.FunctionCall,
 ) (resp Response, err error) {
 	log := clog.FromContext(ctx)
@@ -105,14 +111,14 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	// Start a trace for this execution
-	trace := agenttrace.StartTrace[Response](ctx, prompt)
+	trace := evals.StartTrace[Response](ctx, prompt)
 	defer func() {
 		trace.Complete(resp, err)
 	}()
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
 	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]googletool.Metadata[Response], len(tools)+1)
+		mergedTools := make(map[string]ToolMetadata[Response], len(tools)+1)
 		maps.Copy(mergedTools, tools)
 
 		name := "submit_result"
@@ -134,7 +140,6 @@ func (e *executor[Request, Response]) Execute(
 	config := &genai.GenerateContentConfig{
 		Temperature:     ptr(e.temperature),
 		MaxOutputTokens: e.maxOutputTokens,
-		Labels:          e.resourceLabels,
 	}
 
 	// Add system instructions if provided
@@ -240,11 +245,9 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to create chat with model %q: %w", e.model, err)
 	}
 
-	// Send final message to get response with retry for transient errors
+	// Send final message to get response
 	log.Info("Sending final message")
-	response, err := retry.RetryWithBackoff(ctx, e.retryConfig, "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
-		return chat.Send(ctx, history[len(history)-1].Parts...)
-	})
+	response, err := chat.Send(ctx, history[len(history)-1].Parts...)
 	if err != nil {
 		return resp, fmt.Errorf("failed to send final message: %w", err)
 	}
@@ -278,11 +281,8 @@ func (e *executor[Request, Response]) Execute(
 				funcNames = append(funcNames, decl.Name)
 			}
 
-			// Send a message asking the model to try again with retry for transient errors
-			retryMsg := genai.Part{Text: fmt.Sprintf("The function call was malformed. Please try again using the available functions: %v", funcNames)}
-			retryResp, err := retry.RetryWithBackoff(ctx, e.retryConfig, "send_malformed_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
-				return chat.SendMessage(ctx, retryMsg)
-			})
+			// Send a message asking the model to try again
+			retryResp, err := chat.SendMessage(ctx, genai.Part{Text: fmt.Sprintf("The function call was malformed. Please try again using the available functions: %v", funcNames)})
 			if err != nil {
 				return resp, fmt.Errorf("failed to send retry message after malformed function call: %w", err)
 			}
@@ -314,7 +314,7 @@ func (e *executor[Request, Response]) Execute(
 		for i, part := range candidate.Content.Parts {
 			switch {
 			case part.Thought:
-				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
+				trace.Reasoning = append(trace.Reasoning, evals.ReasoningContent{
 					Thinking: part.Text,
 				})
 				log.With("part_index", i).
@@ -373,10 +373,8 @@ func (e *executor[Request, Response]) Execute(
 				})
 			}
 
-			// Send tool responses back to the chat with retry for transient errors
-			response, err = retry.RetryWithBackoff(ctx, e.retryConfig, "send_tool_responses", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
-				return chat.Send(ctx, toolResponseParts...)
-			})
+			// Send tool responses back to the chat
+			response, err = chat.Send(ctx, toolResponseParts...)
 			if err != nil {
 				return resp, fmt.Errorf("failed to send tool responses: %w", err)
 			}
@@ -418,30 +416,16 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
-// resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
-func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
-	if len(e.resourceLabels) == 0 {
-		return nil
-	}
-	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
-	for k, v := range e.resourceLabels {
-		attrs = append(attrs, attribute.String(k, v))
-	}
-	return attrs
-}
-
 // recordTokenMetrics records token usage with optional enrichment
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, usage *genai.GenerateContentResponseUsageMetadata) {
 	if usage == nil {
 		return
 	}
 
-	attrs := e.resourceLabelsToAttributes()
-	e.genaiMetrics.RecordTokens(ctx, e.model, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount), attrs...)
+	e.genaiMetrics.RecordTokens(ctx, e.model, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount))
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	attrs := e.resourceLabelsToAttributes()
-	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName, attrs...)
+	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName)
 }

@@ -10,10 +10,7 @@ import (
 	"fmt"
 	"math/rand"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
-	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
-	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/judge"
 )
 
@@ -36,10 +33,10 @@ func ExampleNewGoldenEval() {
 	// Create context with tracer
 	ctx := context.Background()
 	obs := &mockObserver{}
-	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, eval)))
+	ctx = evals.WithTracer(ctx, evals.ByCode(evals.Inject(obs, eval)))
 
 	// Simulate a judgment call that would normally be traced
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("prompt-%d", rand.Int63()))
+	trace := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("prompt-%d", rand.Int63()))
 	trace.Complete(&judge.Judgement{
 		Score:     0.85,
 		Reasoning: "The response correctly identifies the answer but uses words instead of the expected numeric format",
@@ -74,7 +71,7 @@ func Example_multipleCriteria() {
 	// Set up tracer with multiple criteria
 	ctx := context.Background()
 	obs := &mockObserver{}
-	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(
+	ctx = evals.WithTracer(ctx, evals.ByCode(
 		evals.Inject(obs, judge.NewGoldenEval[*judge.Judgement](mockJudgeInstance, "correctness - the code produces the expected output", goldenCode)),
 		evals.Inject(obs, judge.NewGoldenEval[*judge.Judgement](mockJudgeInstance, "readability - the code is easy to understand", goldenCode)),
 		evals.Inject(obs, judge.NewGoldenEval[*judge.Judgement](mockJudgeInstance, "efficiency - the code performs well", goldenCode)),
@@ -82,7 +79,7 @@ func Example_multipleCriteria() {
 	))
 
 	// Simulate evaluation - all criteria will be evaluated automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("eval-%d", rand.Int63()))
+	trace := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("eval-%d", rand.Int63()))
 	trace.Complete(&judge.Judgement{
 		Score:       0.75,
 		Reasoning:   "Code meets most requirements with minor issues",
@@ -100,10 +97,8 @@ func Example_multipleCriteria() {
 func ExampleNewVertex() {
 	ctx := context.Background()
 
-	// Create a Claude judge instance with resource labels for billing attribution
-	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-east5", "claude-sonnet-4@20250514",
-		claudeexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
+	// Create a Claude judge instance - automatically detects Claude from model name
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-east5", "claude-sonnet-4@20250514")
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
 		return
@@ -129,10 +124,8 @@ func ExampleNewVertex() {
 func ExampleNewVertex_gemini() {
 	ctx := context.Background()
 
-	// Create a Gemini judge instance with resource labels for billing attribution
-	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
-		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
+	// Create a Gemini judge instance - automatically detects Gemini from model name
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash")
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
 		return
@@ -157,14 +150,14 @@ func ExampleValidScore() {
 	// Create context with tracer
 	ctx := context.Background()
 	obs := &mockObserver{}
-	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, judge.ValidScore(judge.GoldenMode))))
+	ctx = evals.WithTracer(ctx, evals.ByCode(evals.Inject(obs, judge.ValidScore(judge.GoldenMode))))
 
 	// Test with valid score - tracer will call validator automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("valid-%d", rand.Int63()))
+	trace := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("valid-%d", rand.Int63()))
 	trace.Complete(&judge.Judgement{Score: 0.85}, nil)
 
 	// Test with invalid score
-	trace2 := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("invalid-%d", rand.Int63()))
+	trace2 := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("invalid-%d", rand.Int63()))
 	trace2.Complete(&judge.Judgement{Score: 1.5}, nil)
 
 	fmt.Printf("Validation results: %d messages\n", len(obs.logs))
@@ -177,17 +170,15 @@ func ExampleScoreRange() {
 	ctx := context.Background()
 	obs := &mockObserver{}
 
-	// Create a judge instance with resource labels
-	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
-		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
+	// Create a judge instance
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash")
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
 		return
 	}
 
 	// Set up validation that the judge scores a "good quality" response between 0.7-0.9
-	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, judge.ScoreRange(0.7, 0.9))))
+	ctx = evals.WithTracer(ctx, evals.ByCode(evals.Inject(obs, judge.ScoreRange(0.7, 0.9))))
 
 	// Test the judge with a response we expect to be "good quality"
 	_, err = judgeInstance.Judge(ctx, &judge.Request{
@@ -208,17 +199,17 @@ func ExampleHasReasoning() {
 	// Create context with tracer
 	ctx := context.Background()
 	obs := &mockObserver{}
-	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, judge.HasReasoning())))
+	ctx = evals.WithTracer(ctx, evals.ByCode(evals.Inject(obs, judge.HasReasoning())))
 
 	// Test with reasoning - tracer will call validator automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("with-reasoning-%d", rand.Int63()))
+	trace := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("with-reasoning-%d", rand.Int63()))
 	trace.Complete(&judge.Judgement{
 		Score:     0.8,
 		Reasoning: "The response correctly identifies the main point",
 	}, nil)
 
 	// Test without reasoning
-	trace2 := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-reasoning-%d", rand.Int63()))
+	trace2 := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-reasoning-%d", rand.Int63()))
 	trace2.Complete(&judge.Judgement{Score: 0.8}, nil)
 
 	fmt.Printf("Validation completed\n")
@@ -230,10 +221,10 @@ func ExampleNoToolCalls() {
 	// Create context with tracer
 	ctx := context.Background()
 	obs := &mockObserver{}
-	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, evals.NoToolCalls[*judge.Judgement]())))
+	ctx = evals.WithTracer(ctx, evals.ByCode(evals.Inject(obs, evals.NoToolCalls[*judge.Judgement]())))
 
 	// Test with no tool calls - tracer will call validator automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-tools-%d", rand.Int63()))
+	trace := evals.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-tools-%d", rand.Int63()))
 	trace.Complete(&judge.Judgement{Score: 0.8}, nil)
 
 	fmt.Printf("Validation completed\n")
@@ -246,10 +237,8 @@ func ExampleNewStandaloneEval() {
 	ctx := context.Background()
 	obs := &mockObserver{}
 
-	// Create a judge instance with resource labels
-	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
-		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
+	// Create a judge instance
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash")
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
@@ -268,7 +257,7 @@ func ExampleNewStandaloneEval() {
 	)
 
 	// Create trace and run evaluation
-	trace := &agenttrace.Trace[*judge.Judgement]{
+	trace := &evals.Trace[*judge.Judgement]{
 		InputPrompt: "Evaluate instruction clarity",
 		Result:      response,
 	}

@@ -10,18 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 	"time"
 
-	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v75/github"
 )
 
-// Session represents work on a specific PR for a specific resource.
+// Session represents work on a specific PR for a specific resource path.
 type Session[T any] struct {
 	manager    *CM[T]
 	client     *github.Client
@@ -29,17 +26,7 @@ type Session[T any] struct {
 	owner      string
 	repo       string
 	branchName string
-	ref        string // Base branch for the PR
-
-	// Existing PR state (populated by NewSession if a PR exists)
-	prNumber    int      // 0 if no existing PR
-	prURL       string   // HTML URL of existing PR
-	prBody      string   // Body text of existing PR
-	prMergeable *bool    // nil if GitHub is still computing
-	prLabels    []string // Label names on existing PR
-
-	findings      []callbacks.Finding // CI failures detected on the existing PR
-	pendingChecks []string            // Names of checks that are not yet complete
+	existingPR *github.PullRequest
 }
 
 // skipLabel returns the skip label for this session's identity.
@@ -47,46 +34,48 @@ func (s *Session[T]) skipLabel() string {
 	return "skip:" + s.manager.identity
 }
 
+// hasSkipLabel checks if the given PR has a skip label.
+func (s *Session[T]) hasSkipLabel(pr *github.PullRequest) bool {
+	if pr == nil {
+		return false
+	}
+
+	skipLabel := s.skipLabel()
+	for _, label := range pr.Labels {
+		if label.GetName() == skipLabel {
+			return true
+		}
+	}
+	return false
+}
+
 // HasSkipLabel checks if the existing PR has a skip label.
 // Returns false if no existing PR exists.
 func (s *Session[T]) HasSkipLabel() bool {
-	if s.prNumber == 0 {
-		return false
-	}
-	return slices.Contains(s.prLabels, s.skipLabel())
-}
-
-// HasPendingChecks returns true if there are checks that are not yet complete.
-func (s *Session[T]) HasPendingChecks() bool {
-	return len(s.pendingChecks) > 0
-}
-
-// PendingChecks returns the names of checks that are not yet complete.
-func (s *Session[T]) PendingChecks() []string {
-	return s.pendingChecks
+	return s.hasSkipLabel(s.existingPR)
 }
 
 // CloseAnyOutstanding closes the existing PR if one exists.
 // If message is non-empty, it posts the message as a comment before closing.
 // This is a no-op if no PR exists.
 func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) error {
-	if s.prNumber == 0 {
+	if s.existingPR == nil {
 		return nil
 	}
 
 	log := clog.FromContext(ctx)
-	log.Infof("Closing PR #%d", s.prNumber)
+	log.Infof("Closing PR #%d", s.existingPR.GetNumber())
 
 	// Post message as a comment if provided
 	if message != "" {
-		if _, _, err := s.client.Issues.CreateComment(ctx, s.owner, s.repo, s.prNumber, &github.IssueComment{
+		if _, _, err := s.client.Issues.CreateComment(ctx, s.owner, s.repo, s.existingPR.GetNumber(), &github.IssueComment{
 			Body: github.Ptr(message),
 		}); err != nil {
 			return fmt.Errorf("posting comment: %w", err)
 		}
 	}
 
-	_, _, err := s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{
+	_, _, err := s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.existingPR.GetNumber(), &github.PullRequest{
 		State: github.Ptr("closed"),
 	})
 	if err != nil {
@@ -96,46 +85,8 @@ func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) er
 	return nil
 }
 
-// HasFindings returns true if the existing PR has CI failures that need addressing.
-// Returns false if no PR exists or if all checks passed.
-func (s *Session[T]) HasFindings() bool {
-	return len(s.findings) > 0
-}
-
-// Findings returns the list of findings to be addressed.
-// Returns nil if no PR exists or if all checks passed.
-func (s *Session[T]) Findings() []callbacks.Finding {
-	return s.findings
-}
-
-// FindingCallbacks returns callbacks for fetching finding details.
-// The returned callbacks can be embedded into agent tool callbacks.
-// Since all details are pre-fetched in NewSession, this just does a lookup.
-func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
-	return callbacks.FindingCallbacks{
-		Findings: s.findings,
-		GetDetails: func(_ context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
-			for _, f := range s.findings {
-				if f.Kind == kind && f.Identifier == identifier {
-					return f.Details, nil
-				}
-			}
-			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
-		},
-		GetLogs: func(ctx context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
-			for _, f := range s.findings {
-				if f.Kind == kind && f.Identifier == identifier {
-					return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f)
-				}
-			}
-			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
-		},
-	}
-}
-
 // Upsert creates a new PR or updates an existing one with the provided properties.
-// It only calls makeChanges when refresh is needed: no existing PR, merge conflict,
-// CI failures (findings), or embedded data differs.
+// It only calls makeChanges when refresh is needed or when creating a new PR.
 // Returns a RequeueAfter error if GitHub is still computing the PR's mergeable status.
 // Returns an error if the skip label is present on the existing PR.
 func (s *Session[T]) Upsert(
@@ -152,10 +103,9 @@ func (s *Session[T]) Upsert(
 	if err != nil {
 		return "", err
 	}
-
 	if !needsRefresh {
 		log.Info("PR is up to date, no refresh needed")
-		return s.prURL, nil
+		return s.existingPR.GetHTMLURL(), nil
 	}
 
 	// Make code changes on the branch
@@ -182,15 +132,15 @@ func (s *Session[T]) Upsert(
 		return "", fmt.Errorf("embedding data: %w", err)
 	}
 
-	if s.prNumber == 0 {
+	if s.existingPR == nil {
 		// Create new PR
-		log.Infof("Creating new PR with head %s and base %s", s.branchName, s.ref)
+		log.Infof("Creating new PR with head %s and base %s", s.branchName, s.resource.Ref)
 
 		pr, _, err := s.client.PullRequests.Create(ctx, s.owner, s.repo, &github.NewPullRequest{
 			Title: github.Ptr(title),
 			Body:  github.Ptr(body),
 			Head:  github.Ptr(s.branchName),
-			Base:  github.Ptr(s.ref),
+			Base:  github.Ptr(s.resource.Ref),
 			Draft: github.Ptr(draft),
 		})
 		if err != nil {
@@ -209,23 +159,20 @@ func (s *Session[T]) Upsert(
 	}
 
 	// Update existing PR
-	log.Infof("Updating existing PR #%d", s.prNumber)
+	log.Infof("Updating existing PR #%d", s.existingPR.GetNumber())
 
 	// Refetch PR to check for skip label (could have been added since session creation)
-	freshPR, _, err := s.client.PullRequests.Get(ctx, s.owner, s.repo, s.prNumber)
+	freshPR, _, err := s.client.PullRequests.Get(ctx, s.owner, s.repo, s.existingPR.GetNumber())
 	if err != nil {
 		return "", fmt.Errorf("refetching pull request: %w", err)
 	}
 
 	// Check skip label on fresh PR
-	skipLabel := s.skipLabel()
-	for _, label := range freshPR.Labels {
-		if label.GetName() == skipLabel {
-			return "", errors.New("PR has skip label, not updating to avoid stomping manual changes")
-		}
+	if s.hasSkipLabel(freshPR) {
+		return "", errors.New("PR has skip label, not updating to avoid stomping manual changes")
 	}
 
-	_, _, err = s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{
+	_, _, err = s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.existingPR.GetNumber(), &github.PullRequest{
 		Title: github.Ptr(title),
 		Body:  github.Ptr(body),
 		Draft: github.Ptr(draft),
@@ -235,19 +182,19 @@ func (s *Session[T]) Upsert(
 	}
 
 	// Replace labels
-	if _, _, err := s.client.Issues.ReplaceLabelsForIssue(ctx, s.owner, s.repo, s.prNumber, labels); err != nil {
+	if _, _, err := s.client.Issues.ReplaceLabelsForIssue(ctx, s.owner, s.repo, s.existingPR.GetNumber(), labels); err != nil {
 		return "", fmt.Errorf("replacing labels: %w", err)
 	}
 
-	log.Infof("Updated PR #%d: %s", s.prNumber, s.prURL)
-	return s.prURL, nil
+	log.Infof("Updated PR #%d: %s", s.existingPR.GetNumber(), s.existingPR.GetHTMLURL())
+	return s.existingPR.GetHTMLURL(), nil
 }
 
 // needsRefresh determines if an existing PR needs to be refreshed.
 // Returns true if no existing PR, PR has merge conflict, or embedded data differs.
 // Returns an error if the Mergeable status is still being computed by GitHub (RequeueAfter 5 minutes).
 func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error) {
-	if s.prNumber == 0 {
+	if s.existingPR == nil {
 		return true, nil
 	}
 
@@ -257,25 +204,19 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error
 	// See: https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28#get-a-pull-request
 	// "The value of the mergeable attribute can be true, false, or null. If the value is null,
 	// then GitHub has started a background job to compute the mergeability."
-	if s.prMergeable == nil {
+	if s.existingPR.Mergeable == nil {
 		log.Info("PR mergeable status is still being computed by GitHub, requeueing")
 		return false, workqueue.RequeueAfter(5 * time.Minute)
 	}
 
 	// Check for merge conflicts
-	if !*s.prMergeable {
+	if !*s.existingPR.Mergeable {
 		log.Info("PR has merge conflict, refresh needed")
 		return true, nil
 	}
 
-	// Check for CI failures that need addressing
-	if len(s.findings) > 0 {
-		log.Info("PR has CI failures, refresh needed")
-		return true, nil
-	}
-
 	// Extract embedded data from PR body
-	existing, err := s.manager.templateExecutor.Extract(s.prBody)
+	existing, err := s.manager.templateExecutor.Extract(s.existingPR.GetBody())
 	if err != nil {
 		log.Warnf("Failed to extract data from PR body: %v", err)
 		return true, nil
@@ -283,7 +224,7 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error
 
 	// Compare data using deep equality
 	if !reflect.DeepEqual(existing, expected) {
-		log.Infof("PR data differs, refresh needed: %s", cmp.Diff(existing, expected))
+		log.Info("PR data differs, refresh needed")
 		return true, nil
 	}
 

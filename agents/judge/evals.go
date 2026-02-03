@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -58,7 +57,7 @@ func CheckMode(expectedMode JudgmentMode) evals.ObservableTraceCallback[*Judgeme
 
 // ScoreRange returns an ObservableTraceCallback that grades the judgment score based on how well it fits the expected range
 func ScoreRange(minScore, maxScore float64) evals.ObservableTraceCallback[*Judgement] {
-	return func(o evals.Observer, trace *agenttrace.Trace[*Judgement]) {
+	return func(o evals.Observer, trace *evals.Trace[*Judgement]) {
 		if trace.Result == nil {
 			o.Fail("judgment result is nil")
 			return

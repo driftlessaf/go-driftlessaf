@@ -21,7 +21,7 @@ import (
 func ExampleLease_MakeAndPushChanges() {
 	ctx := context.Background()
 
-	repoDir := initExampleRepo()
+	repoDir, _ := initExampleRepo()
 
 	repoURL = func(*githubreconciler.Resource) string { return repoDir }
 	defer func() { repoURL = defaultRemoteURL }()
@@ -80,75 +80,7 @@ func ExampleLease_MakeAndPushChanges() {
 	// commit author: true
 }
 
-// ExampleWorktreeCallbacks demonstrates using WorktreeCallbacks for AI agent integration.
-// WorktreeCallbacks creates WorktreeTools from a git worktree, which can be passed
-// to an AI agent (via metaagent.BaseCallbacks) to allow it to read, write, search,
-// move, copy files and more while automatically staging changes.
-func ExampleWorktreeCallbacks() {
-	ctx := context.Background()
-
-	repoDir := initExampleRepo()
-
-	repoURL = func(*githubreconciler.Resource) string { return repoDir }
-	defer func() { repoURL = defaultRemoteURL }()
-
-	mgr, err := New(ctx, staticTokenSource(""), "automation", nil)
-	if err != nil {
-		fmt.Println("error creating manager:", err)
-		return
-	}
-
-	res := &githubreconciler.Resource{
-		Owner: "example",
-		Repo:  repoDir,
-		Ref:   "master",
-		Path:  "packages/example.yaml",
-		Type:  githubreconciler.ResourceTypePath,
-	}
-
-	lease, err := mgr.Lease(ctx, res)
-	if err != nil {
-		fmt.Println("lease error:", err)
-		return
-	}
-	defer lease.Return(ctx) //nolint:errcheck
-
-	if err := lease.MakeAndPushChanges(ctx, "automation/agent-update", func(ctx context.Context, wt *git.Worktree) (string, error) {
-		// Create WorktreeTools for the agent
-		// This provides callbacks that:
-		// - Read files with offset/limit windowing
-		// - Write files and automatically stage changes
-		// - Delete, move, copy files with auto-staging
-		// - List directory contents with metadata and filtering
-		// - Search for patterns across the codebase
-		wtTools := WorktreeCallbacks(wt)
-
-		// Example: Read a file using the tool callback (offset=0, limit=-1 for full read)
-		result, err := wtTools.ReadFile(ctx, "packages/example.yaml", 0, -1)
-		if err != nil {
-			return "", fmt.Errorf("read file: %w", err)
-		}
-		fmt.Println("file content:", result.Content)
-
-		// Example: Write a file (automatically staged)
-		if err := wtTools.WriteFile(ctx, "packages/example.yaml", "name: updated\n", 0o644); err != nil {
-			return "", fmt.Errorf("write file: %w", err)
-		}
-
-		return "automation: update via agent", nil
-	}); err != nil {
-		fmt.Println("apply error:", err)
-		return
-	}
-
-	fmt.Println("changes pushed successfully")
-
-	// Output:
-	// file content: name: example
-	// changes pushed successfully
-}
-
-func initExampleRepo() string {
+func initExampleRepo() (string, string) {
 	dir, _ := os.MkdirTemp("", "clonemanager-example-")
 	repo, _ := git.PlainInit(dir, false)
 	wt, _ := repo.Worktree()
@@ -158,11 +90,11 @@ func initExampleRepo() string {
 	absPath := filepath.Join(pkgDir, "example.yaml")
 	_ = os.WriteFile(absPath, []byte("name: example"), 0o644)
 	_, _ = wt.Add("packages/example.yaml")
-	_, _ = wt.Commit("initial", &git.CommitOptions{
+	hash, _ := wt.Commit("initial", &git.CommitOptions{
 		Author: &object.Signature{Name: "Example", Email: "example@clonemanager", When: time.Now()},
 	})
 	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))); err != nil {
 		panic(err)
 	}
-	return dir
+	return dir, hash.String()
 }

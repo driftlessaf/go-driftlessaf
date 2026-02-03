@@ -13,7 +13,6 @@ import (
 	"sync"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/evals/report"
 	"chainguard.dev/driftlessaf/agents/evals/testevals"
@@ -383,7 +382,7 @@ I'll stay with you through the entire resolution process to make sure you're com
 
 					// Create context with combined evals tracer
 					testCtx := context.Background()
-					testCtx = agenttrace.WithTracer(testCtx, evals.BuildTracer(testObs, tc.Evals))
+					testCtx = evals.WithTracer(testCtx, evals.BuildTracer(testObs, tc.Evals))
 
 					// Call judge with standalone mode and verify response via evals callbacks
 					_, err := judgeInstance.Judge(testCtx, &judge.Request{

@@ -13,22 +13,19 @@ import (
 	"maps"
 	"reflect"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
-	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // Interface is the public interface for Claude agent execution
 type Interface[Request promptbuilder.Bindable, Response any] interface {
 	// Execute runs the agent conversation with the given request and tools
 	// Optional seed tool calls can be provided - these will be executed and their results prepended to the conversation
-	Execute(ctx context.Context, request Request, tools map[string]claudetool.Metadata[Response], seedToolCalls ...anthropic.ToolUseBlock) (Response, error)
+	Execute(ctx context.Context, request Request, tools map[string]ToolMetadata[Response], seedToolCalls ...anthropic.ToolUseBlock) (Response, error)
 }
 
 // executor provides the private implementation
@@ -39,11 +36,24 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	prompt               *promptbuilder.Prompt
 	maxTokens            int64
 	temperature          float64
-	thinkingBudgetTokens *int64                        // nil = disabled, non-nil = enabled with budget
-	submitTool           claudetool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics         *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
-	retryConfig          retry.RetryConfig             // retry configuration for transient Claude API errors
-	resourceLabels       map[string]string             // resource labels for GCP billing attribution
+	thinkingBudgetTokens *int64                 // nil = disabled, non-nil = enabled with budget
+	submitTool           ToolMetadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics         *metrics.GenAI         // OpenTelemetry metrics for token usage and tool calls
+}
+
+// ToolMetadata describes a tool available to the agent
+type ToolMetadata[Response any] struct {
+	// Tool definition for Claude
+	Definition anthropic.ToolParam
+
+	// Handler processes the tool call
+	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response
+	Handler func(
+		ctx context.Context,
+		toolUse anthropic.ToolUseBlock,
+		trace *evals.Trace[Response],
+		result *Response,
+	) map[string]any
 }
 
 // New creates a new Executor with minimal required configuration
@@ -68,7 +78,6 @@ func New[Request promptbuilder.Bindable, Response any](
 		maxTokens:    8192, // Default max tokens
 		temperature:  0.1,  // Default temperature for consistency
 		genaiMetrics: genaiMetrics,
-		retryConfig:  retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 	}
 
 	// Apply options
@@ -86,7 +95,7 @@ func New[Request promptbuilder.Bindable, Response any](
 func (e *executor[Request, Response]) Execute(
 	ctx context.Context,
 	request Request,
-	tools map[string]claudetool.Metadata[Response],
+	tools map[string]ToolMetadata[Response],
 	seedToolCalls ...anthropic.ToolUseBlock,
 ) (response Response, err error) {
 	log := clog.FromContext(ctx)
@@ -104,7 +113,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	// Start trace
-	trace := agenttrace.StartTrace[Response](ctx, prompt)
+	trace := evals.StartTrace[Response](ctx, prompt)
 	defer func() {
 		trace.Complete(response, err)
 	}()
@@ -114,7 +123,7 @@ func (e *executor[Request, Response]) Execute(
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
 	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]claudetool.Metadata[Response], len(tools)+1)
+		mergedTools := make(map[string]ToolMetadata[Response], len(tools)+1)
 		maps.Copy(mergedTools, tools)
 
 		name := e.submitTool.Definition.Name
@@ -256,22 +265,18 @@ func (e *executor[Request, Response]) Execute(
 
 	// Conversation loop
 	for {
-		// Stream response with retry for transient errors
-		message, err := retry.RetryWithBackoff(ctx, e.retryConfig, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
-			stream := e.client.Messages.NewStreaming(ctx, params)
-			var msg anthropic.Message
-			for stream.Next() {
-				event := stream.Current()
-				if err := msg.Accumulate(event); err != nil {
-					return msg, fmt.Errorf("failed to accumulate event: %w", err)
-				}
+		// Stream response
+		stream := e.client.Messages.NewStreaming(ctx, params)
+
+		var message anthropic.Message
+		for stream.Next() {
+			event := stream.Current()
+			if err := message.Accumulate(event); err != nil {
+				return response, fmt.Errorf("failed to accumulate event: %w", err)
 			}
-			if err := stream.Err(); err != nil {
-				return msg, err
-			}
-			return msg, nil
-		})
-		if err != nil {
+		}
+
+		if err := stream.Err(); err != nil {
 			return response, fmt.Errorf("failed to stream Claude response: %w", err)
 		}
 
@@ -297,7 +302,7 @@ func (e *executor[Request, Response]) Execute(
 					Input: content.Input,
 				})
 			case "thinking", "redacted_thinking":
-				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
+				trace.Reasoning = append(trace.Reasoning, evals.ReasoningContent{
 					Thinking: content.Thinking,
 				})
 			}
@@ -354,26 +359,12 @@ func (e *executor[Request, Response]) Execute(
 	}
 }
 
-// resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
-func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
-	if len(e.resourceLabels) == 0 {
-		return nil
-	}
-	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
-	for k, v := range e.resourceLabels {
-		attrs = append(attrs, attribute.String(k, v))
-	}
-	return attrs
-}
-
 // recordTokenMetrics records token usage with optional enrichment
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, inputTokens, outputTokens int64) {
-	attrs := e.resourceLabelsToAttributes()
-	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens, attrs...)
+	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens)
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	attrs := e.resourceLabelsToAttributes()
-	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
+	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName)
 }

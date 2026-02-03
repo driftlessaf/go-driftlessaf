@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -95,11 +94,9 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 	}).Add(1)
 
 	if _, err := writer.Write([]byte("")); err != nil {
-		clog.WarnContextf(ctx, "Queue: Write failed for key %q: %v", key, err)
 		return fmt.Errorf("Write() = %w", err)
 	}
 	if exists, err := checkPreconditionFailedOk(writer.Close()); err != nil {
-		clog.WarnContextf(ctx, "Queue: Close failed for key %q: %v", key, err)
 		return fmt.Errorf("Close() = %w", err)
 	} else if exists {
 		clog.DebugContextf(ctx, "Key %q already exists", key)
@@ -122,7 +119,6 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 func updateMetadata(ctx context.Context, client ClientInterface, key string, metadata map[string]string) error {
 	attrs, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Attrs(ctx)
 	if err != nil {
-		clog.WarnContextf(ctx, "updateMetadata: Attrs failed for key %q: %v", key, err)
 		return fmt.Errorf("Attrs() = %w", err)
 	}
 	// Inialialize the metadata map if it's nil.
@@ -146,7 +142,6 @@ func updateMetadata(ctx context.Context, client ClientInterface, key string, met
 		if _, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Update(ctx, storage.ObjectAttrsToUpdate{
 			Metadata: attrs.Metadata,
 		}); err != nil {
-			clog.WarnContextf(ctx, "updateMetadata: Update failed for key %q: %v", key, err)
 			return fmt.Errorf("Update() = %w", err)
 		}
 	}
@@ -525,7 +520,6 @@ func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.O
 
 	_, err := copier.Run(ctx)
 	if exists, err := checkPreconditionFailedOk(err); err != nil {
-		clog.WarnContextf(ctx, "RequeueWithOptions: copy to queued failed for key %q: %v", key, err)
 		return fmt.Errorf("Run() = %w", err)
 	} else if exists {
 		if err := updateMetadata(ctx, o.client, key, copier.Metadata); err != nil {
@@ -536,11 +530,7 @@ func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.O
 			return fmt.Errorf("updateMetadata() = %w", err)
 		}
 	}
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name)); err != nil {
-		clog.WarnContextf(ctx, "RequeueWithOptions: failed to delete in-progress object for key %q: %v", key, err)
-		return err
-	}
-	return nil
+	return o.client.Object(o.attrs.Name).Delete(ctx)
 }
 
 // IsOrphaned implements workqueue.ObservedInProgressKey.
@@ -567,42 +557,6 @@ func (o *inProgressKey) IsOrphaned() bool {
 func (o *inProgressKey) deadLetterKey() string {
 	key := strings.TrimPrefix(o.attrs.Name, inProgressPrefix)
 	return fmt.Sprintf("%s%s", deadLetterPrefix, key)
-}
-
-// deleteWithRetry deletes a GCS object, retrying with jittered exponential
-// backoff on transient errors (e.g., 429 rate limiting). It retries up to
-// 10 times before giving up.
-func deleteWithRetry(ctx context.Context, obj *storage.ObjectHandle) error {
-	baseDelay := 500 * time.Millisecond
-	maxDelay := 30 * time.Second
-
-	for attempt := range 10 { // upper bound to prevent infinite loop
-		err := obj.Delete(ctx)
-		if err == nil {
-			return nil
-		}
-
-		// Only retry on rate limit (429) errors.
-		var gerr *googleapi.Error
-		if !errors.As(err, &gerr) || gerr.Code != http.StatusTooManyRequests {
-			return err
-		}
-
-		// Jittered exponential backoff: base * 2^attempt, capped at maxDelay.
-		delay := min(baseDelay<<attempt, maxDelay)
-		jitter := time.Duration(rand.Int64N(int64(delay))) //nolint:gosec // Weak random is fine for jitter
-		sleep := delay + jitter
-
-		clog.WarnContextf(ctx, "deleteWithRetry: 429 on attempt %d, retrying in %v: %v", attempt+1, sleep, err)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(sleep):
-		}
-	}
-
-	return obj.Delete(ctx) // final attempt
 }
 
 // Complete implements workqueue.OwnedInProgressKey.
@@ -633,19 +587,14 @@ func (o *inProgressKey) Complete(ctx context.Context) error {
 	}).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
 
 	// Best-effort delete of the dead-letter object, if it exists.
-	if err := o.client.Object(o.deadLetterKey()).Delete(ctx); err != nil {
+	deadLetterKey := o.deadLetterKey()
+	if err := o.client.Object(deadLetterKey).Delete(ctx); err != nil {
 		if !errors.Is(err, storage.ErrObjectNotExist) {
-			clog.WarnContextf(ctx, "Complete: failed to delete dead-letter object for key %q: %v",
-				strings.TrimPrefix(o.attrs.Name, inProgressPrefix), err)
+			clog.WarnContextf(ctx, "Failed to delete dead-letter object %q: %v", deadLetterKey, err)
 		}
 	}
 
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name)); err != nil {
-		clog.ErrorContextf(ctx, "Complete: failed to delete in-progress object for key %q: %v",
-			strings.TrimPrefix(o.attrs.Name, inProgressPrefix), err)
-		return err
-	}
-	return nil
+	return o.client.Object(o.attrs.Name).Delete(ctx)
 }
 
 // Deadletter implements workqueue.OwnedInProgressKey.
@@ -687,16 +636,11 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 	// Create the dead letter entry
 	_, err := copier.Run(ctx)
 	if err != nil {
-		clog.WarnContextf(ctx, "Deadletter: copy to dead-letter failed for key %q: %v", key, err)
 		return fmt.Errorf("failed to create dead letter entry: %w", err)
 	}
 
 	// Delete the in-progress task
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name)); err != nil {
-		clog.WarnContextf(ctx, "Deadletter: failed to delete in-progress object for key %q: %v", key, err)
-		return err
-	}
-	return nil
+	return o.client.Object(o.attrs.Name).Delete(ctx)
 }
 
 // Context implements workqueue.OwnedInProgressKey.
@@ -833,16 +777,10 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 
 	attrs, err := copier.Run(ctx)
 	if err != nil {
-		clog.WarnContextf(ctx, "Start: copy to in-progress failed for key %q: %v", key, err)
 		return nil, fmt.Errorf("Run() = %w", err)
 	}
 	if err := q.client.Object(srcObject).Delete(ctx); err != nil {
-		// The in-progress object was already created by the copy above,
-		// so we proceed normally. The queued object will be cleaned up
-		// on the next Enumerate when Start is called again, which will
-		// fail the copy (DoesNotExist precondition) and the key will be
-		// processed a second time as a result.
-		clog.WarnContextf(ctx, "Failed to delete queued object %q after starting: %v (key will be processed multiple times)", srcObject, err)
+		return nil, fmt.Errorf("Delete() = %w", err)
 	}
 
 	oip := &inProgressKey{

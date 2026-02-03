@@ -10,14 +10,13 @@ import (
 	"errors"
 	"fmt"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
 // ExampleTracer_NewTrace demonstrates basic trace creation and tool call tracking.
 func ExampleTracer_NewTrace() {
 	// Create a tracer and use it to create a trace
-	tracer := agenttrace.ByCode[string]() // No callbacks for this example
+	tracer := evals.ByCode[string]() // No callbacks for this example
 	ctx := context.Background()
 	trace := tracer.NewTrace(ctx, "Analyze security vulnerabilities in the codebase")
 
@@ -51,15 +50,15 @@ func ExampleStartTrace() {
 	ctx := context.Background()
 
 	// Create a custom tracer with a callback
-	tracer := agenttrace.ByCode[string](func(trace *agenttrace.Trace[string]) {
+	tracer := evals.ByCode[string](func(trace *evals.Trace[string]) {
 		fmt.Printf("Trace %s completed in %v\n", trace.ID[:8], trace.Duration())
 	})
 
 	// Add tracer to context
-	ctx = agenttrace.WithTracer(ctx, tracer)
+	ctx = evals.WithTracer(ctx, tracer)
 
 	// Start a trace using the context tracer
-	trace := agenttrace.StartTrace[string](ctx, "Process user authentication")
+	trace := evals.StartTrace[string](ctx, "Process user authentication")
 
 	// Start a tool call
 	tc := trace.StartToolCall("call-1", "text-analyzer", map[string]any{
@@ -80,30 +79,30 @@ func ExampleStartTrace() {
 // ExampleByCode demonstrates creating a tracer with multiple callbacks.
 func ExampleByCode() {
 	// Create a code-based eval with multiple callbacks
-	var traces []*agenttrace.Trace[string]
+	var traces []*evals.Trace[string]
 	var toolCallCount int
 
-	tracer := agenttrace.ByCode[string](
+	tracer := evals.ByCode[string](
 		// First callback: collect traces
-		func(trace *agenttrace.Trace[string]) {
+		func(trace *evals.Trace[string]) {
 			traces = append(traces, trace)
 		},
 		// Second callback: count tool calls
-		func(trace *agenttrace.Trace[string]) {
+		func(trace *evals.Trace[string]) {
 			toolCallCount += len(trace.ToolCalls)
 		},
 		// Third callback: log completion
-		func(trace *agenttrace.Trace[string]) {
+		func(trace *evals.Trace[string]) {
 			fmt.Println("Trace completed")
 		},
 	)
 
 	// Use the tracer
 	ctx := context.Background()
-	ctx = agenttrace.WithTracer(ctx, tracer)
+	ctx = evals.WithTracer(ctx, tracer)
 
 	// Simulate agent operations
-	trace := agenttrace.StartTrace[string](ctx, "Process data")
+	trace := evals.StartTrace[string](ctx, "Process data")
 	tc := trace.StartToolCall("tool-1", "processor", nil)
 	tc.Complete("done", nil)
 	trace.Complete("Processed", nil)
@@ -115,7 +114,7 @@ func ExampleByCode() {
 
 // ExampleTrace_BadToolCall demonstrates recording failed tool calls.
 func ExampleTrace_BadToolCall() {
-	tracer := agenttrace.ByCode[string]() // No callbacks for this example
+	tracer := evals.ByCode[string]() // No callbacks for this example
 	ctx := context.Background()
 	trace := tracer.NewTrace(ctx, "Execute automated tasks")
 
@@ -146,7 +145,7 @@ func ExampleTrace_BadToolCall() {
 // ExampleTrace_StartToolCall demonstrates starting and completing tool calls.
 func ExampleTrace_StartToolCall() {
 	// Create a new trace using a tracer
-	tracer := agenttrace.ByCode[string]() // No callbacks for this example
+	tracer := evals.ByCode[string]() // No callbacks for this example
 	ctx := context.Background()
 	trace := tracer.NewTrace(ctx, "Generate a random number")
 
@@ -192,18 +191,18 @@ func ExampleTracerFromContext() {
 	ctx := context.Background()
 
 	// Get tracer from context (will return default tracer if none set)
-	tracer1 := agenttrace.TracerFromContext[string](ctx)
+	tracer1 := evals.TracerFromContext[string](ctx)
 	fmt.Printf("Default tracer type: %T\n", tracer1)
 
 	// Add custom tracer to context
-	customTracer := agenttrace.ByCode[string](func(*agenttrace.Trace[string]) {
+	customTracer := evals.ByCode[string](func(*evals.Trace[string]) {
 		fmt.Println("Custom callback executed")
 	})
-	ctx = agenttrace.WithTracer(ctx, customTracer)
+	ctx = evals.WithTracer(ctx, customTracer)
 
 	// Retrieve the custom tracer
-	tracer2 := agenttrace.TracerFromContext[string](ctx)
+	tracer2 := evals.TracerFromContext[string](ctx)
 	fmt.Printf("Custom tracer retrieved: %t\n", tracer2 == customTracer)
-	// Output: Default tracer type: *agenttrace.byCodeTracer[string]
+	// Output: Default tracer type: *evals.byCodeTracer[string]
 	// Custom tracer retrieved: true
 }

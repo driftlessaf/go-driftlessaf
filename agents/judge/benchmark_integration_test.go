@@ -13,7 +13,6 @@ import (
 	"sync"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/evals/report"
 	"chainguard.dev/driftlessaf/agents/evals/testevals"
@@ -389,7 +388,7 @@ func TestBenchmark(t *testing.T) {
 
 					// Create context with combined evals tracer
 					testCtx := context.Background()
-					testCtx = agenttrace.WithTracer(testCtx, evals.BuildTracer(testObs, tc.Evals))
+					testCtx = evals.WithTracer(testCtx, evals.BuildTracer(testObs, tc.Evals))
 
 					// Call judge with benchmark mode and verify response via evals callbacks
 					_, err := judgeInstance.Judge(testCtx, &judge.Request{

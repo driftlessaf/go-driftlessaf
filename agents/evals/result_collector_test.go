@@ -11,7 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -165,7 +164,7 @@ func TestResultCollectorWithTraceCallback(t *testing.T) {
 	collector := evals.NewResultCollector(mock)
 
 	// Use it with a trace callback
-	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
+	callback := func(o evals.Observer, trace *evals.Trace[string]) {
 		o.Log("Processing trace")
 
 		if trace.Error != nil {
@@ -178,7 +177,7 @@ func TestResultCollectorWithTraceCallback(t *testing.T) {
 	}
 
 	// Create tracer with the evaluation
-	tracer := agenttrace.ByCode[string](evals.Inject(collector, callback))
+	tracer := evals.ByCode[string](evals.Inject(collector, callback))
 	ctx := context.Background()
 
 	// Test with error trace
