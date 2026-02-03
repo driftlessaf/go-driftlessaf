@@ -25,6 +25,24 @@ message ProcessResponse {
   // If not set or 0, the default behavior applies (success if no error, or exponential backoff on error).
   // This field is only honored when the RPC returns successfully (no error).
   int64 requeue_after_seconds = 1;
+
+  // Optional: Additional keys to queue as a result of processing this item.
+  // These keys are queued BEFORE the current key is completed, ensuring dependent
+  // work is guaranteed to be queued before we mark the triggering work as done.
+  // If any queue operation fails, the current key will be retried.
+  repeated QueueKeyRequest queue_keys = 2;
+}
+
+// QueueKeyRequest represents a key to be queued with optional priority and delay.
+message QueueKeyRequest {
+  // The key to queue.
+  string key = 1;
+
+  // Optional priority (default: 0). Higher values are processed first.
+  int64 priority = 2;
+
+  // Optional delay in seconds before the key becomes eligible for processing.
+  int64 delay_seconds = 3;
 }
 
 message GetKeyStateRequest {

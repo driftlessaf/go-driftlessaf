@@ -29,10 +29,26 @@ func ServiceCallback(client workqueue.WorkqueueServiceClient) Callback {
 		if err != nil {
 			return err
 		}
-		// If the response indicates a requeue with delay, return a special error
-		if resp.RequeueAfterSeconds > 0 {
-			return workqueue.RequeueAfter(time.Duration(resp.RequeueAfterSeconds) * time.Second)
+
+		// Handle requeue_after_seconds (backward compatibility).
+		// This should NOT be combined with queue_keys.
+		if resp.GetRequeueAfterSeconds() > 0 {
+			return workqueue.RequeueAfter(time.Duration(resp.GetRequeueAfterSeconds()) * time.Second)
 		}
+
+		// Handle queue_keys from response.
+		if len(resp.GetQueueKeys()) > 0 {
+			keys := make([]workqueue.QueueKey, 0, len(resp.GetQueueKeys()))
+			for _, qk := range resp.GetQueueKeys() {
+				keys = append(keys, workqueue.QueueKey{
+					Key:          qk.GetKey(),
+					Priority:     qk.GetPriority(),
+					DelaySeconds: qk.GetDelaySeconds(),
+				})
+			}
+			return workqueue.QueueKeys(keys...)
+		}
+
 		return nil
 	}
 }
@@ -115,27 +131,55 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			}
 
 			// Attempt to perform the actual reconciler invocation.
-			if err := f(oip.Context(), oip.Name(), workqueue.Options{
+			err = f(oip.Context(), oip.Name(), workqueue.Options{
 				Priority: oip.Priority(),
-			}); err != nil {
-				// Use context.WithoutCancel for all cleanup operations to ensure they
-				// complete even if the parent context is cancelled (e.g., SIGTERM).
-				// This prevents work items from getting stuck in "in-progress" state
-				// when the worker is terminated.
-				cleanupCtx := context.WithoutCancel(ctx)
+			})
 
-				// Check if this is a requeue error with custom delay
-				if delay, ok := workqueue.GetRequeueDelay(err); ok {
-					clog.InfoContextf(ctx, "Key %q requested requeue after %v", oip.Name(), delay)
-					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{
-						Priority: oip.Priority(),
-						Delay:    delay,
-					}); err != nil {
-						return fmt.Errorf("requeue(after delay request) = %w", err)
-					}
-					return nil
+			// Use context.WithoutCancel for all cleanup operations to ensure they
+			// complete even if the parent context is cancelled (e.g., SIGTERM).
+			// This prevents work items from getting stuck in "in-progress" state
+			// when the worker is terminated.
+			cleanupCtx := context.WithoutCancel(ctx)
+
+			// Check if this is a requeue error with custom delay
+			if delay, ok := workqueue.GetRequeueDelay(err); ok {
+				clog.InfoContextf(ctx, "Key %q requested requeue after %v", oip.Name(), delay)
+				if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{
+					Priority: oip.Priority(),
+					Delay:    delay,
+				}); err != nil {
+					return fmt.Errorf("requeue(after delay request) = %w", err)
 				}
+				return nil
+			}
 
+			// Extract queue keys from sentinel error (if any).
+			// If present, this is a success case - queue keys BEFORE completing current key.
+			if queueKeys := workqueue.GetQueueKeys(err); len(queueKeys) > 0 {
+				// Queue all keys BEFORE completing current key.
+				// If any queue operation fails, fail the entire operation.
+				// Note: If current key is in queueKeys, it enters "dual state" (queued + in-progress)
+				// and will be processed again after we complete the current in-progress work.
+				for _, qk := range queueKeys {
+					opts := workqueue.Options{
+						Priority: qk.Priority,
+					}
+					if qk.DelaySeconds > 0 {
+						opts.NotBefore = time.Now().Add(time.Duration(qk.DelaySeconds) * time.Second)
+					}
+
+					if err := wq.Queue(cleanupCtx, qk.Key, opts); err != nil {
+						// Fail the operation - current key will be retried
+						clog.WarnContextf(ctx, "Failed to queue key %q: %v", qk.Key, err)
+						if requeueErr := oip.Requeue(cleanupCtx); requeueErr != nil {
+							return fmt.Errorf("requeue(after queue failure) = %w", requeueErr)
+						}
+						return nil // Don't bubble up as dispatcher error
+					}
+					clog.InfoContextf(ctx, "Queued key %q (priority=%d, delay=%ds)", qk.Key, qk.Priority, qk.DelaySeconds)
+				}
+			} else if err != nil {
+				// Real error (not a sentinel) - handle failure.
 				clog.WarnContextf(ctx, "Failed callback for key %q: %v", oip.Name(), err)
 				attempts := oip.GetAttempts()
 
@@ -160,9 +204,10 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 				}
 				return nil // This isn't an error in the dispatcher itself.
 			}
+
 			// Delete the in-progress key (stops heartbeat).
 			// Use context.WithoutCancel to ensure completion even if context is cancelled.
-			if err := oip.Complete(context.WithoutCancel(ctx)); err != nil {
+			if err := oip.Complete(cleanupCtx); err != nil {
 				return fmt.Errorf("complete() = %w", err)
 			}
 			return nil

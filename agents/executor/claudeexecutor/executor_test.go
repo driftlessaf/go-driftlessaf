@@ -9,6 +9,7 @@ package claudeexecutor_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -38,8 +39,8 @@ func (r *simpleRequest) Bind(p *promptbuilder.Prompt) (*promptbuilder.Prompt, er
 
 // simpleResponse is the expected JSON response format
 type simpleResponse struct {
-	Answer    string `json:"answer"`
-	Reasoning string `json:"reasoning"`
+	Answer    json.Number `json:"answer"`
+	Reasoning string      `json:"reasoning"`
 }
 
 // detectProjectID tries to detect the GCP project ID from environment

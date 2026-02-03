@@ -7,6 +7,7 @@ package workqueue
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc/status"
@@ -83,4 +84,44 @@ func GetRequeueDelay(err error) (time.Duration, bool) {
 		return re.delay, true
 	}
 	return 0, false
+}
+
+// QueueKey represents a key to be queued with optional priority and delay.
+type QueueKey struct {
+	Key          string
+	Priority     int64
+	DelaySeconds int64
+}
+
+// queueKeysError wraps keys that should be queued after successful processing.
+type queueKeysError struct {
+	keys []QueueKey
+}
+
+func (e *queueKeysError) Error() string {
+	return fmt.Sprintf("queue %d keys", len(e.keys))
+}
+
+// QueueKeys returns a sentinel error indicating additional keys should be queued.
+// This is used by reconcilers to signal that dependent work should be enqueued.
+// The current key will be completed after all queued keys are successfully added.
+// If the current key is included in the list, it will be requeued (enters "dual state").
+func QueueKeys(keys ...QueueKey) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return &queueKeysError{keys: keys}
+}
+
+// GetQueueKeys extracts queued keys from an error, if present.
+// Returns nil if the error doesn't contain queue keys.
+func GetQueueKeys(err error) []QueueKey {
+	if err == nil {
+		return nil
+	}
+	var qke *queueKeysError
+	if errors.As(err, &qke) {
+		return qke.keys
+	}
+	return nil
 }

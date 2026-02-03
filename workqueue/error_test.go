@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestRequeueAfter(t *testing.T) {
@@ -106,6 +108,159 @@ func TestGetRequeueDelay(t *testing.T) {
 			}
 			if gotDelay != tt.wantDelay {
 				t.Errorf("Got delay %v, want %v", gotDelay, tt.wantDelay)
+			}
+		})
+	}
+}
+
+func TestQueueKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		keys     []QueueKey
+		wantNil  bool
+		wantKeys []QueueKey
+	}{{
+		name:    "no keys returns nil",
+		keys:    nil,
+		wantNil: true,
+	}, {
+		name:    "empty slice returns nil",
+		keys:    []QueueKey{},
+		wantNil: true,
+	}, {
+		name: "single key",
+		keys: []QueueKey{{
+			Key: "key1",
+		}},
+		wantKeys: []QueueKey{{
+			Key: "key1",
+		}},
+	}, {
+		name: "multiple keys",
+		keys: []QueueKey{{
+			Key: "key1",
+		}, {
+			Key:      "key2",
+			Priority: 100,
+		}, {
+			Key:          "key3",
+			DelaySeconds: 60,
+		}},
+		wantKeys: []QueueKey{{
+			Key: "key1",
+		}, {
+			Key:      "key2",
+			Priority: 100,
+		}, {
+			Key:          "key3",
+			DelaySeconds: 60,
+		}},
+	}, {
+		name: "key with all fields",
+		keys: []QueueKey{{
+			Key:          "full-key",
+			Priority:     500,
+			DelaySeconds: 120,
+		}},
+		wantKeys: []QueueKey{{
+			Key:          "full-key",
+			Priority:     500,
+			DelaySeconds: 120,
+		}},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := QueueKeys(tt.keys...)
+			if tt.wantNil {
+				if err != nil {
+					t.Errorf("QueueKeys() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("QueueKeys() = nil, want non-nil error")
+			}
+			gotKeys := GetQueueKeys(err)
+			if diff := cmp.Diff(tt.wantKeys, gotKeys); diff != "" {
+				t.Errorf("GetQueueKeys() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGetQueueKeys(t *testing.T) {
+	testKeys := []QueueKey{{
+		Key:      "test-key",
+		Priority: 50,
+	}}
+
+	tests := []struct {
+		name     string
+		err      error
+		wantKeys []QueueKey
+	}{{
+		name:     "queue keys error",
+		err:      QueueKeys(testKeys...),
+		wantKeys: testKeys,
+	}, {
+		name:     "regular error",
+		err:      errors.New("some error"),
+		wantKeys: nil,
+	}, {
+		name:     "nil error",
+		err:      nil,
+		wantKeys: nil,
+	}, {
+		name:     "wrapped queue keys error",
+		err:      fmt.Errorf("operation failed: %w", QueueKeys(testKeys...)),
+		wantKeys: testKeys,
+	}, {
+		name: "double wrapped queue keys error",
+		err: fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", QueueKeys(
+			QueueKey{Key: "deep-key", Priority: 200},
+		))),
+		wantKeys: []QueueKey{{Key: "deep-key", Priority: 200}},
+	}, {
+		name:     "wrapped regular error",
+		err:      fmt.Errorf("wrapped: %w", errors.New("some error")),
+		wantKeys: nil,
+	}, {
+		name:     "requeue error (not queue keys)",
+		err:      RequeueAfter(5 * time.Second),
+		wantKeys: nil,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotKeys := GetQueueKeys(tt.err)
+			if diff := cmp.Diff(tt.wantKeys, gotKeys); diff != "" {
+				t.Errorf("GetQueueKeys() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestQueueKeysErrorMessage(t *testing.T) {
+	tests := []struct {
+		name    string
+		keys    []QueueKey
+		wantMsg string
+	}{{
+		name:    "single key",
+		keys:    []QueueKey{{Key: "key1"}},
+		wantMsg: "queue 1 keys",
+	}, {
+		name:    "multiple keys",
+		keys:    []QueueKey{{Key: "key1"}, {Key: "key2"}, {Key: "key3"}},
+		wantMsg: "queue 3 keys",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := QueueKeys(tt.keys...)
+			if err.Error() != tt.wantMsg {
+				t.Errorf("Error() = %q, want %q", err.Error(), tt.wantMsg)
 			}
 		})
 	}
