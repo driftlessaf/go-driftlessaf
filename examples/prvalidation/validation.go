@@ -32,7 +32,7 @@ type Details struct {
 	DescriptionValid bool     `json:"descriptionValid"`
 	Issues           []string `json:"issues,omitempty"`
 
-	// Agent fields (optional, used by github-pr-agent)
+	// Agent fields (optional, used by github-pr-autofix)
 	AgentEnabled   bool     `json:"agentEnabled,omitempty"`
 	FixesApplied   []string `json:"fixesApplied,omitempty"`
 	AgentReasoning string   `json:"agentReasoning,omitempty"`
