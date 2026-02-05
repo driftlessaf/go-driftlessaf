@@ -5,7 +5,7 @@ go 1.25.4
 require (
 	chainguard.dev/driftlessaf v0.0.0
 	chainguard.dev/go-grpc-kit v0.17.15
-	github.com/anthropics/anthropic-sdk-go v1.18.0
+	github.com/anthropics/anthropic-sdk-go v1.20.0
 	github.com/chainguard-dev/clog v1.8.0
 	github.com/chainguard-dev/terraform-infra-common v0.10.0
 	github.com/google/go-github/v75 v75.0.0

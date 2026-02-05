@@ -8,7 +8,7 @@ require (
 	chainguard.dev/sdk v0.1.49
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/storage v1.58.0
-	github.com/anthropics/anthropic-sdk-go v1.18.0
+	github.com/anthropics/anthropic-sdk-go v1.20.0
 	github.com/chainguard-dev/clog v1.8.0
 	github.com/chainguard-dev/terraform-infra-common v0.10.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.1.0
