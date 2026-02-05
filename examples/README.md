@@ -14,7 +14,7 @@ Examples demonstrating the DriftlessAF reconciler pattern for GitHub automation.
 - Creates a GitHub Check Run showing pass/fail status
 - Uses `statusmanager` for idempotent check run management
 
-### 2. PR Agent (`github-pr-agent/`)
+### 2. PR Autofix (`github-pr-autofix/`)
 
 **Reconciler + agentic pattern** that extends the validator with Claude-powered auto-fixing.
 
@@ -82,7 +82,7 @@ refactor(api): simplify handlers
 4. Reconciler validates title/description
 5. Creates Check Run with pass/fail status
 
-### PR Agent
+### PR Autofix
 
 ```
  ┌──────────┐                              GCP
@@ -129,9 +129,9 @@ driftlessaf/examples/
 │   └── cmd/reconciler/
 │       ├── main.go           # Validator reconciler
 │       └── main_test.go      # Unit tests
-├── github-pr-agent/
+├── github-pr-autofix/
 │   └── cmd/reconciler/
-│       ├── main.go           # Agent reconciler with label gating
+│       ├── main.go           # Autofix reconciler with label gating
 │       ├── agent.go          # Claude executor and tools
 │       ├── prompts.go        # System and user prompts
 │       ├── types.go          # PRContext and PRFixResult types
