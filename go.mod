@@ -1,6 +1,6 @@
 module chainguard.dev/driftlessaf
 
-go 1.25.4
+go 1.25.7
 
 require (
 	chainguard.dev/apko v1.1.3
@@ -21,7 +21,7 @@ require (
 	github.com/invopop/jsonschema v0.13.0
 	github.com/olekukonko/tablewriter v1.1.2
 	github.com/prometheus/client_golang v1.23.2
-	github.com/secure-systems-lab/go-securesystemslib v0.9.1
+	github.com/secure-systems-lab/go-securesystemslib v0.10.0
 	github.com/sethvargo/go-envconfig v1.3.0
 	github.com/sigstore/cosign/v2 v2.6.2
 	github.com/sigstore/fulcio v1.8.5
@@ -224,7 +224,7 @@ require (
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
 	github.com/theupdateframework/go-tuf v0.7.0 // indirect
-	github.com/theupdateframework/go-tuf/v2 v2.3.0 // indirect
+	github.com/theupdateframework/go-tuf/v2 v2.3.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
