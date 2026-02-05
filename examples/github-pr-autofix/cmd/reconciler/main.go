@@ -87,8 +87,8 @@ func main() {
 
 	clog.InfoContextf(ctx, "Using OctoSTS authentication with identity: %s", cfg.OctoIdentity)
 	clientCache := githubreconciler.NewClientCache(func(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
-		clog.InfoContextf(ctx, "OctoSTS: requesting org-scoped token for identity=%q org=%q (repo=%q)", cfg.OctoIdentity, org, repo)
-		return githubreconciler.NewOrgTokenSource(ctx, cfg.OctoIdentity, org), nil
+		clog.InfoContextf(ctx, "OctoSTS: requesting repo-scoped token for identity=%q org=%q repo=%q", cfg.OctoIdentity, org, repo)
+		return githubreconciler.NewRepoTokenSource(ctx, cfg.OctoIdentity, org, repo), nil
 	})
 
 	d := duplex.New(
