@@ -86,29 +86,64 @@ func New(_ context.Context, tokenSource oauth2.TokenSource, identity string, sig
 }
 
 // Lease hydrates a clone for the supplied GitHub resource and returns a Lease
-// handle. Callers must invoke Return to release the clone back to the pool.
+// handle. For Path resources, it uses res.Ref; for Issue resources, it defaults
+// to "main". Callers must invoke Return to release the clone back to the pool.
 func (m *Manager) Lease(ctx context.Context, res *githubreconciler.Resource) (*Lease, error) {
-	switch {
-	case res == nil:
+	if res == nil {
 		return nil, errors.New("resource cannot be nil")
-	case res.Type != githubreconciler.ResourceTypePath:
-		return nil, fmt.Errorf("unsupported resource type %q", res.Type)
-	case res.Owner == "":
-		return nil, errors.New("resource owner cannot be empty")
-	case res.Repo == "":
-		return nil, errors.New("resource repo cannot be empty")
-	case res.Ref == "":
-		return nil, errors.New("resource ref cannot be empty")
-	case res.Path == "":
-		return nil, errors.New("resource path cannot be empty")
 	}
 
-	cl, err := m.acquireClone(ctx, res)
+	// Compute default ref based on resource type
+	ref := "main"
+	if res.Type == githubreconciler.ResourceTypePath {
+		if res.Ref == "" {
+			return nil, errors.New("resource ref cannot be empty for Path type")
+		}
+		ref = res.Ref
+	}
+
+	return m.LeaseRef(ctx, res, ref)
+}
+
+// LeaseRef hydrates a clone for the supplied GitHub resource at the specified
+// ref and returns a Lease handle. The ref can be a branch name (e.g., "main",
+// "feature-branch") that will be fetched and checked out.
+// Callers must invoke Return to release the clone back to the pool.
+func (m *Manager) LeaseRef(ctx context.Context, res *githubreconciler.Resource, ref string) (*Lease, error) {
+	if res == nil {
+		return nil, errors.New("resource cannot be nil")
+	}
+	if ref == "" {
+		return nil, errors.New("ref cannot be empty")
+	}
+
+	switch res.Type {
+	case githubreconciler.ResourceTypePath:
+		switch {
+		case res.Owner == "":
+			return nil, errors.New("resource owner cannot be empty")
+		case res.Repo == "":
+			return nil, errors.New("resource repo cannot be empty")
+		case res.Path == "":
+			return nil, errors.New("resource path cannot be empty")
+		}
+	case githubreconciler.ResourceTypeIssue:
+		switch {
+		case res.Owner == "":
+			return nil, errors.New("resource owner cannot be empty")
+		case res.Repo == "":
+			return nil, errors.New("resource repo cannot be empty")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported resource type %q", res.Type)
+	}
+
+	cl, err := m.acquireClone(ctx, ref, res)
 	if err != nil {
 		return nil, err
 	}
 
-	sha, exists, err := m.prepareClone(ctx, cl, res)
+	sha, exists, err := m.prepareClone(ctx, cl, ref, res)
 	if err != nil {
 		clog.FromContext(ctx).Warnf("Discarding clone after prepare failure: %v", err)
 		m.discardClone(cl)
@@ -128,7 +163,7 @@ func (m *Manager) Lease(ctx context.Context, res *githubreconciler.Resource) (*L
 // appends to the back, so recently returned clones are not immediately reused.
 // This prevents problematic clones from churning repeatedly by allowing them
 // to age out at the back of the pool.
-func (m *Manager) acquireClone(ctx context.Context, res *githubreconciler.Resource) (*clone, error) {
+func (m *Manager) acquireClone(ctx context.Context, ref string, res *githubreconciler.Resource) (*clone, error) {
 	m.mu.Lock()
 	if n := len(m.available); n > 0 {
 		cl := m.available[0]
@@ -138,10 +173,10 @@ func (m *Manager) acquireClone(ctx context.Context, res *githubreconciler.Resour
 	}
 	m.mu.Unlock()
 
-	return m.createClone(ctx, res)
+	return m.createClone(ctx, ref, res)
 }
 
-func (m *Manager) createClone(ctx context.Context, res *githubreconciler.Resource) (*clone, error) {
+func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconciler.Resource) (*clone, error) {
 	dir, err := os.MkdirTemp("", cloneDirPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("creating temp dir: %w", err)
@@ -158,7 +193,7 @@ func (m *Manager) createClone(ctx context.Context, res *githubreconciler.Resourc
 
 	repo, err := git.PlainClone(dir, false, &git.CloneOptions{
 		URL:           remote,
-		ReferenceName: plumbing.NewBranchReferenceName(res.Ref),
+		ReferenceName: plumbing.NewBranchReferenceName(ref),
 		SingleBranch:  true,
 		Auth:          auth,
 	})
@@ -170,7 +205,7 @@ func (m *Manager) createClone(ctx context.Context, res *githubreconciler.Resourc
 	return &clone{path: dir, repo: repo}, nil
 }
 
-func (m *Manager) prepareClone(ctx context.Context, cl *clone, res *githubreconciler.Resource) (string, bool, error) {
+func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *githubreconciler.Resource) (string, bool, error) {
 	repo := cl.repo
 	if repo == nil {
 		var err error
@@ -200,23 +235,23 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, res *githubreconc
 	}
 
 	fetchOpts := &git.FetchOptions{
-		RefSpecs: []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", res.Ref, res.Ref))},
+		RefSpecs: []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", ref, ref))},
 		Auth:     auth,
 	}
 
-	clog.FromContext(ctx).Infof("Fetching ref %s", res.Ref)
+	clog.FromContext(ctx).Infof("Fetching ref %s", ref)
 	if err := repo.Fetch(fetchOpts); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return "", false, fmt.Errorf("fetching ref %s: %w", res.Ref, err)
+		return "", false, fmt.Errorf("fetching ref %s: %w", ref, err)
 	}
 
-	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", res.Ref), true)
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", ref), true)
 	if err != nil {
-		return "", false, fmt.Errorf("getting remote ref %s: %w", res.Ref, err)
+		return "", false, fmt.Errorf("getting remote ref %s: %w", ref, err)
 	}
 
 	worktreeCheckout := &git.CheckoutOptions{Hash: remoteRef.Hash(), Force: true}
 	if err := worktree.Checkout(worktreeCheckout); err != nil {
-		return remoteRef.Hash().String(), false, fmt.Errorf("checking out ref %s: %w", res.Ref, err)
+		return remoteRef.Hash().String(), false, fmt.Errorf("checking out ref %s: %w", ref, err)
 	}
 
 	commit, err := repo.CommitObject(remoteRef.Hash())
@@ -224,33 +259,36 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, res *githubreconc
 		return remoteRef.Hash().String(), false, fmt.Errorf("getting commit object: %w", err)
 	}
 
-	tree, err := commit.Tree()
-	if err != nil {
-		return remoteRef.Hash().String(), false, fmt.Errorf("getting tree: %w", err)
-	}
-
-	// Verify the path exists in the git tree.
-	_, err = tree.FindEntry(res.Path)
-	if err != nil {
-		if errors.Is(err, object.ErrEntryNotFound) {
-			clog.FromContext(ctx).Debugf("Path %s not found at commit %s", res.Path, remoteRef.Hash().String())
-			return remoteRef.Hash().String(), false, nil
+	// Only check path existence for Path-type resources
+	if res.Type == githubreconciler.ResourceTypePath {
+		tree, err := commit.Tree()
+		if err != nil {
+			return remoteRef.Hash().String(), false, fmt.Errorf("getting tree: %w", err)
 		}
-		return remoteRef.Hash().String(), false, fmt.Errorf("checking tree path %s: %w", res.Path, err)
-	}
 
-	// Verify the path actually exists on the filesystem, not just in the git tree.
-	fsPath := filepath.Join(cl.path, res.Path)
-	_, err = os.Stat(fsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			clog.FromContext(ctx).Debugf("Path %s does not exist on filesystem at commit %s", res.Path, remoteRef.Hash().String())
-			return remoteRef.Hash().String(), false, nil
+		// Verify the path exists in the git tree.
+		_, err = tree.FindEntry(res.Path)
+		if err != nil {
+			if errors.Is(err, object.ErrEntryNotFound) {
+				clog.FromContext(ctx).Debugf("Path %s not found at commit %s", res.Path, remoteRef.Hash().String())
+				return remoteRef.Hash().String(), false, nil
+			}
+			return remoteRef.Hash().String(), false, fmt.Errorf("checking tree path %s: %w", res.Path, err)
 		}
-		return remoteRef.Hash().String(), false, fmt.Errorf("checking fs path %s: %w", res.Path, err)
-	}
 
-	clog.FromContext(ctx).Debugf("Path %s exists at commit %s", res.Path, remoteRef.Hash().String())
+		// Verify the path actually exists on the filesystem, not just in the git tree.
+		fsPath := filepath.Join(cl.path, res.Path)
+		_, err = os.Stat(fsPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				clog.FromContext(ctx).Debugf("Path %s does not exist on filesystem at commit %s", res.Path, remoteRef.Hash().String())
+				return remoteRef.Hash().String(), false, nil
+			}
+			return remoteRef.Hash().String(), false, fmt.Errorf("checking fs path %s: %w", res.Path, err)
+		}
+
+		clog.FromContext(ctx).Debugf("Path %s exists at commit %s", res.Path, remoteRef.Hash().String())
+	}
 
 	status, err := worktree.Status()
 	if err != nil {

@@ -23,6 +23,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/secure-systems-lab/go-securesystemslib v0.10.0
 	github.com/sethvargo/go-envconfig v1.3.0
+	github.com/shurcooL/githubv4 v0.0.0-20240727222349-48295856cce7
 	github.com/sigstore/cosign/v2 v2.6.2
 	github.com/sigstore/fulcio v1.8.5
 	github.com/sigstore/gitsign v0.13.1-0.20250619044204-bc76f512753d
@@ -209,6 +210,7 @@ require (
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.25.11 // indirect
+	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
 	github.com/sigstore/protobuf-specs v0.5.0 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.0.1 // indirect
 	github.com/sigstore/sigstore-go v1.1.4 // indirect

@@ -21,7 +21,7 @@ import (
 func ExampleLease_MakeAndPushChanges() {
 	ctx := context.Background()
 
-	repoDir, _ := initExampleRepo()
+	repoDir := initExampleRepo()
 
 	repoURL = func(*githubreconciler.Resource) string { return repoDir }
 	defer func() { repoURL = defaultRemoteURL }()
@@ -80,7 +80,7 @@ func ExampleLease_MakeAndPushChanges() {
 	// commit author: true
 }
 
-func initExampleRepo() (string, string) {
+func initExampleRepo() string {
 	dir, _ := os.MkdirTemp("", "clonemanager-example-")
 	repo, _ := git.PlainInit(dir, false)
 	wt, _ := repo.Worktree()
@@ -90,11 +90,11 @@ func initExampleRepo() (string, string) {
 	absPath := filepath.Join(pkgDir, "example.yaml")
 	_ = os.WriteFile(absPath, []byte("name: example"), 0o644)
 	_, _ = wt.Add("packages/example.yaml")
-	hash, _ := wt.Commit("initial", &git.CommitOptions{
+	_, _ = wt.Commit("initial", &git.CommitOptions{
 		Author: &object.Signature{Name: "Example", Email: "example@clonemanager", When: time.Now()},
 	})
 	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))); err != nil {
 		panic(err)
 	}
-	return dir, hash.String()
+	return dir
 }
