@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"google.golang.org/genai"
@@ -142,6 +143,19 @@ func WithSubmitResultProvider[Request promptbuilder.Bindable, Response any](prov
 func WithAttributeEnricher[Request promptbuilder.Bindable, Response any](enricher metrics.AttributeEnricher) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		e.genaiMetrics.SetAttributeEnricher(enricher)
+		return nil
+	}
+}
+
+// WithRetryConfig sets the retry configuration for handling transient Vertex AI errors.
+// This is particularly useful for handling 429 RESOURCE_EXHAUSTED errors that occur
+// when quota limits are hit. If not set, a default configuration is used.
+func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.RetryConfig) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		e.retryConfig = cfg
 		return nil
 	}
 }

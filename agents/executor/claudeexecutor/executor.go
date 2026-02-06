@@ -14,6 +14,7 @@ import (
 	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
@@ -39,6 +40,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	thinkingBudgetTokens *int64                 // nil = disabled, non-nil = enabled with budget
 	submitTool           ToolMetadata[Response] // opt-in: set via WithSubmitResultProvider
 	genaiMetrics         *metrics.GenAI         // OpenTelemetry metrics for token usage and tool calls
+	retryConfig          retry.RetryConfig      // retry configuration for transient Claude API errors
 }
 
 // ToolMetadata describes a tool available to the agent
@@ -78,6 +80,7 @@ func New[Request promptbuilder.Bindable, Response any](
 		maxTokens:    8192, // Default max tokens
 		temperature:  0.1,  // Default temperature for consistency
 		genaiMetrics: genaiMetrics,
+		retryConfig:  retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 	}
 
 	// Apply options
@@ -265,18 +268,22 @@ func (e *executor[Request, Response]) Execute(
 
 	// Conversation loop
 	for {
-		// Stream response
-		stream := e.client.Messages.NewStreaming(ctx, params)
-
-		var message anthropic.Message
-		for stream.Next() {
-			event := stream.Current()
-			if err := message.Accumulate(event); err != nil {
-				return response, fmt.Errorf("failed to accumulate event: %w", err)
+		// Stream response with retry for transient errors
+		message, err := retry.RetryWithBackoff(ctx, e.retryConfig, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
+			stream := e.client.Messages.NewStreaming(ctx, params)
+			var msg anthropic.Message
+			for stream.Next() {
+				event := stream.Current()
+				if err := msg.Accumulate(event); err != nil {
+					return msg, fmt.Errorf("failed to accumulate event: %w", err)
+				}
 			}
-		}
-
-		if err := stream.Err(); err != nil {
+			if err := stream.Err(); err != nil {
+				return msg, err
+			}
+			return msg, nil
+		})
+		if err != nil {
 			return response, fmt.Errorf("failed to stream Claude response: %w", err)
 		}
 

@@ -13,6 +13,7 @@ import (
 	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
@@ -52,6 +53,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	thinkingBudget     *int32                 // nil = disabled, non-nil = enabled with budget
 	submitTool         ToolMetadata[Response] // opt-in: set via WithSubmitResultProvider
 	genaiMetrics       *metrics.GenAI         // OpenTelemetry metrics for token usage and tool calls
+	retryConfig        retry.RetryConfig      // retry configuration for transient Vertex AI errors
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -76,6 +78,7 @@ func New[Request promptbuilder.Bindable, Response any](
 		temperature:     0.1,                // Default temperature for consistency
 		maxOutputTokens: 8192,               // Default max tokens
 		genaiMetrics:    genaiMetrics,
+		retryConfig:     retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 	}
 
 	// Apply options
@@ -245,9 +248,11 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to create chat with model %q: %w", e.model, err)
 	}
 
-	// Send final message to get response
+	// Send final message to get response with retry for transient errors
 	log.Info("Sending final message")
-	response, err := chat.Send(ctx, history[len(history)-1].Parts...)
+	response, err := retry.RetryWithBackoff(ctx, e.retryConfig, "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+		return chat.Send(ctx, history[len(history)-1].Parts...)
+	})
 	if err != nil {
 		return resp, fmt.Errorf("failed to send final message: %w", err)
 	}
@@ -281,8 +286,11 @@ func (e *executor[Request, Response]) Execute(
 				funcNames = append(funcNames, decl.Name)
 			}
 
-			// Send a message asking the model to try again
-			retryResp, err := chat.SendMessage(ctx, genai.Part{Text: fmt.Sprintf("The function call was malformed. Please try again using the available functions: %v", funcNames)})
+			// Send a message asking the model to try again with retry for transient errors
+			retryMsg := genai.Part{Text: fmt.Sprintf("The function call was malformed. Please try again using the available functions: %v", funcNames)}
+			retryResp, err := retry.RetryWithBackoff(ctx, e.retryConfig, "send_malformed_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+				return chat.SendMessage(ctx, retryMsg)
+			})
 			if err != nil {
 				return resp, fmt.Errorf("failed to send retry message after malformed function call: %w", err)
 			}
@@ -373,8 +381,10 @@ func (e *executor[Request, Response]) Execute(
 				})
 			}
 
-			// Send tool responses back to the chat
-			response, err = chat.Send(ctx, toolResponseParts...)
+			// Send tool responses back to the chat with retry for transient errors
+			response, err = retry.RetryWithBackoff(ctx, e.retryConfig, "send_tool_responses", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+				return chat.Send(ctx, toolResponseParts...)
+			})
 			if err != nil {
 				return resp, fmt.Errorf("failed to send tool responses: %w", err)
 			}
