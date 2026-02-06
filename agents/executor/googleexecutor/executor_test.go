@@ -5,6 +5,10 @@ Copyright 2025 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
+// Tests in this file hit the real Vertex AI API. Do NOT use t.Parallel() —
+// the test project has limited RPM quota and parallel requests would
+// cause 429 RESOURCE_EXHAUSTED errors that retry alone cannot overcome.
+
 package googleexecutor_test
 
 import (
@@ -14,9 +18,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"google.golang.org/genai"
 )
@@ -58,6 +64,18 @@ func detectProjectID(ctx context.Context, t *testing.T) string {
 	return projectID
 }
 
+// getTestModel returns the model to use for tests.
+// Falls back to environment variable VERTEX_AI_TEST_MODEL if set,
+// otherwise defaults to gemini-2.5-flash.
+// This allows CI to use a model with higher quota (e.g., gemini-1.5-flash)
+// while quota increase requests are being processed.
+func getTestModel() string {
+	if model := os.Getenv("VERTEX_AI_TEST_MODEL"); model != "" {
+		return model
+	}
+	return "gemini-2.5-flash"
+}
+
 func TestExecutorWithThinking(t *testing.T) {
 	ctx := context.Background()
 
@@ -88,14 +106,24 @@ Please solve this problem and provide your answer in JSON format:
 		t.Fatalf("Failed to create prompt: %v", err)
 	}
 
-	// Create executor with thinking enabled
+	// Get model from environment (allows CI to use gemini-1.5-flash with higher quota)
+	model := getTestModel()
+	t.Logf("Using model: %s", model)
+
+	// Create executor with thinking enabled and retry for rate limit handling
 	exec, err := googleexecutor.New[*simpleRequest, *simpleResponse](
 		client,
 		prompt,
-		googleexecutor.WithModel[*simpleRequest, *simpleResponse]("gemini-2.5-flash"),
+		googleexecutor.WithModel[*simpleRequest, *simpleResponse](model),
 		googleexecutor.WithMaxOutputTokens[*simpleRequest, *simpleResponse](8192),
 		googleexecutor.WithThinking[*simpleRequest, *simpleResponse](2048), // Enable thinking with modest budget
 		googleexecutor.WithResponseMIMEType[*simpleRequest, *simpleResponse]("application/json"),
+		googleexecutor.WithRetryConfig[*simpleRequest, *simpleResponse](retry.RetryConfig{
+			MaxRetries:  3,
+			BaseBackoff: 2 * time.Second,
+			MaxBackoff:  30 * time.Second,
+			MaxJitter:   500 * time.Millisecond,
+		}),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
