@@ -13,6 +13,9 @@ type FindingKind string
 const (
 	// FindingKindCICheck indicates a CI check failure.
 	FindingKindCICheck FindingKind = "ciCheck"
+
+	// FindingKindReview indicates a code review with feedback.
+	FindingKindReview FindingKind = "review"
 )
 
 // Finding represents an issue that needs to be addressed.
