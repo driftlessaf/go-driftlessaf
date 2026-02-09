@@ -3,8 +3,6 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Package main implements a GitHub PR validator reconciler with agentic fix capabilities.
-// This extends the hello-world example by adding Claude-based auto-fixing of PR titles and descriptions.
 package main
 
 import (
@@ -14,7 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
+	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/examples/prvalidation"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
@@ -49,7 +47,7 @@ type config struct {
 	AutofixLabel   string `env:"AUTOFIX_LABEL,default=driftlessaf/autofix"`
 	GCPProjectID   string `env:"GCP_PROJECT_ID"`
 	GCPRegion      string `env:"GCP_REGION,default=us-central1"`
-	ClaudeModel    string `env:"CLAUDE_MODEL,default=claude-sonnet-4-5@20250929"`
+	Model          string `env:"AGENT_MODEL,default=gemini-2.5-flash"`
 	MaxFixAttempts int    `env:"MAX_FIX_ATTEMPTS,default=2"`
 }
 
@@ -73,7 +71,7 @@ func main() {
 	}
 
 	// Initialize agent if autofix is enabled
-	var agent claudeexecutor.Interface[*PRContext, *PRFixResult]
+	var agent metaagent.Agent[*PRContext, *PRFixResult, PRTools]
 	if cfg.EnableAutofix {
 		if cfg.GCPProjectID == "" {
 			clog.FatalContextf(ctx, "GCP_PROJECT_ID is required when ENABLE_AUTOFIX=true")
@@ -82,7 +80,7 @@ func main() {
 		if err != nil {
 			clog.FatalContextf(ctx, "creating agent: %v", err)
 		}
-		clog.InfoContextf(ctx, "Agent enabled with model %s", cfg.ClaudeModel)
+		clog.InfoContextf(ctx, "Agent enabled with model %s", cfg.Model)
 	}
 
 	clog.InfoContextf(ctx, "Using OctoSTS authentication with identity: %s", cfg.OctoIdentity)
@@ -118,7 +116,7 @@ func main() {
 }
 
 // newReconciler returns a reconciler function that uses the status manager.
-func newReconciler(sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent claudeexecutor.Interface[*PRContext, *PRFixResult]) githubreconciler.ReconcilerFunc {
+func newReconciler(sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent metaagent.Agent[*PRContext, *PRFixResult, PRTools]) githubreconciler.ReconcilerFunc {
 	return func(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
 		return reconcilePR(ctx, res, gh, sm, cfg, agent)
 	}
@@ -135,7 +133,7 @@ func hasLabel(pr *github.PullRequest, labelName string) bool {
 }
 
 // reconcilePR validates a PR and optionally uses an agent to fix issues.
-func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent claudeexecutor.Interface[*PRContext, *PRFixResult]) error {
+func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent metaagent.Agent[*PRContext, *PRFixResult, PRTools]) error {
 	log := clog.FromContext(ctx)
 	log.Infof("Validating PR: %s/%s#%d", res.Owner, res.Repo, res.Number)
 
@@ -223,7 +221,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 			Conclusion: "failure",
 			Details: prvalidation.Details{
 				Generation: generation, TitleValid: titleValid, DescriptionValid: descValid,
-				Issues: issues, AgentEnabled: true, FixAttempts: fixAttempts, ModelUsed: cfg.ClaudeModel,
+				Issues: issues, AgentEnabled: true, FixAttempts: fixAttempts, ModelUsed: cfg.Model,
 				AgentReasoning: "Maximum fix attempts reached without successful resolution",
 			},
 		})
@@ -232,7 +230,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 	// Set in_progress status
 	if err := session.SetActualState(ctx, "Agent fixing issues...", &statusmanager.Status[prvalidation.Details]{
 		Status:  "in_progress",
-		Details: prvalidation.Details{Generation: generation, Issues: issues, AgentEnabled: true, FixAttempts: fixAttempts + 1, ModelUsed: cfg.ClaudeModel},
+		Details: prvalidation.Details{Generation: generation, Issues: issues, AgentEnabled: true, FixAttempts: fixAttempts + 1, ModelUsed: cfg.Model},
 	}); err != nil {
 		return fmt.Errorf("setting in_progress status: %w", err)
 	}
@@ -246,8 +244,8 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	// Run agent
 	prContext := &PRContext{Owner: res.Owner, Repo: res.Repo, PRNumber: res.Number, Title: title, Body: body, Issues: issues, ChangedFiles: changedFiles}
-	tools := createTools(ctx, gh, res.Owner, res.Repo, res.Number)
-	result, err := agent.Execute(ctx, prContext, tools)
+	prTools := NewPRTools(gh, res.Owner, res.Repo, res.Number)
+	result, err := agent.Execute(ctx, prContext, prTools)
 	if err != nil {
 		log.With("error", err).Error("Agent execution failed")
 		return session.SetActualState(ctx, "Agent failed", &statusmanager.Status[prvalidation.Details]{
@@ -255,7 +253,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 			Conclusion: "failure",
 			Details: prvalidation.Details{
 				Generation: generation, TitleValid: titleValid, DescriptionValid: descValid,
-				Issues: issues, AgentEnabled: true, FixAttempts: fixAttempts + 1, ModelUsed: cfg.ClaudeModel,
+				Issues: issues, AgentEnabled: true, FixAttempts: fixAttempts + 1, ModelUsed: cfg.Model,
 				AgentReasoning: fmt.Sprintf("Agent execution error: %v", err),
 			},
 		})
@@ -285,7 +283,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 		Details: prvalidation.Details{
 			Generation: newGeneration, TitleValid: newTitleValid, DescriptionValid: newDescValid,
 			Issues: newIssues, AgentEnabled: true, FixesApplied: result.FixesApplied,
-			AgentReasoning: result.Reasoning, FixAttempts: fixAttempts + 1, ModelUsed: cfg.ClaudeModel,
+			AgentReasoning: result.Reasoning, FixAttempts: fixAttempts + 1, ModelUsed: cfg.Model,
 		},
 	})
 }

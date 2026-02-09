@@ -16,15 +16,21 @@ Examples demonstrating the DriftlessAF reconciler pattern for GitHub automation.
 
 ### 2. PR Autofix (`github-pr-autofix/`)
 
-**Reconciler + agentic pattern** that extends the validator with Claude-powered auto-fixing.
+**Reconciler + agentic pattern** that extends the validator with AI-powered auto-fixing using the metaagent framework.
 
 **What it does:**
 - Same validation as PR Validator
-- When the `driftlessaf/autofix` label is present, uses **Claude Sonnet 4.5** (via Vertex AI) to automatically fix issues
+- When the `driftlessaf/autofix` label is present, uses an AI agent (via Vertex AI) to automatically fix issues
+- Supports both **Gemini** and **Claude** models via the `AGENT_MODEL` env var (defaults to `gemini-2.5-flash`)
 - Updates PR title to conventional commit format
 - Generates meaningful descriptions from context
 - Shows model used and reasoning in check run output
 - Max 2 fix attempts per PR state to prevent loops
+
+**Switching to Claude Sonnet:**
+```bash
+AGENT_MODEL=claude-sonnet-4-5@20250929
+```
 
 **Agent tools:**
 - `update_pr_title` - Updates title with validation
@@ -101,7 +107,7 @@ refactor(api): simplify handlers
       │          │                               │                                │
       │          │                               ▼                                │
       │          │  ┌──────────────┐  ┌──────────────────────┐  ┌──────────────┐  │
-      │          │  │   OctoSTS    │◄─│     Reconciler       │─►│Claude Sonnet │  │
+      │          │  │   OctoSTS    │◄─│     Reconciler       │─►│  Metaagent   │  │
       │          │  │ (get token)  │  │ (validator + agent)  │  │  (Vertex AI) │  │
       │          │  └──────────────┘  └──────────┬───────────┘  └──────────────┘  │
       │          │                               │                                │
@@ -116,7 +122,7 @@ refactor(api): simplify handlers
 3. CloudEvents Broker routes to Workqueue
 4. Reconciler validates title/description
 5. If `driftlessaf/autofix` label present and issues found:
-   - Calls Claude Sonnet 4.5 via Vertex AI
+   - Calls AI agent via Vertex AI (Gemini or Claude, configurable via `AGENT_MODEL`)
    - Agent uses tools to fix PR title/description
    - Re-validates after fixes
 6. Creates Check Run with results (including model used and reasoning)
@@ -132,7 +138,8 @@ driftlessaf/examples/
 ├── github-pr-autofix/
 │   └── cmd/reconciler/
 │       ├── main.go           # Autofix reconciler with label gating
-│       ├── agent.go          # Claude executor and tools
+│       ├── agent.go          # Metaagent setup (Gemini/Claude via Vertex AI)
+│       ├── prtools.go        # PR tool definitions and handlers (Claude + Google)
 │       ├── prompts.go        # System and user prompts
 │       ├── types.go          # PRContext and PRFixResult types
 │       └── main_test.go      # Unit tests

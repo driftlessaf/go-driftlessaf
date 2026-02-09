@@ -15,6 +15,7 @@ require (
 	github.com/sethvargo/go-envconfig v1.3.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0
 	golang.org/x/oauth2 v0.34.0
+	google.golang.org/genai v1.36.0
 	google.golang.org/grpc v1.78.0
 )
 
@@ -237,7 +238,6 @@ require (
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/api v0.264.0 // indirect
-	google.golang.org/genai v1.36.0 // indirect
 	google.golang.org/genproto v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251222181119-0a764e51fe1b // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260122232226-8e98ce8d340d // indirect
