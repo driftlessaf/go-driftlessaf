@@ -81,37 +81,41 @@ func (m *GenAI) SetAttributeEnricher(enricher AttributeEnricher) {
 // RecordTokens records prompt and completion token usage with optional enrichment.
 // The model parameter is added as a base attribute, and the enricher (if set)
 // can add additional contextual attributes.
-func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, completionTokens int64) {
+func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, completionTokens int64, attrs ...attribute.KeyValue) {
 	// Base attributes
-	attrs := []attribute.KeyValue{
+	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
 	}
 
 	// Enrich with application-specific attributes
 	if m.attrEnricher != nil {
-		attrs = m.attrEnricher(ctx, attrs)
+		baseAttrs = m.attrEnricher(ctx, baseAttrs)
 	}
 
+	baseAttrs = append(baseAttrs, attrs...)
+
 	// Record token metrics
-	m.promptTokens.Add(ctx, promptTokens, metric.WithAttributes(attrs...))
-	m.completionTokens.Add(ctx, completionTokens, metric.WithAttributes(attrs...))
+	m.promptTokens.Add(ctx, promptTokens, metric.WithAttributes(baseAttrs...))
+	m.completionTokens.Add(ctx, completionTokens, metric.WithAttributes(baseAttrs...))
 }
 
 // RecordToolCall records a tool invocation with optional enrichment.
 // The model and toolName parameters are added as base attributes, and the enricher
 // (if set) can add additional contextual attributes.
-func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string) {
+func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attrs ...attribute.KeyValue) {
 	// Base attributes
-	attrs := []attribute.KeyValue{
+	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
 		attribute.String("tool", toolName),
 	}
 
 	// Enrich with application-specific attributes
 	if m.attrEnricher != nil {
-		attrs = m.attrEnricher(ctx, attrs)
+		baseAttrs = m.attrEnricher(ctx, baseAttrs)
 	}
 
+	baseAttrs = append(baseAttrs, attrs...)
+
 	// Record tool call
-	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(attrs...))
+	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
 }

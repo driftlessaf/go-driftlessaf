@@ -8,6 +8,8 @@ package googleexecutor
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"os"
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -157,6 +159,43 @@ func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.Ret
 			return err
 		}
 		e.retryConfig = cfg
+		return nil
+	}
+}
+
+// WithResourceLabels sets labels that are sent with each Vertex AI API request.
+// Automatically includes default labels from environment variables:
+//   - service_name: from K_SERVICE (defaults to "unknown")
+//   - product: from CHAINGUARD_PRODUCT (defaults to "unknown")
+//   - team: from CHAINGUARD_TEAM (defaults to "unknown")
+//
+// Custom labels passed to this function will override defaults if they use the same keys.
+func WithResourceLabels[Request promptbuilder.Bindable, Response any](labels map[string]string) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		// Start with default labels from environment
+		serviceName := os.Getenv("K_SERVICE")
+		if serviceName == "" {
+			serviceName = "unknown"
+		}
+		productName := os.Getenv("CHAINGUARD_PRODUCT")
+		if productName == "" {
+			productName = "unknown"
+		}
+		teamName := os.Getenv("CHAINGUARD_TEAM")
+		if teamName == "" {
+			teamName = "unknown"
+		}
+
+		e.resourceLabels = map[string]string{
+			"service_name": serviceName,
+			"product":      productName,
+			"team":         teamName,
+		}
+
+		// Merge custom labels (these will override defaults if keys match)
+		if labels != nil {
+			maps.Copy(e.resourceLabels, labels)
+		}
 		return nil
 	}
 }

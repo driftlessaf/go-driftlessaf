@@ -11,6 +11,8 @@ import (
 	"math/rand"
 
 	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/judge"
 )
 
@@ -97,8 +99,10 @@ func Example_multipleCriteria() {
 func ExampleNewVertex() {
 	ctx := context.Background()
 
-	// Create a Claude judge instance - automatically detects Claude from model name
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-east5", "claude-sonnet-4@20250514")
+	// Create a Claude judge instance with resource labels for billing attribution
+	labels := map[string]string{"agent_name": "judge"}
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-east5", "claude-sonnet-4@20250514",
+		claudeexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
 		return
@@ -124,8 +128,10 @@ func ExampleNewVertex() {
 func ExampleNewVertex_gemini() {
 	ctx := context.Background()
 
-	// Create a Gemini judge instance - automatically detects Gemini from model name
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash")
+	// Create a Gemini judge instance with resource labels for billing attribution
+	labels := map[string]string{"agent_name": "judge"}
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
+		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
 		return
@@ -170,8 +176,10 @@ func ExampleScoreRange() {
 	ctx := context.Background()
 	obs := &mockObserver{}
 
-	// Create a judge instance
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash")
+	// Create a judge instance with resource labels
+	labels := map[string]string{"agent_name": "judge"}
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
+		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
 		return
@@ -237,8 +245,10 @@ func ExampleNewStandaloneEval() {
 	ctx := context.Background()
 	obs := &mockObserver{}
 
-	// Create a judge instance
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash")
+	// Create a judge instance with resource labels
+	labels := map[string]string{"agent_name": "judge"}
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
+		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

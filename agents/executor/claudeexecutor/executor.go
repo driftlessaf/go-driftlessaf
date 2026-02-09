@@ -21,6 +21,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Interface is the public interface for Claude agent execution
@@ -42,6 +43,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	submitTool           claudetool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
 	genaiMetrics         *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
 	retryConfig          retry.RetryConfig             // retry configuration for transient Claude API errors
+	resourceLabels       map[string]string             // resource labels for GCP billing attribution
 }
 
 // New creates a new Executor with minimal required configuration
@@ -352,12 +354,26 @@ func (e *executor[Request, Response]) Execute(
 	}
 }
 
+// resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
+func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
+	if len(e.resourceLabels) == 0 {
+		return nil
+	}
+	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
+	for k, v := range e.resourceLabels {
+		attrs = append(attrs, attribute.String(k, v))
+	}
+	return attrs
+}
+
 // recordTokenMetrics records token usage with optional enrichment
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, inputTokens, outputTokens int64) {
-	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens)
+	attrs := e.resourceLabelsToAttributes()
+	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens, attrs...)
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName)
+	attrs := e.resourceLabelsToAttributes()
+	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
 }

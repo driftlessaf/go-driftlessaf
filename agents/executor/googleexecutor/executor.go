@@ -19,6 +19,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
 )
 
@@ -43,6 +44,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	submitTool         googletool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
 	genaiMetrics       *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
 	retryConfig        retry.RetryConfig             // retry configuration for transient Vertex AI errors
+	resourceLabels     map[string]string             // resource labels for GCP billing attribution
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -132,6 +134,7 @@ func (e *executor[Request, Response]) Execute(
 	config := &genai.GenerateContentConfig{
 		Temperature:     ptr(e.temperature),
 		MaxOutputTokens: e.maxOutputTokens,
+		Labels:          e.resourceLabels,
 	}
 
 	// Add system instructions if provided
@@ -415,16 +418,30 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
+// resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
+func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
+	if len(e.resourceLabels) == 0 {
+		return nil
+	}
+	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
+	for k, v := range e.resourceLabels {
+		attrs = append(attrs, attribute.String(k, v))
+	}
+	return attrs
+}
+
 // recordTokenMetrics records token usage with optional enrichment
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, usage *genai.GenerateContentResponseUsageMetadata) {
 	if usage == nil {
 		return
 	}
 
-	e.genaiMetrics.RecordTokens(ctx, e.model, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount))
+	attrs := e.resourceLabelsToAttributes()
+	e.genaiMetrics.RecordTokens(ctx, e.model, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount), attrs...)
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName)
+	attrs := e.resourceLabelsToAttributes()
+	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName, attrs...)
 }
