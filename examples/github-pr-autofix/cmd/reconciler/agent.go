@@ -42,8 +42,8 @@ func newPRFixerAgent(ctx context.Context, cfg *config) (claudeexecutor.Interface
 }
 
 // createTools creates the tool definitions for the agent
-func createTools(_ context.Context, gh *github.Client, owner, repo string, prNumber int) map[string]claudeexecutor.ToolMetadata[*PRFixResult] {
-	return map[string]claudeexecutor.ToolMetadata[*PRFixResult]{
+func createTools(_ context.Context, gh *github.Client, owner, repo string, prNumber int) map[string]claudetool.Metadata[*PRFixResult] {
+	return map[string]claudetool.Metadata[*PRFixResult]{
 		"update_pr_title": {
 			Definition: anthropic.ToolParam{
 				Name: "update_pr_title",

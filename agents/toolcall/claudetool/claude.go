@@ -6,9 +6,28 @@ SPDX-License-Identifier: Apache-2.0
 package claudetool
 
 import (
+	"context"
 	"fmt"
 	"maps"
+
+	"chainguard.dev/driftlessaf/agents/evals"
+	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// Metadata describes a tool available to the Claude agent.
+type Metadata[Response any] struct {
+	// Definition is the tool definition for Claude.
+	Definition anthropic.ToolParam
+
+	// Handler processes the tool call.
+	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response.
+	Handler func(
+		ctx context.Context,
+		toolUse anthropic.ToolUseBlock,
+		trace *evals.Trace[Response],
+		result *Response,
+	) map[string]any
+}
 
 // Error creates an error response map for Claude tool calls
 func Error(format string, args ...any) map[string]any {

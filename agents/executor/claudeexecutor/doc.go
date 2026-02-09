@@ -34,7 +34,7 @@ SPDX-License-Identifier: Apache-2.0
 //	}
 //
 //	// Define tools if needed
-//	tools := map[string]claudeexecutor.ToolMetadata[*Response]{
+//	tools := map[string]claudetool.Metadata[*Response]{
 //	    "read_file": {
 //	        Definition: anthropic.ToolParam{
 //	            Name:        "read_file",

@@ -30,3 +30,24 @@ func formatCheckRunDetails(name, status, conclusion, title, summary, text, detai
 	}
 	return sb.String()
 }
+
+// formatReviewDetails builds a human-readable details string for a code review.
+func formatReviewDetails(review gqlReviewNode, activeComments []gqlReviewComment) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("Review by @%s (%s) - %s\n", review.Author.Login, review.AuthorAssociation, review.State))
+	sb.WriteString(fmt.Sprintf("Submitted: %s\n", review.SubmittedAt))
+
+	if review.Body != "" {
+		sb.WriteString(fmt.Sprintf("\nSummary:\n%s\n", review.Body))
+	}
+
+	if len(activeComments) > 0 {
+		sb.WriteString("\nInline Comments:\n")
+		for _, c := range activeComments {
+			sb.WriteString(fmt.Sprintf("\n[%s:%d]\n%s\n", c.Path, c.Line, c.Body))
+		}
+	}
+
+	return sb.String()
+}

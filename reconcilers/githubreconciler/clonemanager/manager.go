@@ -195,6 +195,7 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 		URL:           remote,
 		ReferenceName: plumbing.NewBranchReferenceName(ref),
 		SingleBranch:  true,
+		Depth:         1,
 		Auth:          auth,
 	})
 	if err != nil {

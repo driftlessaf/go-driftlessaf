@@ -80,6 +80,74 @@ func ExampleLease_MakeAndPushChanges() {
 	// commit author: true
 }
 
+// ExampleWorktreeCallbacks demonstrates using WorktreeCallbacks for AI agent integration.
+// WorktreeCallbacks creates WorktreeTools from a git worktree, which can be passed
+// to an AI agent (via metaagent.BaseCallbacks) to allow it to read, write, and search
+// files while automatically staging changes.
+func ExampleWorktreeCallbacks() {
+	ctx := context.Background()
+
+	repoDir := initExampleRepo()
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	defer func() { repoURL = defaultRemoteURL }()
+
+	mgr, err := New(ctx, staticTokenSource(""), "automation", nil)
+	if err != nil {
+		fmt.Println("error creating manager:", err)
+		return
+	}
+
+	res := &githubreconciler.Resource{
+		Owner: "example",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  "packages/example.yaml",
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	lease, err := mgr.Lease(ctx, res)
+	if err != nil {
+		fmt.Println("lease error:", err)
+		return
+	}
+	defer lease.Return(ctx) //nolint:errcheck
+
+	if err := lease.MakeAndPushChanges(ctx, "automation/agent-update", func(ctx context.Context, wt *git.Worktree) (string, error) {
+		// Create WorktreeTools for the agent
+		// This provides callbacks that:
+		// - Read files from the worktree
+		// - Write files and automatically stage changes
+		// - Delete files and automatically stage deletions
+		// - List directory contents
+		// - Search for patterns across the codebase
+		wtTools := WorktreeCallbacks(wt)
+
+		// Example: Read a file using the tool callback
+		content, err := wtTools.ReadFile(ctx, "packages/example.yaml")
+		if err != nil {
+			return "", fmt.Errorf("read file: %w", err)
+		}
+		fmt.Println("file content:", content)
+
+		// Example: Write a file (automatically staged)
+		if err := wtTools.WriteFile(ctx, "packages/example.yaml", "name: updated\n", 0o644); err != nil {
+			return "", fmt.Errorf("write file: %w", err)
+		}
+
+		return "automation: update via agent", nil
+	}); err != nil {
+		fmt.Println("apply error:", err)
+		return
+	}
+
+	fmt.Println("changes pushed successfully")
+
+	// Output:
+	// file content: name: example
+	// changes pushed successfully
+}
+
 func initExampleRepo() string {
 	dir, _ := os.MkdirTemp("", "clonemanager-example-")
 	repo, _ := git.PlainInit(dir, false)

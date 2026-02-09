@@ -13,7 +13,6 @@ import (
 	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/evals"
-	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
@@ -21,10 +20,10 @@ import (
 )
 
 // ClaudeTool constructs the Claude executor metadata for the submit_result tool.
-func ClaudeTool[Response any](opts Options[Response]) (claudeexecutor.ToolMetadata[Response], error) {
+func ClaudeTool[Response any](opts Options[Response]) (claudetool.Metadata[Response], error) {
 	opts.setDefaults()
 	if err := opts.validate(); err != nil {
-		return claudeexecutor.ToolMetadata[Response]{}, err
+		return claudetool.Metadata[Response]{}, err
 	}
 
 	responseSchema := opts.schemaForResponse()
@@ -32,7 +31,7 @@ func ClaudeTool[Response any](opts Options[Response]) (claudeexecutor.ToolMetada
 
 	payloadSchema, err := schemaToMap(responseSchema)
 	if err != nil {
-		return claudeexecutor.ToolMetadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
+		return claudetool.Metadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
 	}
 
 	handler := func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Response], result *Response) map[string]any {
@@ -101,7 +100,7 @@ func ClaudeTool[Response any](opts Options[Response]) (claudeexecutor.ToolMetada
 		return success
 	}
 
-	return claudeexecutor.ToolMetadata[Response]{
+	return claudetool.Metadata[Response]{
 		Definition: anthropic.ToolParam{
 			Name:        opts.ToolName,
 			Description: anthropic.String(opts.Description),
@@ -123,6 +122,6 @@ func ClaudeTool[Response any](opts Options[Response]) (claudeexecutor.ToolMetada
 
 // ClaudeToolForResponse constructs the submit_result tool using metadata inferred from the
 // response type annotations.
-func ClaudeToolForResponse[Response any]() (claudeexecutor.ToolMetadata[Response], error) {
+func ClaudeToolForResponse[Response any]() (claudetool.Metadata[Response], error) {
 	return ClaudeTool(OptionsForResponse[Response]())
 }

@@ -13,7 +13,7 @@ import (
 	"slices"
 	"time"
 
-	"chainguard.dev/driftlessaf/agents/toolcall"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
@@ -38,8 +38,8 @@ type Session[T any] struct {
 	prMergeable *bool    // nil if GitHub is still computing
 	prLabels    []string // Label names on existing PR
 
-	findings      []toolcall.Finding // CI failures detected on the existing PR
-	pendingChecks []string           // Names of checks that are not yet complete
+	findings      []callbacks.Finding // CI failures detected on the existing PR
+	pendingChecks []string            // Names of checks that are not yet complete
 }
 
 // skipLabel returns the skip label for this session's identity.
@@ -104,8 +104,33 @@ func (s *Session[T]) HasFindings() bool {
 
 // Findings returns the list of findings to be addressed.
 // Returns nil if no PR exists or if all checks passed.
-func (s *Session[T]) Findings() []toolcall.Finding {
+func (s *Session[T]) Findings() []callbacks.Finding {
 	return s.findings
+}
+
+// FindingCallbacks returns callbacks for fetching finding details.
+// The returned callbacks can be embedded into agent tool callbacks.
+// Since all details are pre-fetched in NewSession, this just does a lookup.
+func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
+	return callbacks.FindingCallbacks{
+		Findings: s.findings,
+		GetDetails: func(_ context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
+			for _, f := range s.findings {
+				if f.Kind == kind && f.Identifier == identifier {
+					return f.Details, nil
+				}
+			}
+			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
+		},
+		GetLogs: func(ctx context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
+			for _, f := range s.findings {
+				if f.Kind == kind && f.Identifier == identifier {
+					return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f.DetailsURL)
+				}
+			}
+			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
+		},
+	}
 }
 
 // Upsert creates a new PR or updates an existing one with the provided properties.

@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"text/template"
 
-	"chainguard.dev/driftlessaf/agents/toolcall"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 	"github.com/chainguard-dev/clog"
@@ -86,6 +86,50 @@ type gqlCheckSuitesConnection struct {
 		EndCursor   string
 	}
 	Nodes []gqlCheckSuiteNode
+}
+
+// GraphQL types for querying reviews
+type gqlReviewComment struct {
+	DatabaseId int64
+	Author     struct{ Login string }
+	Body       string
+	Path       string
+	Line       int
+	Outdated   bool
+	Url        string
+}
+
+type gqlReviewNode struct {
+	DatabaseId        int64
+	Author            struct{ Login string }
+	AuthorAssociation string
+	State             string
+	Body              string
+	Url               string
+	SubmittedAt       string
+	Commit            struct{ Oid string }
+	Comments          struct {
+		PageInfo struct {
+			HasNextPage bool
+			EndCursor   string
+		}
+		Nodes []gqlReviewComment
+	} `graphql:"comments(first: 100)"`
+}
+
+type gqlReviewsConnection struct {
+	PageInfo struct {
+		HasNextPage bool
+		EndCursor   string
+	}
+	Nodes []gqlReviewNode
+}
+
+// trustedAuthorAssociations defines which author associations we trust for reviews.
+var trustedAuthorAssociations = map[string]struct{}{
+	"OWNER":        {},
+	"MEMBER":       {},
+	"COLLABORATOR": {},
 }
 
 // New creates a new CM with the given identity and templates.
@@ -162,7 +206,7 @@ func (cm *CM[T]) NewSession(
 		prBody        string
 		prMergeable   *bool
 		prLabels      []string
-		findings      []toolcall.Finding
+		findings      []callbacks.Finding
 		pendingChecks []string
 	)
 
@@ -188,6 +232,7 @@ func (cm *CM[T]) NewSession(
 							}
 						}
 					} `graphql:"commits(last: 1)"`
+					Reviews gqlReviewsConnection `graphql:"reviews(first: 100)"`
 				}
 			} `graphql:"pullRequests(headRefName: $headRef, baseRefName: $baseRef, states: [OPEN], first: 1)"`
 		} `graphql:"repository(owner: $owner, name: $repo)"`
@@ -232,6 +277,9 @@ func (cm *CM[T]) NewSession(
 			commit := pr.Commits.Nodes[0].Commit
 			findings, pendingChecks = cm.collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.CheckSuites)
 		}
+
+		// Collect review findings from trusted authors on the current commit
+		findings = append(findings, collectReviewFindings(pr.HeadRefOid, pr.Reviews)...)
 	}
 
 	return &Session[T]{
@@ -256,6 +304,45 @@ func ptrTo[T any](v T) *T {
 	return &v
 }
 
+// collectReviewFindings extracts findings from reviews by trusted authors on the current commit.
+func collectReviewFindings(headRefOid string, reviews gqlReviewsConnection) []callbacks.Finding {
+	findings := make([]callbacks.Finding, 0, len(reviews.Nodes))
+
+	for _, review := range reviews.Nodes {
+		// Skip untrusted authors
+		if _, trusted := trustedAuthorAssociations[review.AuthorAssociation]; !trusted {
+			continue
+		}
+
+		// Skip reviews not on current commit
+		if review.Commit.Oid != headRefOid {
+			continue
+		}
+
+		// Filter out outdated comments
+		var activeComments []gqlReviewComment
+		for _, c := range review.Comments.Nodes {
+			if !c.Outdated {
+				activeComments = append(activeComments, c)
+			}
+		}
+
+		// Skip reviews with no content (no body AND no active comments)
+		if review.Body == "" && len(activeComments) == 0 {
+			continue
+		}
+
+		findings = append(findings, callbacks.Finding{
+			Kind:       callbacks.FindingKindReview,
+			Identifier: fmt.Sprintf("%d", review.DatabaseId),
+			Details:    formatReviewDetails(review, activeComments),
+			DetailsURL: review.Url,
+		})
+	}
+
+	return findings
+}
+
 // collectFindings extracts findings and pending checks from check suites, handling pagination.
 // Returns findings (failed checks) and pendingChecks (names of checks not yet complete).
 // The check runs are pre-filtered by the GraphQL query to only include failures and pending runs.
@@ -264,12 +351,12 @@ func (cm *CM[T]) collectFindings(
 	gqlClient *githubv4.Client,
 	owner, repo, sha string,
 	initialSuites gqlCheckSuitesConnection,
-) (findings []toolcall.Finding, pendingChecks []string) {
+) (findings []callbacks.Finding, pendingChecks []string) {
 	// Process failed check runs into findings
 	processFailedRuns := func(runs []gqlCheckRunNode) {
 		for _, run := range runs {
-			findings = append(findings, toolcall.Finding{
-				Kind:       toolcall.FindingKindCICheck,
+			findings = append(findings, callbacks.Finding{
+				Kind:       callbacks.FindingKindCICheck,
 				Identifier: fmt.Sprintf("%d", run.DatabaseId),
 				Details:    formatCheckRunDetails(run.Name, run.Status, run.Conclusion, run.Title, run.Summary, run.Text, run.DetailsUrl),
 				DetailsURL: run.DetailsUrl,

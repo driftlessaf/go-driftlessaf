@@ -26,18 +26,7 @@ import (
 type Interface[Request promptbuilder.Bindable, Response any] interface {
 	// Execute runs the Google AI conversation with the given request and tools
 	// Optional seed tool calls can be provided - these will be executed and their results prepended to the conversation
-	Execute(ctx context.Context, request Request, tools map[string]ToolMetadata[Response], seedToolCalls ...*genai.FunctionCall) (Response, error)
-}
-
-// ToolMetadata contains metadata for a tool, including its definition and handler
-type ToolMetadata[Response any] struct {
-	// Definition is the Google AI tool definition
-	Definition *genai.FunctionDeclaration
-
-	// Handler is the function that processes tool calls
-	// It receives the context, tool call, trace, and a result pointer
-	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response
-	Handler func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse
+	Execute(ctx context.Context, request Request, tools map[string]googletool.Metadata[Response], seedToolCalls ...*genai.FunctionCall) (Response, error)
 }
 
 // executor is the private implementation of Interface
@@ -50,10 +39,10 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	systemInstructions *promptbuilder.Prompt
 	responseMIMEType   string
 	responseSchema     *genai.Schema
-	thinkingBudget     *int32                 // nil = disabled, non-nil = enabled with budget
-	submitTool         ToolMetadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics       *metrics.GenAI         // OpenTelemetry metrics for token usage and tool calls
-	retryConfig        retry.RetryConfig      // retry configuration for transient Vertex AI errors
+	thinkingBudget     *int32                        // nil = disabled, non-nil = enabled with budget
+	submitTool         googletool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics       *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
+	retryConfig        retry.RetryConfig             // retry configuration for transient Vertex AI errors
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -96,7 +85,7 @@ func New[Request promptbuilder.Bindable, Response any](
 func (e *executor[Request, Response]) Execute(
 	ctx context.Context,
 	request Request,
-	tools map[string]ToolMetadata[Response],
+	tools map[string]googletool.Metadata[Response],
 	seedToolCalls ...*genai.FunctionCall,
 ) (resp Response, err error) {
 	log := clog.FromContext(ctx)
@@ -121,7 +110,7 @@ func (e *executor[Request, Response]) Execute(
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
 	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]ToolMetadata[Response], len(tools)+1)
+		mergedTools := make(map[string]googletool.Metadata[Response], len(tools)+1)
 		maps.Copy(mergedTools, tools)
 
 		name := "submit_result"

@@ -18,6 +18,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
+	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
 )
@@ -26,7 +27,7 @@ import (
 type Interface[Request promptbuilder.Bindable, Response any] interface {
 	// Execute runs the agent conversation with the given request and tools
 	// Optional seed tool calls can be provided - these will be executed and their results prepended to the conversation
-	Execute(ctx context.Context, request Request, tools map[string]ToolMetadata[Response], seedToolCalls ...anthropic.ToolUseBlock) (Response, error)
+	Execute(ctx context.Context, request Request, tools map[string]claudetool.Metadata[Response], seedToolCalls ...anthropic.ToolUseBlock) (Response, error)
 }
 
 // executor provides the private implementation
@@ -37,25 +38,10 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	prompt               *promptbuilder.Prompt
 	maxTokens            int64
 	temperature          float64
-	thinkingBudgetTokens *int64                 // nil = disabled, non-nil = enabled with budget
-	submitTool           ToolMetadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics         *metrics.GenAI         // OpenTelemetry metrics for token usage and tool calls
-	retryConfig          retry.RetryConfig      // retry configuration for transient Claude API errors
-}
-
-// ToolMetadata describes a tool available to the agent
-type ToolMetadata[Response any] struct {
-	// Tool definition for Claude
-	Definition anthropic.ToolParam
-
-	// Handler processes the tool call
-	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response
-	Handler func(
-		ctx context.Context,
-		toolUse anthropic.ToolUseBlock,
-		trace *evals.Trace[Response],
-		result *Response,
-	) map[string]any
+	thinkingBudgetTokens *int64                        // nil = disabled, non-nil = enabled with budget
+	submitTool           claudetool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics         *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
+	retryConfig          retry.RetryConfig             // retry configuration for transient Claude API errors
 }
 
 // New creates a new Executor with minimal required configuration
@@ -98,7 +84,7 @@ func New[Request promptbuilder.Bindable, Response any](
 func (e *executor[Request, Response]) Execute(
 	ctx context.Context,
 	request Request,
-	tools map[string]ToolMetadata[Response],
+	tools map[string]claudetool.Metadata[Response],
 	seedToolCalls ...anthropic.ToolUseBlock,
 ) (response Response, err error) {
 	log := clog.FromContext(ctx)
@@ -126,7 +112,7 @@ func (e *executor[Request, Response]) Execute(
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
 	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]ToolMetadata[Response], len(tools)+1)
+		mergedTools := make(map[string]claudetool.Metadata[Response], len(tools)+1)
 		maps.Copy(mergedTools, tools)
 
 		name := e.submitTool.Definition.Name

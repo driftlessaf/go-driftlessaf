@@ -34,9 +34,9 @@ are parameterized, allowing different agents to reuse the same core logic:
 
 # Tool Support
 
-The executor supports Google AI function calling through the ToolMetadata type:
+The executor supports Google AI function calling through the Metadata type:
 
-	tools := map[string]googleexecutor.ToolMetadata[*MyResponse]{
+	tools := map[string]googletool.Metadata[*MyResponse]{
 	    "my_tool": {
 	        Definition: &genai.FunctionDeclaration{
 	            Name:        "my_tool",

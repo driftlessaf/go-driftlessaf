@@ -6,11 +6,24 @@ SPDX-License-Identifier: Apache-2.0
 package googletool
 
 import (
+	"context"
 	"fmt"
 	"maps"
 
+	"chainguard.dev/driftlessaf/agents/evals"
 	"google.golang.org/genai"
 )
+
+// Metadata describes a tool available to the Google AI agent.
+type Metadata[Response any] struct {
+	// Definition is the Google AI tool definition.
+	Definition *genai.FunctionDeclaration
+
+	// Handler is the function that processes tool calls.
+	// It receives the context, tool call, trace, and a result pointer.
+	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response.
+	Handler func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse
+}
 
 // Param extracts a parameter from a Gemini function call with type safety.
 // Returns the extracted value or a FunctionResponse error that can be sent back to the model.

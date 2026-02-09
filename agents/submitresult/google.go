@@ -13,17 +13,16 @@ import (
 	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/evals"
-	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
 	"google.golang.org/genai"
 )
 
 // GoogleTool constructs the Google executor metadata for the submit_result tool.
-func GoogleTool[Response any](opts Options[Response]) (googleexecutor.ToolMetadata[Response], error) {
+func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Response], error) {
 	opts.setDefaults()
 	if err := opts.validate(); err != nil {
-		return googleexecutor.ToolMetadata[Response]{}, err
+		return googletool.Metadata[Response]{}, err
 	}
 
 	responseSchema := opts.schemaForResponse()
@@ -31,7 +30,7 @@ func GoogleTool[Response any](opts Options[Response]) (googleexecutor.ToolMetada
 
 	genaiPayload := schemaToGenai(responseSchema)
 	if genaiPayload == nil {
-		return googleexecutor.ToolMetadata[Response]{}, fmt.Errorf("failed to derive payload schema")
+		return googletool.Metadata[Response]{}, fmt.Errorf("failed to derive payload schema")
 	}
 
 	handler := func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse {
@@ -94,7 +93,7 @@ func GoogleTool[Response any](opts Options[Response]) (googleexecutor.ToolMetada
 		return response
 	}
 
-	return googleexecutor.ToolMetadata[Response]{
+	return googletool.Metadata[Response]{
 		Definition: &genai.FunctionDeclaration{
 			Name:        opts.ToolName,
 			Description: opts.Description,
@@ -116,6 +115,6 @@ func GoogleTool[Response any](opts Options[Response]) (googleexecutor.ToolMetada
 
 // GoogleToolForResponse constructs the submit_result tool using metadata inferred from the
 // response type annotations.
-func GoogleToolForResponse[Response any]() (googleexecutor.ToolMetadata[Response], error) {
+func GoogleToolForResponse[Response any]() (googletool.Metadata[Response], error) {
 	return GoogleTool(OptionsForResponse[Response]())
 }

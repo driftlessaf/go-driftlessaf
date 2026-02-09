@@ -13,6 +13,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 )
 
 // Option is a functional option for configuring the executor
@@ -85,7 +86,7 @@ func WithThinking[Request promptbuilder.Bindable, Response any](budgetTokens int
 }
 
 // SubmitResultProvider constructs tool metadata for submit_result.
-type SubmitResultProvider[Response any] func() (ToolMetadata[Response], error)
+type SubmitResultProvider[Response any] func() (claudetool.Metadata[Response], error)
 
 // WithSubmitResultProvider registers the submit_result tool using the supplied provider.
 // This is opt-in - agents must explicitly call this to enable submit_result.
