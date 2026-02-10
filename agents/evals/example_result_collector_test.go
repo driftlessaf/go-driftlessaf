@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sync"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -60,7 +61,7 @@ func ExampleResultCollector() {
 	collector := evals.NewResultCollector(baseObs)
 
 	// Define an evaluation callback that validates tool calls
-	callback := func(o evals.Observer, trace *evals.Trace[string]) {
+	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
 		o.Log("Analyzing trace")
 
 		if len(trace.ToolCalls) != 1 {
@@ -76,7 +77,7 @@ func ExampleResultCollector() {
 	}
 
 	// Create tracer with the collector
-	tracer := evals.ByCode[string](evals.Inject(collector, callback))
+	tracer := agenttrace.ByCode[string](evals.Inject(collector, callback))
 
 	// Create a trace that will trigger the evaluation
 	ctx := context.Background()
@@ -112,7 +113,7 @@ func ExampleResultCollector_withNamespacedObserver() {
 	errorCollector := evals.NewResultCollector(namespacedObs.Child("errors"))
 
 	// Define evaluations for tool calls
-	toolEval := func(o evals.Observer, trace *evals.Trace[string]) {
+	toolEval := func(o evals.Observer, trace *agenttrace.Trace[string]) {
 		for _, tc := range trace.ToolCalls {
 			if tc.Error != nil {
 				o.Fail(fmt.Sprintf("Tool %s failed: %v", tc.Name, tc.Error))
@@ -121,14 +122,14 @@ func ExampleResultCollector_withNamespacedObserver() {
 	}
 
 	// Define evaluations for trace errors
-	errorEval := func(o evals.Observer, trace *evals.Trace[string]) {
+	errorEval := func(o evals.Observer, trace *agenttrace.Trace[string]) {
 		if trace.Error != nil {
 			o.Fail("Trace error: " + trace.Error.Error())
 		}
 	}
 
 	// Create tracer with multiple collectors
-	tracer := evals.ByCode[string](
+	tracer := agenttrace.ByCode[string](
 		evals.Inject(toolCollector, toolEval),
 		evals.Inject(errorCollector, errorEval),
 	)

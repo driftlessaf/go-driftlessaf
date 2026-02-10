@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
@@ -184,8 +184,8 @@ func validateDescription(description string) error {
 
 // Claude handler factories
 
-func claudeUpdateTitleHandler(updateFn func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[*PRFixResult], **PRFixResult) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
+func claudeUpdateTitleHandler(updateFn func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[*PRFixResult], **PRFixResult) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -232,8 +232,8 @@ func claudeUpdateTitleHandler(updateFn func(context.Context, string) error) func
 	}
 }
 
-func claudeUpdateDescriptionHandler(updateFn func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[*PRFixResult], **PRFixResult) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
+func claudeUpdateDescriptionHandler(updateFn func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[*PRFixResult], **PRFixResult) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -282,8 +282,8 @@ func claudeUpdateDescriptionHandler(updateFn func(context.Context, string) error
 
 // Google handler factories
 
-func googleUpdateTitleHandler(updateFn func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *evals.Trace[*PRFixResult], **PRFixResult) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[*PRFixResult], _ **PRFixResult) *genai.FunctionResponse {
+func googleUpdateTitleHandler(updateFn func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[*PRFixResult], **PRFixResult) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -324,8 +324,8 @@ func googleUpdateTitleHandler(updateFn func(context.Context, string) error) func
 	}
 }
 
-func googleUpdateDescriptionHandler(updateFn func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *evals.Trace[*PRFixResult], **PRFixResult) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[*PRFixResult], _ **PRFixResult) *genai.FunctionResponse {
+func googleUpdateDescriptionHandler(updateFn func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[*PRFixResult], **PRFixResult) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")

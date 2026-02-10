@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -107,7 +108,7 @@ Please solve this problem and provide your answer in JSON format:
 	})
 
 	// Create eval callback that validates reasoning blocks
-	reasoningValidator := func(o evals.Observer, trace *evals.Trace[*simpleResponse]) {
+	reasoningValidator := func(o evals.Observer, trace *agenttrace.Trace[*simpleResponse]) {
 		if len(trace.Reasoning) == 0 {
 			o.Fail("no reasoning blocks captured in trace")
 			return
@@ -128,7 +129,7 @@ Please solve this problem and provide your answer in JSON format:
 	tracer := evals.BuildTracer(obs, map[string]evals.ObservableTraceCallback[*simpleResponse]{
 		"reasoning_validator": reasoningValidator,
 	})
-	ctx = evals.WithTracer(ctx, tracer)
+	ctx = agenttrace.WithTracer(ctx, tracer)
 
 	// Execute with a simple math problem that should trigger thinking
 	request := &simpleRequest{

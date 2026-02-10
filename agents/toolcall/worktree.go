@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
@@ -258,8 +258,8 @@ func (p worktreeToolsProvider[Resp, T]) GoogleTools(cb WorktreeTools[T]) map[str
 
 // Claude handlers
 
-func claudeReadFileHandler[Resp any](readFile func(context.Context, string) (string, error)) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeReadFileHandler[Resp any](readFile func(context.Context, string) (string, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -297,8 +297,8 @@ func claudeReadFileHandler[Resp any](readFile func(context.Context, string) (str
 	}
 }
 
-func claudeWriteFileHandler[Resp any](writeFile func(context.Context, string, string, os.FileMode) error) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeWriteFileHandler[Resp any](writeFile func(context.Context, string, string, os.FileMode) error) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -348,8 +348,8 @@ func claudeWriteFileHandler[Resp any](writeFile func(context.Context, string, st
 	}
 }
 
-func claudeDeleteFileHandler[Resp any](deleteFile func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeDeleteFileHandler[Resp any](deleteFile func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -386,8 +386,8 @@ func claudeDeleteFileHandler[Resp any](deleteFile func(context.Context, string) 
 	}
 }
 
-func claudeListDirectoryHandler[Resp any](listDirectory func(context.Context, string) ([]string, error)) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeListDirectoryHandler[Resp any](listDirectory func(context.Context, string) ([]string, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -425,8 +425,8 @@ func claudeListDirectoryHandler[Resp any](listDirectory func(context.Context, st
 	}
 }
 
-func claudeSearchCodebaseHandler[Resp any](searchCodebase func(context.Context, string) ([]callbacks.Match, error)) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeSearchCodebaseHandler[Resp any](searchCodebase func(context.Context, string) ([]callbacks.Match, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -466,8 +466,8 @@ func claudeSearchCodebaseHandler[Resp any](searchCodebase func(context.Context, 
 
 // Google handlers
 
-func googleReadFileHandler[Resp any](readFile func(context.Context, string) (string, error)) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleReadFileHandler[Resp any](readFile func(context.Context, string) (string, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -499,8 +499,8 @@ func googleReadFileHandler[Resp any](readFile func(context.Context, string) (str
 	}
 }
 
-func googleWriteFileHandler[Resp any](writeFile func(context.Context, string, string, os.FileMode) error) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleWriteFileHandler[Resp any](writeFile func(context.Context, string, string, os.FileMode) error) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -544,8 +544,8 @@ func googleWriteFileHandler[Resp any](writeFile func(context.Context, string, st
 	}
 }
 
-func googleDeleteFileHandler[Resp any](deleteFile func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleDeleteFileHandler[Resp any](deleteFile func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -576,8 +576,8 @@ func googleDeleteFileHandler[Resp any](deleteFile func(context.Context, string) 
 	}
 }
 
-func googleListDirectoryHandler[Resp any](listDirectory func(context.Context, string) ([]string, error)) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleListDirectoryHandler[Resp any](listDirectory func(context.Context, string) ([]string, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -609,8 +609,8 @@ func googleListDirectoryHandler[Resp any](listDirectory func(context.Context, st
 	}
 }
 
-func googleSearchCodebaseHandler[Resp any](searchCodebase func(context.Context, string) ([]callbacks.Match, error)) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleSearchCodebaseHandler[Resp any](searchCodebase func(context.Context, string) ([]callbacks.Match, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")

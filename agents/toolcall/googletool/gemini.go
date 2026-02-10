@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"maps"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"google.golang.org/genai"
 )
 
@@ -22,7 +22,7 @@ type Metadata[Response any] struct {
 	// Handler is the function that processes tool calls.
 	// It receives the context, tool call, trace, and a result pointer.
 	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response.
-	Handler func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse
+	Handler func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], result *Response) *genai.FunctionResponse
 }
 
 // Param extracts a parameter from a Gemini function call with type safety.

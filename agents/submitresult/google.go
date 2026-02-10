@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
 	"google.golang.org/genai"
@@ -33,7 +33,7 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 		return googletool.Metadata[Response]{}, fmt.Errorf("failed to derive payload schema")
 	}
 
-	handler := func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Response], result *Response) *genai.FunctionResponse {
+	handler := func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], result *Response) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")

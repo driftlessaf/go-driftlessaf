@@ -1,9 +1,9 @@
 /*
-Copyright 2025 Chainguard, Inc.
+Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package evals
+package agenttrace
 
 import (
 	"context"

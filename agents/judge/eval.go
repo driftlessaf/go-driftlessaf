@@ -11,12 +11,13 @@ import (
 	"fmt"
 	"reflect"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
 // NewGoldenEval creates an evaluation function for golden mode judgment
-func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, callbacks ...evals.TraceCallback[*Judgement]) evals.ObservableTraceCallback[T] {
-	return func(o evals.Observer, trace *evals.Trace[T]) {
+func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, callbacks ...agenttrace.TraceCallback[*Judgement]) evals.ObservableTraceCallback[T] {
+	return func(o evals.Observer, trace *agenttrace.Trace[T]) {
 		// Extract actual response from trace.Result
 		// Use reflection-based nil check that works with generic types
 		if isNilResult(trace.Result) {
@@ -33,8 +34,8 @@ func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, ca
 
 		// Get judgment with ByCode tracer injected (allows caller to specify evals for the judge itself, but alternate purpose is to quiet default logging during tests)
 		// Start with background context but preserve ExecutionContext from trace for metrics labeling
-		ctx := evals.WithTracer(context.Background(), evals.ByCode(callbacks...))
-		ctx = evals.WithExecutionContext(ctx, trace.ExecContext)
+		ctx := agenttrace.WithTracer(context.Background(), agenttrace.ByCode(callbacks...))
+		ctx = agenttrace.WithExecutionContext(ctx, trace.ExecContext)
 		resp, err := j.Judge(ctx, &Request{
 			Mode:            GoldenMode,
 			ReferenceAnswer: goldenAnswer,
@@ -63,8 +64,8 @@ func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, ca
 }
 
 // NewStandaloneEval creates an evaluation function for standalone mode judgment
-func NewStandaloneEval[T any](j Interface, criterion string, callbacks ...evals.TraceCallback[*Judgement]) evals.ObservableTraceCallback[T] {
-	return func(o evals.Observer, trace *evals.Trace[T]) {
+func NewStandaloneEval[T any](j Interface, criterion string, callbacks ...agenttrace.TraceCallback[*Judgement]) evals.ObservableTraceCallback[T] {
+	return func(o evals.Observer, trace *agenttrace.Trace[T]) {
 		// Extract actual response from trace.Result
 		// Use reflection-based nil check that works with generic types
 		if isNilResult(trace.Result) {
@@ -81,8 +82,8 @@ func NewStandaloneEval[T any](j Interface, criterion string, callbacks ...evals.
 
 		// Get judgment with ByCode tracer injected (allows caller to specify evals for the judge itself, but alternate purpose is to quiet default logging during tests)
 		// Start with background context but preserve ExecutionContext from trace for metrics labeling
-		ctx := evals.WithTracer(context.Background(), evals.ByCode(callbacks...))
-		ctx = evals.WithExecutionContext(ctx, trace.ExecContext)
+		ctx := agenttrace.WithTracer(context.Background(), agenttrace.ByCode(callbacks...))
+		ctx = agenttrace.WithExecutionContext(ctx, trace.ExecContext)
 		resp, err := j.Judge(ctx, &Request{
 			Mode:         StandaloneMode,
 			ActualAnswer: string(data),

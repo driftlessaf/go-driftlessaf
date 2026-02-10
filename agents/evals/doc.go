@@ -40,7 +40,7 @@ for maximum flexibility, as individual tool calls may return varied data types.
 ### Simple Text Results
 For basic string results from agent interactions:
 
-	tracer := evals.ByCode[string]() // No callbacks
+	tracer := agenttrace.ByCode[string]() // No callbacks
 	ctx := context.Background()
 	trace := tracer.NewTrace(ctx, "Generate summary")
 	trace.Complete("Summary: The analysis shows...", nil)
@@ -54,7 +54,7 @@ For complex, type-safe results using custom structs:
 		Confidence   float64 `json:"confidence"`
 	}
 
-	tracer := evals.ByCode[AnalysisResult]() // No callbacks
+	tracer := agenttrace.ByCode[AnalysisResult]() // No callbacks
 	ctx := context.Background()
 	trace := tracer.NewTrace(ctx, "Analyze codebase")
 	trace.Complete(AnalysisResult{
@@ -69,16 +69,16 @@ The same context can hold tracers for different result types:
 	ctx := context.Background()
 
 	// String tracer for text summaries
-	stringTracer := evals.ByCode[string](stringCallback)
-	ctx = evals.WithTracer[string](ctx, stringTracer)
+	stringTracer := agenttrace.ByCode[string](stringCallback)
+	ctx = agenttrace.WithTracer[string](ctx, stringTracer)
 
 	// Structured tracer for metrics
-	metricsTracer := evals.ByCode[MetricsData](metricsCallback)
-	ctx = evals.WithTracer[MetricsData](ctx, metricsTracer)
+	metricsTracer := agenttrace.ByCode[MetricsData](metricsCallback)
+	ctx = agenttrace.WithTracer[MetricsData](ctx, metricsTracer)
 
 	// Both coexist without conflict
-	summaryTrace := evals.StartTrace[string](ctx, "Generate summary")
-	metricsTrace := evals.StartTrace[MetricsData](ctx, "Collect metrics")
+	summaryTrace := agenttrace.StartTrace[string](ctx, "Generate summary")
+	metricsTrace := agenttrace.StartTrace[MetricsData](ctx, "Collect metrics")
 
 **Note**: While Trace[interface{}] provides maximum flexibility when result types vary at runtime, prefer specific types when possible for better type safety and API clarity.
 
@@ -102,7 +102,7 @@ The same context can hold tracers for different result types:
 
 All traces must be created using a tracer. The simplest approach uses ByCode with no callbacks:
 
-	tracer := evals.ByCode[string]() // No callbacks
+	tracer := agenttrace.ByCode[string]() // No callbacks
 	ctx := context.Background()
 	trace := tracer.NewTrace(ctx, "Analyze the security report")
 	toolCall := trace.StartToolCall("tc1", "file-reader", map[string]interface{}{
@@ -116,12 +116,12 @@ All traces must be created using a tracer. The simplest approach uses ByCode wit
 For more sophisticated scenarios, use context-managed tracers:
 
 	ctx := context.Background()
-	tracer := evals.ByCode[string](func(trace *evals.Trace[string]) {
+	tracer := agenttrace.ByCode[string](func(trace *agenttrace.Trace[string]) {
 		log.Printf("Trace completed: %s", trace.ID)
 	})
-	ctx = evals.WithTracer[string](ctx, tracer)
+	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
-	trace := evals.StartTrace[string](ctx, "Process user request")
+	trace := agenttrace.StartTrace[string](ctx, "Process user request")
 	// ... perform operations
 	trace.Complete("Request processed", nil)
 
@@ -129,12 +129,12 @@ For more sophisticated scenarios, use context-managed tracers:
 
 Create custom tracers with callback functions for specialized evaluation:
 
-	tracer := evals.ByCode[string](
-		func(trace *evals.Trace[string]) {
+	tracer := agenttrace.ByCode[string](
+		func(trace *agenttrace.Trace[string]) {
 			// Save to database
 			saveTraceToDatabase(trace)
 		},
-		func(trace *evals.Trace[string]) {
+		func(trace *agenttrace.Trace[string]) {
 			// Send metrics
 			recordMetrics(trace.Duration(), len(trace.ToolCalls))
 		},
@@ -155,7 +155,7 @@ All helper functions require explicit type parameters matching your trace result
 	callback = evals.Inject[string](observer, evals.RequiredToolCalls[string]([]string{"search", "analyze"}))
 
 	// Custom tool call validation
-	callback = evals.Inject[string](observer, evals.ToolCallValidator[string](func(o evals.Observer, tc *evals.ToolCall[string]) error {
+	callback = evals.Inject[string](observer, evals.ToolCallValidator[string](func(o evals.Observer, tc *agenttrace.ToolCall[string]) error {
 		if tc.Name == "search" && tc.Result == nil {
 			return fmt.Errorf("search tool must return results")
 		}
@@ -175,7 +175,7 @@ Use ResultCollector to collect failure messages and grades from evaluations:
 	collector := evals.NewResultCollector(baseObs)
 
 	// Use in evaluation callbacks
-	callback := func(o evals.Observer, trace *evals.Trace[string]) {
+	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
 		if len(trace.ToolCalls) == 0 {
 			o.Fail("No tool calls found")
 		}
@@ -183,7 +183,7 @@ Use ResultCollector to collect failure messages and grades from evaluations:
 	}
 
 	// Run evaluation
-	tracer := evals.ByCode[string](evals.Inject[string](collector, callback))
+	tracer := agenttrace.ByCode[string](evals.Inject[string](collector, callback))
 	// ... create and complete traces
 
 	// Collect results
@@ -200,7 +200,7 @@ Use the NamespacedObserver for hierarchical evaluation organization:
 	})
 
 	// Use with evaluation helpers in organized namespaces
-	tracer := evals.ByCode[string](
+	tracer := agenttrace.ByCode[string](
 		evals.Inject[string](namespacedObs.Child("accuracy"), evals.ExactToolCalls[string](1)),
 		evals.Inject[string](namespacedObs.Child("reliability"), evals.NoErrors[string]()),
 	)

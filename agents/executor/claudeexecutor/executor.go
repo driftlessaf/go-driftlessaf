@@ -13,7 +13,7 @@ import (
 	"maps"
 	"reflect"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -104,7 +104,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	// Start trace
-	trace := evals.StartTrace[Response](ctx, prompt)
+	trace := agenttrace.StartTrace[Response](ctx, prompt)
 	defer func() {
 		trace.Complete(response, err)
 	}()
@@ -297,7 +297,7 @@ func (e *executor[Request, Response]) Execute(
 					Input: content.Input,
 				})
 			case "thinking", "redacted_thinking":
-				trace.Reasoning = append(trace.Reasoning, evals.ReasoningContent{
+				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
 					Thinking: content.Thinking,
 				})
 			}

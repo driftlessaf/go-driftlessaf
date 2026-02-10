@@ -43,7 +43,7 @@ The executor supports Google AI function calling through the Metadata type:
 	            Description: "Tool description",
 	            Parameters: &genai.Schema{...},
 	        },
-	        Handler: func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[*MyResponse]) *genai.FunctionResponse {
+	        Handler: func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[*MyResponse]) *genai.FunctionResponse {
 	            // Tool implementation
 	        },
 	    },
@@ -74,7 +74,7 @@ thought blocks are captured in the trace:
 	    googleexecutor.WithThinking[*Request, *Response](2048), // 2048 token budget for thinking
 	)
 
-Reasoning blocks are stored in trace.Reasoning as []evals.ReasoningContent,
+Reasoning blocks are stored in trace.Reasoning as []agenttrace.ReasoningContent,
 where each block contains:
   - Thinking: the reasoning text
 

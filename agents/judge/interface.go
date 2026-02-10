@@ -40,7 +40,7 @@ type Request struct {
 
 // Judgement contains the judgment result
 type Judgement struct {
-	// Mode is the judgment mode used. Available in evals.Trace for mode-specific processing.
+	// Mode is the judgment mode used. Available in agenttrace.Trace for mode-specific processing.
 	Mode JudgmentMode `json:"mode"`
 
 	// Score is the primary judgment metric from 0.0 (awful) to 1.0 (ideal - matches golden answer).

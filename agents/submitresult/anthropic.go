@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
@@ -34,7 +34,7 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.Metadata[Respo
 		return claudetool.Metadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
 	}
 
-	handler := func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Response], result *Response) map[string]any {
+	handler := func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Response], result *Response) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)

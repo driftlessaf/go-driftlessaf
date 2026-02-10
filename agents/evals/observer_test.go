@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -49,7 +50,7 @@ func TestObservableTraceCallback(t *testing.T) {
 	obs := &testObserver{}
 
 	// Define a callback using the mock
-	callback := func(o evals.Observer, trace *evals.Trace[string]) {
+	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
 		o.Log("Processing trace")
 		if trace.Error != nil {
 			o.Fail("Trace had an error: " + trace.Error.Error())
@@ -59,7 +60,7 @@ func TestObservableTraceCallback(t *testing.T) {
 
 	// Inject the observer and pass to ByCode tracer
 	traceCallback := evals.Inject[string](obs, callback)
-	tracer := evals.ByCode[string](traceCallback)
+	tracer := agenttrace.ByCode[string](traceCallback)
 
 	// Create and complete a trace - this will automatically invoke the callback
 	ctx := context.Background()
@@ -89,7 +90,7 @@ func TestObservableTraceCallbackWithError(t *testing.T) {
 	obs := &testObserver{}
 
 	// Define an ObservableTraceCallback that checks for errors
-	callback := func(o evals.Observer, trace *evals.Trace[string]) {
+	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
 		o.Log("Checking trace")
 		if trace.Error != nil {
 			o.Fail("Trace error: " + trace.Error.Error())
@@ -100,7 +101,7 @@ func TestObservableTraceCallbackWithError(t *testing.T) {
 
 	// Inject the observer and pass to ByCode tracer
 	traceCallback := evals.Inject[string](obs, callback)
-	tracer := evals.ByCode[string](traceCallback)
+	tracer := agenttrace.ByCode[string](traceCallback)
 
 	// Create and complete a trace with an error - this will automatically invoke the callback
 	ctx := context.Background()

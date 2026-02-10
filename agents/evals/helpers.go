@@ -10,11 +10,13 @@ import (
 	"maps"
 	"reflect"
 	"sort"
+
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 )
 
 // ExactToolCalls returns an ObservableTraceCallback that validates the trace has exactly n tool calls.
 func ExactToolCalls[T any](n int) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		if got := len(trace.ToolCalls); got != n {
 			o.Fail(fmt.Sprintf("tool call count: got = %d, wanted = %d", got, n))
 		}
@@ -23,7 +25,7 @@ func ExactToolCalls[T any](n int) ObservableTraceCallback[T] {
 
 // MinimumNToolCalls returns an ObservableTraceCallback that validates the trace has at least n tool calls.
 func MinimumNToolCalls[T any](n int) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		if got := len(trace.ToolCalls); got < n {
 			o.Fail(fmt.Sprintf("tool call count: got = %d, wanted >= %d", got, n))
 		}
@@ -32,7 +34,7 @@ func MinimumNToolCalls[T any](n int) ObservableTraceCallback[T] {
 
 // MaximumNToolCalls returns an ObservableTraceCallback that validates the trace has at most n tool calls.
 func MaximumNToolCalls[T any](n int) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		if got := len(trace.ToolCalls); got > n {
 			o.Fail(fmt.Sprintf("tool call count: got = %d, wanted <= %d", got, n))
 		}
@@ -41,7 +43,7 @@ func MaximumNToolCalls[T any](n int) ObservableTraceCallback[T] {
 
 // RangeToolCalls returns an ObservableTraceCallback that validates the trace has between min and max tool calls (inclusive).
 func RangeToolCalls[T any](min, max int) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		if got := len(trace.ToolCalls); got < min || got > max {
 			o.Fail(fmt.Sprintf("tool call count: got = %d, wanted = %d..%d", got, min, max))
 		}
@@ -61,7 +63,7 @@ func OnlyToolCalls[T any](toolNames ...string) ObservableTraceCallback[T] {
 		allowed[name] = struct{}{}
 	}
 
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		for _, tc := range trace.ToolCalls {
 			if _, ok := allowed[tc.Name]; !ok {
 				o.Fail(fmt.Sprintf("unexpected tool call %q, only allowed: %v", tc.Name, toolNames))
@@ -79,7 +81,7 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 		baseRequired[name] = struct{}{}
 	}
 
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		// Copy the precomputed set for this invocation
 		required := maps.Clone(baseRequired)
 
@@ -101,8 +103,8 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 }
 
 // ToolCallValidator creates an ObservableTraceCallback that validates individual tool calls using a custom validator function.
-func ToolCallValidator[T any](validator func(o Observer, tc *ToolCall[T]) error) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+func ToolCallValidator[T any](validator func(o Observer, tc *agenttrace.ToolCall[T]) error) ObservableTraceCallback[T] {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		for i, tc := range trace.ToolCalls {
 			if err := validator(o, tc); err != nil {
 				o.Fail(fmt.Sprintf("tool call %d (%s) validation failed: %v", i, tc.Name, err))
@@ -113,8 +115,8 @@ func ToolCallValidator[T any](validator func(o Observer, tc *ToolCall[T]) error)
 }
 
 // ToolCallNamed returns an ObservableTraceCallback that validates tool calls with a specific name using a custom validator.
-func ToolCallNamed[T any](name string, validator func(o Observer, tc *ToolCall[T]) error) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+func ToolCallNamed[T any](name string, validator func(o Observer, tc *agenttrace.ToolCall[T]) error) ObservableTraceCallback[T] {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		found := false
 		for _, tc := range trace.ToolCalls {
 			if tc.Name == name {
@@ -134,7 +136,7 @@ func ToolCallNamed[T any](name string, validator func(o Observer, tc *ToolCall[T
 
 // NoErrors returns an ObservableTraceCallback that validates no tool calls resulted in errors.
 func NoErrors[T any]() ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		// Check trace error
 		if trace.Error != nil {
 			o.Fail(fmt.Sprintf("trace error: got = %v, wanted = nil", trace.Error))
@@ -154,8 +156,8 @@ func NoErrors[T any]() ObservableTraceCallback[T] {
 // BuildCallbacks creates a list of TraceCallbacks from a namespaced observer and evaluation map.
 // This helper injects each evaluation function with a child observer to create
 // TraceCallbacks that can be used with ByCode or other tracers.
-func BuildCallbacks[T any, O Observer](observer *NamespacedObserver[O], evalMap map[string]ObservableTraceCallback[T]) []TraceCallback[T] {
-	callbacks := make([]TraceCallback[T], 0, len(evalMap))
+func BuildCallbacks[T any, O Observer](observer *NamespacedObserver[O], evalMap map[string]ObservableTraceCallback[T]) []agenttrace.TraceCallback[T] {
+	callbacks := make([]agenttrace.TraceCallback[T], 0, len(evalMap))
 	for name, evalFunc := range evalMap {
 		callbacks = append(callbacks, Inject(observer.Child(name), evalFunc))
 	}
@@ -166,15 +168,15 @@ func BuildCallbacks[T any, O Observer](observer *NamespacedObserver[O], evalMap 
 // This helper consolidates the common pattern of setting up comprehensive evaluation
 // tracers by injecting each evaluation function with a child observer and building
 // a ByCode tracer from the resulting callbacks.
-func BuildTracer[T any, O Observer](observer *NamespacedObserver[O], evalMap map[string]ObservableTraceCallback[T]) Tracer[T] {
-	return ByCode(BuildCallbacks(observer, evalMap)...)
+func BuildTracer[T any, O Observer](observer *NamespacedObserver[O], evalMap map[string]ObservableTraceCallback[T]) agenttrace.Tracer[T] {
+	return agenttrace.ByCode(BuildCallbacks(observer, evalMap)...)
 }
 
 // ResultValidator returns an ObservableTraceCallback that validates the result using a custom validator.
 // The validator is only called if the result is non-nil.
 // T should typically be a pointer type like *MyStruct.
 func ResultValidator[T any](validator func(result T) error) ObservableTraceCallback[T] {
-	return func(o Observer, trace *Trace[T]) {
+	return func(o Observer, trace *agenttrace.Trace[T]) {
 		// Use reflection to check if Result is a nil pointer
 		v := reflect.ValueOf(trace.Result)
 		if !v.IsValid() || (v.Kind() == reflect.Ptr && v.IsNil()) {

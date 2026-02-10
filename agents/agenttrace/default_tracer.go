@@ -1,23 +1,22 @@
 /*
-Copyright 2025 Chainguard, Inc.
+Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package evals
+package agenttrace
 
 import (
 	"context"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/chainguard-dev/clog"
 )
 
 // NewDefaultTracer creates a new default tracer that logs to clog
-func NewDefaultTracer[T any](ctx context.Context) agenttrace.Tracer[T] {
+func NewDefaultTracer[T any](ctx context.Context) Tracer[T] {
 	logger := clog.FromContext(ctx)
 
 	// Create a callback that logs traces
-	callback := func(trace *agenttrace.Trace[T]) {
+	callback := func(trace *Trace[T]) {
 		// Log the structured trace representation
 		logger.With(
 			"trace_id", trace.ID,
@@ -26,5 +25,5 @@ func NewDefaultTracer[T any](ctx context.Context) agenttrace.Tracer[T] {
 		).Info("Agent trace completed", "trace", trace.String())
 	}
 
-	return agenttrace.ByCode[T](callback)
+	return ByCode[T](callback)
 }

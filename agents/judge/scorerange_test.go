@@ -8,7 +8,7 @@ package judge
 import (
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 )
 
 // mockObserver implements the evals.Observer interface for testing
@@ -58,7 +58,7 @@ func TestScoreRange_ComprehensiveNestedLoop(t *testing.T) {
 				observer := &mockObserver{}
 
 				// Call ScoreRange function
-				ScoreRange(min, max)(observer, &evals.Trace[*Judgement]{
+				ScoreRange(min, max)(observer, &agenttrace.Trace[*Judgement]{
 					Result: &Judgement{
 						Score: value,
 					},
@@ -403,7 +403,7 @@ func TestScoreRange_BenchmarkNegativeValues(t *testing.T) {
 func TestScoreRange_NilResult(t *testing.T) {
 	observer := &mockObserver{}
 
-	ScoreRange(0.5, 0.8)(observer, &evals.Trace[*Judgement]{
+	ScoreRange(0.5, 0.8)(observer, &agenttrace.Trace[*Judgement]{
 		Result: nil,
 	})
 

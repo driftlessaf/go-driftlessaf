@@ -49,7 +49,7 @@ SPDX-License-Identifier: Apache-2.0
 //	                Required: []string{"path"},
 //	            },
 //	        },
-//	        Handler: func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[*Response]) map[string]interface{} {
+//	        Handler: func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*Response]) map[string]interface{} {
 //	            // Tool implementation
 //	            return map[string]interface{}{"content": "file contents"}
 //	        },
@@ -79,7 +79,7 @@ SPDX-License-Identifier: Apache-2.0
 //	    claudeexecutor.WithThinking[*Request, *Response](2048), // 2048 token budget for thinking
 //	)
 //
-// Reasoning blocks are stored in trace.Reasoning as []evals.ReasoningContent,
+// Reasoning blocks are stored in trace.Reasoning as []agenttrace.ReasoningContent,
 // where each block contains:
 //   - Thinking: the reasoning text
 //

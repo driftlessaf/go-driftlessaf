@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/judge"
 )
 
@@ -32,7 +32,7 @@ func TestNewGoldenEval(t *testing.T) {
 	evalCallback := judge.NewGoldenEval[*judge.Judgement](judgeImpl, "correctness", "Expected answer")
 
 	// Create a test trace
-	trace := &evals.Trace[*judge.Judgement]{
+	trace := &agenttrace.Trace[*judge.Judgement]{
 		InputPrompt: "What is 2+2?",
 		Result: &judge.Judgement{
 			Score:     0.9,
@@ -82,7 +82,7 @@ func TestNewEvalWithError(t *testing.T) {
 	evalCallback := judge.NewGoldenEval[*judge.Judgement](judgeImpl, "accuracy", "Expected answer")
 
 	// Create a test trace
-	trace := &evals.Trace[*judge.Judgement]{
+	trace := &agenttrace.Trace[*judge.Judgement]{
 		InputPrompt: "Test prompt",
 		Result: &judge.Judgement{
 			Score:     0.5,
@@ -115,7 +115,7 @@ func TestNewEvalWithNilResult(t *testing.T) {
 	evalCallback := judge.NewGoldenEval[*judge.Judgement](judgeImpl, "completeness", "Expected")
 
 	// Create trace with nil result
-	trace := &evals.Trace[*judge.Judgement]{
+	trace := &agenttrace.Trace[*judge.Judgement]{
 		InputPrompt: "Test prompt",
 		Result:      nil,
 	}
@@ -152,7 +152,7 @@ func TestNewStandaloneEval(t *testing.T) {
 	evalCallback := judge.NewStandaloneEval[*judge.Judgement](judgeImpl, "clarity - response should be easy to understand")
 
 	// Create a test trace
-	trace := &evals.Trace[*judge.Judgement]{
+	trace := &agenttrace.Trace[*judge.Judgement]{
 		InputPrompt: "Test prompt",
 		Result: &judge.Judgement{
 			Score:     0.7,

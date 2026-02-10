@@ -9,7 +9,7 @@ import (
 	"context"
 	"errors"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
@@ -169,8 +169,8 @@ func (p findingToolsProvider[Resp, T]) GoogleTools(cb FindingTools[T]) map[strin
 
 // Claude handlers for finding tools
 
-func claudeGetFindingDetailsHandler[Resp any](getDetails func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeGetFindingDetailsHandler[Resp any](getDetails func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -218,8 +218,8 @@ func claudeGetFindingDetailsHandler[Resp any](getDetails func(context.Context, c
 	}
 }
 
-func claudeGetFindingLogsHandler[Resp any](getLogs func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeGetFindingLogsHandler[Resp any](getLogs func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		log := clog.FromContext(ctx)
 
 		params, errResp := claudetool.NewParams(toolUse)
@@ -270,8 +270,8 @@ func claudeGetFindingLogsHandler[Resp any](getLogs func(context.Context, callbac
 
 // Google handlers for finding tools
 
-func googleGetFindingDetailsHandler[Resp any](getDetails func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleGetFindingDetailsHandler[Resp any](getDetails func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
@@ -318,8 +318,8 @@ func googleGetFindingDetailsHandler[Resp any](getDetails func(context.Context, c
 	}
 }
 
-func googleGetFindingLogsHandler[Resp any](getLogs func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleGetFindingLogsHandler[Resp any](getLogs func(context.Context, callbacks.FindingKind, string) (string, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		log := clog.FromContext(ctx)
 
 		reasoning, errResp := googletool.Param[string](call, "reasoning")

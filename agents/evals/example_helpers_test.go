@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
@@ -22,7 +23,7 @@ func ExampleExactToolCalls() {
 	evalCallback := evals.ExactToolCalls[string](2)
 
 	// Create tracer with the evaluation
-	tracer := evals.ByCode[string](evals.Inject(obs, evalCallback))
+	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create trace with exactly 2 tool calls
 	ctx := context.Background()
@@ -55,7 +56,7 @@ func ExampleRequiredToolCalls() {
 	evalCallback := evals.RequiredToolCalls[string]([]string{"read_logs", "analyze"})
 
 	// Create tracer with the evaluation
-	tracer := evals.ByCode[string](evals.Inject(obs, evalCallback))
+	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create trace and add required tools (plus extra)
 	ctx := context.Background()
@@ -89,7 +90,7 @@ func ExampleToolCallValidator() {
 	obs := &mockObserver{}
 
 	// Validate that all tool calls have a reasoning parameter
-	validator := func(o evals.Observer, tc *evals.ToolCall[string]) error {
+	validator := func(o evals.Observer, tc *agenttrace.ToolCall[string]) error {
 		if _, ok := tc.Params["reasoning"]; !ok {
 			return errors.New("missing reasoning parameter")
 		}
@@ -99,7 +100,7 @@ func ExampleToolCallValidator() {
 	evalCallback := evals.ToolCallValidator[string](validator)
 
 	// Create tracer with the evaluation
-	tracer := evals.ByCode[string](evals.Inject(obs, evalCallback))
+	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create trace with proper reasoning parameters
 	ctx := context.Background()
@@ -135,7 +136,7 @@ func ExampleNoErrors() {
 	evalCallback := evals.NoErrors[string]()
 
 	// Create tracer with the evaluation
-	tracer := evals.ByCode[string](evals.Inject(obs, evalCallback))
+	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create successful trace with no errors
 	ctx := context.Background()

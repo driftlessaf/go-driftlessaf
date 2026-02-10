@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"maps"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
@@ -24,7 +24,7 @@ type Metadata[Response any] struct {
 	Handler func(
 		ctx context.Context,
 		toolUse anthropic.ToolUseBlock,
-		trace *evals.Trace[Response],
+		trace *agenttrace.Trace[Response],
 		result *Response,
 	) map[string]any
 }

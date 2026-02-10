@@ -26,12 +26,12 @@ SPDX-License-Identifier: Apache-2.0
 //	    })
 //
 //	    // Use evals helpers with the testing adapter
-//	    callbacks := []evals.TraceCallback{
+//	    callbacks := []agenttrace.TraceCallback{
 //	        evals.Inject(namespacedObs.Child("tool-calls"), evals.ExactToolCalls(1)),
 //	        evals.Inject(namespacedObs.Child("errors"), evals.NoErrors()),
 //	    }
 //
-//	    tracer := evals.ByCode(callbacks...)
+//	    tracer := agenttrace.ByCode(callbacks...)
 //	    // Use tracer with your analyzer
 //	}
 //
@@ -52,13 +52,13 @@ SPDX-License-Identifier: Apache-2.0
 //	            return testevals.NewPrefix(t, name)
 //	        })
 //
-//	        var callbacks []evals.TraceCallback
+//	        var callbacks []agenttrace.TraceCallback
 //	        for namespace, eval := range tc.Evals {
 //	            childObs := namespacedObs.Child(namespace)
 //	            callbacks = append(callbacks, evals.Inject(childObs, eval))
 //	        }
 //
-//	        tracer := evals.ByCode(callbacks...)
+//	        tracer := agenttrace.ByCode(callbacks...)
 //	        // Run analyzer with tracer
 //	    })
 //	}

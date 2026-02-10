@@ -8,6 +8,7 @@ package judge_test
 import (
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/judge"
 )
@@ -17,44 +18,44 @@ import (
 func TestValidScore(t *testing.T) {
 	tests := []struct {
 		name          string
-		trace         *evals.Trace[*judge.Judgement]
+		trace         *agenttrace.Trace[*judge.Judgement]
 		expectFailure bool
 		expectedMsg   string
 	}{{
 		name: "valid score in range",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.5},
 		},
 		expectFailure: false,
 	}, {
 		name: "valid score at minimum boundary",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.0},
 		},
 		expectFailure: false,
 	}, {
 		name: "valid score at maximum boundary",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 1.0},
 		},
 		expectFailure: false,
 	}, {
 		name: "nil result",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: nil,
 		},
 		expectFailure: true,
 		expectedMsg:   "result is nil",
 	}, {
 		name: "score below range",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: -0.1},
 		},
 		expectFailure: true,
 		expectedMsg:   "score -0.10 is out of range [0, 1] for golden mode",
 	}, {
 		name: "score above range",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 1.5},
 		},
 		expectFailure: true,
@@ -87,27 +88,27 @@ func TestMinimumScore(t *testing.T) {
 	tests := []struct {
 		name          string
 		threshold     float64
-		trace         *evals.Trace[*judge.Judgement]
+		trace         *agenttrace.Trace[*judge.Judgement]
 		expectFailure bool
 		expectedMsg   string
 	}{{
 		name:      "score meets threshold exactly",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.8},
 		},
 		expectFailure: false,
 	}, {
 		name:      "score exceeds threshold",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.9},
 		},
 		expectFailure: false,
 	}, {
 		name:      "nil result",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: nil,
 		},
 		expectFailure: true,
@@ -115,7 +116,7 @@ func TestMinimumScore(t *testing.T) {
 	}, {
 		name:      "score below threshold",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.7},
 		},
 		expectFailure: true, // Expect grade < 1.0 for out-of-range score
@@ -175,27 +176,27 @@ func TestMaximumScore(t *testing.T) {
 	tests := []struct {
 		name          string
 		threshold     float64
-		trace         *evals.Trace[*judge.Judgement]
+		trace         *agenttrace.Trace[*judge.Judgement]
 		expectFailure bool
 		expectedMsg   string
 	}{{
 		name:      "score meets threshold exactly",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.8},
 		},
 		expectFailure: false,
 	}, {
 		name:      "score below threshold",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.7},
 		},
 		expectFailure: false,
 	}, {
 		name:      "nil result",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: nil,
 		},
 		expectFailure: true,
@@ -203,7 +204,7 @@ func TestMaximumScore(t *testing.T) {
 	}, {
 		name:      "score above threshold",
 		threshold: 0.8,
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Score: 0.9},
 		},
 		expectFailure: true, // Expect grade < 1.0 for out-of-range score
@@ -262,25 +263,25 @@ func TestMaximumScore(t *testing.T) {
 func TestHasReasoning(t *testing.T) {
 	tests := []struct {
 		name          string
-		trace         *evals.Trace[*judge.Judgement]
+		trace         *agenttrace.Trace[*judge.Judgement]
 		expectFailure bool
 		expectedMsg   string
 	}{{
 		name: "has reasoning",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Reasoning: "This is the reasoning"},
 		},
 		expectFailure: false,
 	}, {
 		name: "nil result",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: nil,
 		},
 		expectFailure: true,
 		expectedMsg:   "result is nil",
 	}, {
 		name: "empty reasoning",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			Result: &judge.Judgement{Reasoning: ""},
 		},
 		expectFailure: true,
@@ -312,25 +313,25 @@ func TestHasReasoning(t *testing.T) {
 func TestNoToolCalls(t *testing.T) {
 	tests := []struct {
 		name          string
-		trace         *evals.Trace[*judge.Judgement]
+		trace         *agenttrace.Trace[*judge.Judgement]
 		expectFailure bool
 		expectedMsg   string
 	}{{
 		name: "no tool calls",
-		trace: &evals.Trace[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
 			ToolCalls: nil,
 		},
 		expectFailure: false,
 	}, {
 		name: "empty tool calls slice",
-		trace: &evals.Trace[*judge.Judgement]{
-			ToolCalls: []*evals.ToolCall[*judge.Judgement]{},
+		trace: &agenttrace.Trace[*judge.Judgement]{
+			ToolCalls: []*agenttrace.ToolCall[*judge.Judgement]{},
 		},
 		expectFailure: false,
 	}, {
 		name: "one tool call",
-		trace: &evals.Trace[*judge.Judgement]{
-			ToolCalls: []*evals.ToolCall[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
+			ToolCalls: []*agenttrace.ToolCall[*judge.Judgement]{
 				{ID: "tool_call_1", Name: "test_tool"},
 			},
 		},
@@ -338,8 +339,8 @@ func TestNoToolCalls(t *testing.T) {
 		expectedMsg:   "tool call count: got = 1, wanted = 0",
 	}, {
 		name: "multiple tool calls",
-		trace: &evals.Trace[*judge.Judgement]{
-			ToolCalls: []*evals.ToolCall[*judge.Judgement]{
+		trace: &agenttrace.Trace[*judge.Judgement]{
+			ToolCalls: []*agenttrace.ToolCall[*judge.Judgement]{
 				{ID: "tool_call_1", Name: "test_tool_1"},
 				{ID: "tool_call_2", Name: "test_tool_2"},
 				{ID: "tool_call_3", Name: "test_tool_3"},

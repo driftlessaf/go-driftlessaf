@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -107,8 +107,8 @@ func (p exampleToolsProvider[Resp, T]) GoogleTools(cb ExampleTools[T]) map[strin
 }
 
 // claudeRandomNumberHandler creates a Claude handler for the random_number tool.
-func claudeRandomNumberHandler[Resp any](randomFn func(context.Context, int, int) (int, error)) func(context.Context, anthropic.ToolUseBlock, *evals.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *evals.Trace[Resp], _ *Resp) map[string]any {
+func claudeRandomNumberHandler[Resp any](randomFn func(context.Context, int, int) (int, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 		params, errResp := claudetool.NewParams(toolUse)
 		if errResp != nil {
 			trace.BadToolCall(toolUse.ID, toolUse.Name, map[string]any{"input": toolUse.Input}, errors.New("failed to parse params"))
@@ -143,8 +143,8 @@ func claudeRandomNumberHandler[Resp any](randomFn func(context.Context, int, int
 }
 
 // googleRandomNumberHandler creates a Google handler for the random_number tool.
-func googleRandomNumberHandler[Resp any](randomFn func(context.Context, int, int) (int, error)) func(context.Context, *genai.FunctionCall, *evals.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *evals.Trace[Resp], _ *Resp) *genai.FunctionResponse {
+func googleRandomNumberHandler[Resp any](randomFn func(context.Context, int, int) (int, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
 		minVal, errResp := googletool.Param[float64](call, "min")
 		if errResp != nil {
 			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing min parameter"))
