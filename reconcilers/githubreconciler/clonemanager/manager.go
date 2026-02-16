@@ -27,6 +27,8 @@ import (
 
 const cloneDirPrefix = "clonemanager-clone-"
 
+const gitFetchDepth = 1
+
 // repoURL resolves the remote git URL for a githubreconciler.Resource. Tests
 // can override this to provide local filesystem paths by assigning a custom
 // function to repoURL.
@@ -195,7 +197,7 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 		URL:           remote,
 		ReferenceName: plumbing.NewBranchReferenceName(ref),
 		SingleBranch:  true,
-		Depth:         1,
+		Depth:         gitFetchDepth,
 		Auth:          auth,
 	})
 	if err != nil {
@@ -238,6 +240,7 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	fetchOpts := &git.FetchOptions{
 		RefSpecs: []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", ref, ref))},
 		Auth:     auth,
+		Depth:    gitFetchDepth,
 	}
 
 	clog.FromContext(ctx).Infof("Fetching ref %s", ref)

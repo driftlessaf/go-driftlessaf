@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"github.com/google/go-github/v75/github"
 )
 
@@ -94,22 +95,25 @@ func cleanLogs(logs string) string {
 }
 
 // fetchFindingLogs fetches logs for a finding based on its details URL.
-// Currently supports GitHub Actions logs; other log sources return an error.
-func fetchFindingLogs(ctx context.Context, gh *github.Client, owner, repo, detailsURL string) (string, error) {
-	if detailsURL == "" {
-		return "", fmt.Errorf("no details URL available for finding")
+// Supports GitHub Actions logs and GCP console log URLs. For unrecognized
+// URL formats, returns the finding's Details as a fallback.
+func fetchFindingLogs(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) (string, error) {
+	if f.DetailsURL == "" {
+		return f.Details, nil
 	}
 
 	// Check if it's a GitHub Actions URL
-	if matches := actionsURLRegex.FindStringSubmatch(detailsURL); len(matches) > 2 {
+	if matches := actionsURLRegex.FindStringSubmatch(f.DetailsURL); len(matches) > 2 {
 		jobID, err := strconv.ParseInt(matches[2], 10, 64)
 		if err != nil {
-			return "", fmt.Errorf("parse job ID from URL %q: %w", detailsURL, err)
+			return "", fmt.Errorf("parse job ID from URL %q: %w", f.DetailsURL, err)
 		}
 		if jobID != 0 {
 			return getGitHubActionsLogs(ctx, gh, owner, repo, jobID)
 		}
 	}
 
-	return "", fmt.Errorf("unsupported log source: %s", detailsURL)
+	// For unrecognized URL formats (e.g., GCP console links handled
+	// downstream by gcpfindings), return Details as a fallback.
+	return f.Details, nil
 }

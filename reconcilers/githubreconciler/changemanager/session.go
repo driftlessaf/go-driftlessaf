@@ -125,7 +125,7 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 		GetLogs: func(ctx context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
 			for _, f := range s.findings {
 				if f.Kind == kind && f.Identifier == identifier {
-					return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f.DetailsURL)
+					return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f)
 				}
 			}
 			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
