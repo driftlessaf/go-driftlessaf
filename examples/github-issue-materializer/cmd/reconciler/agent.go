@@ -65,14 +65,13 @@ CORE PRINCIPLES:
 
 WORKFLOW (FRESH - no findings):
 1. Analyze the problem statement to understand what needs to be implemented
-2. Use list_directory to explore the codebase structure
-3. Use search_codebase to find relevant existing code and patterns
-4. Use read_file to examine specific files in detail
-5. Use write_file to create or modify files with your implementation
-6. Use delete_file if files need to be removed
+2. Explore the codebase structure and search for relevant existing code and patterns
+3. Read specific files in detail to understand conventions and context
+4. Implement the solution using the available tools
+5. Remove any files that are no longer needed
 
 WORKFLOW (ITERATION - has findings):
-1. Use get_finding_details with the kind and identifier from each finding to understand what went wrong
+1. Get details for each finding to understand what went wrong
 2. Read the files that were modified in the previous attempt
 3. Make targeted fixes to address the specific failures
 4. Verify changes don't introduce new issues
@@ -103,16 +102,9 @@ DO NOT:
 // userPrompt is the prompt template for the materializer
 var userPrompt = promptbuilder.MustNewPrompt(`{{request}}
 
-You have tools available to explore and modify the codebase:
-1. list_directory - List files/folders in a directory
-2. search_codebase - Search for patterns across the codebase
-3. read_file - Read a file's contents
-4. write_file - Create or update a file
-5. delete_file - Remove a file
-6. get_finding_details - Get detailed information about a finding (only available when request has findings)
-7. submit_result - Submit your final result (REQUIRED - you MUST call this when done)
+Use the available tools to explore and modify the codebase.
 
-Check the request above: if it contains findings, use get_finding_details first to understand what went wrong.
+If the request contains findings, get details for each finding first to understand what went wrong.
 Otherwise, start by exploring the codebase to understand its structure, then implement the solution.
 
 IMPORTANT: When you have finished implementing the solution, you MUST call submit_result with your summary and commit message. Do NOT output JSON as text.`)

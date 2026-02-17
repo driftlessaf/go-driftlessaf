@@ -7,10 +7,9 @@ package claudetool
 
 import (
 	"context"
-	"fmt"
-	"maps"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
@@ -31,17 +30,10 @@ type Metadata[Response any] struct {
 
 // Error creates an error response map for Claude tool calls
 func Error(format string, args ...any) map[string]any {
-	return map[string]any{
-		"error": fmt.Sprintf(format, args...),
-	}
+	return params.Error(format, args...)
 }
 
 // ErrorWithContext creates an error response with additional context
 func ErrorWithContext(err error, context map[string]any) map[string]any {
-	response := map[string]any{
-		"error": err.Error(),
-	}
-	// Add context fields
-	maps.Copy(response, context)
-	return response
+	return params.ErrorWithContext(err, context)
 }

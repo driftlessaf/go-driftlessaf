@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 
+	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
@@ -41,73 +42,20 @@ func (cp *Params) Get(name string) (any, bool) {
 
 // Param extracts a required parameter with type safety
 func Param[T any](cp *Params, name string) (T, map[string]any) {
-	var zero T
-
-	value, exists := cp.inputMap[name]
-	if !exists {
-		return zero, map[string]any{
-			"error": fmt.Sprintf("%s parameter is required", name),
-		}
+	v, err := params.Extract[T](cp.inputMap, name)
+	if err != nil {
+		return v, params.Error("%s", err)
 	}
-
-	// Try direct type assertion
-	if v, ok := value.(T); ok {
-		return v, nil
-	}
-
-	// Handle common JSON numeric conversions
-	switch any(zero).(type) {
-	case int:
-		if floatVal, ok := value.(float64); ok {
-			return any(int(floatVal)).(T), nil
-		}
-	case int32:
-		if floatVal, ok := value.(float64); ok {
-			return any(int32(floatVal)).(T), nil
-		}
-	case int64:
-		if floatVal, ok := value.(float64); ok {
-			return any(int64(floatVal)).(T), nil
-		}
-	}
-
-	return zero, map[string]any{
-		"error": fmt.Sprintf("%s parameter must be of type %T, got %T", name, zero, value),
-	}
+	return v, nil
 }
 
 // OptionalParam extracts an optional parameter with a default value
 func OptionalParam[T any](cp *Params, name string, defaultValue T) (T, map[string]any) {
-	value, exists := cp.inputMap[name]
-	if !exists {
-		return defaultValue, nil
+	v, err := params.ExtractOptional[T](cp.inputMap, name, defaultValue)
+	if err != nil {
+		return v, params.Error("%s", err)
 	}
-
-	// Try direct type assertion
-	if v, ok := value.(T); ok {
-		return v, nil
-	}
-
-	// Handle common JSON numeric conversions
-	var zero T
-	switch any(zero).(type) {
-	case int:
-		if floatVal, ok := value.(float64); ok {
-			return any(int(floatVal)).(T), nil
-		}
-	case int32:
-		if floatVal, ok := value.(float64); ok {
-			return any(int32(floatVal)).(T), nil
-		}
-	case int64:
-		if floatVal, ok := value.(float64); ok {
-			return any(int64(floatVal)).(T), nil
-		}
-	}
-
-	return zero, map[string]any{
-		"error": fmt.Sprintf("%s parameter must be of type %T, got %T", name, zero, value),
-	}
+	return v, nil
 }
 
 // RawInputs returns a copy of the internal parameter map

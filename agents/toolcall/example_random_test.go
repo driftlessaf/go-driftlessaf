@@ -8,15 +8,15 @@ package toolcall
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"math/big"
+	"os"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
-	"github.com/anthropics/anthropic-sdk-go"
-	"google.golang.org/genai"
+	"chainguard.dev/driftlessaf/agents/toolcall/params"
 )
 
 // ExampleTools wraps a base tools type and adds example tool functionality.
@@ -54,124 +54,91 @@ func NewExampleToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvid
 
 func (p exampleToolsProvider[Resp, T]) ClaudeTools(cb ExampleTools[T]) map[string]claudetool.Metadata[Resp] {
 	tools := p.base.ClaudeTools(cb.base)
-
-	tools["random_number"] = claudetool.Metadata[Resp]{
-		Definition: anthropic.ToolParam{
-			Name:        "random_number",
-			Description: anthropic.String("Generate a random number between min and max (inclusive)."),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Type: "object",
-				Properties: map[string]any{
-					"min": map[string]any{
-						"type":        "integer",
-						"description": "The minimum value (inclusive)",
-					},
-					"max": map[string]any{
-						"type":        "integer",
-						"description": "The maximum value (inclusive)",
-					},
-				},
-				Required: []string{"min", "max"},
-			},
-		},
-		Handler: claudeRandomNumberHandler[Resp](cb.RandomNumber),
-	}
+	t := randomNumberTool[Resp](cb.RandomNumber)
+	tools["random_number"] = t.ClaudeMetadata()
 	return tools
 }
 
 func (p exampleToolsProvider[Resp, T]) GoogleTools(cb ExampleTools[T]) map[string]googletool.Metadata[Resp] {
 	tools := p.base.GoogleTools(cb.base)
-
-	tools["random_number"] = googletool.Metadata[Resp]{
-		Definition: &genai.FunctionDeclaration{
-			Name:        "random_number",
-			Description: "Generate a random number between min and max (inclusive).",
-			Parameters: &genai.Schema{
-				Type: "object",
-				Properties: map[string]*genai.Schema{
-					"min": {
-						Type:        "integer",
-						Description: "The minimum value (inclusive)",
-					},
-					"max": {
-						Type:        "integer",
-						Description: "The maximum value (inclusive)",
-					},
-				},
-				Required: []string{"min", "max"},
-			},
-		},
-		Handler: googleRandomNumberHandler[Resp](cb.RandomNumber),
-	}
+	t := randomNumberTool[Resp](cb.RandomNumber)
+	tools["random_number"] = t.GoogleMetadata()
 	return tools
 }
 
-// claudeRandomNumberHandler creates a Claude handler for the random_number tool.
-func claudeRandomNumberHandler[Resp any](randomFn func(context.Context, int, int) (int, error)) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
-		params, errResp := claudetool.NewParams(toolUse)
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, map[string]any{"input": toolUse.Input}, errors.New("failed to parse params"))
-			return errResp
-		}
+func randomNumberTool[Resp any](randomFn func(context.Context, int, int) (int, error)) Tool[Resp] {
+	return Tool[Resp]{
+		Def: Definition{
+			Name:        "random_number",
+			Description: "Generate a random number between min and max (inclusive).",
+			Parameters: []Parameter{
+				{Name: "min", Type: "integer", Description: "The minimum value (inclusive)", Required: true},
+				{Name: "max", Type: "integer", Description: "The maximum value (inclusive)", Required: true},
+			},
+		},
+		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
+			minVal, errResp := Param[float64](call, trace, "min")
+			if errResp != nil {
+				return errResp
+			}
 
-		minVal, errResp := claudetool.Param[float64](params, "min")
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, params.RawInputs(), errors.New("missing min parameter"))
-			return errResp
-		}
+			maxVal, errResp := Param[float64](call, trace, "max")
+			if errResp != nil {
+				return errResp
+			}
 
-		maxVal, errResp := claudetool.Param[float64](params, "max")
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, params.RawInputs(), errors.New("missing max parameter"))
-			return errResp
-		}
+			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"min": minVal, "max": maxVal})
 
-		tc := trace.StartToolCall(toolUse.ID, toolUse.Name, map[string]any{"min": minVal, "max": maxVal})
+			result, err := randomFn(ctx, int(minVal), int(maxVal))
+			if err != nil {
+				output := params.ErrorWithContext(err, map[string]any{"min": minVal, "max": maxVal})
+				tc.Complete(output, err)
+				return output
+			}
 
-		result, err := randomFn(ctx, int(minVal), int(maxVal))
-		if err != nil {
-			output := claudetool.ErrorWithContext(err, map[string]any{"min": minVal, "max": maxVal})
-			tc.Complete(output, err)
+			output := map[string]any{"result": result}
+			tc.Complete(output, nil)
 			return output
-		}
-
-		output := map[string]any{"result": result}
-		tc.Complete(output, nil)
-		return output
+		},
 	}
 }
 
-// googleRandomNumberHandler creates a Google handler for the random_number tool.
-func googleRandomNumberHandler[Resp any](randomFn func(context.Context, int, int) (int, error)) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], _ *Resp) *genai.FunctionResponse {
-		minVal, errResp := googletool.Param[float64](call, "min")
-		if errResp != nil {
-			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing min parameter"))
-			return errResp
-		}
+// Ensure the example tools provider stack compiles and works for both providers.
+var _ = func() {
+	type Response struct{}
 
-		maxVal, errResp := googletool.Param[float64](call, "max")
-		if errResp != nil {
-			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing max parameter"))
-			return errResp
-		}
+	base := NewEmptyToolsProvider[*Response]()
+	wtProvider := NewWorktreeToolsProvider[*Response, EmptyTools](base)
+	findingProvider := NewFindingToolsProvider[*Response, WorktreeTools[EmptyTools]](wtProvider)
+	exampleProvider := NewExampleToolsProvider[*Response, FindingTools[WorktreeTools[EmptyTools]]](findingProvider)
 
-		tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"min": minVal, "max": maxVal})
-
-		result, err := randomFn(ctx, int(minVal), int(maxVal))
-		if err != nil {
-			resp := googletool.ErrorWithContext(call, err, map[string]any{"min": minVal, "max": maxVal})
-			tc.Complete(resp.Response, err)
-			return resp
-		}
-
-		output := map[string]any{"result": result}
-		tc.Complete(output, nil)
-		return &genai.FunctionResponse{
-			ID:       call.ID,
-			Name:     call.Name,
-			Response: output,
-		}
+	wt := callbacks.WorktreeCallbacks{
+		ReadFile: func(_ context.Context, _ string, _ int64, _ int) (callbacks.ReadResult, error) {
+			return callbacks.ReadResult{}, nil
+		},
+		WriteFile:     func(_ context.Context, _, _ string, _ os.FileMode) error { return nil },
+		DeleteFile:    func(_ context.Context, _ string) error { return nil },
+		MoveFile:      func(_ context.Context, _, _ string) error { return nil },
+		CopyFile:      func(_ context.Context, _, _ string) error { return nil },
+		CreateSymlink: func(_ context.Context, _, _ string) error { return nil },
+		Chmod:         func(_ context.Context, _ string, _ os.FileMode) error { return nil },
+		EditFile: func(_ context.Context, _, _, _ string, _ bool) (callbacks.EditResult, error) {
+			return callbacks.EditResult{}, nil
+		},
+		ListDirectory: func(_ context.Context, _, _ string, _, _ int) (callbacks.ListResult, error) {
+			return callbacks.ListResult{}, nil
+		},
+		SearchCodebase: func(_ context.Context, _, _, _ string, _, _ int) (callbacks.SearchResult, error) {
+			return callbacks.SearchResult{}, nil
+		},
 	}
+	fc := callbacks.FindingCallbacks{
+		GetDetails: func(_ context.Context, _ callbacks.FindingKind, _ string) (string, error) { return "", nil },
+		GetLogs:    func(_ context.Context, _ callbacks.FindingKind, _ string) (string, error) { return "", nil },
+	}
+	tools := NewExampleTools(NewFindingTools(NewWorktreeTools(EmptyTools{}, wt), fc))
+
+	// Both methods should compile.
+	_ = exampleProvider.ClaudeTools(tools)
+	_ = exampleProvider.GoogleTools(tools)
 }

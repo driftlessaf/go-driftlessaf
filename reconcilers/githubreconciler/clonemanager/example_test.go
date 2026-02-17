@@ -82,8 +82,8 @@ func ExampleLease_MakeAndPushChanges() {
 
 // ExampleWorktreeCallbacks demonstrates using WorktreeCallbacks for AI agent integration.
 // WorktreeCallbacks creates WorktreeTools from a git worktree, which can be passed
-// to an AI agent (via metaagent.BaseCallbacks) to allow it to read, write, and search
-// files while automatically staging changes.
+// to an AI agent (via metaagent.BaseCallbacks) to allow it to read, write, search,
+// move, copy files and more while automatically staging changes.
 func ExampleWorktreeCallbacks() {
 	ctx := context.Background()
 
@@ -116,19 +116,19 @@ func ExampleWorktreeCallbacks() {
 	if err := lease.MakeAndPushChanges(ctx, "automation/agent-update", func(ctx context.Context, wt *git.Worktree) (string, error) {
 		// Create WorktreeTools for the agent
 		// This provides callbacks that:
-		// - Read files from the worktree
+		// - Read files with offset/limit windowing
 		// - Write files and automatically stage changes
-		// - Delete files and automatically stage deletions
-		// - List directory contents
+		// - Delete, move, copy files with auto-staging
+		// - List directory contents with metadata and filtering
 		// - Search for patterns across the codebase
 		wtTools := WorktreeCallbacks(wt)
 
-		// Example: Read a file using the tool callback
-		content, err := wtTools.ReadFile(ctx, "packages/example.yaml")
+		// Example: Read a file using the tool callback (offset=0, limit=-1 for full read)
+		result, err := wtTools.ReadFile(ctx, "packages/example.yaml", 0, -1)
 		if err != nil {
 			return "", fmt.Errorf("read file: %w", err)
 		}
-		fmt.Println("file content:", content)
+		fmt.Println("file content:", result.Content)
 
 		// Example: Write a file (automatically staged)
 		if err := wtTools.WriteFile(ctx, "packages/example.yaml", "name: updated\n", 0o644); err != nil {

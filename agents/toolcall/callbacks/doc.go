@@ -19,13 +19,13 @@ toolcall package instead.
 WorktreeCallbacks provides file operations on a git worktree:
 
 	cb := callbacks.WorktreeCallbacks{
-		ReadFile: func(ctx context.Context, path string) (string, error) {
-			// Read file from worktree
+		ReadFile: func(ctx context.Context, path string, offset int64, limit int) (ReadResult, error) {
+			// Read file from worktree with offset/limit windowing
 		},
 		WriteFile: func(ctx context.Context, path, content string, mode os.FileMode) error {
 			// Write file to worktree and stage it
 		},
-		// ... other callbacks
+		// ... other callbacks (DeleteFile, MoveFile, CopyFile, etc.)
 	}
 
 # Finding Callbacks
