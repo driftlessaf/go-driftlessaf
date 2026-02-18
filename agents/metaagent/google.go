@@ -12,6 +12,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
+	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"google.golang.org/genai"
 )
 
@@ -58,6 +59,6 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 func (a *googleAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {
-	tools := a.config.Tools.GoogleTools(callbacks)
+	tools := googletool.Map(a.config.Tools.Tools(callbacks))
 	return a.executor.Execute(ctx, request, tools)
 }

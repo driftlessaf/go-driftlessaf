@@ -14,8 +14,6 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
-	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
 )
 
@@ -52,17 +50,9 @@ func NewExampleToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvid
 	return exampleToolsProvider[Resp, T]{base: base}
 }
 
-func (p exampleToolsProvider[Resp, T]) ClaudeTools(cb ExampleTools[T]) map[string]claudetool.Metadata[Resp] {
-	tools := p.base.ClaudeTools(cb.base)
-	t := randomNumberTool[Resp](cb.RandomNumber)
-	tools["random_number"] = t.ClaudeMetadata()
-	return tools
-}
-
-func (p exampleToolsProvider[Resp, T]) GoogleTools(cb ExampleTools[T]) map[string]googletool.Metadata[Resp] {
-	tools := p.base.GoogleTools(cb.base)
-	t := randomNumberTool[Resp](cb.RandomNumber)
-	tools["random_number"] = t.GoogleMetadata()
+func (p exampleToolsProvider[Resp, T]) Tools(cb ExampleTools[T]) map[string]Tool[Resp] {
+	tools := p.base.Tools(cb.base)
+	tools["random_number"] = randomNumberTool[Resp](cb.RandomNumber)
 	return tools
 }
 
@@ -138,7 +128,6 @@ var _ = func() {
 	}
 	tools := NewExampleTools(NewFindingTools(NewWorktreeTools(EmptyTools{}, wt), fc))
 
-	// Both methods should compile.
-	_ = exampleProvider.ClaudeTools(tools)
-	_ = exampleProvider.GoogleTools(tools)
+	// Provider returns unified tools that work with any provider.
+	_ = exampleProvider.Tools(tools)
 }

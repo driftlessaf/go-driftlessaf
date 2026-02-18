@@ -8,13 +8,12 @@ package toolcall
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
-	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"github.com/chainguard-dev/clog"
 )
@@ -43,19 +42,9 @@ func NewWorktreeToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvi
 	return worktreeToolsProvider[Resp, T]{baseProvider: base}
 }
 
-func (p worktreeToolsProvider[Resp, T]) ClaudeTools(cb WorktreeTools[T]) map[string]claudetool.Metadata[Resp] {
-	tools := p.baseProvider.ClaudeTools(cb.base)
-	for name, t := range worktreeToolDefs[Resp](cb.WorktreeCallbacks) {
-		tools[name] = t.ClaudeMetadata()
-	}
-	return tools
-}
-
-func (p worktreeToolsProvider[Resp, T]) GoogleTools(cb WorktreeTools[T]) map[string]googletool.Metadata[Resp] {
-	tools := p.baseProvider.GoogleTools(cb.base)
-	for name, t := range worktreeToolDefs[Resp](cb.WorktreeCallbacks) {
-		tools[name] = t.GoogleMetadata()
-	}
+func (p worktreeToolsProvider[Resp, T]) Tools(cb WorktreeTools[T]) map[string]Tool[Resp] {
+	tools := p.baseProvider.Tools(cb.base)
+	maps.Copy(tools, worktreeToolDefs[Resp](cb.WorktreeCallbacks))
 	return tools
 }
 
