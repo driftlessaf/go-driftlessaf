@@ -7,19 +7,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
-	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
+	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"chainguard.dev/driftlessaf/examples/prvalidation"
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v75/github"
-	"google.golang.org/genai"
 )
 
 // PRTools contains callback functions for PR operations.
@@ -81,84 +77,109 @@ The description should be meaningful and at least 20 characters.
 Preserve any existing content that is useful.`
 )
 
-func (prToolsProvider) ClaudeTools(cb PRTools) map[string]claudetool.Metadata[*PRFixResult] {
-	return map[string]claudetool.Metadata[*PRFixResult]{
-		"update_pr_title": {
-			Definition: anthropic.ToolParam{
-				Name:        "update_pr_title",
-				Description: anthropic.String(updateTitleDescription),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Type: "object",
-					Properties: map[string]any{
-						"reasoning": map[string]any{
-							"type":        "string",
-							"description": "Explain why this title change fixes the issue",
-						},
-						"new_title": map[string]any{
-							"type":        "string",
-							"description": "The new PR title in conventional commit format",
-						},
-					},
-					Required: []string{"reasoning", "new_title"},
-				},
+func (prToolsProvider) Tools(cb PRTools) map[string]toolcall.Tool[*PRFixResult] {
+	return map[string]toolcall.Tool[*PRFixResult]{
+		"update_pr_title":       updatePRTitleTool(cb.UpdateTitle),
+		"update_pr_description": updatePRDescriptionTool(cb.UpdateDescription),
+	}
+}
+
+func updatePRTitleTool(updateFn func(context.Context, string) error) toolcall.Tool[*PRFixResult] {
+	return toolcall.Tool[*PRFixResult]{
+		Def: toolcall.Definition{
+			Name:        "update_pr_title",
+			Description: updateTitleDescription,
+			Parameters: []toolcall.Parameter{
+				{Name: "reasoning", Type: "string", Description: "Explain why this title change fixes the issue", Required: true},
+				{Name: "new_title", Type: "string", Description: "The new PR title in conventional commit format", Required: true},
 			},
-			Handler: claudeUpdateTitleHandler(cb.UpdateTitle),
 		},
-		"update_pr_description": {
-			Definition: anthropic.ToolParam{
-				Name:        "update_pr_description",
-				Description: anthropic.String(updateDescriptionDescription),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Type: "object",
-					Properties: map[string]any{
-						"reasoning": map[string]any{
-							"type":        "string",
-							"description": "Explain why this description change fixes the issue",
-						},
-						"new_description": map[string]any{
-							"type":        "string",
-							"description": "The new PR description",
-						},
-					},
-					Required: []string{"reasoning", "new_description"},
-				},
-			},
-			Handler: claudeUpdateDescriptionHandler(cb.UpdateDescription),
+		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
+			log := clog.FromContext(ctx)
+
+			reasoning, errResp := toolcall.Param[string](call, trace, "reasoning")
+			if errResp != nil {
+				return errResp
+			}
+			log.With("reasoning", reasoning).Info("Tool call reasoning")
+
+			newTitle, errResp := toolcall.Param[string](call, trace, "new_title")
+			if errResp != nil {
+				return errResp
+			}
+
+			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"new_title": newTitle})
+
+			if err := validateTitle(newTitle); err != nil {
+				result := params.Error("%s", err)
+				tc.Complete(result, err)
+				return result
+			}
+
+			if err := updateFn(ctx, newTitle); err != nil {
+				log.With("error", err).Error("Failed to update PR title")
+				result := params.ErrorWithContext(err, map[string]any{"new_title": newTitle})
+				tc.Complete(result, err)
+				return result
+			}
+
+			result := map[string]any{
+				"success":   true,
+				"message":   "PR title updated successfully",
+				"new_title": newTitle,
+			}
+			tc.Complete(result, nil)
+			return result
 		},
 	}
 }
 
-func (prToolsProvider) GoogleTools(cb PRTools) map[string]googletool.Metadata[*PRFixResult] {
-	return map[string]googletool.Metadata[*PRFixResult]{
-		"update_pr_title": {
-			Definition: &genai.FunctionDeclaration{
-				Name:        "update_pr_title",
-				Description: updateTitleDescription,
-				Parameters: &genai.Schema{
-					Type: "object",
-					Properties: map[string]*genai.Schema{
-						"reasoning": {Type: "string", Description: "Explain why this title change fixes the issue"},
-						"new_title": {Type: "string", Description: "The new PR title in conventional commit format"},
-					},
-					Required: []string{"reasoning", "new_title"},
-				},
+func updatePRDescriptionTool(updateFn func(context.Context, string) error) toolcall.Tool[*PRFixResult] {
+	return toolcall.Tool[*PRFixResult]{
+		Def: toolcall.Definition{
+			Name:        "update_pr_description",
+			Description: updateDescriptionDescription,
+			Parameters: []toolcall.Parameter{
+				{Name: "reasoning", Type: "string", Description: "Explain why this description change fixes the issue", Required: true},
+				{Name: "new_description", Type: "string", Description: "The new PR description", Required: true},
 			},
-			Handler: googleUpdateTitleHandler(cb.UpdateTitle),
 		},
-		"update_pr_description": {
-			Definition: &genai.FunctionDeclaration{
-				Name:        "update_pr_description",
-				Description: updateDescriptionDescription,
-				Parameters: &genai.Schema{
-					Type: "object",
-					Properties: map[string]*genai.Schema{
-						"reasoning":       {Type: "string", Description: "Explain why this description change fixes the issue"},
-						"new_description": {Type: "string", Description: "The new PR description"},
-					},
-					Required: []string{"reasoning", "new_description"},
-				},
-			},
-			Handler: googleUpdateDescriptionHandler(cb.UpdateDescription),
+		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
+			log := clog.FromContext(ctx)
+
+			reasoning, errResp := toolcall.Param[string](call, trace, "reasoning")
+			if errResp != nil {
+				return errResp
+			}
+			log.With("reasoning", reasoning).Info("Tool call reasoning")
+
+			newDescription, errResp := toolcall.Param[string](call, trace, "new_description")
+			if errResp != nil {
+				return errResp
+			}
+
+			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"new_description_length": len(newDescription)})
+
+			if err := validateDescription(newDescription); err != nil {
+				result := params.Error("%s", err)
+				tc.Complete(result, err)
+				return result
+			}
+
+			if err := updateFn(ctx, newDescription); err != nil {
+				log.With("error", err).Error("Failed to update PR description")
+				result := params.ErrorWithContext(err, map[string]any{"new_description_length": len(newDescription)})
+				tc.Complete(result, err)
+				return result
+			}
+
+			result := map[string]any{
+				"success":         true,
+				"message":         "PR description updated successfully",
+				"description_len": len(newDescription),
+			}
+			tc.Complete(result, nil)
+			return result
 		},
 	}
 }
@@ -180,188 +201,4 @@ func validateDescription(description string) error {
 		return fmt.Errorf("description must be at least 20 characters, got %d", len(strings.TrimSpace(description)))
 	}
 	return nil
-}
-
-// Claude handler factories
-
-func claudeUpdateTitleHandler(updateFn func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[*PRFixResult], **PRFixResult) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
-		log := clog.FromContext(ctx)
-
-		params, errResp := claudetool.NewParams(toolUse)
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, map[string]any{"input": toolUse.Input}, errors.New("parameter error"))
-			return errResp
-		}
-
-		reasoning, errResp := claudetool.Param[string](params, "reasoning")
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, params.RawInputs(), errors.New("missing reasoning parameter"))
-			return errResp
-		}
-		log.With("reasoning", reasoning).Info("Tool call reasoning")
-
-		newTitle, errResp := claudetool.Param[string](params, "new_title")
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, params.RawInputs(), errors.New("missing new_title parameter"))
-			return errResp
-		}
-
-		tc := trace.StartToolCall(toolUse.ID, toolUse.Name, params.RawInputs())
-
-		if err := validateTitle(newTitle); err != nil {
-			result := claudetool.Error("%s", err)
-			tc.Complete(result, err)
-			return result
-		}
-
-		if err := updateFn(ctx, newTitle); err != nil {
-			log.With("error", err).Error("Failed to update PR title")
-			result := claudetool.ErrorWithContext(err, map[string]any{"new_title": newTitle})
-			tc.Complete(result, err)
-			return result
-		}
-
-		result := map[string]any{
-			"success":   true,
-			"message":   "PR title updated successfully",
-			"new_title": newTitle,
-		}
-		tc.Complete(result, nil)
-		return result
-	}
-}
-
-func claudeUpdateDescriptionHandler(updateFn func(context.Context, string) error) func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[*PRFixResult], **PRFixResult) map[string]any {
-	return func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
-		log := clog.FromContext(ctx)
-
-		params, errResp := claudetool.NewParams(toolUse)
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, map[string]any{"input": toolUse.Input}, errors.New("parameter error"))
-			return errResp
-		}
-
-		reasoning, errResp := claudetool.Param[string](params, "reasoning")
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, params.RawInputs(), errors.New("missing reasoning parameter"))
-			return errResp
-		}
-		log.With("reasoning", reasoning).Info("Tool call reasoning")
-
-		newDescription, errResp := claudetool.Param[string](params, "new_description")
-		if errResp != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, params.RawInputs(), errors.New("missing new_description parameter"))
-			return errResp
-		}
-
-		tc := trace.StartToolCall(toolUse.ID, toolUse.Name, params.RawInputs())
-
-		if err := validateDescription(newDescription); err != nil {
-			result := claudetool.Error("%s", err)
-			tc.Complete(result, err)
-			return result
-		}
-
-		if err := updateFn(ctx, newDescription); err != nil {
-			log.With("error", err).Error("Failed to update PR description")
-			result := claudetool.ErrorWithContext(err, map[string]any{"new_description_length": len(newDescription)})
-			tc.Complete(result, err)
-			return result
-		}
-
-		result := map[string]any{
-			"success":         true,
-			"message":         "PR description updated successfully",
-			"description_len": len(newDescription),
-		}
-		tc.Complete(result, nil)
-		return result
-	}
-}
-
-// Google handler factories
-
-func googleUpdateTitleHandler(updateFn func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[*PRFixResult], **PRFixResult) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) *genai.FunctionResponse {
-		log := clog.FromContext(ctx)
-
-		reasoning, errResp := googletool.Param[string](call, "reasoning")
-		if errResp != nil {
-			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing reasoning parameter"))
-			return errResp
-		}
-		log.With("reasoning", reasoning).Info("Tool call reasoning")
-
-		newTitle, errResp := googletool.Param[string](call, "new_title")
-		if errResp != nil {
-			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing new_title parameter"))
-			return errResp
-		}
-
-		tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"new_title": newTitle})
-
-		if err := validateTitle(newTitle); err != nil {
-			resp := googletool.Error(call, "%s", err)
-			tc.Complete(resp.Response, err)
-			return resp
-		}
-
-		if err := updateFn(ctx, newTitle); err != nil {
-			log.With("error", err).Error("Failed to update PR title")
-			resp := googletool.ErrorWithContext(call, err, map[string]any{"new_title": newTitle})
-			tc.Complete(resp.Response, err)
-			return resp
-		}
-
-		result := map[string]any{
-			"success":   true,
-			"message":   "PR title updated successfully",
-			"new_title": newTitle,
-		}
-		tc.Complete(result, nil)
-		return &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result}
-	}
-}
-
-func googleUpdateDescriptionHandler(updateFn func(context.Context, string) error) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[*PRFixResult], **PRFixResult) *genai.FunctionResponse {
-	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) *genai.FunctionResponse {
-		log := clog.FromContext(ctx)
-
-		reasoning, errResp := googletool.Param[string](call, "reasoning")
-		if errResp != nil {
-			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing reasoning parameter"))
-			return errResp
-		}
-		log.With("reasoning", reasoning).Info("Tool call reasoning")
-
-		newDescription, errResp := googletool.Param[string](call, "new_description")
-		if errResp != nil {
-			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("missing new_description parameter"))
-			return errResp
-		}
-
-		tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"new_description_length": len(newDescription)})
-
-		if err := validateDescription(newDescription); err != nil {
-			resp := googletool.Error(call, "%s", err)
-			tc.Complete(resp.Response, err)
-			return resp
-		}
-
-		if err := updateFn(ctx, newDescription); err != nil {
-			log.With("error", err).Error("Failed to update PR description")
-			resp := googletool.ErrorWithContext(call, err, map[string]any{"new_description_length": len(newDescription)})
-			tc.Complete(resp.Response, err)
-			return resp
-		}
-
-		result := map[string]any{
-			"success":         true,
-			"message":         "PR description updated successfully",
-			"description_len": len(newDescription),
-		}
-		tc.Complete(result, nil)
-		return &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result}
-	}
 }

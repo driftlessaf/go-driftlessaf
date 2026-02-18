@@ -7,11 +7,10 @@ package toolcall
 
 import (
 	"context"
+	"maps"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
-	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"github.com/chainguard-dev/clog"
 )
@@ -41,19 +40,9 @@ func NewFindingToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvid
 	return findingToolsProvider[Resp, T]{baseProvider: base}
 }
 
-func (p findingToolsProvider[Resp, T]) ClaudeTools(cb FindingTools[T]) map[string]claudetool.Metadata[Resp] {
-	tools := p.baseProvider.ClaudeTools(cb.base)
-	for name, t := range findingToolDefs[Resp](cb.FindingCallbacks) {
-		tools[name] = t.ClaudeMetadata()
-	}
-	return tools
-}
-
-func (p findingToolsProvider[Resp, T]) GoogleTools(cb FindingTools[T]) map[string]googletool.Metadata[Resp] {
-	tools := p.baseProvider.GoogleTools(cb.base)
-	for name, t := range findingToolDefs[Resp](cb.FindingCallbacks) {
-		tools[name] = t.GoogleMetadata()
-	}
+func (p findingToolsProvider[Resp, T]) Tools(cb FindingTools[T]) map[string]Tool[Resp] {
+	tools := p.baseProvider.Tools(cb.base)
+	maps.Copy(tools, findingToolDefs[Resp](cb.FindingCallbacks))
 	return tools
 }
 

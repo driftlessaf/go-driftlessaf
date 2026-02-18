@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"google.golang.org/genai"
 )
@@ -67,5 +68,68 @@ func ErrorWithContext(call *genai.FunctionCall, err error, context map[string]an
 		ID:       call.ID,
 		Name:     call.Name,
 		Response: params.ErrorWithContext(err, context),
+	}
+}
+
+// FromTool converts a unified tool to Google-specific metadata.
+func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
+	return Metadata[Resp]{
+		Definition: toolParam(t.Def),
+		Handler:    handler(t),
+	}
+}
+
+// Map converts a unified tool map to Google-specific metadata.
+func Map[Resp any](tools map[string]toolcall.Tool[Resp]) map[string]Metadata[Resp] {
+	m := make(map[string]Metadata[Resp], len(tools))
+	for name, t := range tools {
+		m[name] = FromTool(t)
+	}
+	return m
+}
+
+func toolParam(def toolcall.Definition) *genai.FunctionDeclaration {
+	props := make(map[string]*genai.Schema, len(def.Parameters))
+	var required []string
+	for _, p := range def.Parameters {
+		props[p.Name] = &genai.Schema{
+			Type:        genai.Type(p.Type),
+			Description: p.Description,
+		}
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+	return &genai.FunctionDeclaration{
+		Name:        def.Name,
+		Description: def.Description,
+		Parameters: &genai.Schema{
+			Type:       "object",
+			Properties: props,
+			Required:   required,
+		},
+	}
+}
+
+func handler[Resp any](t toolcall.Tool[Resp]) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
+	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], result *Resp) *genai.FunctionResponse {
+		tc := toolcall.ToolCall{
+			ID:   call.ID,
+			Name: call.Name,
+			Args: call.Args,
+		}
+		resp := t.Handler(ctx, tc, trace, result)
+		if resp == nil {
+			return &genai.FunctionResponse{
+				ID:       call.ID,
+				Name:     call.Name,
+				Response: map[string]any{},
+			}
+		}
+		return &genai.FunctionResponse{
+			ID:       call.ID,
+			Name:     call.Name,
+			Response: resp,
+		}
 	}
 }

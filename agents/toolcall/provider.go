@@ -5,18 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 package toolcall
 
-import (
-	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
-)
-
 // ToolProvider defines tools for an agent.
-// Implementations return provider-specific tool definitions.
+// Implementations return provider-independent tool definitions.
 // Compose providers by wrapping: Empty -> Worktree -> Finding.
+// Conversion to SDK-specific types happens downstream in the metaagent layer.
 type ToolProvider[Resp, CB any] interface {
-	// ClaudeTools returns tool definitions for Claude models.
-	ClaudeTools(cb CB) map[string]claudetool.Metadata[Resp]
-
-	// GoogleTools returns tool definitions for Gemini models.
-	GoogleTools(cb CB) map[string]googletool.Metadata[Resp]
+	// Tools returns unified tool definitions that work with any provider.
+	Tools(cb CB) map[string]Tool[Resp]
 }

@@ -12,6 +12,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
+	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
 )
@@ -54,6 +55,6 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {
-	tools := a.config.Tools.ClaudeTools(callbacks)
+	tools := claudetool.Map(a.config.Tools.Tools(callbacks))
 	return a.executor.Execute(ctx, request, tools)
 }

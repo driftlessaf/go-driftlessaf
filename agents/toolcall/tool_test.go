@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package toolcall
+package toolcall_test
 
 import (
 	"context"
@@ -11,27 +11,30 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/toolcall"
+	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
+	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 )
 
 func TestToolClaudeMetadata(t *testing.T) {
-	tool := Tool[string]{
-		Def: Definition{
+	tool := toolcall.Tool[string]{
+		Def: toolcall.Definition{
 			Name:        "test_tool",
 			Description: "A test tool",
-			Parameters: []Parameter{
+			Parameters: []toolcall.Parameter{
 				{Name: "input", Type: "string", Description: "The input", Required: true},
 				{Name: "count", Type: "integer", Description: "A count", Required: false},
 			},
 		},
-		Handler: func(_ context.Context, call ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
+		Handler: func(_ context.Context, call toolcall.ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
 			return map[string]any{"received": call.Args["input"]}
 		},
 	}
 
-	meta := tool.ClaudeMetadata()
+	meta := claudetool.FromTool(tool)
 
 	if meta.Definition.Name != "test_tool" {
 		t.Errorf("got name %q, want %q", meta.Definition.Name, "test_tool")
@@ -52,20 +55,20 @@ func TestToolClaudeMetadata(t *testing.T) {
 }
 
 func TestToolGoogleMetadata(t *testing.T) {
-	tool := Tool[string]{
-		Def: Definition{
+	tool := toolcall.Tool[string]{
+		Def: toolcall.Definition{
 			Name:        "test_tool",
 			Description: "A test tool",
-			Parameters: []Parameter{
+			Parameters: []toolcall.Parameter{
 				{Name: "input", Type: "string", Description: "The input", Required: true},
 			},
 		},
-		Handler: func(_ context.Context, _ ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
+		Handler: func(_ context.Context, _ toolcall.ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
 			return nil
 		},
 	}
 
-	meta := tool.GoogleMetadata()
+	meta := googletool.FromTool(tool)
 
 	if meta.Definition.Name != "test_tool" {
 		t.Errorf("got name %q, want %q", meta.Definition.Name, "test_tool")
@@ -80,14 +83,14 @@ func TestToolParam(t *testing.T) {
 	ctx := context.Background()
 	trace := agenttrace.StartTrace[string](ctx, "test")
 
-	call := ToolCall{
+	call := toolcall.ToolCall{
 		ID:   "test-1",
 		Name: "test_tool",
 		Args: map[string]any{"name": "hello", "count": float64(42)},
 	}
 
 	t.Run("string param", func(t *testing.T) {
-		v, errResp := Param[string](call, trace, "name")
+		v, errResp := toolcall.Param[string](call, trace, "name")
 		if errResp != nil {
 			t.Fatalf("unexpected error: %v", errResp)
 		}
@@ -97,7 +100,7 @@ func TestToolParam(t *testing.T) {
 	})
 
 	t.Run("int param from float64", func(t *testing.T) {
-		v, errResp := Param[int](call, trace, "count")
+		v, errResp := toolcall.Param[int](call, trace, "count")
 		if errResp != nil {
 			t.Fatalf("unexpected error: %v", errResp)
 		}
@@ -107,7 +110,7 @@ func TestToolParam(t *testing.T) {
 	})
 
 	t.Run("missing param", func(t *testing.T) {
-		_, errResp := Param[string](call, trace, "missing")
+		_, errResp := toolcall.Param[string](call, trace, "missing")
 		if errResp == nil {
 			t.Fatal("expected error for missing parameter")
 		}
@@ -115,14 +118,14 @@ func TestToolParam(t *testing.T) {
 }
 
 func TestToolOptionalParam(t *testing.T) {
-	call := ToolCall{
+	call := toolcall.ToolCall{
 		ID:   "test-1",
 		Name: "test_tool",
 		Args: map[string]any{"name": "hello"},
 	}
 
 	t.Run("present", func(t *testing.T) {
-		v, errResp := OptionalParam[string](call, "name", "default")
+		v, errResp := toolcall.OptionalParam[string](call, "name", "default")
 		if errResp != nil {
 			t.Fatalf("unexpected error: %v", errResp)
 		}
@@ -132,7 +135,7 @@ func TestToolOptionalParam(t *testing.T) {
 	})
 
 	t.Run("missing uses default", func(t *testing.T) {
-		v, errResp := OptionalParam[string](call, "missing", "default")
+		v, errResp := toolcall.OptionalParam[string](call, "missing", "default")
 		if errResp != nil {
 			t.Fatalf("unexpected error: %v", errResp)
 		}
@@ -143,20 +146,20 @@ func TestToolOptionalParam(t *testing.T) {
 }
 
 func TestClaudeHandlerParsesJSON(t *testing.T) {
-	tool := Tool[string]{
-		Def: Definition{
+	tool := toolcall.Tool[string]{
+		Def: toolcall.Definition{
 			Name:        "echo",
 			Description: "Echoes input",
-			Parameters: []Parameter{
+			Parameters: []toolcall.Parameter{
 				{Name: "msg", Type: "string", Description: "Message", Required: true},
 			},
 		},
-		Handler: func(_ context.Context, call ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
+		Handler: func(_ context.Context, call toolcall.ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
 			return map[string]any{"echo": call.Args["msg"]}
 		},
 	}
 
-	meta := tool.ClaudeMetadata()
+	meta := claudetool.FromTool(tool)
 	ctx := context.Background()
 	trace := agenttrace.StartTrace[string](ctx, "test")
 
@@ -175,18 +178,18 @@ func TestClaudeHandlerParsesJSON(t *testing.T) {
 }
 
 func TestGoogleHandlerNilResponse(t *testing.T) {
-	tool := Tool[string]{
-		Def: Definition{
+	tool := toolcall.Tool[string]{
+		Def: toolcall.Definition{
 			Name:        "noop",
 			Description: "Does nothing",
-			Parameters:  []Parameter{},
+			Parameters:  []toolcall.Parameter{},
 		},
-		Handler: func(_ context.Context, _ ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
+		Handler: func(_ context.Context, _ toolcall.ToolCall, _ *agenttrace.Trace[string], _ *string) map[string]any {
 			return nil
 		},
 	}
 
-	meta := tool.GoogleMetadata()
+	meta := googletool.FromTool(tool)
 	ctx := context.Background()
 	trace := agenttrace.StartTrace[string](ctx, "test")
 
