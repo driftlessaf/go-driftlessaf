@@ -65,19 +65,12 @@ func getFindingDetailsTool[Resp any](getDetails func(context.Context, callbacks.
 			Name:        "get_finding_details",
 			Description: "Get detailed information about a finding (CI failure, etc.) to understand what went wrong.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you need details about this finding.", Required: true},
 				{Name: "kind", Type: "string", Description: "The kind of finding (from the request's findings list)", Required: true},
 				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			kind, errResp := Param[string](call, trace, "kind")
 			if errResp != nil {
@@ -116,19 +109,12 @@ func getFindingLogsTool[Resp any](getLogs func(context.Context, callbacks.Findin
 			Name:        "get_finding_logs",
 			Description: "Fetch the full logs for a finding (e.g., GitHub Actions job logs). Use this to see the complete output of a failed CI check.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you need the logs for this finding.", Required: true},
 				{Name: "kind", Type: "string", Description: "The kind of finding (from the request's findings list)", Required: true},
 				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			kind, errResp := Param[string](call, trace, "kind")
 			if errResp != nil {

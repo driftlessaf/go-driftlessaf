@@ -59,8 +59,15 @@ func Map[Resp any](tools map[string]toolcall.Tool[Resp]) map[string]Metadata[Res
 }
 
 func toolParam(def toolcall.Definition) anthropic.ToolParam {
-	props := make(map[string]any, len(def.Parameters))
-	var required []string
+	props := make(map[string]any, len(def.Parameters)+1)
+	required := []string{"reasoning"}
+
+	// Auto-inject reasoning as the first parameter.
+	props["reasoning"] = map[string]any{
+		"type":        "string",
+		"description": "Explain why you are making this tool call and what you hope to accomplish.",
+	}
+
 	for _, p := range def.Parameters {
 		props[p.Name] = map[string]any{
 			"type":        p.Type,

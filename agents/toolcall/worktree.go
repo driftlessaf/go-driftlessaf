@@ -69,7 +69,6 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 			Name:        "read_file",
 			Description: "Read content from a file starting at a byte offset. Returns the content, next_offset to continue reading, and remaining bytes. Use list_directory to check file size before reading large files.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are reading this file.", Required: true},
 				{Name: "path", Type: "string", Description: "The path to the file to read (relative to repository root)", Required: true},
 				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0)", Required: false},
 				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). Pass -1 to read the entire file, but avoid this if you don't know the file size as it may be very large.", Required: false},
@@ -77,12 +76,6 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -122,7 +115,6 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 			Name:        "edit_file",
 			Description: "Edit a file by replacing exact text. The old_string must appear exactly once in the file unless replace_all is true. Use this instead of write_file for modifying existing files to avoid sending the entire file through context.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are making this edit.", Required: true},
 				{Name: "path", Type: "string", Description: "The path to the file to edit (relative to repository root)", Required: true},
 				{Name: "old_string", Type: "string", Description: "The exact text to find and replace. Maximum 32KB; use write_file for larger replacements.", Required: true},
 				{Name: "new_string", Type: "string", Description: "The replacement text. Pass an empty string to delete the matched text. Maximum 32KB; use write_file for larger replacements.", Required: true},
@@ -131,12 +123,6 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -178,7 +164,6 @@ func writeFileTool[Resp any](writeFile func(context.Context, string, string, os.
 			Name:        "write_file",
 			Description: "Create or overwrite a file. For targeted modifications to existing files, prefer edit_file to avoid sending the entire file through context.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are writing this file.", Required: true},
 				{Name: "path", Type: "string", Description: "The path to the file to write (relative to repository root)", Required: true},
 				{Name: "content", Type: "string", Description: "The complete content to write to the file", Required: true},
 				{Name: "executable", Type: "boolean", Description: "Whether the file should be executable (default: false)", Required: false},
@@ -186,12 +171,6 @@ func writeFileTool[Resp any](writeFile func(context.Context, string, string, os.
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -232,18 +211,11 @@ func deleteFileTool[Resp any](deleteFile func(context.Context, string) error) To
 			Name:        "delete_file",
 			Description: "Delete a file from the codebase.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are deleting this file.", Required: true},
 				{Name: "path", Type: "string", Description: "The path to the file to delete (relative to repository root)", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -272,19 +244,12 @@ func moveFileTool[Resp any](moveFile func(context.Context, string, string) error
 			Name:        "move_file",
 			Description: "Move or rename a file. No file content flows through context.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are moving this file.", Required: true},
 				{Name: "path", Type: "string", Description: "The source path (relative to repository root)", Required: true},
 				{Name: "destination", Type: "string", Description: "The destination path (relative to repository root)", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -318,19 +283,12 @@ func copyFileTool[Resp any](copyFile func(context.Context, string, string) error
 			Name:        "copy_file",
 			Description: "Copy a file. No file content flows through context.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are copying this file.", Required: true},
 				{Name: "path", Type: "string", Description: "The source path (relative to repository root)", Required: true},
 				{Name: "destination", Type: "string", Description: "The destination path (relative to repository root)", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -364,19 +322,12 @@ func chmodTool[Resp any](chmod func(context.Context, string, os.FileMode) error)
 			Name:        "chmod",
 			Description: "Change file permissions. Mode is an octal string like \"0755\" or \"0644\".",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are changing permissions.", Required: true},
 				{Name: "path", Type: "string", Description: "The path to the file (relative to repository root)", Required: true},
 				{Name: "mode", Type: "string", Description: "The file mode as an octal string (e.g., \"0755\", \"0644\")", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -416,19 +367,12 @@ func symlinkTool[Resp any](createSymlink func(context.Context, string, string) e
 			Name:        "symlink",
 			Description: "Create a symbolic link. The target should be a relative path.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are creating this symlink.", Required: true},
 				{Name: "path", Type: "string", Description: "Where to create the symlink (relative to repository root)", Required: true},
 				{Name: "target", Type: "string", Description: "What the symlink points to (relative path)", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -462,7 +406,6 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 			Name:        "list_directory",
 			Description: "List directory contents with ls -l style metadata (name, size, mode, type). Supports glob filtering with * wildcards or exact filename matching. Results are paginated.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why you are listing this directory.", Required: true},
 				{Name: "path", Type: "string", Description: "The path to the directory to list (relative to repository root, use '.' for root)", Required: true},
 				{Name: "filter", Type: "string", Description: "Filter entries by glob pattern (e.g., \"*.go\") or exact filename (e.g., \"main.go\"). Only * wildcards are supported.", Required: false},
 				{Name: "offset", Type: "integer", Description: "Number of entries to skip (default: 0)", Required: false},
@@ -471,12 +414,6 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			path, errResp := Param[string](call, trace, "path")
 			if errResp != nil {
@@ -510,7 +447,6 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 			Name:        "search_codebase",
 			Description: "Search for a regex pattern across files. Returns compact match pointers (path, byte offset, length) without content. Use read_file with the returned offset to view matches in context, padding the offset and limit as needed for surrounding context.",
 			Parameters: []Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain what you are searching for and why.", Required: true},
 				{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
 				{Name: "path", Type: "string", Description: "Directory to search within (relative to repository root, default: \".\")", Required: false},
 				{Name: "filter", Type: "string", Description: "File filter — glob with * wildcards (e.g., \"*.go\") or exact filename (e.g., \"Makefile\")", Required: false},
@@ -520,12 +456,6 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			pattern, errResp := Param[string](call, trace, "pattern")
 			if errResp != nil {

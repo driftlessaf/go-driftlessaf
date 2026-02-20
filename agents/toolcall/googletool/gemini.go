@@ -89,8 +89,15 @@ func Map[Resp any](tools map[string]toolcall.Tool[Resp]) map[string]Metadata[Res
 }
 
 func toolParam(def toolcall.Definition) *genai.FunctionDeclaration {
-	props := make(map[string]*genai.Schema, len(def.Parameters))
-	var required []string
+	props := make(map[string]*genai.Schema, len(def.Parameters)+1)
+	required := []string{"reasoning"}
+
+	// Auto-inject reasoning as the first parameter.
+	props["reasoning"] = &genai.Schema{
+		Type:        "string",
+		Description: "Explain why you are making this tool call and what you hope to accomplish.",
+	}
+
 	for _, p := range def.Parameters {
 		props[p.Name] = &genai.Schema{
 			Type:        genai.Type(p.Type),

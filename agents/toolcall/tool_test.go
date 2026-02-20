@@ -44,13 +44,18 @@ func TestToolClaudeMetadata(t *testing.T) {
 	if !ok {
 		t.Fatal("properties is not map[string]any")
 	}
-	if len(props) != 2 {
-		t.Errorf("got %d properties, want 2", len(props))
+	// 2 declared + 1 auto-injected "reasoning"
+	if len(props) != 3 {
+		t.Errorf("got %d properties, want 3", len(props))
+	}
+	if _, ok := props["reasoning"]; !ok {
+		t.Error("missing auto-injected reasoning property")
 	}
 
 	required := meta.Definition.InputSchema.Required
-	if len(required) != 1 || required[0] != "input" {
-		t.Errorf("got required %v, want [input]", required)
+	// "reasoning" is auto-injected first, then "input"
+	if len(required) != 2 || required[0] != "reasoning" || required[1] != "input" {
+		t.Errorf("got required %v, want [reasoning input]", required)
 	}
 }
 
@@ -74,8 +79,12 @@ func TestToolGoogleMetadata(t *testing.T) {
 		t.Errorf("got name %q, want %q", meta.Definition.Name, "test_tool")
 	}
 
-	if len(meta.Definition.Parameters.Properties) != 1 {
-		t.Errorf("got %d properties, want 1", len(meta.Definition.Parameters.Properties))
+	// 1 declared + 1 auto-injected "reasoning"
+	if len(meta.Definition.Parameters.Properties) != 2 {
+		t.Errorf("got %d properties, want 2", len(meta.Definition.Parameters.Properties))
+	}
+	if _, ok := meta.Definition.Parameters.Properties["reasoning"]; !ok {
+		t.Error("missing auto-injected reasoning property")
 	}
 }
 

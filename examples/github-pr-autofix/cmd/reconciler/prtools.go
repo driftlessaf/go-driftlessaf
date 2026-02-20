@@ -90,18 +90,11 @@ func updatePRTitleTool(updateFn func(context.Context, string) error) toolcall.To
 			Name:        "update_pr_title",
 			Description: updateTitleDescription,
 			Parameters: []toolcall.Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why this title change fixes the issue", Required: true},
 				{Name: "new_title", Type: "string", Description: "The new PR title in conventional commit format", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := toolcall.Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			newTitle, errResp := toolcall.Param[string](call, trace, "new_title")
 			if errResp != nil {
@@ -140,18 +133,11 @@ func updatePRDescriptionTool(updateFn func(context.Context, string) error) toolc
 			Name:        "update_pr_description",
 			Description: updateDescriptionDescription,
 			Parameters: []toolcall.Parameter{
-				{Name: "reasoning", Type: "string", Description: "Explain why this description change fixes the issue", Required: true},
 				{Name: "new_description", Type: "string", Description: "The new PR description", Required: true},
 			},
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
 			log := clog.FromContext(ctx)
-
-			reasoning, errResp := toolcall.Param[string](call, trace, "reasoning")
-			if errResp != nil {
-				return errResp
-			}
-			log.With("reasoning", reasoning).Info("Tool call reasoning")
 
 			newDescription, errResp := toolcall.Param[string](call, trace, "new_description")
 			if errResp != nil {

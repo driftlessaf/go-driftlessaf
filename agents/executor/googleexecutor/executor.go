@@ -343,7 +343,11 @@ func (e *executor[Request, Response]) Execute(
 			var toolResponseParts []*genai.Part
 
 			for _, call := range toolCalls {
-				log.With("tool", call.Name).With("id", call.ID).Info("Executing tool call")
+				l := log.With("tool", call.Name).With("id", call.ID)
+				for k, v := range call.Args {
+					l = l.With("args."+k, v)
+				}
+				l.Info("Executing tool call")
 
 				// Record tool call metric
 				e.recordToolCall(ctx, call.Name)

@@ -182,9 +182,15 @@ func (e *executor[Request, Response]) Execute(
 
 	// executeToolCall handles executing a single tool call and returning the result
 	executeToolCall := func(toolUse anthropic.ToolUseBlock) (anthropic.ContentBlockParamUnion, error) {
-		log.With("tool", toolUse.Name).
-			With("id", toolUse.ID).
-			Info("Executing tool call")
+		l := log.With("tool", toolUse.Name).
+			With("id", toolUse.ID)
+		var args map[string]any
+		if err := json.Unmarshal(toolUse.Input, &args); err == nil {
+			for k, v := range args {
+				l = l.With("args."+k, v)
+			}
+		}
+		l.Info("Executing tool call")
 
 		var result map[string]any
 
