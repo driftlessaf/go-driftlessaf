@@ -135,7 +135,7 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 
 // Upsert creates a new PR or updates an existing one with the provided properties.
 // It only calls makeChanges when refresh is needed: no existing PR, merge conflict,
-// CI failures (findings), or embedded data differs.
+// CI failures (only when WithFindingsIteration is enabled), or embedded data differs.
 // Returns a RequeueAfter error if GitHub is still computing the PR's mergeable status.
 // Returns an error if the skip label is present on the existing PR.
 func (s *Session[T]) Upsert(
@@ -268,8 +268,8 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error
 		return true, nil
 	}
 
-	// Check for CI failures that need addressing
-	if len(s.findings) > 0 {
+	// Check for CI failures that need addressing (only if the bot handles findings)
+	if s.manager.handlesFindings && len(s.findings) > 0 {
 		log.Info("PR has CI failures, refresh needed")
 		return true, nil
 	}

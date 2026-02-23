@@ -57,7 +57,9 @@ func newReconciler[CB any](
 		return nil, fmt.Errorf("parse body template: %w", err)
 	}
 
-	cm, err := changemanager.New[metareconciler.PRData](identity, titleTmpl, bodyTmpl)
+	cm, err := changemanager.New[metareconciler.PRData](identity, titleTmpl, bodyTmpl,
+		changemanager.WithFindingsIteration[metareconciler.PRData](),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create change manager: %w", err)
 	}

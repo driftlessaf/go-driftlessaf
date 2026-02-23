@@ -39,6 +39,16 @@ func WithRepo[T any](repo string) Option[T] {
 	}
 }
 
+// WithFindingsIteration configures the change manager to treat CI findings
+// as requiring a refresh. Use this for bots that can iterate on CI failures
+// (e.g. via an AI agent). Without this option, CI findings are ignored by
+// needsRefresh and Upsert will not re-invoke makeChanges.
+func WithFindingsIteration[T any]() Option[T] {
+	return func(cm *CM[T]) {
+		cm.handlesFindings = true
+	}
+}
+
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
@@ -48,6 +58,7 @@ type CM[T any] struct {
 	templateExecutor *internaltemplate.Template[T]
 	owner            string
 	repo             string
+	handlesFindings  bool
 }
 
 // GraphQL types for querying check runs
