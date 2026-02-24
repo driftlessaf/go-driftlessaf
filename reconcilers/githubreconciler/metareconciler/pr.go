@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v75/github"
@@ -51,7 +52,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 // findLinkedIssuesWithLabel queries for issues linked to a PR via "closes" keywords
 // and returns URLs for issues that have the specified label.
 func findLinkedIssuesWithLabel(ctx context.Context, gh *github.Client, owner, repo string, prNumber int, label string) ([]string, error) {
-	gqlClient := githubv4.NewClient(gh.Client())
+	gqlClient := graphqlclient.NewGraphQLClient(gh)
 
 	var query struct {
 		Repository struct {
@@ -76,7 +77,7 @@ func findLinkedIssuesWithLabel(ctx context.Context, gh *github.Client, owner, re
 		"number": githubv4.Int(prNumber),
 	}
 
-	if err := gqlClient.Query(ctx, &query, variables); err != nil {
+	if err := gqlClient.Query(ctx, "FindLinkedIssues", &query, variables); err != nil {
 		return nil, fmt.Errorf("graphql query: %w", err)
 	}
 

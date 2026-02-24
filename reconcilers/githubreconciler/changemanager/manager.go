@@ -14,6 +14,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
 	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v75/github"
@@ -209,7 +210,7 @@ func (cm *CM[T]) NewSession(
 	}
 
 	// Use GraphQL to fetch PR + check runs in a single query
-	gqlClient := githubv4.NewClient(client.Client())
+	gqlClient := graphqlclient.NewGraphQLClient(client)
 
 	var (
 		prNumber      int
@@ -256,7 +257,7 @@ func (cm *CM[T]) NewSession(
 		"baseRef": githubv4.String(ref),
 	}
 
-	if err := gqlClient.Query(ctx, &query, variables); err != nil {
+	if err := gqlClient.Query(ctx, "GetPRInfo", &query, variables); err != nil {
 		return nil, fmt.Errorf("querying pull request: %w", err)
 	}
 
@@ -359,7 +360,7 @@ func collectReviewFindings(headRefOid string, reviews gqlReviewsConnection) []ca
 // The check runs are pre-filtered by the GraphQL query to only include failures and pending runs.
 func (cm *CM[T]) collectFindings(
 	ctx context.Context,
-	gqlClient *githubv4.Client,
+	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha string,
 	initialSuites gqlCheckSuitesConnection,
 ) (findings []callbacks.Finding, pendingChecks []string) {
@@ -428,7 +429,7 @@ func (cm *CM[T]) collectFindings(
 // paginateFailedRuns fetches additional failed check runs for a suite.
 func (cm *CM[T]) paginateFailedRuns(
 	ctx context.Context,
-	gqlClient *githubv4.Client,
+	gqlClient *graphqlclient.GraphQLClient,
 	suiteID, cursor string,
 	processRuns func([]gqlCheckRunNode),
 ) {
@@ -452,7 +453,7 @@ func (cm *CM[T]) paginateFailedRuns(
 			"cursor":  githubv4.String(cursor),
 		}
 
-		if err := gqlClient.Query(ctx, &query, variables); err != nil {
+		if err := gqlClient.Query(ctx, "PaginateFailedRuns", &query, variables); err != nil {
 			clog.WarnContextf(ctx, "failed to paginate failed check runs: %v", err)
 			return // Skip on error
 		}
@@ -469,7 +470,7 @@ func (cm *CM[T]) paginateFailedRuns(
 // paginatePendingRuns fetches additional pending check runs for a suite.
 func (cm *CM[T]) paginatePendingRuns(
 	ctx context.Context,
-	gqlClient *githubv4.Client,
+	gqlClient *graphqlclient.GraphQLClient,
 	suiteID, cursor string,
 	processRuns func([]gqlCheckRunNode),
 ) {
@@ -493,7 +494,7 @@ func (cm *CM[T]) paginatePendingRuns(
 			"cursor":  githubv4.String(cursor),
 		}
 
-		if err := gqlClient.Query(ctx, &query, variables); err != nil {
+		if err := gqlClient.Query(ctx, "PaginatePendingRuns", &query, variables); err != nil {
 			clog.WarnContextf(ctx, "failed to paginate pending check runs: %v", err)
 			return // Skip on error
 		}
@@ -510,7 +511,7 @@ func (cm *CM[T]) paginatePendingRuns(
 // paginateCheckSuites fetches additional check suites for a commit.
 func (cm *CM[T]) paginateCheckSuites(
 	ctx context.Context,
-	gqlClient *githubv4.Client,
+	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha, cursor string,
 	processFailedRuns, processPendingRuns func([]gqlCheckRunNode),
 ) {
@@ -554,7 +555,7 @@ func (cm *CM[T]) paginateCheckSuites(
 			"cursor": githubv4.String(cursor),
 		}
 
-		if err := gqlClient.Query(ctx, &query, variables); err != nil {
+		if err := gqlClient.Query(ctx, "PaginateCheckSuites", &query, variables); err != nil {
 			return // Skip on error
 		}
 
