@@ -16,7 +16,7 @@ var (
 			Name: "github_graphql_operations_total",
 			Help: "Total GitHub GraphQL operations executed.",
 		},
-		[]string{"operation", "status", "response_code"},
+		[]string{"operation", "operation_type", "status", "response_code"},
 	)
 
 	mGraphQLDuration = promauto.NewHistogramVec(
@@ -25,6 +25,6 @@ var (
 			Help:    "Duration of GitHub GraphQL operations.",
 			Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		},
-		[]string{"operation"},
+		[]string{"operation", "operation_type"},
 	)
 )

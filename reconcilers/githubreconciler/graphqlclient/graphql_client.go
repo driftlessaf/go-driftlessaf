@@ -112,8 +112,8 @@ func (c *GraphQLClient) Query(ctx context.Context, operationName string, q any, 
 	if err != nil {
 		status = "error"
 	}
-	mGraphQLOperations.WithLabelValues(operationName, status, strconv.Itoa(code)).Inc()
-	mGraphQLDuration.WithLabelValues(operationName).Observe(time.Since(start).Seconds())
+	mGraphQLOperations.WithLabelValues(operationName, "query", status, strconv.Itoa(code)).Inc()
+	mGraphQLDuration.WithLabelValues(operationName, "query").Observe(time.Since(start).Seconds())
 
 	return err
 }
@@ -131,8 +131,8 @@ func (c *GraphQLClient) Mutate(ctx context.Context, operationName string, m any,
 	if err != nil {
 		status = "error"
 	}
-	mGraphQLOperations.WithLabelValues(operationName, status, strconv.Itoa(code)).Inc()
-	mGraphQLDuration.WithLabelValues(operationName).Observe(time.Since(start).Seconds())
+	mGraphQLOperations.WithLabelValues(operationName, "mutation", status, strconv.Itoa(code)).Inc()
+	mGraphQLDuration.WithLabelValues(operationName, "mutation").Observe(time.Since(start).Seconds())
 
 	return err
 }

@@ -59,12 +59,13 @@ func TestQuery_RecordsHTTPStatusCode(t *testing.T) {
 	}
 
 	got := counterValue(mGraphQLOperations, prometheus.Labels{
-		"operation":     "TestOp",
-		"status":        "success",
-		"response_code": "200",
+		"operation":      "TestOp",
+		"operation_type": "query",
+		"status":         "success",
+		"response_code":  "200",
 	})
 	if got != 1 {
-		t.Errorf("expected counter=1 for {operation=TestOp, status=success, response_code=200}, got %v", got)
+		t.Errorf("expected counter=1 for {operation=TestOp, operation_type=query, status=success, response_code=200}, got %v", got)
 	}
 }
 
@@ -82,12 +83,13 @@ func TestQuery_RecordsHTTPStatusCodeOnError(t *testing.T) {
 	}
 
 	got := counterValue(mGraphQLOperations, prometheus.Labels{
-		"operation":     "RateLimitedOp",
-		"status":        "error",
-		"response_code": "403",
+		"operation":      "RateLimitedOp",
+		"operation_type": "query",
+		"status":         "error",
+		"response_code":  "403",
 	})
 	if got != 1 {
-		t.Errorf("expected counter=1 for {operation=RateLimitedOp, status=error, response_code=403}, got %v", got)
+		t.Errorf("expected counter=1 for {operation=RateLimitedOp, operation_type=query, status=error, response_code=403}, got %v", got)
 	}
 }
 
@@ -113,12 +115,13 @@ func TestMutate_RecordsHTTPStatusCode(t *testing.T) {
 	}
 
 	got := counterValue(mGraphQLOperations, prometheus.Labels{
-		"operation":     "MutateOp",
-		"status":        "success",
-		"response_code": "200",
+		"operation":      "MutateOp",
+		"operation_type": "mutation",
+		"status":         "success",
+		"response_code":  "200",
 	})
 	if got != 1 {
-		t.Errorf("expected counter=1 for {operation=MutateOp, status=success, response_code=200}, got %v", got)
+		t.Errorf("expected counter=1 for {operation=MutateOp, operation_type=mutation, status=success, response_code=200}, got %v", got)
 	}
 }
 
@@ -192,11 +195,12 @@ func TestQuery_RecordsHTTPStatusCodeOnConnectionError(t *testing.T) {
 
 	// With no HTTP response, response_code should be "0"
 	got := counterValue(mGraphQLOperations, prometheus.Labels{
-		"operation":     "ConnFailOp",
-		"status":        "error",
-		"response_code": "0",
+		"operation":      "ConnFailOp",
+		"operation_type": "query",
+		"status":         "error",
+		"response_code":  "0",
 	})
 	if got != 1 {
-		t.Errorf("expected counter=1 for {operation=ConnFailOp, status=error, response_code=0}, got %v", got)
+		t.Errorf("expected counter=1 for {operation=ConnFailOp, operation_type=query, status=error, response_code=0}, got %v", got)
 	}
 }
