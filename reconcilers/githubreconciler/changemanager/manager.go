@@ -218,6 +218,7 @@ func (cm *CM[T]) NewSession(
 		prBody        string
 		prMergeable   *bool
 		prLabels      []string
+		prAssignees   []string
 		findings      []callbacks.Finding
 		pendingChecks []string
 	)
@@ -244,6 +245,11 @@ func (cm *CM[T]) NewSession(
 							}
 						}
 					} `graphql:"commits(last: 1)"`
+					Assignees struct {
+						Nodes []struct {
+							Login string
+						}
+					} `graphql:"assignees(first: 100)"`
 					Reviews gqlReviewsConnection `graphql:"reviews(first: 100)"`
 				}
 			} `graphql:"pullRequests(headRefName: $headRef, baseRefName: $baseRef, states: [OPEN], first: 1)"`
@@ -284,6 +290,11 @@ func (cm *CM[T]) NewSession(
 			prLabels = append(prLabels, label.Name)
 		}
 
+		// Extract assignee logins
+		for _, assignee := range pr.Assignees.Nodes {
+			prAssignees = append(prAssignees, assignee.Login)
+		}
+
 		// Collect all check runs, handling pagination
 		if len(pr.Commits.Nodes) > 0 {
 			commit := pr.Commits.Nodes[0].Commit
@@ -307,6 +318,7 @@ func (cm *CM[T]) NewSession(
 		prBody:        prBody,
 		prMergeable:   prMergeable,
 		prLabels:      prLabels,
+		prAssignees:   prAssignees,
 		findings:      findings,
 		pendingChecks: pendingChecks,
 	}, nil

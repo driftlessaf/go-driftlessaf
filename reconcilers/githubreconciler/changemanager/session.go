@@ -37,6 +37,7 @@ type Session[T any] struct {
 	prBody      string   // Body text of existing PR
 	prMergeable *bool    // nil if GitHub is still computing
 	prLabels    []string // Label names on existing PR
+	prAssignees []string // Login names of PR assignees
 
 	findings      []callbacks.Finding // CI failures detected on the existing PR
 	pendingChecks []string            // Names of checks that are not yet complete
@@ -47,13 +48,17 @@ func (s *Session[T]) skipLabel() string {
 	return "skip:" + s.manager.identity
 }
 
-// HasSkipLabel checks if the existing PR has a skip label.
+// ShouldSkip checks if the existing PR should be skipped.
+// Returns true if the PR has a skip label or is assigned to someone.
 // Returns false if no existing PR exists.
-func (s *Session[T]) HasSkipLabel() bool {
+func (s *Session[T]) ShouldSkip() bool {
 	if s.prNumber == 0 {
 		return false
 	}
-	return slices.Contains(s.prLabels, s.skipLabel())
+	if slices.Contains(s.prLabels, s.skipLabel()) {
+		return true
+	}
+	return len(s.prAssignees) > 0
 }
 
 // HasPendingChecks returns true if there are checks that are not yet complete.
@@ -137,7 +142,7 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 // It only calls makeChanges when refresh is needed: no existing PR, merge conflict,
 // CI failures (only when WithFindingsIteration is enabled), or embedded data differs.
 // Returns a RequeueAfter error if GitHub is still computing the PR's mergeable status.
-// Returns an error if the skip label is present on the existing PR.
+// Returns an error if the PR should be skipped (skip label or assigned to someone).
 func (s *Session[T]) Upsert(
 	ctx context.Context,
 	data *T,

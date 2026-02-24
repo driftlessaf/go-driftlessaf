@@ -33,8 +33,8 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	case err != nil:
 		return fmt.Errorf("create change session: %w", err)
 
-	case changeSession.HasSkipLabel():
-		log.Info("PR has skip label, not updating")
+	case changeSession.ShouldSkip():
+		log.Info("PR should be skipped, not updating")
 		return nil
 
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
