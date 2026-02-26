@@ -7,7 +7,7 @@ require (
 	chainguard.dev/go-grpc-kit v0.17.15
 	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v0.10.2
+	github.com/chainguard-dev/terraform-infra-common v0.10.0
 	github.com/go-git/go-git/v5 v5.16.5
 	github.com/google/go-github/v75 v75.0.0
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3
@@ -15,7 +15,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.65.0
 	golang.org/x/oauth2 v0.35.0
 	golang.org/x/tools v0.42.0
-	google.golang.org/grpc v1.79.1
+	google.golang.org/grpc v1.78.0
 )
 
 require (
@@ -116,7 +116,7 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/certificate-transparency-go v1.3.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/go-containerregistry v0.21.1 // indirect
+	github.com/google/go-containerregistry v0.21.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/pprof v0.0.0-20250602020802-c6617b811d0e // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
@@ -251,3 +251,7 @@ require (
 )
 
 replace chainguard.dev/driftlessaf => ../
+
+replace chainguard.dev/sdk => ../../../sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../../terraform-infra-common
