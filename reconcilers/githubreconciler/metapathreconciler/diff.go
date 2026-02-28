@@ -20,7 +20,7 @@ type parsedDiff struct {
 	// files is the list of changed file paths (new names, excluding deletions).
 	files []string
 	// ranges maps each file path to its changed line ranges.
-	ranges map[string][]changedLineRange
+	ranges map[string][]*changedLineRange
 }
 
 // parseDiff parses a unified diff string and returns the changed files and
@@ -33,7 +33,7 @@ func parseDiff(rawDiff string) (*parsedDiff, error) {
 	}
 
 	result := &parsedDiff{
-		ranges: make(map[string][]changedLineRange, len(diff.Files)),
+		ranges: make(map[string][]*changedLineRange, len(diff.Files)),
 	}
 	for _, f := range diff.Files {
 		// Skip deletions.
@@ -42,13 +42,19 @@ func parseDiff(rawDiff string) (*parsedDiff, error) {
 		}
 		result.files = append(result.files, f.NewName)
 		for _, h := range f.Hunks {
-			if len(h.NewRange.Lines) == 0 {
-				continue
+			var cur *changedLineRange
+			for _, l := range h.NewRange.Lines {
+				if l.Mode != diffparser.ADDED {
+					cur = nil
+					continue
+				}
+				if cur != nil && l.Number == cur.end+1 {
+					cur.end = l.Number
+				} else {
+					cur = &changedLineRange{start: l.Number, end: l.Number}
+					result.ranges[f.NewName] = append(result.ranges[f.NewName], cur)
+				}
 			}
-			result.ranges[f.NewName] = append(result.ranges[f.NewName], changedLineRange{
-				start: h.NewRange.Lines[0].Number,
-				end:   h.NewRange.Lines[len(h.NewRange.Lines)-1].Number,
-			})
 		}
 	}
 	return result, nil

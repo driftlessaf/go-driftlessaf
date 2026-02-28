@@ -342,8 +342,40 @@ index abc..def 100644
 	if pd.files[0] != "file.go" {
 		t.Errorf("files[0]: got = %q, wanted = %q", pd.files[0], "file.go")
 	}
+	// Three contiguous added lines should coalesce into a single range.
 	if len(pd.ranges["file.go"]) != 1 {
 		t.Fatalf("len(ranges[file.go]): got = %d, wanted = 1", len(pd.ranges["file.go"]))
+	}
+	if r := pd.ranges["file.go"][0]; r.start != 10 || r.end != 12 {
+		t.Errorf("ranges[file.go][0]: got = {%d, %d}, wanted = {10, 12}", r.start, r.end)
+	}
+}
+
+func TestParseDiffNonContiguous(t *testing.T) {
+	// Added lines separated by an unchanged line should produce separate ranges.
+	rawDiff := `diff --git a/file.go b/file.go
+index abc..def 100644
+--- a/file.go
++++ b/file.go
+@@ -10,4 +10,6 @@ func foo() {
++	addedA
+ 	existing
++	addedB1
++	addedB2
+ 	existing2
+`
+	pd, err := parseDiff(rawDiff)
+	if err != nil {
+		t.Fatalf("parseDiff: %v", err)
+	}
+	if len(pd.ranges["file.go"]) != 2 {
+		t.Fatalf("len(ranges[file.go]): got = %d, wanted = 2", len(pd.ranges["file.go"]))
+	}
+	if r := pd.ranges["file.go"][0]; r.start != 10 || r.end != 10 {
+		t.Errorf("ranges[file.go][0]: got = {%d, %d}, wanted = {10, 10}", r.start, r.end)
+	}
+	if r := pd.ranges["file.go"][1]; r.start != 12 || r.end != 13 {
+		t.Errorf("ranges[file.go][1]: got = {%d, %d}, wanted = {12, 13}", r.start, r.end)
 	}
 }
 
@@ -387,6 +419,46 @@ index abc..def 100644
 	}
 	if filtered[1].Line != 0 {
 		t.Errorf("filtered[1].Line: got = %d, wanted = 0", filtered[1].Line)
+	}
+}
+
+func TestFilterToChangedLinesExcludesContext(t *testing.T) {
+	// Regression test: context lines within a diff hunk must not match.
+	// This diff adds an import on line 19, with context lines around it.
+	rawDiff := `diff --git a/file.go b/file.go
+index abc..def 100644
+--- a/file.go
++++ b/file.go
+@@ -14,6 +14,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"strings"
++	"testing"
+
+ 	"example.com/pkg"
+ )
+`
+	pd, err := parseDiff(rawDiff)
+	if err != nil {
+		t.Fatalf("parseDiff: %v", err)
+	}
+
+	diagnostics := []Diagnostic{{
+		Path: "file.go", Line: 16, Message: "on context line", Rule: "r1",
+	}, {
+		Path: "file.go", Line: 17, Message: "on added line", Rule: "r2",
+	}, {
+		Path: "file.go", Line: 18, Message: "on context line after", Rule: "r3",
+	}}
+
+	filtered := filterToChangedLines(diagnostics, pd)
+
+	// Only line 17 (the added line) should pass through.
+	if len(filtered) != 1 {
+		t.Fatalf("len(filtered): got = %d, wanted = 1", len(filtered))
+	}
+	if filtered[0].Line != 17 {
+		t.Errorf("filtered[0].Line: got = %d, wanted = 17", filtered[0].Line)
 	}
 }
 
