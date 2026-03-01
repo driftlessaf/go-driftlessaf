@@ -47,7 +47,7 @@ func NewPRTools(gh *github.Client, owner, repo string, prNumber int) PRTools {
 // prToolsProvider implements toolcall.ToolProvider[*PRFixResult, PRTools].
 type prToolsProvider struct{}
 
-var _ toolcall.ToolProvider[*PRFixResult, PRTools] = prToolsProvider{}
+var _ toolcall.ToolProvider[*PRFixResult, PRTools] = (*prToolsProvider)(nil)
 
 // NewPRToolsProvider creates a new ToolProvider for PR tools.
 func NewPRToolsProvider() toolcall.ToolProvider[*PRFixResult, PRTools] {
