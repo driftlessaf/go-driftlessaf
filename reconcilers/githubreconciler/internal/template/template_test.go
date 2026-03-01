@@ -55,7 +55,7 @@ func Test_ExecuteTemplate(t *testing.T) {
 			result, err := executor.Execute(tmpl, tt.data)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Execute() error: got = %v, wantErr = %v", err, tt.wantErr)
+				t.Errorf("Execute() error: got = %v, wanted error = %v", err, tt.wantErr)
 				return
 			}
 
