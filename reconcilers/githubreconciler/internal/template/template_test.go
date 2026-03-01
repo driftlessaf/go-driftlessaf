@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 package template
 
 import (
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"text/template"
@@ -81,9 +83,9 @@ func Test_EmbedData(t *testing.T) {
 		identity:     "first-identity",
 		markerSuffix: "-data",
 		data: &testData{
-			Foo: "foo",
-			Bar: "bar",
-			Baz: "baz",
+			Foo: fmt.Sprintf("foo-%d", rand.Int63()),
+			Bar: fmt.Sprintf("bar-%d", rand.Int63()),
+			Baz: fmt.Sprintf("baz-%d", rand.Int63()),
 		},
 		wantMarker: "first-identity-data",
 		entityType: "entity",
@@ -93,9 +95,9 @@ func Test_EmbedData(t *testing.T) {
 		identity:     "second-identity",
 		markerSuffix: "-other-data",
 		data: &testData{
-			Foo: "bar",
-			Bar: "baz",
-			Baz: "foo",
+			Foo: fmt.Sprintf("foo-%d", rand.Int63()),
+			Bar: fmt.Sprintf("bar-%d", rand.Int63()),
+			Baz: fmt.Sprintf("baz-%d", rand.Int63()),
 		},
 		wantMarker: "second-identity-other-data",
 		entityType: "entity",
