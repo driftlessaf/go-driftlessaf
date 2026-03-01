@@ -38,13 +38,13 @@ func TestPRContextBind(t *testing.T) {
 
 	// Verify the bound content includes expected data
 	if !strings.Contains(result, "testorg") {
-		t.Error("bound prompt should contain owner")
+		t.Error("bound prompt: got = (missing owner), wanted = (contains owner)")
 	}
 	if !strings.Contains(result, "testrepo") {
-		t.Error("bound prompt should contain repo")
+		t.Error("bound prompt: got = (missing repo), wanted = (contains repo)")
 	}
 	if !strings.Contains(result, "fix bug") {
-		t.Error("bound prompt should contain title")
+		t.Error("bound prompt: got = (missing title), wanted = (contains title)")
 	}
 }
 
@@ -56,12 +56,12 @@ func TestPRFixResultFields(t *testing.T) {
 	}
 
 	if !result.Success {
-		t.Error("expected Success to be true")
+		t.Errorf("Success: got = %v, wanted = true", result.Success)
 	}
 	if len(result.FixesApplied) != 2 {
-		t.Errorf("expected 2 fixes, got %d", len(result.FixesApplied))
+		t.Errorf("FixesApplied count: got = %d, wanted = 2", len(result.FixesApplied))
 	}
 	if result.Reasoning != "Fixed both issues" {
-		t.Errorf("unexpected reasoning: %s", result.Reasoning)
+		t.Errorf("Reasoning: got = %q, wanted = %q", result.Reasoning, "Fixed both issues")
 	}
 }

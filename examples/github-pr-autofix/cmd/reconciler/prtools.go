@@ -177,7 +177,7 @@ func validateTitle(title string) error {
 		return fmt.Errorf("title must be under 72 characters, got %d", len(title))
 	}
 	if !prvalidation.ConventionalCommitRegex.MatchString(title) {
-		return fmt.Errorf("title does not match conventional commit format: %s", title)
+		return fmt.Errorf("title does not match conventional commit format: %q", title)
 	}
 	return nil
 }
