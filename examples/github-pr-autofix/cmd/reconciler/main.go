@@ -295,7 +295,7 @@ func getChangedFiles(ctx context.Context, gh *github.Client, owner, repo string,
 	if err != nil {
 		return nil, err
 	}
-	var filenames []string
+	filenames := make([]string, 0, len(files))
 	for _, f := range files {
 		filenames = append(filenames, f.GetFilename())
 	}
