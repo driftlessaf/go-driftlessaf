@@ -115,17 +115,17 @@ func Test_EmbedData(t *testing.T) {
 
 			// Verify the original body is present
 			if !strings.Contains(embedded, tt.body) {
-				t.Errorf("embedded body missing original content")
+				t.Errorf("original content: got = missing, wanted = present")
 			}
 
 			// Verify the markers are present
 			startMarker := "<!--" + tt.wantMarker + "-->"
 			endMarker := "<!--/" + tt.wantMarker + "-->"
 			if !strings.Contains(embedded, startMarker) {
-				t.Errorf("embedded body missing start marker: %s", startMarker)
+				t.Errorf("start marker: got = missing, wanted = %s", startMarker)
 			}
 			if !strings.Contains(embedded, endMarker) {
-				t.Errorf("embedded body missing end marker: %s", endMarker)
+				t.Errorf("end marker: got = missing, wanted = %s", endMarker)
 			}
 
 			// Verify we can extract the data back
@@ -268,9 +268,9 @@ func Test_ExtractData(t *testing.T) {
 			if tt.wantErr {
 				// Test error cases
 				if err == nil {
-					t.Error("Extract() should have failed")
+					t.Error("Extract() error: got = nil, wanted = error")
 				} else if !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Errorf("error message should contain %q: %v", tt.wantErrContains, err)
+					t.Errorf("error message: got = %v, wanted to contain %q", err, tt.wantErrContains)
 				}
 			} else {
 				// Test success cases
