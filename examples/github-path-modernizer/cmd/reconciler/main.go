@@ -47,7 +47,7 @@ import (
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-type config struct {
+var env = envconfig.MustProcess(context.Background(), &struct {
 	Port         int    `env:"PORT,default=8080"`
 	OctoIdentity string `env:"OCTO_IDENTITY,required"`
 	MetricsPort  int    `env:"METRICS_PORT,default=2112"`
@@ -56,7 +56,7 @@ type config struct {
 	// Model configuration
 	Model       string `env:"MODEL,default=gemini-2.5-flash"`
 	ModelRegion string `env:"MODEL_REGION"` // Defaults to detected GCP region
-}
+}{})
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -67,11 +67,6 @@ func main() {
 	defer httpmetrics.SetupTracer(ctx)()
 
 	log := clog.FromContext(ctx)
-
-	var cfg config
-	if err := envconfig.Process(ctx, &cfg); err != nil {
-		clog.FatalContextf(ctx, "failed to process config: %v", err)
-	}
 
 	// Detect project ID from GCP metadata
 	projectID, err := metadata.ProjectIDWithContext(ctx)
@@ -89,14 +84,14 @@ func main() {
 	log.With("region", defaultRegion).Info("Detected Google Cloud region")
 
 	// Use configured region or fall back to detected region
-	modelRegion := cfg.ModelRegion
+	modelRegion := env.ModelRegion
 	if modelRegion == "" {
 		modelRegion = defaultRegion
 	}
 
 	// Create GitHub client cache with Octo identity
 	clientCache := githubreconciler.NewClientCache(func(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
-		return githubreconciler.NewRepoTokenSource(ctx, cfg.OctoIdentity, org, repo), nil
+		return githubreconciler.NewRepoTokenSource(ctx, env.OctoIdentity, org, repo), nil
 	})
 
 	// Create gitsign signer for signed commits
@@ -107,8 +102,8 @@ func main() {
 
 	// Create the clone manager meta for caching clone managers per repo
 	cloneMeta := clonemanager.NewMeta(ctx, func(ctx context.Context, owner, repo string) (oauth2.TokenSource, error) {
-		return githubreconciler.NewRepoTokenSource(ctx, cfg.OctoIdentity, owner, repo), nil
-	}, cfg.OctoIdentity, signer)
+		return githubreconciler.NewRepoTokenSource(ctx, env.OctoIdentity, owner, repo), nil
+	}, env.OctoIdentity, signer)
 
 	// Configure agent tools and callbacks using composition: Empty -> Worktree -> Finding
 	type modernizerTools = toolcall.FindingTools[toolcall.WorktreeTools[toolcall.EmptyTools]]
@@ -129,9 +124,9 @@ func main() {
 	}
 
 	// Create the modernizer agent
-	log.With("model", cfg.Model, "region", modelRegion).
+	log.With("model", env.Model, "region", modelRegion).
 		Info("Initializing modernizer agent")
-	agent, err := newAgent(ctx, projectID, modelRegion, cfg.Model, tools)
+	agent, err := newAgent(ctx, projectID, modelRegion, env.Model, tools)
 	if err != nil {
 		clog.FatalContextf(ctx, "failed to create modernizer agent: %v", err)
 	}
@@ -139,10 +134,10 @@ func main() {
 	// Create the reconciler
 	rec, err := newReconciler(
 		ctx,
-		cfg.OctoIdentity,
+		env.OctoIdentity,
 		agent,
 		cloneMeta,
-		[]string{cfg.OctoIdentity + "/managed"},
+		[]string{env.OctoIdentity + "/managed"},
 		buildCallbacks,
 	)
 	if err != nil {
@@ -151,7 +146,7 @@ func main() {
 
 	// Create duplex server (HTTP + gRPC on same port) with metrics and tracing
 	d := duplex.New(
-		cfg.Port,
+		env.Port,
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainStreamInterceptor(kmetrics.StreamServerInterceptor()),
 		grpc.ChainUnaryInterceptor(
@@ -170,13 +165,13 @@ func main() {
 	))
 
 	// Register prometheus handle
-	d.RegisterListenAndServeMetrics(cfg.MetricsPort, cfg.EnablePprof)
+	d.RegisterListenAndServeMetrics(env.MetricsPort, env.EnablePprof)
 
 	// Register health check handler
 	healthgrpc.RegisterHealthServer(d.Server, health.NewServer())
 
 	// Start the server
-	log.With("port", cfg.Port).Info("Starting modernizer reconciler")
+	log.With("port", env.Port).Info("Starting modernizer reconciler")
 	if err := d.ListenAndServe(ctx); err != nil {
 		clog.FatalContextf(ctx, "server failed: %v", err)
 	}
