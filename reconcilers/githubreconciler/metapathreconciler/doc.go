@@ -39,9 +39,12 @@ SPDX-License-Identifier: Apache-2.0
 //	        if err != nil {
 //	            return MyCallbacks{}, fmt.Errorf("get worktree: %w", err)
 //	        }
-//	        return toolcall.NewFindingTools(
-//	            toolcall.NewWorktreeTools(toolcall.EmptyTools{}, clonemanager.WorktreeCallbacks(wt)),
-//	            session.FindingCallbacks(),
+//	        return toolcall.NewHistoryTools(
+//	            toolcall.NewFindingTools(
+//	                toolcall.NewWorktreeTools(toolcall.EmptyTools{}, clonemanager.WorktreeCallbacks(wt)),
+//	                session.FindingCallbacks(),
+//	            ),
+//	            clonemanager.HistoryCallbacks(lease.Repo(), plumbing.NewHash(session.BaseSHA())),
 //	        ), nil
 //	    },
 //	)

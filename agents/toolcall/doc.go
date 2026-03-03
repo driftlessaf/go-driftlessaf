@@ -5,8 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 // Package toolcall defines composable tool providers for AI agents.
 //
-// This package provides a layered tool composition system for AI agent file and finding
-// operations. Tools are composed using generics: Empty -> Worktree -> Finding.
+// This package provides a layered tool composition system for AI agent file, finding,
+// and history operations. Tools are composed using generics:
+// Empty -> Worktree -> Finding -> History.
 //
 // Callback types (WorktreeCallbacks, FindingCallbacks, etc.) are defined in the
 // toolcall/callbacks subpackage. This separation allows packages that only need
@@ -26,10 +27,18 @@ SPDX-License-Identifier: Apache-2.0
 //		GetLogs: func(ctx context.Context, kind callbacks.FindingKind, id string) (string, error) { ... },
 //	}
 //
-//	// Compose tools: Empty -> Worktree -> Finding
-//	tools := toolcall.NewFindingTools(
-//		toolcall.NewWorktreeTools(toolcall.EmptyTools{}, wt),
-//		fc,
+//	hc := callbacks.HistoryCallbacks{
+//		ListCommits: func(ctx context.Context, offset, limit int) (callbacks.CommitListResult, error) { ... },
+//		GetFileDiff: func(ctx context.Context, path, start, end string, offset int64, limit int) (callbacks.FileDiffResult, error) { ... },
+//	}
+//
+//	// Compose tools: Empty -> Worktree -> Finding -> History
+//	tools := toolcall.NewHistoryTools(
+//		toolcall.NewFindingTools(
+//			toolcall.NewWorktreeTools(toolcall.EmptyTools{}, wt),
+//			fc,
+//		),
+//		hc,
 //	)
 //
 // # Tool Providers
@@ -50,4 +59,5 @@ SPDX-License-Identifier: Apache-2.0
 // Factory functions for callbacks are provided by other packages:
 //   - WorktreeCallbacks: clonemanager.WorktreeCallbacks(worktree)
 //   - FindingCallbacks: session.FindingCallbacks()
+//   - HistoryCallbacks: clonemanager.HistoryCallbacks(repo, baseCommit)
 package toolcall

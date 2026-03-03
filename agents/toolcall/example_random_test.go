@@ -100,7 +100,8 @@ var _ = func() {
 	base := NewEmptyToolsProvider[*Response]()
 	wtProvider := NewWorktreeToolsProvider[*Response, EmptyTools](base)
 	findingProvider := NewFindingToolsProvider[*Response, WorktreeTools[EmptyTools]](wtProvider)
-	exampleProvider := NewExampleToolsProvider[*Response, FindingTools[WorktreeTools[EmptyTools]]](findingProvider)
+	historyProvider := NewHistoryToolsProvider[*Response, FindingTools[WorktreeTools[EmptyTools]]](findingProvider)
+	exampleProvider := NewExampleToolsProvider[*Response, HistoryTools[FindingTools[WorktreeTools[EmptyTools]]]](historyProvider)
 
 	wt := callbacks.WorktreeCallbacks{
 		ReadFile: func(_ context.Context, _ string, _ int64, _ int) (callbacks.ReadResult, error) {
@@ -126,7 +127,15 @@ var _ = func() {
 		GetDetails: func(_ context.Context, _ callbacks.FindingKind, _ string) (string, error) { return "", nil },
 		GetLogs:    func(_ context.Context, _ callbacks.FindingKind, _ string) (string, error) { return "", nil },
 	}
-	tools := NewExampleTools(NewFindingTools(NewWorktreeTools(EmptyTools{}, wt), fc))
+	hc := callbacks.HistoryCallbacks{
+		ListCommits: func(_ context.Context, _, _ int) (callbacks.CommitListResult, error) {
+			return callbacks.CommitListResult{}, nil
+		},
+		GetFileDiff: func(_ context.Context, _, _, _ string, _ int64, _ int) (callbacks.FileDiffResult, error) {
+			return callbacks.FileDiffResult{}, nil
+		},
+	}
+	tools := NewExampleTools(NewHistoryTools(NewFindingTools(NewWorktreeTools(EmptyTools{}, wt), fc), hc))
 
 	// Provider returns unified tools that work with any provider.
 	_ = exampleProvider.Tools(tools)

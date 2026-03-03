@@ -41,5 +41,18 @@ FindingCallbacks provides access to CI failure information:
 			// Fetch and return logs for the finding
 		},
 	}
+
+# History Callbacks
+
+HistoryCallbacks provides access to commit history and file diffs:
+
+	cb := callbacks.HistoryCallbacks{
+		ListCommits: func(ctx context.Context, offset, limit int) (CommitListResult, error) {
+			// List commits since base ref with pagination
+		},
+		GetFileDiff: func(ctx context.Context, path, start, end string, offset int64, limit int) (FileDiffResult, error) {
+			// Return paginated unified diff for a file over a commit range
+		},
+	}
 */
 package callbacks
