@@ -85,7 +85,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 		log.With("path", path, "url", pathURL).Info("Re-queuing path from managed PR")
 		return workqueue.QueueKeys(workqueue.QueueKey{
 			Key:      pathURL,
-			Priority: 50, // Elevate the priority to prioritize acting on existing PRs over creating new ones.
+			Priority: 300, // Highest priority: completing existing PRs is more important than creating new ones.
 		})
 	}
 
