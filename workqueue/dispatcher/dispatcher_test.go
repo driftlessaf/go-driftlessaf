@@ -382,7 +382,7 @@ func TestHandleAsync_QueueKeysBasic(t *testing.T) {
 	wantKeys := []string{"child1", "child2"}
 	for i, want := range wantKeys {
 		if queued[i].key != want {
-			t.Errorf("queued[%d].key = %q, want %q", i, queued[i].key, want)
+			t.Errorf("queued[%d].key: got = %q, wanted = %q", i, queued[i].key, want)
 		}
 	}
 }
@@ -411,10 +411,10 @@ func TestHandleAsync_QueueKeysWithPriority(t *testing.T) {
 
 	// Verify priorities were passed correctly
 	if queued[0].opts.Priority != 100 {
-		t.Errorf("queued[0].opts.Priority = %d, want 100", queued[0].opts.Priority)
+		t.Errorf("queued[0].opts.Priority: got = %d, wanted = 100", queued[0].opts.Priority)
 	}
 	if queued[1].opts.Priority != 10 {
-		t.Errorf("queued[1].opts.Priority = %d, want 10", queued[1].opts.Priority)
+		t.Errorf("queued[1].opts.Priority: got = %d, wanted = 10", queued[1].opts.Priority)
 	}
 }
 
@@ -449,10 +449,10 @@ func TestHandleAsync_QueueKeysWithDelay(t *testing.T) {
 	maxNotBefore := after.Add(time.Duration(delaySeconds) * time.Second)
 
 	if queued[0].opts.NotBefore.Before(expectedNotBefore) {
-		t.Errorf("NotBefore too early: got = %v, want >= %v", queued[0].opts.NotBefore, expectedNotBefore)
+		t.Errorf("NotBefore too early: got = %v, wanted >= %v", queued[0].opts.NotBefore, expectedNotBefore)
 	}
 	if queued[0].opts.NotBefore.After(maxNotBefore) {
-		t.Errorf("NotBefore too late: got = %v, want <= %v", queued[0].opts.NotBefore, maxNotBefore)
+		t.Errorf("NotBefore too late: got = %v, wanted <= %v", queued[0].opts.NotBefore, maxNotBefore)
 	}
 }
 
@@ -514,7 +514,7 @@ func TestHandleAsync_QueueKeysSelf(t *testing.T) {
 		t.Fatalf("expected 1 key to be queued, got %d", len(queued))
 	}
 	if queued[0].key != "self-requeue" {
-		t.Errorf("queued key = %q, want %q", queued[0].key, "self-requeue")
+		t.Errorf("queued key: got = %q, wanted = %q", queued[0].key, "self-requeue")
 	}
 }
 
@@ -549,7 +549,7 @@ func TestHandleAsync_QueueKeysAndChildren(t *testing.T) {
 	wantKeys := []string{"child1", "child2", "parent"}
 	for i, want := range wantKeys {
 		if queued[i].key != want {
-			t.Errorf("queued[%d].key = %q, want %q", i, queued[i].key, want)
+			t.Errorf("queued[%d].key: got = %q, wanted = %q", i, queued[i].key, want)
 		}
 	}
 }
@@ -589,7 +589,7 @@ func TestHandleAsync_QueueKeysFailure(t *testing.T) {
 		t.Fatalf("expected 1 key to be queued before failure, got %d", len(queued))
 	}
 	if queued[0].key != "child1" {
-		t.Errorf("queued key = %q, want %q", queued[0].key, "child1")
+		t.Errorf("queued key: got = %q, wanted = %q", queued[0].key, "child1")
 	}
 }
 
@@ -693,7 +693,7 @@ func TestServiceCallback_RequeueAfter(t *testing.T) {
 		t.Fatal("expected RequeueAfter error")
 	}
 	if delay != 30*time.Second {
-		t.Errorf("delay = %v, want 30s", delay)
+		t.Errorf("delay: got = %v, wanted = 30s", delay)
 	}
 
 	// Should NOT have queue keys

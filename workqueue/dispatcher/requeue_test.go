@@ -82,15 +82,15 @@ func TestRequeueWithDelay(t *testing.T) {
 			if tt.wantCompleted {
 				// Should not be in WIP or queued
 				if len(wip) > 0 {
-					t.Errorf("Expected no WIP items, got %d", len(wip))
+					t.Errorf("WIP items: got = %d, wanted = 0", len(wip))
 				}
 				if len(queued) > 0 {
-					t.Errorf("Expected no queued items, got %d", len(queued))
+					t.Errorf("queued items: got = %d, wanted = 0", len(queued))
 				}
 			} else if tt.wantRequeued {
 				// Should be requeued but with a delay, so it won't show up in Enumerate yet
 				if len(wip) > 0 {
-					t.Errorf("Expected no WIP items after requeue, got %d", len(wip))
+					t.Errorf("WIP items after requeue: got = %d, wanted = 0", len(wip))
 				}
 
 				// The item should be queued but not visible due to the delay
