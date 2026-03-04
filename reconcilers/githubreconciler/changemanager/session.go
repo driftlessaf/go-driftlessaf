@@ -38,6 +38,8 @@ const (
 	StateHasFindings
 	// StatePending indicates CI checks are still running.
 	StatePending
+	// StateMaxCommits indicates the PR has reached the maximum number of commits.
+	StateMaxCommits
 )
 
 // HasPR returns true if a PR exists.
@@ -54,6 +56,9 @@ func (s State) HasFindings() bool { return s&StateHasFindings != 0 }
 
 // HasPendingChecks returns true if CI checks are still running.
 func (s State) HasPendingChecks() bool { return s&StatePending != 0 }
+
+// HitMaxCommits returns true if the PR has reached the maximum commit limit.
+func (s State) HitMaxCommits() bool { return s&StateMaxCommits != 0 }
 
 // HasNoConflicts returns true if the PR exists, has no merge conflicts,
 // and mergeability is known.
@@ -80,6 +85,7 @@ type Session[T any] struct {
 	prAssignees []string // Login names of PR assignees
 	baseSHA     string   // SHA of the base branch tip from the PR
 
+	commitCount   int                 // Total number of commits on the PR
 	findings      []callbacks.Finding // CI failures detected on the existing PR
 	pendingChecks []string            // Names of checks that are not yet complete
 }
@@ -115,6 +121,9 @@ func (s *Session[T]) State() State {
 	case !*s.prMergeable:
 		state |= StateNeedsRebase
 	}
+	if s.manager.maxCommits > 0 && s.commitCount >= s.manager.maxCommits {
+		state |= StateMaxCommits
+	}
 	if s.manager.handlesFindings && len(s.findings) > 0 {
 		state |= StateHasFindings
 	}
@@ -133,6 +142,24 @@ func (s *Session[T]) BaseSHA() string {
 // PendingChecks returns the names of checks that are not yet complete.
 func (s *Session[T]) PendingChecks() []string {
 	return s.pendingChecks
+}
+
+// ApplyTurnLimit adds the skip label and a turn-limit label to the PR,
+// preventing further automated iterations. Returns the PR URL.
+// This is a no-op if no PR exists.
+func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
+	if s.prNumber == 0 {
+		return "", nil
+	}
+	log := clog.FromContext(ctx)
+	log.With("pr", s.prNumber, "commits", s.commitCount, "max", s.manager.maxCommits).
+		Info("PR hit turn limit, adding skip and turn-limit labels")
+
+	labels := []string{s.skipLabel(), s.manager.identity + "/turn-limit"}
+	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, labels); err != nil {
+		return "", fmt.Errorf("adding turn-limit labels: %w", err)
+	}
+	return s.prURL, nil
 }
 
 // CloseAnyOutstanding closes the existing PR if one exists.

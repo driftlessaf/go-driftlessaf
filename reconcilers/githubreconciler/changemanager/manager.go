@@ -50,6 +50,16 @@ func WithFindingsIteration[T any]() Option[T] {
 	}
 }
 
+// WithMaxCommits sets the maximum number of commits allowed on a PR before
+// the session reports StateMaxCommits. Each commit triggers a CI run, so this
+// limits how many times the bot can iterate on a PR. A value of 0 (default)
+// means no limit.
+func WithMaxCommits[T any](n int) Option[T] {
+	return func(cm *CM[T]) {
+		cm.maxCommits = n
+	}
+}
+
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
@@ -60,6 +70,7 @@ type CM[T any] struct {
 	owner            string
 	repo             string
 	handlesFindings  bool
+	maxCommits       int
 }
 
 // GraphQL types for querying check runs
@@ -220,6 +231,7 @@ func (cm *CM[T]) NewSession(
 		prLabels      []string
 		prAssignees   []string
 		baseSHA       string
+		commitCount   int
 		findings      []callbacks.Finding
 		pendingChecks []string
 	)
@@ -241,7 +253,8 @@ func (cm *CM[T]) NewSession(
 						}
 					} `graphql:"labels(first: 100)"`
 					Commits struct {
-						Nodes []struct {
+						TotalCount int
+						Nodes      []struct {
 							Commit struct {
 								CheckSuites gqlCheckSuitesConnection `graphql:"checkSuites(first: 100)"`
 							}
@@ -298,6 +311,8 @@ func (cm *CM[T]) NewSession(
 			prAssignees = append(prAssignees, assignee.Login)
 		}
 
+		commitCount = pr.Commits.TotalCount
+
 		// Collect all check runs, handling pagination
 		if len(pr.Commits.Nodes) > 0 {
 			commit := pr.Commits.Nodes[0].Commit
@@ -323,6 +338,7 @@ func (cm *CM[T]) NewSession(
 		prLabels:      prLabels,
 		prAssignees:   prAssignees,
 		baseSHA:       baseSHA,
+		commitCount:   commitCount,
 		findings:      findings,
 		pendingChecks: pendingChecks,
 	}, nil

@@ -41,6 +41,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		log.Info("PR should be skipped, not updating")
 		return nil
 
+	case state.HitMaxCommits():
+		log.Info("PR hit turn limit, adding skip label")
+		_, err := changeSession.ApplyTurnLimit(ctx)
+		return err
+
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		log.With("required_label", r.requiredLabel).Info("Issue missing required label, closing any outstanding PRs")
 		return changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue no longer has the required label.")
