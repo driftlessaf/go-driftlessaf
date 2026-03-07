@@ -78,7 +78,7 @@ func getTestModel() string {
 }
 
 func TestExecutorWithThinking(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Detect project ID
 	projectID := detectProjectID(ctx, t)
