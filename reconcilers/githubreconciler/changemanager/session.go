@@ -170,8 +170,7 @@ func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) er
 		return nil
 	}
 
-	log := clog.FromContext(ctx)
-	log.Infof("Closing PR #%d", s.prNumber)
+	clog.InfoContextf(ctx, "Closing PR #%d", s.prNumber)
 
 	// Post message as a comment if provided
 	if message != "" {
@@ -235,8 +234,6 @@ func (s *Session[T]) Upsert(
 	labels []string,
 	makeChanges func(ctx context.Context, branchName string) error,
 ) (prURL string, err error) {
-	log := clog.FromContext(ctx)
-
 	// Check if refresh is needed
 	needsRefresh, err := s.needsRefresh(ctx, data)
 	if err != nil {
@@ -244,7 +241,7 @@ func (s *Session[T]) Upsert(
 	}
 
 	if !needsRefresh {
-		log.Info("PR is up to date, no refresh needed")
+		clog.InfoContext(ctx, "PR is up to date, no refresh needed")
 		return s.prURL, nil
 	}
 
@@ -274,7 +271,7 @@ func (s *Session[T]) Upsert(
 
 	if s.prNumber == 0 {
 		// Create new PR
-		log.Infof("Creating new PR with head %s and base %s", s.branchName, s.ref)
+		clog.InfoContextf(ctx, "Creating new PR with head %s and base %s", s.branchName, s.ref)
 
 		pr, _, err := s.client.PullRequests.Create(ctx, s.owner, s.repo, &github.NewPullRequest{
 			Title: github.Ptr(title),
@@ -294,12 +291,12 @@ func (s *Session[T]) Upsert(
 			}
 		}
 
-		log.Infof("Created PR #%d: %s", pr.GetNumber(), pr.GetHTMLURL())
+		clog.InfoContextf(ctx, "Created PR #%d: %s", pr.GetNumber(), pr.GetHTMLURL())
 		return pr.GetHTMLURL(), nil
 	}
 
 	// Update existing PR
-	log.Infof("Updating existing PR #%d", s.prNumber)
+	clog.InfoContextf(ctx, "Updating existing PR #%d", s.prNumber)
 
 	// Refetch PR to check for skip label (could have been added since session creation)
 	freshPR, _, err := s.client.PullRequests.Get(ctx, s.owner, s.repo, s.prNumber)
@@ -329,7 +326,7 @@ func (s *Session[T]) Upsert(
 		return "", fmt.Errorf("replacing labels: %w", err)
 	}
 
-	log.Infof("Updated PR #%d: %s", s.prNumber, s.prURL)
+	clog.InfoContextf(ctx, "Updated PR #%d: %s", s.prNumber, s.prURL)
 	return s.prURL, nil
 }
 
@@ -337,14 +334,13 @@ func (s *Session[T]) Upsert(
 // Uses State() for mergeability and CI checks, then falls through to
 // embedded data comparison for the remaining cases.
 func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error) {
-	log := clog.FromContext(ctx)
 	state := s.State()
 
 	switch {
 	case !state.HasPR(), state.NeedsRebase(), state.HasFindings():
 		return true, nil
 	case state.IsUnknown():
-		log.Info("PR mergeable status is still being computed by GitHub, requeueing")
+		clog.InfoContext(ctx, "PR mergeable status is still being computed by GitHub, requeueing")
 		return false, workqueue.RequeueAfter(5 * time.Minute)
 	}
 
@@ -354,22 +350,22 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error
 	// the comparison.
 	existing, err := s.manager.templateExecutor.Extract(s.prBody)
 	if err != nil {
-		log.Warnf("Failed to extract data from PR body: %v", err)
+		clog.WarnContextf(ctx, "Failed to extract data from PR body: %v", err)
 		return true, nil
 	}
 
 	existingJSON, err := json.Marshal(existing)
 	if err != nil {
-		log.Warnf("Failed to marshal existing data: %v", err)
+		clog.WarnContextf(ctx, "Failed to marshal existing data: %v", err)
 		return true, nil
 	}
 	expectedJSON, err := json.Marshal(expected)
 	if err != nil {
-		log.Warnf("Failed to marshal expected data: %v", err)
+		clog.WarnContextf(ctx, "Failed to marshal expected data: %v", err)
 		return true, nil
 	}
 	if !bytes.Equal(existingJSON, expectedJSON) {
-		log.Infof("PR data differs, refresh needed: existing=%s expected=%s", existingJSON, expectedJSON)
+		clog.InfoContextf(ctx, "PR data differs, refresh needed: existing=%s expected=%s", existingJSON, expectedJSON)
 		return true, nil
 	}
 
