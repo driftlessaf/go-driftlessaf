@@ -21,7 +21,7 @@ func TestMetricsObserver(t *testing.T) {
 
 	// Test initial state
 	if observer.Total() != 0 {
-		t.Errorf("Expected initial count to be 0, got %d", observer.Total())
+		t.Errorf("initial count: got = %d, wanted = 0", observer.Total())
 	}
 
 	// Test increment
@@ -81,19 +81,19 @@ func TestMetricsObserver(t *testing.T) {
 	if !foundEval {
 		t.Error("Evaluation counter metric not found")
 	} else if evalTotal != 1 {
-		t.Errorf("Expected evaluation counter to be 1, got %f", evalTotal)
+		t.Errorf("evaluation counter: got = %f, wanted = 1", evalTotal)
 	}
 
 	if !foundFail {
 		t.Error("Failure counter metric not found")
 	} else if failTotal != 1 {
-		t.Errorf("Expected failure counter to be 1, got %f", failTotal)
+		t.Errorf("failure counter: got = %f, wanted = 1", failTotal)
 	}
 
 	if !foundGrade {
 		t.Error("Grade gauge metric not found")
 	} else if gradeValue != 0.85 {
-		t.Errorf("Expected grade gauge to be 0.85, got %f", gradeValue)
+		t.Errorf("grade gauge: got = %f, wanted = 0.85", gradeValue)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestMetricsObserver_TracerTypeFormatting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			observer := tc.observerFunc().(*MetricsObserver)
 			if observer.tracerType != tc.expectedType {
-				t.Errorf("Expected tracer type %q, got %q", tc.expectedType, observer.tracerType)
+				t.Errorf("tracer type: got = %q, wanted = %q", observer.tracerType, tc.expectedType)
 			}
 		})
 	}
@@ -153,6 +153,6 @@ func TestMetricsObserver_Concurrency(t *testing.T) {
 
 	// Total always returns 0 for MetricsObserver
 	if observer.Total() != 0 {
-		t.Errorf("Expected total to be 0, got %d", observer.Total())
+		t.Errorf("total: got = %d, wanted = 0", observer.Total())
 	}
 }
