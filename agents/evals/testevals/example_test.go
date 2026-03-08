@@ -15,11 +15,8 @@ import (
 
 // ExampleNew demonstrates creating a basic testing observer.
 func ExampleNew() {
-	// This would typically be called within a test function
-	t := &testing.T{}
-
 	// Create a basic observer from a *testing.T
-	obs := testevals.New(t)
+	obs := testevals.New(&testing.T{})
 
 	// Use the observer with evaluation callbacks
 	callback := func(o evals.Observer, trace *agenttrace.Trace[string]) {
@@ -35,15 +32,12 @@ func ExampleNew() {
 
 // ExampleNewPrefix demonstrates creating a testing observer with a message prefix.
 func ExampleNewPrefix() {
-	// This would typically be called within a test function
-	t := &testing.T{}
-
 	// Create an observer with a prefix for namespaced logging
-	obs := testevals.NewPrefix(t, "tool-validation")
+	obs := testevals.NewPrefix(&testing.T{}, "tool-validation")
 
 	// Use with a namespaced observer factory
 	namespacedObs := evals.NewNamespacedObserver(func(name string) evals.Observer {
-		return testevals.NewPrefix(t, name)
+		return testevals.NewPrefix(&testing.T{}, name)
 	})
 
 	// Create child observers for different evaluation aspects
