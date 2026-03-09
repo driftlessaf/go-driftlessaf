@@ -49,18 +49,38 @@ func (p worktreeToolsProvider[Resp, T]) Tools(cb WorktreeTools[T]) map[string]To
 }
 
 func worktreeToolDefs[Resp any](cb callbacks.WorktreeCallbacks) map[string]Tool[Resp] {
-	return map[string]Tool[Resp]{
-		"read_file":       readFileTool[Resp](cb.ReadFile),
-		"edit_file":       editFileTool[Resp](cb.EditFile),
-		"write_file":      writeFileTool[Resp](cb.WriteFile),
-		"delete_file":     deleteFileTool[Resp](cb.DeleteFile),
-		"move_file":       moveFileTool[Resp](cb.MoveFile),
-		"copy_file":       copyFileTool[Resp](cb.CopyFile),
-		"chmod":           chmodTool[Resp](cb.Chmod),
-		"symlink":         symlinkTool[Resp](cb.CreateSymlink),
-		"list_directory":  listDirectoryTool[Resp](cb.ListDirectory),
-		"search_codebase": searchCodebaseTool[Resp](cb.SearchCodebase),
+	tools := make(map[string]Tool[Resp], 10)
+	if cb.ReadFile != nil {
+		tools["read_file"] = readFileTool[Resp](cb.ReadFile)
 	}
+	if cb.EditFile != nil {
+		tools["edit_file"] = editFileTool[Resp](cb.EditFile)
+	}
+	if cb.WriteFile != nil {
+		tools["write_file"] = writeFileTool[Resp](cb.WriteFile)
+	}
+	if cb.DeleteFile != nil {
+		tools["delete_file"] = deleteFileTool[Resp](cb.DeleteFile)
+	}
+	if cb.MoveFile != nil {
+		tools["move_file"] = moveFileTool[Resp](cb.MoveFile)
+	}
+	if cb.CopyFile != nil {
+		tools["copy_file"] = copyFileTool[Resp](cb.CopyFile)
+	}
+	if cb.Chmod != nil {
+		tools["chmod"] = chmodTool[Resp](cb.Chmod)
+	}
+	if cb.CreateSymlink != nil {
+		tools["symlink"] = symlinkTool[Resp](cb.CreateSymlink)
+	}
+	if cb.ListDirectory != nil {
+		tools["list_directory"] = listDirectoryTool[Resp](cb.ListDirectory)
+	}
+	if cb.SearchCodebase != nil {
+		tools["search_codebase"] = searchCodebaseTool[Resp](cb.SearchCodebase)
+	}
+	return tools
 }
 
 func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (callbacks.ReadResult, error)) Tool[Resp] {
