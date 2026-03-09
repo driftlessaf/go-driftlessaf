@@ -440,12 +440,12 @@ func (cm *CM[T]) collectFindings(
 
 	// Paginate through remaining failed runs within suites
 	for _, sp := range failedRunsPagination {
-		cm.paginateFailedRuns(ctx, gqlClient, sp.id, sp.cursor, processFailedRuns)
+		paginateFailedRuns(ctx, gqlClient, sp.id, sp.cursor, processFailedRuns)
 	}
 
 	// Paginate through remaining pending runs within suites
 	for _, sp := range pendingRunsPagination {
-		cm.paginatePendingRuns(ctx, gqlClient, sp.id, sp.cursor, processPendingRuns)
+		paginatePendingRuns(ctx, gqlClient, sp.id, sp.cursor, processPendingRuns)
 	}
 
 	// Paginate through remaining check suites if needed
@@ -457,7 +457,7 @@ func (cm *CM[T]) collectFindings(
 }
 
 // paginateFailedRuns fetches additional failed check runs for a suite.
-func (cm *CM[T]) paginateFailedRuns(
+func paginateFailedRuns(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	suiteID, cursor string,
@@ -496,7 +496,7 @@ func (cm *CM[T]) paginateFailedRuns(
 }
 
 // paginatePendingRuns fetches additional pending check runs for a suite.
-func (cm *CM[T]) paginatePendingRuns(
+func paginatePendingRuns(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	suiteID, cursor string,
@@ -589,10 +589,10 @@ func (cm *CM[T]) paginateCheckSuites(
 
 			// Handle nested check run pagination
 			if suite.FailedRuns.PageInfo.HasNextPage {
-				cm.paginateFailedRuns(ctx, gqlClient, suite.Id, suite.FailedRuns.PageInfo.EndCursor, processFailedRuns)
+				paginateFailedRuns(ctx, gqlClient, suite.Id, suite.FailedRuns.PageInfo.EndCursor, processFailedRuns)
 			}
 			if suite.PendingRuns.PageInfo.HasNextPage {
-				cm.paginatePendingRuns(ctx, gqlClient, suite.Id, suite.PendingRuns.PageInfo.EndCursor, processPendingRuns)
+				paginatePendingRuns(ctx, gqlClient, suite.Id, suite.PendingRuns.PageInfo.EndCursor, processPendingRuns)
 			}
 		}
 
