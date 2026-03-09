@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -26,8 +25,6 @@ type testResponse struct{}
 type testCallbacks = toolcall.FindingTools[toolcall.WorktreeTools[toolcall.EmptyTools]]
 
 func TestNewModelSelection(t *testing.T) {
-	ctx := context.Background()
-
 	config := Config[*testResponse, testCallbacks]{
 		Tools: toolcall.NewFindingToolsProvider[*testResponse, toolcall.WorktreeTools[toolcall.EmptyTools]](
 			toolcall.NewWorktreeToolsProvider[*testResponse, toolcall.EmptyTools](
@@ -58,7 +55,7 @@ func TestNewModelSelection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New[*testRequest](ctx, "test-project", "us-central1", tt.model, config)
+			_, err := New[*testRequest](t.Context(), "test-project", "us-central1", tt.model, config)
 			if err == nil {
 				t.Errorf("New() error = nil, wantErr containing %q", tt.wantErr)
 				return
