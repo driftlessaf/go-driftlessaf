@@ -67,13 +67,13 @@ func TestNew(t *testing.T) {
 
 			if tt.wantErr {
 				if err == nil {
-					t.Error("New() should have returned an error")
+					t.Error("New() error: got = nil, want = non-nil error")
 				} else if !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("New() error message: got = %q, wanted to contain %q", err.Error(), tt.errContains)
 				}
 			} else {
 				if cm == nil {
-					t.Fatal("New() returned nil CM when error is nil")
+					t.Fatal("New() result: got = nil, want = non-nil CM")
 					return
 				}
 				if cm.identity != tt.identity {
