@@ -314,7 +314,7 @@ func (cm *CM[T]) NewSession(
 		// Collect all check runs, handling pagination
 		if len(pr.Commits.Nodes) > 0 {
 			commit := pr.Commits.Nodes[0].Commit
-			findings, pendingChecks = cm.collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.CheckSuites)
+			findings, pendingChecks = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.CheckSuites)
 		}
 
 		// Collect review findings from trusted authors on the current commit
@@ -388,7 +388,7 @@ func collectReviewFindings(headRefOid string, reviews gqlReviewsConnection) []ca
 // collectFindings extracts findings and pending checks from check suites, handling pagination.
 // Returns findings (failed checks) and pendingChecks (names of checks not yet complete).
 // The check runs are pre-filtered by the GraphQL query to only include failures and pending runs.
-func (cm *CM[T]) collectFindings(
+func collectFindings(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha string,
