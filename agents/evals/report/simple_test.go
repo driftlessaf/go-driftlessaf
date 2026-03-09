@@ -74,25 +74,25 @@ func TestSimpleReportBasic(t *testing.T) {
 
 	// Check report contains expected tree structure
 	if !strings.Contains(reportStr, "test1") {
-		t.Error("report should contain test1 in tree")
+		t.Error("report: got = missing test1, want = test1 in tree")
 	}
 	if !strings.Contains(reportStr, "test2") {
-		t.Error("report should contain test2 in tree")
+		t.Error("report: got = missing test2, want = test2 in tree")
 	}
 	if !strings.Contains(reportStr, "❌") {
-		t.Error("report should contain failure indicator for test1")
+		t.Error("report: got = missing ❌, want = failure indicator for test1")
 	}
 	if !strings.Contains(reportStr, "33.3%") {
-		t.Error("report should contain test1 pass rate")
+		t.Error("report: got = missing 33.3%, want = test1 pass rate")
 	}
 	if !strings.Contains(reportStr, "100.0%") {
-		t.Error("report should contain test2 pass rate")
+		t.Error("report: got = missing 100.0%, want = test2 pass rate")
 	}
 	if !strings.Contains(reportStr, "error 1") {
-		t.Error("report should contain failure messages")
+		t.Error("report: got = missing failure messages, want = error 1 in output")
 	}
 	if !strings.Contains(reportStr, "[FAIL]") {
-		t.Error("report should contain FAIL indicators")
+		t.Error("report: got = missing [FAIL], want = FAIL indicators in output")
 	}
 }
 
@@ -124,13 +124,13 @@ func TestSimpleReportWithGrades(t *testing.T) {
 
 	// Check report contains grade information
 	if !strings.Contains(reportStr, "0.70 avg") {
-		t.Error("report should contain average grade")
+		t.Error("report: got = missing 0.70 avg, want = average grade in output")
 	}
 	if !strings.Contains(reportStr, "0.50") {
-		t.Error("report should contain below-threshold grade score")
+		t.Error("report: got = missing 0.50, want = below-threshold grade score in output")
 	}
 	if !strings.Contains(reportStr, "needs improvement") {
-		t.Error("report should contain grade reasoning")
+		t.Error("report: got = missing grade reasoning, want = \"needs improvement\" in output")
 	}
 }
 
@@ -162,10 +162,10 @@ func TestSimpleReportWithBothPassRateAndGrades(t *testing.T) {
 
 	// Check report shows both metrics
 	if !strings.Contains(reportStr, "66.7% pass") {
-		t.Error("report should contain pass rate")
+		t.Error("report: got = missing 66.7% pass, want = pass rate in output")
 	}
 	if !strings.Contains(reportStr, "0.90 avg") {
-		t.Error("report should contain average grade")
+		t.Error("report: got = missing 0.90 avg, want = average grade in output")
 	}
 }
 
@@ -194,10 +194,10 @@ func TestSimpleReportNoFailures(t *testing.T) {
 
 	// Check report format - when there are no failures, only grade is shown
 	if !strings.Contains(reportStr, "1 result") {
-		t.Error("report should show grade count when no failures")
+		t.Error("report: got = missing \"1 result\", want = grade count in output")
 	}
 	if !strings.Contains(reportStr, "0.90 avg") {
-		t.Error("report should show average grade")
+		t.Error("report: got = missing 0.90 avg, want = average grade in output")
 	}
 }
 
@@ -223,7 +223,7 @@ func TestSimpleReportEmptyNamespace(t *testing.T) {
 
 	// Empty namespaces with no iterations should be skipped
 	if strings.Contains(reportStr, "empty-test") {
-		t.Error("report should not contain empty namespace with no iterations")
+		t.Error("report: got = empty-test in output, want = empty namespace omitted")
 	}
 }
 
@@ -248,13 +248,13 @@ func TestSimpleReportNestedNamespaces(t *testing.T) {
 
 	// Check tree structure is correct
 	if !strings.Contains(reportStr, "level1") {
-		t.Error("report should contain level1 in tree")
+		t.Error("report: got = missing level1, want = level1 in tree")
 	}
 	if !strings.Contains(reportStr, "level2") {
-		t.Error("report should contain level2 in tree")
+		t.Error("report: got = missing level2, want = level2 in tree")
 	}
 	if !strings.Contains(reportStr, "level3") {
-		t.Error("report should contain level3 in tree")
+		t.Error("report: got = missing level3, want = level3 in tree")
 	}
 }
 
@@ -284,10 +284,10 @@ func TestSimpleReportSingularPluralGrades(t *testing.T) {
 
 	// Check singular/plural forms
 	if !strings.Contains(reportStr, "1 result") {
-		t.Error("report should use singular 'result' for single grade")
+		t.Error("report: got = missing \"1 result\", want = singular form for single grade")
 	}
 	if !strings.Contains(reportStr, "2 results") {
-		t.Error("report should use plural 'results' for multiple grades")
+		t.Error("report: got = missing \"2 results\", want = plural form for multiple grades")
 	}
 }
 

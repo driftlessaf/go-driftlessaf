@@ -42,8 +42,7 @@ func (e *exampleObserver) Total() int64 {
 func ExampleSimple() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
@@ -74,8 +73,7 @@ func ExampleSimple() {
 func ExampleSimple_successfulEvaluation() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
@@ -104,8 +102,7 @@ func ExampleSimple_successfulEvaluation() {
 func ExampleSimple_nestedNamespaces() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
@@ -140,8 +137,7 @@ func ExampleSimple_nestedNamespaces() {
 func ExampleGenerator() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer with test data
@@ -170,8 +166,7 @@ func ExampleGenerator() {
 func ExampleSimple_multipleMetrics() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
@@ -203,8 +198,7 @@ func ExampleSimple_multipleMetrics() {
 func ExampleByEval() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
@@ -247,8 +241,7 @@ func ExampleByEval() {
 func ExampleByEval_withGrades() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
@@ -291,8 +284,7 @@ func ExampleByEval_withGrades() {
 func ExampleByEval_multipleEvaluations() {
 	// Create a factory for result collectors
 	factory := func(name string) *evals.ResultCollector {
-		baseObs := &exampleObserver{name: name}
-		return evals.NewResultCollector(baseObs)
+		return evals.NewResultCollector(&exampleObserver{name: name})
 	}
 
 	// Create root observer
