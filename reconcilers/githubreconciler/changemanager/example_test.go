@@ -52,13 +52,11 @@ func Example() {
 	}
 
 	// Upsert a PR with data
-	data := &UpdateData{
+	_, err = session.Upsert(ctx, &UpdateData{
 		PackageName: "foo",
 		Version:     "1.2.3",
 		Commit:      "abc123",
-	}
-
-	_, err = session.Upsert(ctx, data, false, []string{"automated pr"}, func(_ context.Context, _ string) error {
+	}, false, []string{"automated pr"}, func(_ context.Context, _ string) error {
 		// Make code changes on the branch
 		// e.g., update package YAML, commit changes, push to remote
 		return nil
