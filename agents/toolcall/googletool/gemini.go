@@ -120,12 +120,11 @@ func toolParam(def toolcall.Definition) *genai.FunctionDeclaration {
 
 func handler[Resp any](t toolcall.Tool[Resp]) func(context.Context, *genai.FunctionCall, *agenttrace.Trace[Resp], *Resp) *genai.FunctionResponse {
 	return func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Resp], result *Resp) *genai.FunctionResponse {
-		tc := toolcall.ToolCall{
+		resp := t.Handler(ctx, toolcall.ToolCall{
 			ID:   call.ID,
 			Name: call.Name,
 			Args: call.Args,
-		}
-		resp := t.Handler(ctx, tc, trace, result)
+		}, trace, result)
 		if resp == nil {
 			return &genai.FunctionResponse{
 				ID:       call.ID,
