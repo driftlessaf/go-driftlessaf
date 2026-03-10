@@ -56,6 +56,5 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {
-	tools := claudetool.Map(a.config.Tools.Tools(callbacks))
-	return a.executor.Execute(ctx, request, tools)
+	return a.executor.Execute(ctx, request, claudetool.Map(a.config.Tools.Tools(callbacks)))
 }

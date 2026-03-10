@@ -60,6 +60,5 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 func (a *googleAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {
-	tools := googletool.Map(a.config.Tools.Tools(callbacks))
-	return a.executor.Execute(ctx, request, tools)
+	return a.executor.Execute(ctx, request, googletool.Map(a.config.Tools.Tools(callbacks)))
 }
