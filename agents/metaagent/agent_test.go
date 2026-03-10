@@ -57,11 +57,11 @@ func TestNewModelSelection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New[*testRequest](t.Context(), "test-project", "us-central1", tt.model, config)
 			if err == nil {
-				t.Errorf("New() error = nil, wantErr containing %q", tt.wantErr)
+				t.Errorf("New() got = nil, want error containing %q", tt.wantErr)
 				return
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("New() error = %v, wantErr containing %q", err, tt.wantErr)
+				t.Errorf("New() got = %v, want error containing %q", err, tt.wantErr)
 			}
 		})
 	}

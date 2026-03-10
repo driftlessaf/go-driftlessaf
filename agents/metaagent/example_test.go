@@ -51,3 +51,26 @@ func ExampleNew() {
 	}
 	// Output: error: unsupported model: unknown-model (expected gemini-* or claude-*)
 }
+
+// ExampleAgent_Execute demonstrates calling Execute on an Agent to run a request.
+// Execute sends the request to the model and returns the structured response.
+func ExampleAgent_Execute() {
+	ctx := context.Background()
+
+	tools := toolcall.NewEmptyToolsProvider[*response]()
+	config := metaagent.Config[*response, toolcall.EmptyTools]{
+		Tools: tools,
+	}
+
+	agent, err := metaagent.New[*request](ctx, "my-project", "us-central1", "gemini-2.0-flash", config)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	req := &request{Query: "What is the answer?"}
+	_, err = agent.Execute(ctx, req, toolcall.EmptyTools{})
+	if err != nil {
+		fmt.Println("error:", err)
+	}
+}
