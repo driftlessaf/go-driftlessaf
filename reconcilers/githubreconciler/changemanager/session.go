@@ -343,20 +343,15 @@ func (s *Session[T]) Upsert(
 }
 
 // needsRefresh determines if an existing PR needs to be refreshed.
-// Uses State() for mergeability and CI checks, then falls through to
-// embedded data comparison for the remaining cases.
+// Checks embedded data first, then falls through to mergeability and CI state.
 func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error) {
 	state := s.State()
 
-	switch {
-	case !state.HasPR(), state.NeedsRebase(), state.HasFindings():
+	if !state.HasPR() {
 		return true, nil
-	case state.IsUnknown():
-		clog.InfoContext(ctx, "PR mergeable status is still being computed by GitHub, requeueing")
-		return false, workqueue.RequeueAfter(5 * time.Minute)
 	}
 
-	// Pending or mergeable: check if embedded data differs.
+	// Check if embedded data differs before consulting mergeable state.
 	// Compare via JSON round-trip so that fields tagged json:"-" (such as
 	// Request, which is only used for template rendering) are excluded from
 	// the comparison.
@@ -379,6 +374,15 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error
 	if !bytes.Equal(existingJSON, expectedJSON) {
 		clog.InfoContextf(ctx, "PR data differs, refresh needed: existing=%s expected=%s", existingJSON, expectedJSON)
 		return true, nil
+	}
+
+	// Data matches — now check mergeability and CI state.
+	switch {
+	case state.NeedsRebase(), state.HasFindings():
+		return true, nil
+	case state.IsUnknown():
+		clog.InfoContext(ctx, "PR mergeable status is still being computed by GitHub, requeueing")
+		return false, workqueue.RequeueAfter(5 * time.Minute)
 	}
 
 	return false, nil
