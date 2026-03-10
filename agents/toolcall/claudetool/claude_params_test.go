@@ -66,7 +66,7 @@ func TestNewParams(t *testing.T) {
 				if errMsg, ok := errResp["error"].(string); !ok {
 					t.Errorf("NewParams() error response missing 'error' field")
 				} else if len(tt.expectedError) > 0 && len(errMsg) < len(tt.expectedError) {
-					t.Errorf("NewParams() error = %v, want prefix %v", errMsg, tt.expectedError)
+					t.Errorf("NewParams() got = %v, want prefix %v", errMsg, tt.expectedError)
 				}
 			} else {
 				if errResp != nil {
@@ -147,7 +147,7 @@ func TestParams_Get(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gotValue, gotOk := params.Get(tt.paramName)
 			if gotOk != tt.wantOk {
-				t.Errorf("Get() ok = %v, want %v", gotOk, tt.wantOk)
+				t.Errorf("Get() got = %v, want %v", gotOk, tt.wantOk)
 			}
 			if diff := cmp.Diff(tt.wantValue, gotValue); diff != "" {
 				t.Errorf("Get() value mismatch (-want, +got):\n%s", diff)
@@ -170,7 +170,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param() unexpected error: %v", errResp)
 		}
 		if got != "test" {
-			t.Errorf("Param() = %v, want %v", got, "test")
+			t.Errorf("Param() got = %v, want %v", got, "test")
 		}
 
 		// Test empty string
@@ -179,7 +179,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param() unexpected error: %v", errResp)
 		}
 		if got != "" {
-			t.Errorf("Param() = %v, want empty string", got)
+			t.Errorf("Param() got = %v, want empty string", got)
 		}
 
 		// Test missing parameter
@@ -187,7 +187,7 @@ func TestParam(t *testing.T) {
 		if errResp == nil {
 			t.Errorf("Param() expected error for missing parameter")
 		} else if errResp["error"] != "missing parameter is required" {
-			t.Errorf("Param() error = %v, want 'missing parameter is required'", errResp["error"])
+			t.Errorf("Param() got = %v, want 'missing parameter is required'", errResp["error"])
 		}
 	})
 
@@ -203,7 +203,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param[int]() unexpected error: %v", errResp)
 		}
 		if gotInt != 42 {
-			t.Errorf("Param[int]() = %v, want %v", gotInt, 42)
+			t.Errorf("Param[int]() got = %v, want %v", gotInt, 42)
 		}
 
 		// Test int32 conversion
@@ -212,7 +212,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param[int32]() unexpected error: %v", errResp)
 		}
 		if gotInt32 != 42 {
-			t.Errorf("Param[int32]() = %v, want %v", gotInt32, 42)
+			t.Errorf("Param[int32]() got = %v, want %v", gotInt32, 42)
 		}
 
 		// Test int64 conversion
@@ -221,7 +221,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param[int64]() unexpected error: %v", errResp)
 		}
 		if gotInt64 != 42 {
-			t.Errorf("Param[int64]() = %v, want %v", gotInt64, 42)
+			t.Errorf("Param[int64]() got = %v, want %v", gotInt64, 42)
 		}
 
 		// Test float64 (no conversion needed)
@@ -230,7 +230,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param[float64]() unexpected error: %v", errResp)
 		}
 		if gotFloat != 3.14 {
-			t.Errorf("Param[float64]() = %v, want %v", gotFloat, 3.14)
+			t.Errorf("Param[float64]() got = %v, want %v", gotFloat, 3.14)
 		}
 	})
 
@@ -274,7 +274,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param[[]interface{}]() unexpected error: %v", errResp)
 		}
 		if len(gotSlice) != 3 {
-			t.Errorf("Param[[]interface{}]() slice length = %v, want 3", len(gotSlice))
+			t.Errorf("Param[[]interface{}]() slice length got = %v, want 3", len(gotSlice))
 		}
 
 		// Test map
@@ -283,7 +283,7 @@ func TestParam(t *testing.T) {
 			t.Errorf("Param[map]() unexpected error: %v", errResp)
 		}
 		if gotMap["key"] != "value" {
-			t.Errorf("Param[map]() map['key'] = %v, want 'value'", gotMap["key"])
+			t.Errorf("Param[map]() map['key'] got = %v, want 'value'", gotMap["key"])
 		}
 	})
 }
@@ -302,7 +302,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam() unexpected error: %v", errResp)
 		}
 		if gotStr != "default" {
-			t.Errorf("OptionalParam() = %v, want 'default'", gotStr)
+			t.Errorf("OptionalParam() got = %v, want 'default'", gotStr)
 		}
 
 		// Int default
@@ -311,7 +311,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam() unexpected error: %v", errResp)
 		}
 		if gotInt != 99 {
-			t.Errorf("OptionalParam() = %v, want 99", gotInt)
+			t.Errorf("OptionalParam() got = %v, want 99", gotInt)
 		}
 
 		// Bool default
@@ -320,7 +320,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam() unexpected error: %v", errResp)
 		}
 		if gotBool != true {
-			t.Errorf("OptionalParam() = %v, want true", gotBool)
+			t.Errorf("OptionalParam() got = %v, want true", gotBool)
 		}
 	})
 
@@ -336,7 +336,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam() unexpected error: %v", errResp)
 		}
 		if got != "actual" {
-			t.Errorf("OptionalParam() = %v, want 'actual'", got)
+			t.Errorf("OptionalParam() got = %v, want 'actual'", got)
 		}
 
 		// Int with default (converted from float64)
@@ -345,7 +345,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam() unexpected error: %v", errResp)
 		}
 		if gotInt != 42 {
-			t.Errorf("OptionalParam() = %v, want 42", gotInt)
+			t.Errorf("OptionalParam() got = %v, want 42", gotInt)
 		}
 
 		// Bool with default
@@ -354,7 +354,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam() unexpected error: %v", errResp)
 		}
 		if gotBool != false {
-			t.Errorf("OptionalParam() = %v, want false", gotBool)
+			t.Errorf("OptionalParam() got = %v, want false", gotBool)
 		}
 	})
 
@@ -385,7 +385,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam[int32]() unexpected error: %v", errResp)
 		}
 		if got32 != 123 {
-			t.Errorf("OptionalParam[int32]() = %v, want 123", got32)
+			t.Errorf("OptionalParam[int32]() got = %v, want 123", got32)
 		}
 
 		// int64 conversion
@@ -394,7 +394,7 @@ func TestOptionalParam(t *testing.T) {
 			t.Errorf("OptionalParam[int64]() unexpected error: %v", errResp)
 		}
 		if got64 != 123 {
-			t.Errorf("OptionalParam[int64]() = %v, want 123", got64)
+			t.Errorf("OptionalParam[int64]() got = %v, want 123", got64)
 		}
 	})
 }
