@@ -371,6 +371,7 @@ func extractStatus[T any](sig oci.Signature) (*Status[T], error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding payload: %w", err)
 	}
+	//nolint:staticcheck // SA1019 TODO port later
 	var stmt in_toto.Statement
 	if err := json.Unmarshal(decoded, &stmt); err != nil {
 		return nil, fmt.Errorf("unmarshaling statement: %w", err)
