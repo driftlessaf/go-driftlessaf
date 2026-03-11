@@ -27,13 +27,24 @@ import (
 
 const cloneDirPrefix = "clonemanager-clone-"
 
-const (
-	gitFetchDepth = 1
+const gitFetchDepth = 1
 
-	// leaseRefFetchDepth is the fetch depth used by LeaseRef. This is deeper
-	// than the default to support commit history walking (e.g., list_commits).
-	leaseRefFetchDepth = 100
-)
+// LeaseOption configures optional parameters for LeaseRef.
+type LeaseOption func(*leaseOptions)
+
+type leaseOptions struct {
+	depth int
+}
+
+// WithCommitDepth sets the fetch depth for the lease. This controls how many
+// commits of history are fetched. Use this when you need commit history
+// walking (e.g., for list_commits), setting it to the PR commit count + 1
+// to include the base commit.
+func WithCommitDepth(depth int) LeaseOption {
+	return func(o *leaseOptions) {
+		o.depth = depth
+	}
+}
 
 // repoURL resolves the remote git URL for a githubreconciler.Resource. Tests
 // can override this to provide local filesystem paths by assigning a custom
@@ -115,11 +126,16 @@ func (m *Manager) Lease(ctx context.Context, res *githubreconciler.Resource) (*L
 
 // LeaseRef hydrates a clone for the supplied GitHub resource at the specified
 // ref and returns a Lease handle. The ref can be a branch name (e.g., "main",
-// "feature-branch") that will be fetched and checked out. It fetches with
-// enough depth to support commit history walking.
+// "feature-branch") that will be fetched and checked out.
+// By default it fetches with depth 1. Use WithCommitDepth to fetch deeper
+// history for commit walking (e.g., list_commits).
 // Callers must invoke Return to release the clone back to the pool.
-func (m *Manager) LeaseRef(ctx context.Context, res *githubreconciler.Resource, ref string) (*Lease, error) {
-	return m.leaseRef(ctx, res, ref, leaseRefFetchDepth)
+func (m *Manager) LeaseRef(ctx context.Context, res *githubreconciler.Resource, ref string, opts ...LeaseOption) (*Lease, error) {
+	o := leaseOptions{depth: gitFetchDepth}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return m.leaseRef(ctx, res, ref, o.depth)
 }
 
 func (m *Manager) leaseRef(ctx context.Context, res *githubreconciler.Resource, ref string, depth int) (*Lease, error) {

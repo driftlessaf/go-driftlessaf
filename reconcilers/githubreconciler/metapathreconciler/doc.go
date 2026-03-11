@@ -39,12 +39,16 @@ SPDX-License-Identifier: Apache-2.0
 //	        if err != nil {
 //	            return MyCallbacks{}, fmt.Errorf("get worktree: %w", err)
 //	        }
+//	        baseCommit, err := clonemanager.ResolveBaseCommit(lease.Repo(), session.CommitCount())
+//	        if err != nil {
+//	            return MyCallbacks{}, fmt.Errorf("resolve base commit: %w", err)
+//	        }
 //	        return toolcall.NewHistoryTools(
 //	            toolcall.NewFindingTools(
 //	                toolcall.NewWorktreeTools(toolcall.EmptyTools{}, clonemanager.WorktreeCallbacks(wt)),
 //	                session.FindingCallbacks(),
 //	            ),
-//	            clonemanager.HistoryCallbacks(lease.Repo(), plumbing.NewHash(session.BaseSHA())),
+//	            clonemanager.HistoryCallbacks(lease.Repo(), baseCommit),
 //	        ), nil
 //	    },
 //	)

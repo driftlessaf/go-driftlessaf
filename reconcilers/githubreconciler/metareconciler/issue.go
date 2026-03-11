@@ -105,7 +105,8 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		var lease *clonemanager.Lease
 		if usePRBranch {
 			log.With("branch", branchName).Info("Acquiring clone lease for pull request branch")
-			lease, err = cloneMgr.LeaseRef(ctx, res, branchName)
+			lease, err = cloneMgr.LeaseRef(ctx, res, branchName,
+				clonemanager.WithCommitDepth(changeSession.CommitCount()+1))
 		} else {
 			log.Info("Acquiring clone lease for default branch")
 			lease, err = cloneMgr.Lease(ctx, res)

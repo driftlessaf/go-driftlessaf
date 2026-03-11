@@ -69,6 +69,80 @@ func initHistoryRepo(t *testing.T, n int) (*gogit.Repository, plumbing.Hash, []s
 	return repo, baseHash, paths
 }
 
+func TestResolveBaseCommit(t *testing.T) {
+	repo, baseHash, _ := initHistoryRepo(t, 3)
+
+	got, err := ResolveBaseCommit(repo, 3)
+	if err != nil {
+		t.Fatalf("ResolveBaseCommit: %v", err)
+	}
+	if got != baseHash {
+		t.Errorf("base commit: got = %s, wanted = %s", got, baseHash)
+	}
+}
+
+func TestResolveBaseCommitSubset(t *testing.T) {
+	repo, _, _ := initHistoryRepo(t, 5)
+
+	// Ask for only 2 commits — the base should be the parent of the 2nd
+	// commit from HEAD, not the original base.
+	got, err := ResolveBaseCommit(repo, 2)
+	if err != nil {
+		t.Fatalf("ResolveBaseCommit: %v", err)
+	}
+	if got == (plumbing.Hash{}) {
+		t.Fatal("base commit: got = zero hash, wanted non-zero")
+	}
+
+	// Verify the resolved base is reachable and is the parent of the
+	// 2nd commit from HEAD.
+	_, err = repo.CommitObject(got)
+	if err != nil {
+		t.Fatalf("resolved base commit not found in repo: %v", err)
+	}
+}
+
+func TestResolveBaseCommitRootCommit(t *testing.T) {
+	// A repo with only a single commit (the root) — commitCount=1 means
+	// the root commit has no parent, so we should get ZeroHash.
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, "root.txt", "root", 0o644)
+	if _, err := wt.Add("root.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("root commit", &gogit.CommitOptions{Author: testSig()}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolveBaseCommit(repo, 1)
+	if err != nil {
+		t.Fatalf("ResolveBaseCommit: %v", err)
+	}
+	if got != (plumbing.Hash{}) {
+		t.Errorf("base commit: got = %s, wanted = zero hash", got)
+	}
+}
+
+func TestResolveBaseCommitZeroCount(t *testing.T) {
+	repo, _, _ := initHistoryRepo(t, 3)
+
+	got, err := ResolveBaseCommit(repo, 0)
+	if err != nil {
+		t.Fatalf("ResolveBaseCommit: %v", err)
+	}
+	if got != (plumbing.Hash{}) {
+		t.Errorf("base commit: got = %s, wanted = zero hash", got)
+	}
+}
+
 // TestListCommitsRootCommit exercises the commitFiles path for a root commit
 // (no parents), by using plumbing.ZeroHash as the base so the root commit
 // itself appears in the returned list.

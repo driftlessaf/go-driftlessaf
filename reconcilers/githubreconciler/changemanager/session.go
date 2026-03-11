@@ -83,7 +83,6 @@ type Session[T any] struct {
 	prMergeable *bool    // nil if GitHub is still computing
 	prLabels    []string // Label names on existing PR
 	prAssignees []string // Login names of PR assignees
-	baseSHA     string   // SHA of the base branch tip from the PR
 
 	commitCount   int                 // Total number of commits on the PR
 	findings      []callbacks.Finding // CI failures detected on the existing PR
@@ -133,10 +132,10 @@ func (s *Session[T]) State() State {
 	return state
 }
 
-// BaseSHA returns the SHA of the base branch tip from the PR metadata.
-// Returns an empty string if no PR exists.
-func (s *Session[T]) BaseSHA() string {
-	return s.baseSHA
+// CommitCount returns the number of commits on the PR.
+// Returns 0 if no PR exists.
+func (s *Session[T]) CommitCount() int {
+	return s.commitCount
 }
 
 // PendingChecks returns the names of checks that are not yet complete.

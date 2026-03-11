@@ -81,7 +81,8 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 	if usePRBranch {
 		branchName := r.identity + "/" + githubreconciler.PathToBranchSuffix(res.Path)
 		log.With("branch", branchName).Info("Acquiring clone lease for pull request branch")
-		lease, err = cloneMgr.LeaseRef(ctx, res, branchName)
+		lease, err = cloneMgr.LeaseRef(ctx, res, branchName,
+			clonemanager.WithCommitDepth(session.CommitCount()+1))
 	} else {
 		log.Info("Acquiring clone lease for default branch")
 		lease, err = cloneMgr.Lease(ctx, res)

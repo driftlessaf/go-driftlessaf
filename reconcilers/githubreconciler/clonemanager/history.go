@@ -8,6 +8,7 @@ package clonemanager
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -81,6 +82,52 @@ func HistoryCallbacks(repo *gogit.Repository, baseCommit plumbing.Hash) callback
 			return paginateDiff(buf.String(), offset, limit), nil
 		},
 	}
+}
+
+// ResolveBaseCommit walks commitCount commits from HEAD and returns the first
+// parent of the oldest commit found. This derives the actual merge-base from
+// the PR branch's own ancestry, avoiding reliance on the base branch tip SHA
+// (which may not be present in a shallow clone).
+//
+// This assumes a linear commit history (no merge commits on the PR branch),
+// which is the case for bot-created PRs. For merge commits, ParentHashes[0]
+// is the first-parent which may not be the intended base.
+//
+// The caller must ensure the clone has sufficient depth (commitCount+1) via
+// WithCommitDepth before calling this function.
+//
+// Returns plumbing.ZeroHash if the oldest commit has no parents (root commit).
+func ResolveBaseCommit(repo *gogit.Repository, commitCount int) (plumbing.Hash, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("get HEAD: %w", err)
+	}
+
+	iter, err := repo.Log(&gogit.LogOptions{
+		From:  head.Hash(),
+		Order: gogit.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("log: %w", err)
+	}
+	defer iter.Close()
+
+	var last *object.Commit
+	for range commitCount {
+		c, err := iter.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("walk commit: %w", err)
+		}
+		last = c
+	}
+
+	if last == nil || last.NumParents() == 0 {
+		return plumbing.ZeroHash, nil
+	}
+	return last.ParentHashes[0], nil
 }
 
 // collectCommits returns all commits from HEAD down to (but not including)
