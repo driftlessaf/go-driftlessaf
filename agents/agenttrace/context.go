@@ -75,7 +75,9 @@ func (e ExecutionContext) EnrichAttributes(baseAttrs []attribute.KeyValue) []att
 	}
 
 	// Add turn number (bounded: typically 0-10 for multi-turn agents)
-	attrs = append(attrs, attribute.Int("turn", e.TurnNumber))
+	if e.TurnNumber > 0 {
+		attrs = append(attrs, attribute.Int("turn", e.TurnNumber))
+	}
 
 	return attrs
 }

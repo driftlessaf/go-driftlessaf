@@ -8,6 +8,7 @@ package metrics
 import (
 	"context"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/chainguard-dev/clog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,7 +24,6 @@ type GenAI struct {
 	promptTokens     metric.Int64Counter
 	completionTokens metric.Int64Counter
 	toolCallCounter  metric.Int64Counter
-	attrEnricher     AttributeEnricher
 }
 
 // NewGenAI creates a new GenAI metrics instance with the specified meter name.
@@ -71,51 +71,28 @@ func NewGenAI(meterName string) *GenAI {
 	}
 }
 
-// SetAttributeEnricher sets the attribute enricher for this metrics instance.
-// The enricher is called before recording each metric to add contextual attributes
-// (e.g., repository, pull_request, commit_sha, turn).
-func (m *GenAI) SetAttributeEnricher(enricher AttributeEnricher) {
-	m.attrEnricher = enricher
-}
-
-// RecordTokens records prompt and completion token usage with optional enrichment.
-// The model parameter is added as a base attribute, and the enricher (if set)
-// can add additional contextual attributes.
+// RecordTokens records prompt and completion token usage.
+// Enriches attributes from the execution context propagated via context.Context.
 func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, completionTokens int64, attrs ...attribute.KeyValue) {
-	// Base attributes
 	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
 	}
-
-	// Enrich with application-specific attributes
-	if m.attrEnricher != nil {
-		baseAttrs = m.attrEnricher(ctx, baseAttrs)
-	}
-
+	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
-	// Record token metrics
 	m.promptTokens.Add(ctx, promptTokens, metric.WithAttributes(baseAttrs...))
 	m.completionTokens.Add(ctx, completionTokens, metric.WithAttributes(baseAttrs...))
 }
 
-// RecordToolCall records a tool invocation with optional enrichment.
-// The model and toolName parameters are added as base attributes, and the enricher
-// (if set) can add additional contextual attributes.
+// RecordToolCall records a tool invocation.
+// Enriches attributes from the execution context propagated via context.Context.
 func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attrs ...attribute.KeyValue) {
-	// Base attributes
 	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
 		attribute.String("tool", toolName),
 	}
-
-	// Enrich with application-specific attributes
-	if m.attrEnricher != nil {
-		baseAttrs = m.attrEnricher(ctx, baseAttrs)
-	}
-
+	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
-	// Record tool call
 	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
 }

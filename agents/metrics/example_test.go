@@ -65,54 +65,6 @@ func ExampleGenAI_RecordToolCall() {
 	// Tool call metrics recorded
 }
 
-// ExampleGenAI_SetAttributeEnricher demonstrates adding contextual attributes.
-func ExampleGenAI_SetAttributeEnricher() {
-	ctx := context.Background()
-	m := metrics.NewGenAI("chainguard.ai.agents")
-
-	// Define an enricher that adds PR context to all metrics
-	enricher := func(_ context.Context, baseAttrs []attribute.KeyValue) []attribute.KeyValue {
-		return append(baseAttrs,
-			attribute.String("repository", "chainguard-dev/example"),
-			attribute.Int("pull_request", 123),
-			attribute.String("commit_sha", "abc123"),
-		)
-	}
-
-	// Set the enricher on the metrics instance
-	m.SetAttributeEnricher(enricher)
-
-	// All subsequent metrics will include the enriched attributes
-	m.RecordTokens(ctx, "claude-3-sonnet", 100, 200)
-	m.RecordToolCall(ctx, "claude-3-sonnet", "search_codebase")
-
-	fmt.Println("Metrics recorded with enriched attributes")
-
-	// Output:
-	// Metrics recorded with enriched attributes
-}
-
-// ExampleAttributeEnricher demonstrates creating a custom attribute enricher.
-func ExampleAttributeEnricher() {
-	// Create an enricher that extracts context from the request
-	var enricher metrics.AttributeEnricher = func(ctx context.Context, baseAttrs []attribute.KeyValue) []attribute.KeyValue {
-		// In a real application, you might extract values from context
-		// For example: repository info, user ID, request ID, etc.
-		return append(baseAttrs,
-			attribute.String("environment", "production"),
-			attribute.String("service", "code-review-agent"),
-		)
-	}
-
-	m := metrics.NewGenAI("chainguard.ai.agents")
-	m.SetAttributeEnricher(enricher)
-
-	fmt.Println("Custom enricher configured")
-
-	// Output:
-	// Custom enricher configured
-}
-
 // ExampleGenAI_multipleModels demonstrates tracking metrics across different models.
 func ExampleGenAI_multipleModels() {
 	ctx := context.Background()

@@ -13,7 +13,6 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
-	"chainguard.dev/driftlessaf/agents/metrics"
 )
 
 // NewVertex creates a new Interface instance by delegating to the appropriate
@@ -21,12 +20,23 @@ import (
 // Gemini models use Google's Generative AI SDK.
 // Accepts optional executor options that will be passed through to the underlying executor.
 func NewVertex(ctx context.Context, projectID, region, modelName string, opts ...any) (Interface, error) {
+	return NewVertexWithLabels(ctx, projectID, region, modelName, nil, opts...)
+}
+
+// NewVertexWithLabels creates a new Interface with GCP resource labels for billing attribution.
+// model_name is always added to the labels automatically. The labels map is copied, not mutated.
+func NewVertexWithLabels(ctx context.Context, projectID, region, modelName string, labels map[string]string, opts ...any) (Interface, error) {
 	modelLower := strings.ToLower(modelName)
 
-	// Delegate to Claude implementation for Claude models
+	// Copy to avoid mutating the caller's map, and inject model_name.
+	merged := make(map[string]string, len(labels)+1)
+	maps.Copy(merged, labels)
+	merged["model_name"] = modelLower
+
 	if strings.HasPrefix(modelLower, "claude-") {
-		// Extract Claude options
-		claudeOpts := make([]claudeexecutor.Option[*Request, *Judgement], 0, len(opts))
+		claudeOpts := []claudeexecutor.Option[*Request, *Judgement]{
+			claudeexecutor.WithResourceLabels[*Request, *Judgement](merged),
+		}
 		for _, opt := range opts {
 			if claudeOpt, ok := opt.(claudeexecutor.Option[*Request, *Judgement]); ok {
 				claudeOpts = append(claudeOpts, claudeOpt)
@@ -35,50 +45,16 @@ func NewVertex(ctx context.Context, projectID, region, modelName string, opts ..
 		return newClaude(ctx, projectID, region, modelName, claudeOpts...)
 	}
 
-	// Delegate to Google implementation for Gemini models
 	if strings.HasPrefix(modelLower, "gemini-") {
-		// Extract Google options
-		googleOpts := make([]googleexecutor.Option[*Request, *Judgement], 0, len(opts))
+		googleOpts := []googleexecutor.Option[*Request, *Judgement]{
+			googleexecutor.WithResourceLabels[*Request, *Judgement](merged),
+		}
 		for _, opt := range opts {
 			if googleOpt, ok := opt.(googleexecutor.Option[*Request, *Judgement]); ok {
 				googleOpts = append(googleOpts, googleOpt)
 			}
 		}
 		return newGoogle(ctx, projectID, region, modelName, googleOpts...)
-	}
-
-	return nil, fmt.Errorf("unsupported model: %s (expected claude-* or gemini-*)", modelName)
-}
-
-// NewVertexWithEnricher creates a new Interface instance with an attribute enricher for metrics.
-// This is a convenience function for the common case of passing an enricher.
-func NewVertexWithEnricher(ctx context.Context, projectID, region, modelName string, enricher metrics.AttributeEnricher, resourceLabels ...map[string]string) (Interface, error) {
-	modelLower := strings.ToLower(modelName)
-
-	// Build executor options
-	labels := make(map[string]string)
-	if len(resourceLabels) > 0 {
-		// Copy existing labels
-		maps.Copy(labels, resourceLabels[0])
-	}
-	labels["model_name"] = modelLower
-
-	// Delegate to Claude implementation for Claude models
-	if strings.HasPrefix(modelLower, "claude-") {
-		opts := []claudeexecutor.Option[*Request, *Judgement]{
-			claudeexecutor.WithAttributeEnricher[*Request, *Judgement](enricher),
-			claudeexecutor.WithResourceLabels[*Request, *Judgement](labels),
-		}
-		return newClaude(ctx, projectID, region, modelName, opts...)
-	}
-
-	// Delegate to Google implementation for Gemini models
-	if strings.HasPrefix(modelLower, "gemini-") {
-		opts := []googleexecutor.Option[*Request, *Judgement]{
-			googleexecutor.WithAttributeEnricher[*Request, *Judgement](enricher),
-			googleexecutor.WithResourceLabels[*Request, *Judgement](labels),
-		}
-		return newGoogle(ctx, projectID, region, modelName, opts...)
 	}
 
 	return nil, fmt.Errorf("unsupported model: %s (expected claude-* or gemini-*)", modelName)

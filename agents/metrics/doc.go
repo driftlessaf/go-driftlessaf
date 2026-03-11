@@ -16,7 +16,7 @@ The metrics package offers the following key features:
 
   - Token usage tracking (prompt and completion tokens)
   - Tool call counting with model and tool name dimensions
-  - Attribute enrichment for contextual metrics (repository, PR, commit)
+  - Automatic attribute enrichment from execution context (repository, turn, etc.)
   - Graceful degradation when metric creation fails
   - Thread-safe operations
 
@@ -35,21 +35,9 @@ Create a GenAI metrics instance and record token usage:
 
 # Attribute Enrichment
 
-Use an AttributeEnricher to add contextual attributes to all metrics:
-
-	// Define an enricher that adds PR context
-	enricher := func(ctx context.Context, baseAttrs []attribute.KeyValue) []attribute.KeyValue {
-		return append(baseAttrs,
-			attribute.String("repository", "chainguard-dev/example"),
-			attribute.Int("pull_request", 123),
-		)
-	}
-
-	m := metrics.NewGenAI("chainguard.ai.agents")
-	m.SetAttributeEnricher(enricher)
-
-	// All subsequent metrics will include repository and pull_request attributes
-	m.RecordTokens(ctx, "gemini-pro", 100, 200)
+Contextual attributes (reconciler_type, repository, turn, etc.) are automatically
+extracted from the execution context propagated via context.Context using
+agenttrace.GetExecutionContext. No manual enricher setup is needed.
 
 # Graceful Degradation
 

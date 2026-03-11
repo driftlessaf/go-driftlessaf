@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
-	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 )
@@ -102,17 +101,6 @@ func WithSubmitResultProvider[Request promptbuilder.Bindable, Response any](prov
 			return err
 		}
 		e.submitTool = tool
-		return nil
-	}
-}
-
-// WithAttributeEnricher sets a custom attribute enricher for metrics.
-// The enricher is called before recording each metric, allowing the application
-// to add contextual attributes (e.g., repository, pull_request, package_version, etc.)
-// If not provided, metrics will only include base attributes (model, tool).
-func WithAttributeEnricher[Request promptbuilder.Bindable, Response any](enricher metrics.AttributeEnricher) Option[Request, Response] {
-	return func(e *executor[Request, Response]) error {
-		e.genaiMetrics.SetAttributeEnricher(enricher)
 		return nil
 	}
 }
