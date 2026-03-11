@@ -46,9 +46,13 @@ SPDX-License-Identifier: Apache-2.0
 // Upsert a PR with data:
 //
 //	prURL, err := session.Upsert(ctx, data, draft, labels, func(ctx context.Context, branchName string) error {
-//	    // Make code changes on the branch
+//	    // Make code changes on the branch.
+//	    // Return changemanager.ErrNoChanges if no diff was produced.
 //	    return makeChanges(ctx, branchName)
 //	})
+//	if errors.Is(err, changemanager.ErrNoChanges) {
+//	    // Handle no-diff case (e.g., close existing PR, log, or ignore)
+//	}
 //
 // Close any outstanding PRs with a message:
 //

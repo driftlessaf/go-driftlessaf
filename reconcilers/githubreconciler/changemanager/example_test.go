@@ -7,6 +7,7 @@ package changemanager_test
 
 import (
 	"context"
+	"errors"
 	"text/template"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -57,10 +58,15 @@ func Example() {
 		Version:     "1.2.3",
 		Commit:      "abc123",
 	}, false, []string{"automated pr"}, func(_ context.Context, _ string) error {
-		// Make code changes on the branch
-		// e.g., update package YAML, commit changes, push to remote
+		// Make code changes on the branch.
+		// Return changemanager.ErrNoChanges if no diff was produced.
 		return nil
 	})
+	if errors.Is(err, changemanager.ErrNoChanges) {
+		// No diff was produced — close any existing PR, log, or ignore.
+		_ = session.CloseAnyOutstanding(ctx, "Closing PR because all changes have been resolved.")
+		return
+	}
 	if err != nil {
 		// handle error
 		return
