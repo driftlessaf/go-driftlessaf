@@ -30,6 +30,12 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 	Execute(ctx context.Context, request Request, tools map[string]googletool.Metadata[Response], seedToolCalls ...*genai.FunctionCall) (Response, error)
 }
 
+// DefaultMaxTurns is the default maximum number of conversation turns (LLM
+// round-trips) before the executor aborts. Each turn corresponds to one
+// Gemini API call. This prevents runaway loops when the model keeps calling
+// tools without converging on a result.
+const DefaultMaxTurns = 50
+
 // executor is the private implementation of Interface
 type executor[Request promptbuilder.Bindable, Response any] struct {
 	client             *genai.Client
@@ -37,6 +43,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	model              string
 	temperature        float32
 	maxOutputTokens    int32
+	maxTurns           int // maximum conversation turns before aborting
 	systemInstructions *promptbuilder.Prompt
 	responseMIMEType   string
 	responseSchema     *genai.Schema
@@ -68,6 +75,7 @@ func New[Request promptbuilder.Bindable, Response any](
 		model:           "gemini-2.5-flash", // Default to Gemini 2.5 Flash
 		temperature:     0.1,                // Default temperature for consistency
 		maxOutputTokens: 8192,               // Default max tokens
+		maxTurns:        DefaultMaxTurns,    // Default max conversation turns
 		genaiMetrics:    genaiMetrics,
 		retryConfig:     retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 	}
@@ -267,9 +275,9 @@ func (e *executor[Request, Response]) Execute(
 		trace.RecordTokenUsage(e.model, int64(response.UsageMetadata.PromptTokenCount), int64(response.UsageMetadata.CandidatesTokenCount))
 	}
 
-	// Handle the conversation loop
+	// Handle the conversation loop with bounded turns to prevent runaway executions.
 	var responseText string
-	for {
+	for turn := 0; turn < e.maxTurns; turn++ {
 		log.With("candidates_count", len(response.Candidates)).
 			Info("Received response from model")
 
@@ -411,9 +419,14 @@ func (e *executor[Request, Response]) Execute(
 			continue
 		}
 
-		// If we have text, we're done
+		// If we have text, parse and return directly
 		if hasText && responseText != "" {
-			break
+			extractedResponse, err := result.Extract[Response](responseText)
+			if err != nil {
+				log.With("response", responseText).With("error", err).Error("Failed to parse AI response")
+				return resp, fmt.Errorf("failed to parse AI response: %w", err)
+			}
+			return extractedResponse, nil
 		}
 
 		// Unexpected state
@@ -421,18 +434,8 @@ func (e *executor[Request, Response]) Execute(
 		return resp, errors.New("unexpected response format from model")
 	}
 
-	if responseText == "" {
-		return resp, errors.New("no text content found in response")
-	}
-
-	// Extract and parse the response
-	extractedResponse, err := result.Extract[Response](responseText)
-	if err != nil {
-		log.With("response", responseText).With("error", err).Error("Failed to parse AI response")
-		return resp, fmt.Errorf("failed to parse AI response: %w", err)
-	}
-
-	return extractedResponse, nil
+	log.With("max_turns", e.maxTurns).Error("Agent exceeded maximum conversation turns")
+	return resp, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
 // ptr is a helper function to create a pointer to a value

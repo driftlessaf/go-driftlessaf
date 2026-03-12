@@ -31,6 +31,12 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 	Execute(ctx context.Context, request Request, tools map[string]claudetool.Metadata[Response], seedToolCalls ...anthropic.ToolUseBlock) (Response, error)
 }
 
+// DefaultMaxTurns is the default maximum number of conversation turns (LLM
+// round-trips) before the executor aborts. Each turn corresponds to one
+// Claude API call. This prevents runaway loops when the model keeps calling
+// tools without converging on a result.
+const DefaultMaxTurns = 50
+
 // executor provides the private implementation
 type executor[Request promptbuilder.Bindable, Response any] struct {
 	client               anthropic.Client
@@ -38,6 +44,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	systemInstructions   *promptbuilder.Prompt
 	prompt               *promptbuilder.Prompt
 	maxTokens            int64
+	maxTurns             int // maximum conversation turns before aborting
 	temperature          float64
 	thinkingBudgetTokens *int64                        // nil = disabled, non-nil = enabled with budget
 	submitTool           claudetool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
@@ -65,8 +72,9 @@ func New[Request promptbuilder.Bindable, Response any](
 		client:       client,
 		modelName:    "claude-sonnet-4@20250514", // Default to Sonnet 4
 		prompt:       prompt,
-		maxTokens:    8192, // Default max tokens
-		temperature:  0.1,  // Default temperature for consistency
+		maxTokens:    8192,            // Default max tokens
+		maxTurns:     DefaultMaxTurns, // Default max conversation turns
+		temperature:  0.1,             // Default temperature for consistency
 		genaiMetrics: genaiMetrics,
 		retryConfig:  retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 	}
@@ -260,8 +268,8 @@ func (e *executor[Request, Response]) Execute(
 		})
 	}
 
-	// Conversation loop
-	for {
+	// Conversation loop with bounded turns to prevent runaway executions.
+	for turn := 0; turn < e.maxTurns; turn++ {
 		// Stream response with retry for transient errors
 		message, err := retry.RetryWithBackoff(ctx, e.retryConfig, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
 			stream := e.client.Messages.NewStreaming(ctx, params)
@@ -364,6 +372,9 @@ func (e *executor[Request, Response]) Execute(
 
 		return response, errors.New("no content in Claude's response")
 	}
+
+	log.With("max_turns", e.maxTurns).Error("Agent exceeded maximum conversation turns")
+	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
 // resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes

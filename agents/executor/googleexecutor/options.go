@@ -63,6 +63,20 @@ func WithMaxOutputTokens[Request promptbuilder.Bindable, Response any](tokens in
 	}
 }
 
+// WithMaxTurns sets the maximum number of conversation turns (LLM round-trips)
+// before the executor aborts. This prevents runaway loops where the model
+// keeps calling tools without converging on a result.
+// Default is DefaultMaxTurns (50).
+func WithMaxTurns[Request promptbuilder.Bindable, Response any](turns int) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if turns <= 0 {
+			return fmt.Errorf("max turns must be positive, got %d", turns)
+		}
+		e.maxTurns = turns
+		return nil
+	}
+}
+
 // WithSystemInstructions sets the system instructions for the model
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
