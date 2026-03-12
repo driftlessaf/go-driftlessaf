@@ -95,8 +95,54 @@ func TestLeaseLifecycle(t *testing.T) {
 		t.Fatalf("returning missing lease: %v", err)
 	}
 
+	// Commit a new file directly into the worktree, advancing HEAD beyond
+	// the remote. This simulates a rogue commit must be undone.
+	cloneRepo, err := git.PlainOpen(lease2.WorkingTree())
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	cloneWT, err := cloneRepo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+
+	extraFile := filepath.Join("packages", "extra.yaml")
+	if err := os.WriteFile(filepath.Join(lease2.WorkingTree(), extraFile), []byte("name: extra"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := cloneWT.Add(filepath.ToSlash(extraFile)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := cloneWT.Commit("add extra", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
 	if err := lease2.Return(ctx); err != nil {
 		t.Fatalf("returning lease2: %v", err)
+	}
+
+	// Reacquire and verify the clone is back to the original state.
+	lease3, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease after rogue commit: %v", err)
+	}
+
+	if got := lease3.SHA(); got != headHash {
+		t.Errorf("SHA after reset: got %s, want %s", got, headHash)
+	}
+
+	if _, err := os.Stat(filepath.Join(lease3.WorkingTree(), extraFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected extra.yaml to be gone after reset, got err=%v", err)
+	}
+
+	if err := lease3.Return(ctx); err != nil {
+		t.Fatalf("returning lease3: %v", err)
 	}
 }
 
@@ -108,7 +154,7 @@ func TestMakeAndPushChanges(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	repoDir, _ := initTestRepo(t)
+	repoDir, headHash := initTestRepo(t)
 
 	res := &githubreconciler.Resource{
 		Owner: "tests",
@@ -127,15 +173,15 @@ func TestMakeAndPushChanges(t *testing.T) {
 	}
 
 	branchName := "clonemanager/test-branch"
+	barPath := filepath.ToSlash(filepath.Join("packages", "bar.yaml"))
 
 	if err := lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
-		relPath := filepath.ToSlash(filepath.Join("packages", "bar.yaml"))
-		absPath := filepath.Join(wt.Filesystem.Root(), relPath)
+		absPath := filepath.Join(wt.Filesystem.Root(), barPath)
 		if err := os.WriteFile(absPath, []byte("name: bar"), 0o644); err != nil {
 			return "", fmt.Errorf("WriteFile: %w", err)
 		}
 
-		if _, err := wt.Add(relPath); err != nil {
+		if _, err := wt.Add(barPath); err != nil {
 			return "", fmt.Errorf("Add: %w", err)
 		}
 
@@ -155,6 +201,25 @@ func TestMakeAndPushChanges(t *testing.T) {
 
 	if _, err := originRepo.Reference(plumbing.NewBranchReferenceName(branchName), true); err != nil {
 		t.Fatalf("Reference lookup: %v", err)
+	}
+
+	// Reacquire the lease and verify the clone was reset to the original
+	// state: correct SHA, committed file removed.
+	lease2, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease after push: %v", err)
+	}
+
+	if got := lease2.SHA(); got != headHash {
+		t.Errorf("SHA after reset: got %s, want %s", got, headHash)
+	}
+
+	if _, err := os.Stat(filepath.Join(lease2.WorkingTree(), barPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected bar.yaml to be gone after reset, got err=%v", err)
+	}
+
+	if err := lease2.Return(ctx); err != nil {
+		t.Fatalf("Return lease2: %v", err)
 	}
 }
 
