@@ -419,8 +419,36 @@ func (e *executor[Request, Response]) Execute(
 			continue
 		}
 
-		// If we have text, parse and return directly
-		if hasText && responseText != "" {
+		// When submit_result is configured, it is the only valid exit path.
+		// If the model responds with text instead of calling submit_result,
+		// redirect it back to use the tool.
+		if e.submitTool.Handler != nil && hasText {
+			log.Warn("Model responded with text instead of calling submit_result, redirecting")
+			e.recordToolCall(ctx, "submit_result_redirect")
+
+			redirectResp, err := retry.RetryWithBackoff(ctx, e.retryConfig, "send_submit_redirect", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+				return chat.SendMessage(ctx, genai.Part{
+					Text: "You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary.",
+				})
+			})
+			if err != nil {
+				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
+					return resp, requeueErr
+				}
+				return resp, fmt.Errorf("failed to send submit_result redirect: %w", err)
+			}
+
+			if redirectResp != nil && redirectResp.UsageMetadata != nil {
+				e.recordTokenMetrics(ctx, redirectResp.UsageMetadata)
+				trace.RecordTokenUsage(e.model, int64(redirectResp.UsageMetadata.PromptTokenCount), int64(redirectResp.UsageMetadata.CandidatesTokenCount))
+			}
+
+			response = redirectResp
+			continue
+		}
+
+		// Fallback: parse text response as JSON when submit_result is not configured
+		if hasText {
 			extractedResponse, err := result.Extract[Response](responseText)
 			if err != nil {
 				log.With("response", responseText).With("error", err).Error("Failed to parse AI response")

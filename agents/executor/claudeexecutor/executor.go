@@ -356,7 +356,31 @@ func (e *executor[Request, Response]) Execute(
 			continue
 		}
 
-		// Parse final response
+		// When submit_result is configured, it is the only valid exit path.
+		// If Claude responds with text instead of calling submit_result,
+		// force it to call the tool on the next turn using tool_choice.
+		if e.submitTool.Handler != nil && textContent != "" {
+			log.Warn("Claude responded with text instead of calling submit_result, redirecting with tool_choice")
+			e.recordToolCall(ctx, "submit_result_redirect")
+
+			submitToolName := e.submitTool.Definition.Name
+			if submitToolName == "" {
+				submitToolName = "submit_result"
+			}
+
+			params.Messages = append(params.Messages, message.ToParam())
+			params.Messages = append(params.Messages, anthropic.MessageParam{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					anthropic.NewTextBlock("You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary."),
+				},
+			})
+			// Force Claude to call the submit_result tool on the next turn.
+			params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
+			continue
+		}
+
+		// Fallback: parse text response as JSON when submit_result is not configured
 		if textContent != "" {
 			resp, err := result.Extract[Response](textContent)
 			if err != nil {
