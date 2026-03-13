@@ -131,7 +131,7 @@ func ExampleNewVertex_gemini() {
 
 	// Create a Gemini judge instance with resource labels for billing attribution
 	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "global", "gemini-3-flash-preview",
 		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
@@ -179,7 +179,7 @@ func ExampleScoreRange() {
 
 	// Create a judge instance with resource labels
 	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "global", "gemini-3-flash-preview",
 		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)
@@ -248,7 +248,7 @@ func ExampleNewStandaloneEval() {
 
 	// Create a judge instance with resource labels
 	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-central1", "gemini-2.5-flash",
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "global", "gemini-3-flash-preview",
 		googleexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

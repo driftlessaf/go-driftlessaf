@@ -27,7 +27,7 @@ func TestNewVertex(t *testing.T) {
 		wantError: false,
 	}, {
 		name:      "gemini model",
-		modelName: "gemini-2.5-flash",
+		modelName: "gemini-3-flash-preview",
 		wantError: false,
 	}, {
 		name:      "unsupported model",

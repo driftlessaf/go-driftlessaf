@@ -29,7 +29,7 @@ func TestStandalone(t *testing.T) {
 	threshold := 0.8 // 80% success rate threshold
 
 	// Create meta-judge instance for LLM-as-a-judge evaluation using Gemini Flash
-	metaJudgeInstance, err := judge.NewVertex(ctx, projectID, "us-central1", "gemini-2.5-flash")
+	metaJudgeInstance, err := judge.NewVertex(ctx, projectID, "global", "gemini-3-flash-preview")
 	if err != nil {
 		t.Fatalf("Failed to create meta-judge instance: %v", err)
 	}
@@ -45,15 +45,13 @@ func TestStandalone(t *testing.T) {
 		region string
 		model  string
 	}{{
-		name:   "gemini-2.5-flash",
-		region: "us-central1",
-		// https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-flash
-		model: "gemini-2.5-flash",
+		name:   "gemini-3-flash-preview",
+		region: "global",
+		model:  "gemini-3-flash-preview",
 	}, {
-		name:   "gemini-2.5-flash-lite",
-		region: "us-central1",
-		// https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-flash-lite
-		model: "gemini-2.5-flash-lite",
+		name:   "gemini-3.1-flash-lite-preview",
+		region: "global",
+		model:  "gemini-3.1-flash-lite-preview",
 	}}
 
 	// Add Claude models when not in short mode
