@@ -86,7 +86,7 @@ func TestExecutorWithThinking(t *testing.T) {
 	// Create Gemini client
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  projectID,
-		Location: "us-central1",
+		Location: "global",
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
