@@ -84,7 +84,7 @@ func HistoryCallbacks(repo *gogit.Repository, baseCommit plumbing.Hash) callback
 	}
 }
 
-// ResolveBaseCommit walks commitCount commits from HEAD and returns the first
+// resolveBaseCommit walks commitCount commits from HEAD and returns the first
 // parent of the oldest commit found. This derives the actual merge-base from
 // the PR branch's own ancestry, avoiding reliance on the base branch tip SHA
 // (which may not be present in a shallow clone).
@@ -94,13 +94,22 @@ func HistoryCallbacks(repo *gogit.Repository, baseCommit plumbing.Hash) callback
 // is the first-parent which may not be the intended base.
 //
 // The caller must ensure the clone has sufficient depth (commitCount+1) via
-// WithCommitDepth before calling this function.
+// WithCommitDepth before calling this function. Lease.BaseCommit
+// handles this automatically by using the depth recorded at lease creation.
 //
+// Returns HEAD's hash when commitCount is 0 (no PR commits to walk, so the
+// base is the current checkout — producing empty change history).
 // Returns plumbing.ZeroHash if the oldest commit has no parents (root commit).
-func ResolveBaseCommit(repo *gogit.Repository, commitCount int) (plumbing.Hash, error) {
+func resolveBaseCommit(repo *gogit.Repository, commitCount int) (plumbing.Hash, error) {
 	head, err := repo.Head()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("get HEAD: %w", err)
+	}
+
+	// When there are no PR commits, the base is HEAD itself so that
+	// history tools see an empty changeset.
+	if commitCount == 0 {
+		return head.Hash(), nil
 	}
 
 	iter, err := repo.Log(&gogit.LogOptions{

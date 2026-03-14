@@ -72,7 +72,7 @@ func initHistoryRepo(t *testing.T, n int) (*gogit.Repository, plumbing.Hash, []s
 func TestResolveBaseCommit(t *testing.T) {
 	repo, baseHash, _ := initHistoryRepo(t, 3)
 
-	got, err := ResolveBaseCommit(repo, 3)
+	got, err := resolveBaseCommit(repo, 3)
 	if err != nil {
 		t.Fatalf("ResolveBaseCommit: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestResolveBaseCommitSubset(t *testing.T) {
 
 	// Ask for only 2 commits — the base should be the parent of the 2nd
 	// commit from HEAD, not the original base.
-	got, err := ResolveBaseCommit(repo, 2)
+	got, err := resolveBaseCommit(repo, 2)
 	if err != nil {
 		t.Fatalf("ResolveBaseCommit: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestResolveBaseCommitRootCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := ResolveBaseCommit(repo, 1)
+	got, err := resolveBaseCommit(repo, 1)
 	if err != nil {
 		t.Fatalf("ResolveBaseCommit: %v", err)
 	}
@@ -134,12 +134,19 @@ func TestResolveBaseCommitRootCommit(t *testing.T) {
 func TestResolveBaseCommitZeroCount(t *testing.T) {
 	repo, _, _ := initHistoryRepo(t, 3)
 
-	got, err := ResolveBaseCommit(repo, 0)
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveBaseCommit(repo, 0)
 	if err != nil {
 		t.Fatalf("ResolveBaseCommit: %v", err)
 	}
-	if got != (plumbing.Hash{}) {
-		t.Errorf("base commit: got = %s, wanted = zero hash", got)
+	// Zero commit count means "no PR commits to walk", so the base should
+	// be HEAD itself, producing an empty changeset for history tools.
+	if got != head.Hash() {
+		t.Errorf("base commit: got = %s, wanted = %s (HEAD)", got, head.Hash())
 	}
 }
 

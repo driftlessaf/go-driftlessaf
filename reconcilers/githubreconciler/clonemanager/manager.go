@@ -77,6 +77,11 @@ type Lease struct {
 
 	sha        string
 	pathExists bool
+	// baseCommit is the merge-base resolved at lease creation time by
+	// walking (fetchDepth - 1) commits from HEAD. This keeps the walk
+	// in sync with the actual clone depth so callers never request more
+	// history than was fetched.
+	baseCommit plumbing.Hash
 }
 
 // UpdateFunc receives the prepared working tree for a lease and returns the
@@ -179,11 +184,22 @@ func (m *Manager) leaseRef(ctx context.Context, res *githubreconciler.Resource, 
 		return nil, err
 	}
 
+	// Resolve the merge-base eagerly so callers can access it without
+	// error handling. The fetch depth includes the base commit
+	// (depth = commitCount + 1), so subtract 1 to get the PR commit count.
+	baseCommit, err := resolveBaseCommit(cl.repo, max(depth-1, 0))
+	if err != nil {
+		clog.FromContext(ctx).Warnf("Discarding clone after base commit resolution failure: %v", err)
+		m.discardClone(cl)
+		return nil, fmt.Errorf("resolve base commit: %w", err)
+	}
+
 	return &Lease{
 		manager:    m,
 		clone:      cl,
 		sha:        sha,
 		pathExists: exists,
+		baseCommit: baseCommit,
 	}, nil
 }
 
@@ -528,6 +544,14 @@ func (l *Lease) SHA() string {
 // checked-out commit.
 func (l *Lease) PathExists() bool {
 	return l.pathExists
+}
+
+// BaseCommit returns the merge-base resolved at lease creation time.
+// For PR branch leases this is the parent of the oldest PR commit;
+// for default branch leases (depth 1) this is HEAD, producing empty
+// change history.
+func (l *Lease) BaseCommit() plumbing.Hash {
+	return l.baseCommit
 }
 
 // Return resets the working tree and places the clone back into the manager's
