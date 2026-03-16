@@ -42,10 +42,13 @@ func NewWorktreeToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvi
 	return worktreeToolsProvider[Resp, T]{baseProvider: base}
 }
 
-func (p worktreeToolsProvider[Resp, T]) Tools(cb WorktreeTools[T]) map[string]Tool[Resp] {
-	tools := p.baseProvider.Tools(cb.base)
+func (p worktreeToolsProvider[Resp, T]) Tools(ctx context.Context, cb WorktreeTools[T]) (map[string]Tool[Resp], error) {
+	tools, err := p.baseProvider.Tools(ctx, cb.base)
+	if err != nil {
+		return nil, err
+	}
 	maps.Copy(tools, worktreeToolDefs[Resp](cb.WorktreeCallbacks))
-	return tools
+	return tools, nil
 }
 
 func worktreeToolDefs[Resp any](cb callbacks.WorktreeCallbacks) map[string]Tool[Resp] {

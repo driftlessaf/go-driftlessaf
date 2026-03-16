@@ -49,10 +49,13 @@ func NewFindingToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvid
 	return findingToolsProvider[Resp, T]{baseProvider: base}
 }
 
-func (p findingToolsProvider[Resp, T]) Tools(cb FindingTools[T]) map[string]Tool[Resp] {
-	tools := p.baseProvider.Tools(cb.base)
+func (p findingToolsProvider[Resp, T]) Tools(ctx context.Context, cb FindingTools[T]) (map[string]Tool[Resp], error) {
+	tools, err := p.baseProvider.Tools(ctx, cb.base)
+	if err != nil {
+		return nil, err
+	}
 	maps.Copy(tools, findingToolDefs[Resp](cb.FindingCallbacks))
-	return tools
+	return tools, nil
 }
 
 func findingToolDefs[Resp any](cb callbacks.FindingCallbacks) map[string]Tool[Resp] {

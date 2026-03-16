@@ -50,10 +50,13 @@ func NewExampleToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvid
 	return exampleToolsProvider[Resp, T]{base: base}
 }
 
-func (p exampleToolsProvider[Resp, T]) Tools(cb ExampleTools[T]) map[string]Tool[Resp] {
-	tools := p.base.Tools(cb.base)
+func (p exampleToolsProvider[Resp, T]) Tools(ctx context.Context, cb ExampleTools[T]) (map[string]Tool[Resp], error) {
+	tools, err := p.base.Tools(ctx, cb.base)
+	if err != nil {
+		return nil, err
+	}
 	tools["random_number"] = randomNumberTool[Resp](cb.RandomNumber)
-	return tools
+	return tools, nil
 }
 
 func randomNumberTool[Resp any](randomFn func(context.Context, int, int) (int, error)) Tool[Resp] {
@@ -138,5 +141,5 @@ var _ = func() {
 	tools := NewExampleTools(NewHistoryTools(NewFindingTools(NewWorktreeTools(EmptyTools{}, wt), fc), hc))
 
 	// Provider returns unified tools that work with any provider.
-	_ = exampleProvider.Tools(tools)
+	_, _ = exampleProvider.Tools(context.Background(), tools)
 }

@@ -77,11 +77,11 @@ The description should be meaningful and at least 20 characters.
 Preserve any existing content that is useful.`
 )
 
-func (prToolsProvider) Tools(cb PRTools) map[string]toolcall.Tool[*PRFixResult] {
+func (prToolsProvider) Tools(_ context.Context, cb PRTools) (map[string]toolcall.Tool[*PRFixResult], error) {
 	return map[string]toolcall.Tool[*PRFixResult]{
 		"update_pr_title":       updatePRTitleTool(cb.UpdateTitle),
 		"update_pr_description": updatePRDescriptionTool(cb.UpdateDescription),
-	}
+	}, nil
 }
 
 func updatePRTitleTool(updateFn func(context.Context, string) error) toolcall.Tool[*PRFixResult] {

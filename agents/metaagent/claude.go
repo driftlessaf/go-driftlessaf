@@ -56,5 +56,10 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {
-	return a.executor.Execute(ctx, request, claudetool.Map(a.config.Tools.Tools(callbacks)))
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		var zero Resp
+		return zero, fmt.Errorf("building tools: %w", err)
+	}
+	return a.executor.Execute(ctx, request, claudetool.Map(tools))
 }

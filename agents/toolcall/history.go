@@ -40,10 +40,13 @@ func NewHistoryToolsProvider[Resp, T any](base ToolProvider[Resp, T]) ToolProvid
 	return historyToolsProvider[Resp, T]{baseProvider: base}
 }
 
-func (p historyToolsProvider[Resp, T]) Tools(cb HistoryTools[T]) map[string]Tool[Resp] {
-	tools := p.baseProvider.Tools(cb.base)
+func (p historyToolsProvider[Resp, T]) Tools(ctx context.Context, cb HistoryTools[T]) (map[string]Tool[Resp], error) {
+	tools, err := p.baseProvider.Tools(ctx, cb.base)
+	if err != nil {
+		return nil, err
+	}
 	maps.Copy(tools, historyToolDefs[Resp](cb.HistoryCallbacks))
-	return tools
+	return tools, nil
 }
 
 const (
