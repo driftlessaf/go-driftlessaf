@@ -94,6 +94,29 @@ func cleanLogs(logs string) string {
 	return logs
 }
 
+// rerunCICheck triggers a rerun of a GitHub Actions job identified by its details URL.
+func rerunCICheck(ctx context.Context, gh *github.Client, owner, repo, detailsURL string) error {
+	if detailsURL == "" {
+		return fmt.Errorf("finding has no details URL")
+	}
+
+	matches := actionsURLRegex.FindStringSubmatch(detailsURL)
+	if len(matches) < 3 {
+		return fmt.Errorf("details URL %q does not match GitHub Actions URL pattern", detailsURL)
+	}
+
+	jobID, err := strconv.ParseInt(matches[2], 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse job ID from URL %q: %w", detailsURL, err)
+	}
+
+	if _, err := gh.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
+		return fmt.Errorf("rerun job %d: %w", jobID, err)
+	}
+
+	return nil
+}
+
 // fetchFindingLogs fetches logs for a finding based on its details URL.
 // Supports GitHub Actions logs and GCP console log URLs. For unrecognized
 // URL formats, returns the finding's Details as a fallback.

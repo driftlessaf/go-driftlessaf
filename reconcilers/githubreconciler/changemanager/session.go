@@ -235,6 +235,17 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			}
 			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
 		},
+		Retry: func(ctx context.Context, kind callbacks.FindingKind, identifier string) error {
+			if kind != callbacks.FindingKindCICheck {
+				return fmt.Errorf("retry is only supported for CI check findings, got: %s", kind)
+			}
+			for _, f := range s.findings {
+				if f.Kind == kind && f.Identifier == identifier {
+					return rerunCICheck(ctx, s.client, s.owner, s.repo, f.DetailsURL)
+				}
+			}
+			return fmt.Errorf("finding not found: %s/%s", kind, identifier)
+		},
 		Resolve: func(ctx context.Context, identifier string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
 				return errors.New("cannot resolve review body findings, only review thread findings can be resolved")

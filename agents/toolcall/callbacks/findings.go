@@ -55,6 +55,9 @@ type FindingCallbacks struct {
 	// Resolve marks a review thread finding as resolved by calling the
 	// GitHub resolveReviewThread mutation.
 	Resolve func(ctx context.Context, identifier string) error
+
+	// Retry triggers a retry of a failed finding (e.g., rerunning a flaky CI check).
+	Retry func(ctx context.Context, kind FindingKind, identifier string) error
 }
 
 // HasGetDetails returns true if the GetDetails callback is available.
@@ -70,6 +73,11 @@ func (f FindingCallbacks) HasGetLogs() bool {
 // HasResolve returns true if the Resolve callback is available.
 func (f FindingCallbacks) HasResolve() bool {
 	return f.Resolve != nil
+}
+
+// HasRetry returns true if the Retry callback is available.
+func (f FindingCallbacks) HasRetry() bool {
+	return f.Retry != nil
 }
 
 // GetFinding looks up a finding by kind and identifier.

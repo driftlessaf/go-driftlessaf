@@ -70,6 +70,9 @@ func findingToolDefs[Resp any](cb callbacks.FindingCallbacks) map[string]Tool[Re
 	if cb.HasResolve() {
 		defs["resolve_finding"] = resolveFindingTool[Resp](cb.Resolve)
 	}
+	if cb.HasRetry() {
+		defs["retry_finding"] = retryFindingTool[Resp](cb.Retry)
+	}
 
 	return defs
 }
@@ -146,6 +149,67 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 			result := map[string]any{
 				"identifier": identifier,
 				"resolved":   true,
+			}
+			tc.Complete(result, nil)
+			return result
+		},
+	}
+}
+
+func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKind, string) error) Tool[Resp] {
+	type retryCall struct{ kind, identifier string }
+	seen := make(map[retryCall]struct{})
+
+	return Tool[Resp]{
+		Def: Definition{
+			Name: "retry_finding",
+			Description: "Retry a failed finding (e.g., rerun a flaky CI check due to a network issue or transient infrastructure failure). " +
+				"Only use this after reading the logs and confirming the failure is not caused by the code changes.",
+			Parameters: []Parameter{
+				{Name: "kind", Type: "string", Description: "The kind of finding (from the request's findings list)", Required: true},
+				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
+			},
+		},
+		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
+			kind, errResp := Param[string](call, trace, "kind")
+			if errResp != nil {
+				return errResp
+			}
+
+			identifier, errResp := Param[string](call, trace, "identifier")
+			if errResp != nil {
+				return errResp
+			}
+
+			// Detect duplicate calls to prevent infinite retry loops.
+			key := retryCall{kind: kind, identifier: identifier}
+			if _, dup := seen[key]; dup {
+				clog.WarnContext(ctx, "Duplicate retry_finding call detected", "kind", kind, "identifier", identifier)
+				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier})
+				resp := map[string]any{
+					"error":      "duplicate call — this finding was already retried. Wait for the retry to complete instead of triggering another.",
+					"kind":       kind,
+					"identifier": identifier,
+				}
+				tc.Complete(resp, nil)
+				return resp
+			}
+			seen[key] = struct{}{}
+
+			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier})
+
+			if err := retry(ctx, callbacks.FindingKind(kind), identifier); err != nil {
+				clog.ErrorContext(ctx, "Failed to retry finding", "kind", kind, "identifier", identifier, "error", err)
+				result := params.ErrorWithContext(err, map[string]any{"kind": kind, "identifier": identifier})
+				tc.Complete(result, err)
+				return result
+			}
+
+			result := map[string]any{
+				"kind":       kind,
+				"identifier": identifier,
+				"retried":    true,
+				"message":    "Finding retry triggered successfully.",
 			}
 			tc.Complete(result, nil)
 			return result

@@ -129,6 +129,7 @@ var _ = func() {
 	fc := callbacks.FindingCallbacks{
 		GetDetails: func(_ context.Context, _ callbacks.FindingKind, _ string) (string, error) { return "", nil },
 		GetLogs:    func(_ context.Context, _ callbacks.FindingKind, _ string) (string, error) { return "", nil },
+		Retry:      func(_ context.Context, _ callbacks.FindingKind, _ string) error { return nil },
 	}
 	hc := callbacks.HistoryCallbacks{
 		ListCommits: func(_ context.Context, _, _ int) (callbacks.CommitListResult, error) {
