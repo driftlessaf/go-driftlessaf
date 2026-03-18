@@ -62,7 +62,7 @@ func downloadLogs(ctx context.Context, url string) (string, error) {
 	// an authenticated client here as the Auth header will cause 400.
 	resp, err := (&http.Client{
 		Timeout: 30 * time.Second,
-	}).Do(req)
+	}).Do(req) //nolint:gosec // G704: URL from internal findings config
 	if err != nil {
 		return "", fmt.Errorf("failed to download logs: %w", err)
 	}

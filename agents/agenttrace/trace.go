@@ -247,27 +247,27 @@ func (t *Trace[T]) String() string {
 	}
 
 	// Header
-	sb.WriteString(fmt.Sprintf("=== Trace %s ===\n", t.ID))
-	sb.WriteString(fmt.Sprintf("Prompt: %q\n", t.InputPrompt))
-	sb.WriteString(fmt.Sprintf("Duration: %v\n", duration))
+	fmt.Fprintf(&sb, "=== Trace %s ===\n", t.ID)
+	fmt.Fprintf(&sb, "Prompt: %q\n", t.InputPrompt)
+	fmt.Fprintf(&sb, "Duration: %v\n", duration)
 
 	// Reasoning
 	if len(t.Reasoning) > 0 {
-		sb.WriteString(fmt.Sprintf("\nReasoning (%d blocks):\n", len(t.Reasoning)))
+		fmt.Fprintf(&sb, "\nReasoning (%d blocks):\n", len(t.Reasoning))
 		for i, r := range t.Reasoning {
 			thinkingStr := r.Thinking
 			if len(thinkingStr) > 200 {
 				thinkingStr = thinkingStr[:197] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, thinkingStr))
+			fmt.Fprintf(&sb, "  [%d] %s\n", i+1, thinkingStr)
 		}
 	}
 
 	// Tool calls
 	if len(t.ToolCalls) > 0 {
-		sb.WriteString(fmt.Sprintf("\nTool Calls (%d):\n", len(t.ToolCalls)))
+		fmt.Fprintf(&sb, "\nTool Calls (%d):\n", len(t.ToolCalls))
 		for i, tc := range t.ToolCalls {
-			sb.WriteString(fmt.Sprintf("  [%d] %s (ID: %s)\n", i+1, tc.Name, tc.ID))
+			fmt.Fprintf(&sb, "  [%d] %s (ID: %s)\n", i+1, tc.Name, tc.ID)
 
 			// Calculate tool call duration inline to avoid nested mutex lock
 			var tcDuration time.Duration
@@ -276,26 +276,26 @@ func (t *Trace[T]) String() string {
 			} else {
 				tcDuration = tc.EndTime.Sub(tc.StartTime)
 			}
-			sb.WriteString(fmt.Sprintf("      Duration: %v\n", tcDuration))
+			fmt.Fprintf(&sb, "      Duration: %v\n", tcDuration)
 
 			// Parameters
 			if len(tc.Params) > 0 {
 				sb.WriteString("      Params:\n")
 				for k, v := range tc.Params {
-					sb.WriteString(fmt.Sprintf("        %s: %v\n", k, v))
+					fmt.Fprintf(&sb, "        %s: %v\n", k, v)
 				}
 			}
 
 			// Result/Error
 			if tc.Error != nil {
-				sb.WriteString(fmt.Sprintf("      Error: %v\n", tc.Error))
+				fmt.Fprintf(&sb, "      Error: %v\n", tc.Error)
 			} else if tc.Result != nil {
 				// Limit result output to avoid huge logs
 				resultStr := fmt.Sprintf("%v", tc.Result)
 				if len(resultStr) > 200 {
 					resultStr = resultStr[:197] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("      Result: %s\n", resultStr))
+				fmt.Fprintf(&sb, "      Result: %s\n", resultStr)
 			}
 		}
 	} else {
@@ -306,14 +306,14 @@ func (t *Trace[T]) String() string {
 	sb.WriteString("\nCompletion:\n")
 	switch {
 	case t.Error != nil:
-		sb.WriteString(fmt.Sprintf("  Error: %v\n", t.Error))
+		fmt.Fprintf(&sb, "  Error: %v\n", t.Error)
 	case any(t.Result) != nil:
 		// Limit result output
 		resultStr := fmt.Sprintf("%v", t.Result)
 		if len(resultStr) > 500 {
 			resultStr = resultStr[:497] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("  Result: %s\n", resultStr))
+		fmt.Fprintf(&sb, "  Result: %s\n", resultStr)
 	default:
 		sb.WriteString("  Result: <nil>\n")
 	}
@@ -322,7 +322,7 @@ func (t *Trace[T]) String() string {
 	if len(t.Metadata) > 0 {
 		sb.WriteString("\nMetadata:\n")
 		for k, v := range t.Metadata {
-			sb.WriteString(fmt.Sprintf("  %s: %v\n", k, v))
+			fmt.Fprintf(&sb, "  %s: %v\n", k, v)
 		}
 	}
 

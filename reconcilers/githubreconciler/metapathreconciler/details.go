@@ -60,7 +60,7 @@ func (d CheckDetails) Markdown() string {
 	}
 	sb.WriteString("**Files with issues:**\n")
 	for path := range seen {
-		sb.WriteString(fmt.Sprintf("- `%s`\n", path))
+		fmt.Fprintf(&sb, "- `%s`\n", path)
 	}
 
 	sb.WriteString("\n| File | Line | Rule | Message |\n")
@@ -70,11 +70,11 @@ func (d CheckDetails) Markdown() string {
 		if diag.Line > 0 {
 			line = strconv.Itoa(diag.Line)
 		}
-		sb.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s |\n", diag.Path, line, diag.Rule, diag.Message))
+		fmt.Fprintf(&sb, "| `%s` | %s | %s | %s |\n", diag.Path, line, diag.Rule, diag.Message)
 	}
 
 	if d.Identity != "" {
-		sb.WriteString(fmt.Sprintf("\nTo skip this check, apply the `skip:%s` label to the PR.\n", d.Identity))
+		fmt.Fprintf(&sb, "\nTo skip this check, apply the `skip:%s` label to the PR.\n", d.Identity)
 	}
 
 	return sb.String()

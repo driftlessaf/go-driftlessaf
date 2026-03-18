@@ -50,13 +50,13 @@ func (d Details) Markdown() string {
 	if d.TitleValid {
 		titleStatus = "✅ Valid"
 	}
-	sb.WriteString(fmt.Sprintf("| Title (conventional commit) | %s |\n", titleStatus))
+	fmt.Fprintf(&sb, "| Title (conventional commit) | %s |\n", titleStatus)
 
 	descStatus := "❌ Invalid"
 	if d.DescriptionValid {
 		descStatus = "✅ Valid"
 	}
-	sb.WriteString(fmt.Sprintf("| Description | %s |\n", descStatus))
+	fmt.Fprintf(&sb, "| Description | %s |\n", descStatus)
 
 	if len(d.Issues) > 0 {
 		sb.WriteString("\n### Issues\n\n")
@@ -69,20 +69,20 @@ func (d Details) Markdown() string {
 	if d.AgentEnabled {
 		sb.WriteString("\n### Agent Activity\n\n")
 		if d.ModelUsed != "" {
-			sb.WriteString(fmt.Sprintf("**Model:** `%s`\n\n", d.ModelUsed))
+			fmt.Fprintf(&sb, "**Model:** `%s`\n\n", d.ModelUsed)
 		}
 		if len(d.FixesApplied) > 0 {
 			sb.WriteString("**Fixes Applied:**\n")
 			for _, fix := range d.FixesApplied {
-				sb.WriteString(fmt.Sprintf("- %s\n", fix))
+				fmt.Fprintf(&sb, "- %s\n", fix)
 			}
 			sb.WriteString("\n")
 		}
 		if d.AgentReasoning != "" {
-			sb.WriteString(fmt.Sprintf("**Agent Reasoning:** %s\n\n", d.AgentReasoning))
+			fmt.Fprintf(&sb, "**Agent Reasoning:** %s\n\n", d.AgentReasoning)
 		}
 		if d.FixAttempts > 0 {
-			sb.WriteString(fmt.Sprintf("**Fix Attempts:** %d\n", d.FixAttempts))
+			fmt.Fprintf(&sb, "**Fix Attempts:** %d\n", d.FixAttempts)
 		}
 	}
 

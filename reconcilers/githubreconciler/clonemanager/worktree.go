@@ -166,7 +166,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(dstFull), 0755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(dstFull, data, srcInfo.Mode()); err != nil {
+			if err := os.WriteFile(dstFull, data, srcInfo.Mode()); err != nil { //nolint:gosec // G703: path from git worktree
 				return err
 			}
 			_, err = wt.Add(dst)
@@ -335,7 +335,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 					return nil
 				}
 
-				data, err := os.ReadFile(filePath)
+				data, err := os.ReadFile(filePath) //nolint:gosec // G122: walking git worktree, developer-controlled
 				if err != nil {
 					return nil // Skip unreadable files.
 				}
@@ -644,7 +644,7 @@ func executeReplacements(path string, offsets []int64, oldLen int, newBytes []by
 	}
 	defer func() {
 		tmp.Close()
-		os.Remove(tmp.Name())
+		os.Remove(tmp.Name()) //nolint:gosec // G703: path from internal git worktree
 	}()
 
 	var pos int64
@@ -680,5 +680,5 @@ func executeReplacements(path string, offsets []int64, oldLen int, newBytes []by
 		return err
 	}
 
-	return os.Rename(tmp.Name(), path)
+	return os.Rename(tmp.Name(), path) //nolint:gosec // G703: path from internal git worktree
 }

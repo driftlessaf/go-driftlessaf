@@ -324,7 +324,7 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 
 		// Verify the path actually exists on the filesystem, not just in the git tree.
 		fsPath := filepath.Join(cl.path, res.Path)
-		_, err = os.Stat(fsPath)
+		_, err = os.Stat(fsPath) //nolint:gosec // G703: path from git clone directory
 		if err != nil {
 			if os.IsNotExist(err) {
 				clog.DebugContextf(ctx, "Path %s does not exist on filesystem at commit %s", res.Path, remoteRef.Hash().String())
@@ -373,7 +373,7 @@ func (m *Manager) releaseClone(cl *clone) {
 }
 
 func (m *Manager) discardClone(cl *clone) {
-	os.RemoveAll(cl.path)
+	os.RemoveAll(cl.path) //nolint:gosec // G703: path from git clone directory
 }
 
 func (m *Manager) authForRemote() (*githttp.BasicAuth, error) {

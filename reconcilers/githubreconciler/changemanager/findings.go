@@ -13,20 +13,20 @@ import (
 // formatCheckRunDetails builds a human-readable details string for a check run.
 func formatCheckRunDetails(name, status, conclusion, title, summary, text, detailsURL string) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Check Run: %s\n", name))
-	sb.WriteString(fmt.Sprintf("Status: %s\n", status))
-	sb.WriteString(fmt.Sprintf("Conclusion: %s\n", conclusion))
+	fmt.Fprintf(&sb, "Check Run: %s\n", name)
+	fmt.Fprintf(&sb, "Status: %s\n", status)
+	fmt.Fprintf(&sb, "Conclusion: %s\n", conclusion)
 	if title != "" {
-		sb.WriteString(fmt.Sprintf("Title: %s\n", title))
+		fmt.Fprintf(&sb, "Title: %s\n", title)
 	}
 	if summary != "" {
-		sb.WriteString(fmt.Sprintf("Summary: %s\n", summary))
+		fmt.Fprintf(&sb, "Summary: %s\n", summary)
 	}
 	if text != "" {
-		sb.WriteString(fmt.Sprintf("Details:\n%s\n", text))
+		fmt.Fprintf(&sb, "Details:\n%s\n", text)
 	}
 	if detailsURL != "" {
-		sb.WriteString(fmt.Sprintf("Details URL: %s\n", detailsURL))
+		fmt.Fprintf(&sb, "Details URL: %s\n", detailsURL)
 	}
 	return sb.String()
 }
@@ -38,17 +38,17 @@ func formatThreadDetails(path string, line int, isOutdated bool, comments []gqlT
 
 	first := comments[0]
 
-	sb.WriteString(fmt.Sprintf("Review thread by @%s (%s)\n", first.Author.Login, first.AuthorAssociation))
-	sb.WriteString(fmt.Sprintf("Path: %s:%d\n", path, line))
+	fmt.Fprintf(&sb, "Review thread by @%s (%s)\n", first.Author.Login, first.AuthorAssociation)
+	fmt.Fprintf(&sb, "Path: %s:%d\n", path, line)
 
 	commitAnnotation := first.Commit.Oid
 	if isOutdated {
 		commitAnnotation += " (outdated)"
 	}
-	sb.WriteString(fmt.Sprintf("Commit: %s\n", commitAnnotation))
+	fmt.Fprintf(&sb, "Commit: %s\n", commitAnnotation)
 
 	for _, c := range comments {
-		sb.WriteString(fmt.Sprintf("\n[Comment by @%s]\n%s\n", c.Author.Login, c.Body))
+		fmt.Fprintf(&sb, "\n[Comment by @%s]\n%s\n", c.Author.Login, c.Body)
 	}
 
 	return sb.String()
@@ -58,10 +58,10 @@ func formatThreadDetails(path string, line int, isOutdated bool, comments []gqlT
 func formatReviewBodyDetails(review gqlReviewBodyNode) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("Review by @%s (%s) - %s\n", review.Author.Login, review.AuthorAssociation, review.State))
-	sb.WriteString(fmt.Sprintf("Submitted: %s\n", review.SubmittedAt))
-	sb.WriteString(fmt.Sprintf("Commit: %s\n", review.Commit.Oid))
-	sb.WriteString(fmt.Sprintf("\n%s\n", review.Body))
+	fmt.Fprintf(&sb, "Review by @%s (%s) - %s\n", review.Author.Login, review.AuthorAssociation, review.State)
+	fmt.Fprintf(&sb, "Submitted: %s\n", review.SubmittedAt)
+	fmt.Fprintf(&sb, "Commit: %s\n", review.Commit.Oid)
+	fmt.Fprintf(&sb, "\n%s\n", review.Body)
 
 	return sb.String()
 }

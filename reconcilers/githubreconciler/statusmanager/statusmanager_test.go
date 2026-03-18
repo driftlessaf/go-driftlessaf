@@ -35,12 +35,12 @@ type TestDetailsWithMarkdown struct {
 
 func (d TestDetailsWithMarkdown) Markdown() string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("**Message**: %s\n", d.Message))
-	b.WriteString(fmt.Sprintf("**Count**: %d\n", d.Count))
+	fmt.Fprintf(&b, "**Message**: %s\n", d.Message)
+	fmt.Fprintf(&b, "**Count**: %d\n", d.Count)
 	if len(d.Items) > 0 {
 		b.WriteString("**Items**:\n")
 		for _, item := range d.Items {
-			b.WriteString(fmt.Sprintf("- %s\n", item))
+			fmt.Fprintf(&b, "- %s\n", item)
 		}
 	}
 	return b.String()

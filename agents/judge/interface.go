@@ -58,18 +58,18 @@ func (j *Judgement) String() string {
 	var sb strings.Builder
 
 	// Header with score
-	sb.WriteString(fmt.Sprintf("Grade: %.2f", j.Score))
+	fmt.Fprintf(&sb, "Grade: %.2f", j.Score)
 
 	// Add reasoning if present
 	if j.Reasoning != "" {
-		sb.WriteString(fmt.Sprintf(" - %s", j.Reasoning))
+		fmt.Fprintf(&sb, " - %s", j.Reasoning)
 	}
 	sb.WriteString("\n")
 
 	// Add suggestions if present
 	if len(j.Suggestions) > 0 {
 		for _, suggestion := range j.Suggestions {
-			sb.WriteString(fmt.Sprintf("  Suggestion: %s\n", suggestion))
+			fmt.Fprintf(&sb, "  Suggestion: %s\n", suggestion)
 		}
 	}
 
