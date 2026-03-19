@@ -67,11 +67,9 @@ func WithStatePrefix(prefix string) Option {
 	}
 }
 
-// New creates a new Reconciler. It resolves the bot user identity by calling
-// the Linear API with the provided token.
-func New(ctx context.Context, token string, opts ...Option) (*Reconciler, error) {
-	client := NewClient(token)
-
+// New creates a new Reconciler with the given client. It resolves the bot user
+// identity by calling the Linear API.
+func New(ctx context.Context, client *Client, opts ...Option) (*Reconciler, error) {
 	r := &Reconciler{
 		client: client,
 	}

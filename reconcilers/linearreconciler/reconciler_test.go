@@ -77,13 +77,9 @@ func TestReconciler_LabelGating(t *testing.T) {
 	defer srv.Close()
 
 	var called atomic.Bool
-	client := NewClient("test-token")
-	client.httpClient = srv.Client()
-
-	// Override the endpoint for testing.
-	origEndpoint := linearGraphQLEndpoint
-	t.Cleanup(func() { /* can't restore package-level const */ })
-	_ = origEndpoint
+	client := NewClientWithAPIKey("test-token").
+		WithHTTPClient(srv.Client()).
+		WithEndpoint(srv.URL)
 
 	r := &Reconciler{
 		client:        client,
@@ -95,8 +91,6 @@ func TestReconciler_LabelGating(t *testing.T) {
 	}
 	r.client.BotUserID = "bot-1"
 
-	// We can't easily override the const endpoint, so test the label/team
-	// logic directly via the issue helper.
 	if issue.HasLabel("game") {
 		t.Error("issue should NOT have game label")
 	}
@@ -129,7 +123,7 @@ func TestReconciler_Process_Success(t *testing.T) {
 			processedKey = issue.ID
 			return nil
 		},
-		client: NewClient("test-token"),
+		client: NewClientWithAPIKey("test-token"),
 	}
 	r.client.BotUserID = "bot-1"
 
@@ -153,7 +147,7 @@ func TestReconciler_Process_RequeueOnError(t *testing.T) {
 		reconcileFunc: func(_ context.Context, _ *Issue, _ *Client) error {
 			return fmt.Errorf("temporary error")
 		},
-		client: NewClient("test-token"),
+		client: NewClientWithAPIKey("test-token"),
 	}
 	r.client.BotUserID = "bot-1"
 
@@ -169,7 +163,7 @@ func TestReconciler_Process_RequeueOnError(t *testing.T) {
 }
 
 func TestWithStatePrefix(t *testing.T) {
-	client := NewClient("test-token")
+	client := NewClientWithAPIKey("test-token")
 	r := &Reconciler{client: client}
 
 	WithStatePrefix("game")(r)
@@ -180,7 +174,7 @@ func TestWithStatePrefix(t *testing.T) {
 }
 
 func TestWithStatePrefix_Default(t *testing.T) {
-	client := NewClient("test-token")
+	client := NewClientWithAPIKey("test-token")
 
 	if got := client.stateAttachmentTitle(); got != "reconciler_state" {
 		t.Errorf("stateAttachmentTitle() = %q, want %q", got, "reconciler_state")

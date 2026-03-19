@@ -12,12 +12,44 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-const linearGraphQLEndpoint = "https://api.linear.app/graphql"
+const (
+	// DefaultEndpoint is the Linear GraphQL API endpoint.
+	DefaultEndpoint = "https://api.linear.app/graphql"
+
+	// DefaultTokenURL is the Linear OAuth token endpoint.
+	DefaultTokenURL = "https://api.linear.app/oauth/token" //nolint:gosec // This is a URL, not a credential.
+
+	// maxGraphQLResponseSize caps GraphQL API response reads (10 MB).
+	maxGraphQLResponseSize = 10 << 20
+	// maxAttachmentSize caps downloaded attachment reads (10 MB).
+	maxAttachmentSize = 10 << 20
+	// maxErrorBodySize caps error response bodies included in error messages (1 KB).
+	maxErrorBodySize = 1 << 10
+)
+
+// OAuth scope constants for Linear API permissions.
+const (
+	ScopeRead           = "read"
+	ScopeWrite          = "write"
+	ScopeIssuesCreate   = "issues:create"
+	ScopeCommentsCreate = "comments:create"
+)
+
+// sensitiveHeaders must not be forwarded from API-provided header lists.
+var sensitiveHeaders = map[string]bool{
+	"Authorization":       true,
+	"Cookie":              true,
+	"Host":                true,
+	"Proxy-Authorization": true,
+}
 
 // RateLimitError is returned when the Linear API returns HTTP 429.
 type RateLimitError struct {
@@ -28,26 +60,166 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("linear rate limited, retry after %v", e.RetryAfter)
 }
 
-// Client is a Linear API client that uses GraphQL.
+// Client is a Linear GraphQL API client that supports two authentication modes:
+//
+// OAuth client_credentials (recommended for production):
+//
+//	client := linearreconciler.NewClient(clientID, clientSecret)
+//
+// OAuth is preferred because it issues short-lived access tokens that are
+// automatically refreshed, limits the blast radius of a compromised credential,
+// and allows fine-grained permission scoping via WithScopes.
+//
+// Static API key (acceptable for development and testing):
+//
+//	client := linearreconciler.NewClientWithAPIKey(apiKey)
+//
+// API keys are long-lived and grant the full permissions of the user who
+// created them. They should only be used for local development or tests.
 type Client struct {
+	clientID     string
+	clientSecret string
+	scopes       []string
+	endpoint     string
+	tokenURL     string
+	httpClient   *http.Client
+	statePrefix  string
+
+	mu          sync.Mutex
 	token       string
-	httpClient  *http.Client
-	statePrefix string
+	tokenExpiry time.Time
+	isAPIKey    bool
 
 	// BotUserID is the authenticated user's ID, resolved during reconciler construction.
 	BotUserID string
 }
 
-// NewClient creates a new Linear API client with the given API token.
-func NewClient(token string) *Client {
+// NewClient creates a new Linear client that uses OAuth client_credentials.
+// This is the recommended constructor for production use because:
+//   - Tokens are short-lived and automatically refreshed, reducing exposure
+//     if a token is leaked.
+//   - Permissions are scoped to only what the bot needs (see WithScopes),
+//     rather than inheriting the full permissions of a user account.
+//   - Client credentials can be rotated independently of any user account.
+//
+// By default, the client requests ScopeRead and ScopeWrite. Use WithScopes
+// to request only the permissions your reconciler needs.
+func NewClient(clientID, clientSecret string) *Client {
 	return &Client{
-		token:       token,
-		httpClient:  http.DefaultClient,
-		statePrefix: "reconciler",
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		scopes:       []string{ScopeRead, ScopeWrite},
+		endpoint:     DefaultEndpoint,
+		tokenURL:     DefaultTokenURL,
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		statePrefix:  "reconciler",
 	}
 }
 
+// NewClientWithAPIKey creates a new Linear client using a static API key.
+// API keys are long-lived and carry the full permissions of the creating user,
+// so prefer NewClient with OAuth client_credentials for production deployments.
+func NewClientWithAPIKey(apiKey string) *Client {
+	return &Client{
+		endpoint:    DefaultEndpoint,
+		tokenURL:    DefaultTokenURL,
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		statePrefix: "reconciler",
+		token:       apiKey,
+		tokenExpiry: time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC),
+		isAPIKey:    true,
+	}
+}
+
+// WithScopes sets the OAuth scopes requested during token exchange.
+// Use this to restrict the bot to only the permissions it needs. For example,
+// a read-only reconciler should use WithScopes(ScopeRead).
+func (c *Client) WithScopes(scopes ...string) *Client {
+	c.scopes = scopes
+	return c
+}
+
+// WithEndpoint sets a custom API endpoint (useful for testing).
+func (c *Client) WithEndpoint(endpoint string) *Client {
+	c.endpoint = endpoint
+	return c
+}
+
+// WithTokenURL sets a custom OAuth token endpoint (useful for testing).
+func (c *Client) WithTokenURL(tokenURL string) *Client {
+	c.tokenURL = tokenURL
+	return c
+}
+
+// WithHTTPClient sets a custom HTTP client.
+func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
+	c.httpClient = httpClient
+	return c
+}
+
+// getToken returns a valid access token, fetching or refreshing as needed.
+func (c *Client) getToken(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.token != "" && time.Now().Before(c.tokenExpiry) {
+		return c.token, nil
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("client_id", c.clientID)
+	form.Set("client_secret", c.clientSecret)
+	form.Set("scope", strings.Join(c.scopes, ","))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("creating token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGraphQLResponseSize))
+	if err != nil {
+		return "", fmt.Errorf("reading token response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody := body
+		if len(errBody) > maxErrorBodySize {
+			errBody = errBody[:maxErrorBodySize]
+		}
+		return "", fmt.Errorf("token request failed: status=%d body=%s", resp.StatusCode, errBody)
+	}
+
+	var tr struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return "", fmt.Errorf("parsing token response: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return "", fmt.Errorf("token response missing access_token")
+	}
+
+	c.token = tr.AccessToken
+	// Refresh 30 seconds early to avoid edge-case expiry.
+	c.tokenExpiry = time.Now().Add(time.Duration(tr.ExpiresIn)*time.Second - 30*time.Second)
+	return c.token, nil
+}
+
 func (c *Client) graphql(ctx context.Context, query string, variables map[string]any, result any) error {
+	token, err := c.getToken(ctx)
+	if err != nil {
+		return fmt.Errorf("getting access token: %w", err)
+	}
+
 	body, err := json.Marshal(map[string]any{
 		"query":     query,
 		"variables": variables,
@@ -56,12 +228,16 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("marshaling query: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearGraphQLEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", c.token)
+	if c.isAPIKey {
+		req.Header.Set("Authorization", token)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -69,7 +245,7 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxGraphQLResponseSize))
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
 	}
@@ -85,7 +261,11 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, respBody)
+		errBody := respBody
+		if len(errBody) > maxErrorBodySize {
+			errBody = errBody[:maxErrorBodySize]
+		}
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, errBody)
 	}
 
 	var gqlResp struct {
@@ -251,6 +431,9 @@ func (c *Client) UploadFileAttachment(ctx context.Context, issueID, title string
 	}
 	putReq.Header.Set("Content-Type", "application/json")
 	for _, h := range uploadResult.FileUpload.UploadFile.Headers {
+		if sensitiveHeaders[http.CanonicalHeaderKey(h.Key)] {
+			continue
+		}
 		putReq.Header.Set(h.Key, h.Value)
 	}
 	putResp, err := c.httpClient.Do(putReq)
@@ -259,7 +442,7 @@ func (c *Client) UploadFileAttachment(ctx context.Context, issueID, title string
 	}
 	defer putResp.Body.Close()
 	if putResp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(putResp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(putResp.Body, maxErrorBodySize))
 		return fmt.Errorf("upload failed with status %d: %s", putResp.StatusCode, respBody)
 	}
 
@@ -285,13 +468,36 @@ func (c *Client) UploadFileAttachment(ctx context.Context, issueID, title string
 	return nil
 }
 
+// isLinearHost returns true if the host is a trusted Linear domain.
+func isLinearHost(host string) bool {
+	return host == "linear.app" || strings.HasSuffix(host, ".linear.app")
+}
+
 // FetchAttachmentContent downloads the content of a file attachment by URL.
-func (c *Client) FetchAttachmentContent(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// The API token is only sent to trusted Linear hosts (*.linear.app) over HTTPS
+// to prevent credential leakage if an attacker controls the attachment URL.
+func (c *Client) FetchAttachmentContent(ctx context.Context, rawURL string) ([]byte, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing attachment URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", c.token)
+
+	if parsed.Scheme == "https" && isLinearHost(parsed.Hostname()) {
+		token, err := c.getToken(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("getting access token: %w", err)
+		}
+		if c.isAPIKey {
+			req.Header.Set("Authorization", token)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -303,5 +509,5 @@ func (c *Client) FetchAttachmentContent(ctx context.Context, url string) ([]byte
 		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
 }
