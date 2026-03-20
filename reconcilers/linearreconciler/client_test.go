@@ -253,7 +253,7 @@ func TestSensitiveHeaders_Filtered(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.key, func(t *testing.T) {
-			got := sensitiveHeaders[http.CanonicalHeaderKey(tc.key)]
+			_, got := sensitiveHeaders[http.CanonicalHeaderKey(tc.key)]
 			if got != tc.filtered {
 				t.Errorf("sensitiveHeaders[%q] = %v, want %v", tc.key, got, tc.filtered)
 			}

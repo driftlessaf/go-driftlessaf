@@ -44,6 +44,8 @@ func TestIsRetryableVertexError(t *testing.T) {
 		{name: "not found string", err: errors.New("model not found"), want: false},
 		{name: "invalid argument string", err: errors.New("invalid argument: bad request"), want: false},
 		{name: "auth error string", err: errors.New("authentication failed"), want: false},
+		{name: "UNAVAILABLE string", err: errors.New("Error 503, Message: Visibility check was unavailable. Please retry the request, Status: UNAVAILABLE, Details: []"), want: true},
+		{name: "unavailable lowercase string", err: errors.New("service unavailable: please retry"), want: true},
 	}
 
 	for _, tt := range tests {

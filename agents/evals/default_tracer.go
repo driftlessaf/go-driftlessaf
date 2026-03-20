@@ -14,16 +14,15 @@ import (
 
 // NewDefaultTracer creates a new default tracer that logs to clog
 func NewDefaultTracer[T any](ctx context.Context) agenttrace.Tracer[T] {
-	logger := clog.FromContext(ctx)
-
 	// Create a callback that logs traces
 	callback := func(trace *agenttrace.Trace[T]) {
 		// Log the structured trace representation
-		logger.With(
+		clog.InfoContext(ctx, "Agent trace completed",
 			"trace_id", trace.ID,
 			"duration_ms", trace.Duration().Milliseconds(),
 			"tool_calls", len(trace.ToolCalls),
-		).Info("Agent trace completed", "trace", trace.String())
+			"trace", trace.String(),
+		)
 	}
 
 	return agenttrace.ByCode[T](callback)

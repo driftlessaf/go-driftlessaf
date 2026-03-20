@@ -117,8 +117,9 @@ func (e *executor[Request, Response]) Execute(
 		trace.Complete(response, err)
 	}()
 
-	log.With("prompt_length", len(prompt)).
-		Info("Starting Claude agent execution")
+	clog.InfoContext(ctx, "Starting Claude agent execution",
+		"prompt_length", len(prompt),
+	)
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
 	if e.submitTool.Handler != nil {

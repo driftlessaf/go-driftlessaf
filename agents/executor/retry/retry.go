@@ -110,12 +110,13 @@ func RetryWithBackoff[T any](ctx context.Context, cfg RetryConfig, operation str
 			}
 		}
 
-		clog.FromContext(ctx).With("operation", operation).
-			With("attempt", attempt+1).
-			With("max_retries", cfg.MaxRetries).
-			With("backoff", backoff+jitter).
-			With("error", lastErr.Error()).
-			Warn("Rate limit hit, retrying")
+		clog.WarnContext(ctx, "Rate limit hit, retrying",
+			"operation", operation,
+			"attempt", attempt+1,
+			"max_retries", cfg.MaxRetries,
+			"backoff", backoff+jitter,
+			"error", lastErr.Error(),
+		)
 
 		select {
 		case <-ctx.Done():

@@ -45,5 +45,7 @@ func isRetryableVertexError(err error) bool {
 		strings.Contains(errStr, "quota exceeded") ||
 		strings.Contains(errStr, "Internal error") ||
 		strings.Contains(errStr, "server error") ||
-		strings.Contains(errStr, "CANCELLED")
+		strings.Contains(errStr, "CANCELLED") ||
+		strings.Contains(errStr, "UNAVAILABLE") ||
+		strings.Contains(errStr, "unavailable")
 }

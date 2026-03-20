@@ -35,8 +35,6 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.Metadata[Respo
 	}
 
 	handler := func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Response], result *Response) map[string]any {
-		log := clog.FromContext(ctx)
-
 		params, errResp := claudetool.NewParams(toolUse)
 		if errResp != nil {
 			trace.BadToolCall(toolUse.ID, toolUse.Name, map[string]any{
@@ -59,7 +57,9 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.Metadata[Respo
 			return errMap
 		}
 
-		log.With("reasoning", reasoning).Info("Submitting result")
+		clog.InfoContext(ctx, "Submitting result",
+			"reasoning", reasoning,
+		)
 
 		tc := trace.StartToolCall(toolUse.ID, toolUse.Name, rawInputs)
 

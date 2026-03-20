@@ -44,11 +44,11 @@ const (
 )
 
 // sensitiveHeaders must not be forwarded from API-provided header lists.
-var sensitiveHeaders = map[string]bool{
-	"Authorization":       true,
-	"Cookie":              true,
-	"Host":                true,
-	"Proxy-Authorization": true,
+var sensitiveHeaders = map[string]struct{}{
+	"Authorization":       {},
+	"Cookie":              {},
+	"Host":                {},
+	"Proxy-Authorization": {},
 }
 
 // RateLimitError is returned when the Linear API returns HTTP 429.
@@ -431,7 +431,7 @@ func (c *Client) UploadFileAttachment(ctx context.Context, issueID, title string
 	}
 	putReq.Header.Set("Content-Type", "application/json")
 	for _, h := range uploadResult.FileUpload.UploadFile.Headers {
-		if sensitiveHeaders[http.CanonicalHeaderKey(h.Key)] {
+		if _, ok := sensitiveHeaders[http.CanonicalHeaderKey(h.Key)]; ok {
 			continue
 		}
 		putReq.Header.Set(h.Key, h.Value)

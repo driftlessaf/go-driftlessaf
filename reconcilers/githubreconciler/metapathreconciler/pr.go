@@ -37,8 +37,8 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 	}
 
 	sha := pr.GetHead().GetSHA()
-	log = log.With("sha", sha)
-	ctx = clog.WithLogger(ctx, log)
+	ctx = clog.WithValues(ctx, "sha", sha)
+	log = clog.FromContext(ctx)
 	session := r.statusManager.NewSession(gh, res, sha)
 
 	// Check if the status is already at the PR HEAD, completed, and neutral.

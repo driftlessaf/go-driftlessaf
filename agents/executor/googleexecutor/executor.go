@@ -193,7 +193,9 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	// Create a new chat session with optional seed messages
-	log.With("model", e.model).Info("Creating Google AI chat session")
+	clog.InfoContext(ctx, "Creating Google AI chat session",
+		"model", e.model,
+	)
 
 	// Pre-execute seed tool calls and prepare history
 	// Build complete history, then split: use first n-1 for chat creation, send last via SendMessage

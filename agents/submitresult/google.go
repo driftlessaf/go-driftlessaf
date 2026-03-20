@@ -34,8 +34,6 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 	}
 
 	handler := func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], result *Response) *genai.FunctionResponse {
-		log := clog.FromContext(ctx)
-
 		reasoning, errResp := googletool.Param[string](call, "reasoning")
 		if errResp != nil {
 			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("parameter error"))
@@ -48,7 +46,9 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 			return errResp
 		}
 
-		log.With("reasoning", reasoning).Info("Submitting result")
+		clog.InfoContext(ctx, "Submitting result",
+			"reasoning", reasoning,
+		)
 
 		tc := trace.StartToolCall(call.ID, call.Name, call.Args)
 
