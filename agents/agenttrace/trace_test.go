@@ -23,7 +23,7 @@ func randomString() string {
 func TestNewTrace(t *testing.T) {
 	prompt := randomString()
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, prompt)
 
 	if trace == nil {
@@ -53,7 +53,7 @@ func TestNewTrace(t *testing.T) {
 
 func TestTraceStartToolCall(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, randomString())
 
 	params := map[string]any{
@@ -110,7 +110,7 @@ func TestTraceStartToolCall(t *testing.T) {
 
 func TestToolCallDuration(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, randomString())
 
 	tc := trace.StartToolCall("tc1", randomString(), nil)
@@ -140,7 +140,7 @@ func TestToolCallDuration(t *testing.T) {
 
 func TestTraceComplete(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Sleep briefly to ensure EndTime is different from StartTime
@@ -168,7 +168,7 @@ func TestTraceComplete(t *testing.T) {
 
 func TestTraceCompleteWithError(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, randomString())
 
 	err := errors.New("test error")
@@ -185,7 +185,7 @@ func TestTraceCompleteWithError(t *testing.T) {
 
 func TestTraceDuration(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Test duration before completion
@@ -227,7 +227,7 @@ func TestGenerateTraceID(t *testing.T) {
 
 func TestBadToolCall(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Test BadToolCall

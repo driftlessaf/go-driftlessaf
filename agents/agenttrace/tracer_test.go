@@ -11,7 +11,7 @@ import (
 )
 
 func TestWithTracer(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	var traces []*Trace[string]
 	tracer := &mockTracer[string]{traces: &traces}
 
@@ -30,7 +30,7 @@ func TestWithTracer(t *testing.T) {
 }
 
 func TestStartTrace(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Test without tracer in context - should still work with default tracer
 	if trace := StartTrace[string](ctx, randomString()); trace == nil {
@@ -51,7 +51,7 @@ func TestStartTrace(t *testing.T) {
 }
 
 func TestAutoRecordTrace(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	var traces []*Trace[string]
 	tracer := &mockTracer[string]{traces: &traces}
 	ctx = WithTracer[string](ctx, tracer)
@@ -84,7 +84,7 @@ func TestAutoRecordTrace(t *testing.T) {
 }
 
 func TestMultipleTracersWithDifferentTypes(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create tracers for different result types using the same generic type
 	var stringTraces []*Trace[string]

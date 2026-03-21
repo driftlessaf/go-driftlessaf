@@ -6,14 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 package agenttrace
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestByCode(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	var capturedTrace *Trace[string]
 
 	// Create a callback that captures the trace
@@ -61,7 +60,7 @@ func TestByCode(t *testing.T) {
 }
 
 func TestByCodeWithNilCallback(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create a tracer with nil callback
 	tracer := ByCode[string](nil)
@@ -75,7 +74,7 @@ func TestByCodeWithNilCallback(t *testing.T) {
 }
 
 func TestByCodeWithMultipleCallbacks(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	var mu sync.Mutex
 	capturedTraces := make([]*Trace[string], 3)
 	callbackExecuted := make([]bool, 3)
@@ -128,7 +127,7 @@ func TestByCodeWithMultipleCallbacks(t *testing.T) {
 }
 
 func TestByCodeWithNoCallbacks(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create a tracer with no callbacks
 	tracer := ByCode[string]()
@@ -142,7 +141,7 @@ func TestByCodeWithNoCallbacks(t *testing.T) {
 }
 
 func TestByCodeParallelExecution(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Channel to signal when callbacks start
 	started := make(chan int, 3)
