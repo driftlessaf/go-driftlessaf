@@ -35,15 +35,15 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		log.Info("PR should be skipped, not updating")
 		return nil
 
-	case state.HitMaxCommits():
-		log.Info("PR hit turn limit, adding skip label")
-		_, err := session.ApplyTurnLimit(ctx)
-		return err
-
 	// If the PR is not mergeable, ignore everything about the existing PR
 	// and start from scratch on the default branch.
 	case state.NeedsRebase():
 		log.Info("PR needs rebase, starting fresh from default branch")
+
+	case state.HitMaxCommits():
+		log.Info("PR hit turn limit")
+		_, err := session.ApplyTurnLimit(ctx)
+		return err
 
 	case state.IsUnknown():
 		log.Info("PR merge status unknown, requeuing to check again shortly")

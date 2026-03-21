@@ -162,18 +162,23 @@ func (s *Session[T]) Labels() []string {
 	return s.prLabels
 }
 
-// ApplyTurnLimit adds the skip label and a turn-limit label to the PR,
-// preventing further automated iterations. Returns the PR URL.
-// This is a no-op if no PR exists.
+// ApplyTurnLimit adds a turn-limit label to the PR, preventing further
+// commits from being added. Unlike adding a skip label, this does not
+// block the PR from being rebased if it develops merge conflicts.
+// Returns the PR URL. This is a no-op if no PR exists.
 func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	clog.InfoContext(ctx, "PR hit turn limit, adding skip and turn-limit labels", "pr", s.prNumber, "commits", s.commitCount, "max", s.manager.maxCommits)
+	turnLimitLabel := s.manager.identity + "/turn-limit"
+	if slices.Contains(s.prLabels, turnLimitLabel) {
+		clog.InfoContext(ctx, "PR already has turn-limit label", "pr", s.prNumber)
+		return s.prURL, nil
+	}
+	clog.InfoContext(ctx, "PR hit turn limit, adding turn-limit label", "pr", s.prNumber, "commits", s.commitCount, "max", s.manager.maxCommits)
 
-	labels := []string{s.skipLabel(), s.manager.identity + "/turn-limit"}
-	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, labels); err != nil {
-		return "", fmt.Errorf("adding turn-limit labels: %w", err)
+	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, []string{turnLimitLabel}); err != nil {
+		return "", fmt.Errorf("adding turn-limit label: %w", err)
 	}
 	return s.prURL, nil
 }
