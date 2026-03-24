@@ -10,18 +10,15 @@ import (
 	"fmt"
 	"sync"
 
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/go-git/go-git/v5"
-	"golang.org/x/oauth2"
 )
-
-// TokenSourceForRepo resolves an OAuth2 token source for a given owner/repo pair.
-type TokenSourceForRepo func(ctx context.Context, owner, repo string) (oauth2.TokenSource, error)
 
 // Meta manages a cache of Manager instances, one per owner/repo pair.
 // It provides thread-safe access to managers and lazily creates them on first use.
 type Meta struct {
 	ctx            context.Context
-	tokenSourceFor TokenSourceForRepo
+	tokenSourceFor githubreconciler.TokenSourceFunc
 	identity       string
 	signer         git.Signer
 
@@ -32,7 +29,7 @@ type Meta struct {
 // NewMeta creates a Meta that caches Manager instances per owner/repo.
 // The tokenSourceFor function is called to obtain credentials when a new
 // Manager is needed for a repository.
-func NewMeta(ctx context.Context, tokenSourceFor TokenSourceForRepo, identity string, signer git.Signer) *Meta {
+func NewMeta(ctx context.Context, tokenSourceFor githubreconciler.TokenSourceFunc, identity string, signer git.Signer) *Meta {
 	return &Meta{
 		ctx:            ctx,
 		tokenSourceFor: tokenSourceFor,

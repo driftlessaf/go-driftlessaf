@@ -5,17 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 // Package main implements a GitHub issue materializer reconciler that uses
 // metaagent to transform issue problem statements into pull requests.
-//
-// This example demonstrates:
-//   - Using metaagent for provider-agnostic AI execution (Gemini or Claude)
-//   - Using metareconciler for GitHub issue-based reconciliation
-//   - Composing toolcall tools (Empty -> Worktree -> Finding)
-//   - Creating PRs from AI-generated code changes
 package main
 
 import (
 	"context"
-	"os"
+	"fmt"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -26,153 +20,79 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/gitsign"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/metareconciler"
-	"chainguard.dev/driftlessaf/workqueue"
-	"chainguard.dev/go-grpc-kit/pkg/duplex"
-	kmetrics "chainguard.dev/go-grpc-kit/pkg/metrics"
 	"cloud.google.com/go/compute/metadata"
 	"github.com/chainguard-dev/clog"
 	_ "github.com/chainguard-dev/clog/gcp/init"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/profiler"
-	"github.com/google/go-github/v84/github"
-	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
-	"github.com/sethvargo/go-envconfig"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"golang.org/x/oauth2"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health"
-	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 type config struct {
-	Port         int    `env:"PORT,default=8080"`
-	OctoIdentity string `env:"OCTO_IDENTITY,required"`
-	MetricsPort  int    `env:"METRICS_PORT,default=2112"`
-	EnablePprof  bool   `env:"ENABLE_PPROF,default=false"`
-
 	// Materializer model configuration
 	MaterializerModel  string `env:"MATERIALIZER_MODEL,default=gemini-2.5-flash"`
 	MaterializerRegion string `env:"MATERIALIZER_REGION"` // Defaults to detected GCP region
 }
 
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	go httpmetrics.ScrapeDiskUsage(ctx)
-	profiler.SetupProfiler()
-	defer httpmetrics.SetupTracer(ctx)()
-
-	var cfg config
-	if err := envconfig.Process(ctx, &cfg); err != nil {
-		clog.FatalContextf(ctx, "failed to process config: %v", err)
-	}
-
-	// Detect project ID from GCP metadata
+// New constructs the issue materializer reconciler.
+func New(ctx context.Context, identity string, tsf githubreconciler.TokenSourceFunc, cfg config) (githubreconciler.ReconcilerFunc, error) {
 	projectID, err := metadata.ProjectIDWithContext(ctx)
 	if err != nil {
-		clog.FatalContextf(ctx, "failed to detect project ID: %v", err)
+		return nil, fmt.Errorf("detect project ID: %w", err)
 	}
-	clog.InfoContext(ctx, "Detected Google Cloud project", "project_id", projectID)
 
-	// Get zone from metadata and extract region for default model region
 	zone, err := metadata.ZoneWithContext(ctx)
 	if err != nil {
-		clog.FatalContextf(ctx, "failed to get zone from metadata: %v", err)
+		return nil, fmt.Errorf("get zone from metadata: %w", err)
 	}
-	defaultRegion := zone[:strings.LastIndex(zone, "-")]
-	clog.InfoContext(ctx, "Detected Google Cloud region", "region", defaultRegion)
-
-	// Use configured region or fall back to detected region
 	materializerRegion := cfg.MaterializerRegion
 	if materializerRegion == "" {
-		materializerRegion = defaultRegion
+		materializerRegion = zone[:strings.LastIndex(zone, "-")]
 	}
 
-	// Create GitHub client cache with Octo identity
-	clientCache := githubreconciler.NewClientCache(func(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
-		return githubreconciler.NewOrgTokenSource(ctx, cfg.OctoIdentity, org), nil
-	})
-
-	// Create gitsign signer for signed commits
 	signer, err := gitsign.NewSigner(ctx)
 	if err != nil {
-		clog.FatalContextf(ctx, "failed to create gitsign signer: %v", err)
+		return nil, fmt.Errorf("create gitsign signer: %w", err)
 	}
+	cloneMeta := clonemanager.NewMeta(ctx, tsf, identity, signer)
 
-	// Create the clone manager meta for caching clone managers per repo
-	cloneMeta := clonemanager.NewMeta(ctx, func(ctx context.Context, owner, repo string) (oauth2.TokenSource, error) {
-		return githubreconciler.NewOrgTokenSource(ctx, cfg.OctoIdentity, owner), nil
-	}, cfg.OctoIdentity, signer)
-
-	// Configure agent tools and callbacks using composition: Empty -> Worktree -> Finding
 	type materializerTools = toolcall.FindingTools[toolcall.WorktreeTools[toolcall.EmptyTools]]
 	tools := toolcall.NewFindingToolsProvider[*Result, toolcall.WorktreeTools[toolcall.EmptyTools]](
 		toolcall.NewWorktreeToolsProvider[*Result, toolcall.EmptyTools](
 			toolcall.NewEmptyToolsProvider[*Result](),
 		),
 	)
-	buildCallbacks := func(_ context.Context, session *changemanager.Session[metareconciler.PRData[*Request]], lease *clonemanager.Lease) (materializerTools, error) {
-		wt, err := lease.Repo().Worktree()
-		if err != nil {
-			return materializerTools{}, err
-		}
-		return toolcall.NewFindingTools(
-			toolcall.NewWorktreeTools(toolcall.EmptyTools{}, clonemanager.WorktreeCallbacks(wt)),
-			session.FindingCallbacks(),
-		), nil
-	}
 
-	// Create the materializer agent
 	clog.InfoContext(ctx, "Initializing materializer agent", "model", cfg.MaterializerModel, "region", materializerRegion)
 	mat, err := newAgent(ctx, projectID, materializerRegion, cfg.MaterializerModel, tools)
 	if err != nil {
-		clog.FatalContextf(ctx, "failed to create materializer: %v", err)
+		return nil, fmt.Errorf("create materializer: %w", err)
 	}
 
-	// Create the reconciler
 	rec, err := newReconciler(
-		cfg.OctoIdentity,
+		identity,
 		mat,
 		cloneMeta,
-		[]string{cfg.OctoIdentity + "/managed"},
-		buildCallbacks,
+		[]string{identity + "/managed"},
+		func(_ context.Context, session *changemanager.Session[metareconciler.PRData[*Request]], lease *clonemanager.Lease) (materializerTools, error) {
+			wt, err := lease.Repo().Worktree()
+			if err != nil {
+				return materializerTools{}, err
+			}
+			return toolcall.NewFindingTools(
+				toolcall.NewWorktreeTools(toolcall.EmptyTools{}, clonemanager.WorktreeCallbacks(wt)),
+				session.FindingCallbacks(),
+			), nil
+		},
 	)
 	if err != nil {
-		clog.FatalContextf(ctx, "failed to create reconciler: %v", err)
+		return nil, fmt.Errorf("create reconciler: %w", err)
 	}
+	return rec.Reconcile, nil
+}
 
-	// Create duplex server (HTTP + gRPC on same port) with metrics and tracing
-	d := duplex.New(
-		cfg.Port,
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.ChainStreamInterceptor(kmetrics.StreamServerInterceptor()),
-		grpc.ChainUnaryInterceptor(
-			kmetrics.UnaryServerInterceptor(),
-			recovery.UnaryServerInterceptor(),
-		),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-	// Register workqueue service with the GitHub reconciler
-	workqueue.RegisterWorkqueueServiceServer(d.Server, githubreconciler.NewReconciler(
-		clientCache,
-		githubreconciler.WithReconciler(githubreconciler.ReconcilerFunc(func(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
-			return rec.Reconcile(ctx, res, gh)
-		})),
-		githubreconciler.WithOrgScopedCredentials(),
-	))
-
-	// Register prometheus handle
-	d.RegisterListenAndServeMetrics(cfg.MetricsPort, cfg.EnablePprof)
-
-	// Register health check handler
-	healthgrpc.RegisterHealthServer(d.Server, health.NewServer())
-
-	// Start the server
-	clog.InfoContext(ctx, "Starting materializer reconciler", "port", cfg.Port)
-	if err := d.ListenAndServe(ctx); err != nil {
+	if err := githubreconciler.OrgMain(ctx, New); err != nil {
 		clog.FatalContextf(ctx, "server failed: %v", err)
 	}
 }

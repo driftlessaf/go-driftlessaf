@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"cloud.google.com/go/compute/metadata"
+	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v84/github"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -62,13 +63,13 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 	// Get project ID from metadata
 	projectID, err := metadata.ProjectIDWithContext(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project ID from metadata: %w", err)
+		clog.InfoContextf(ctx, "Unable to detect project-id: %v", err)
 	}
 
 	// Get service name once at startup
 	serviceName, ok := os.LookupEnv("K_SERVICE")
 	if !ok {
-		return nil, errors.New("K_SERVICE environment variable not set")
+		clog.InfoContextf(ctx, "Unable to detect reconciler service: %v", err)
 	}
 
 	templateExecutor, err := internaltemplate.New[Status[T]](identity, "-status", "status")

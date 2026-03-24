@@ -10,95 +10,35 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"syscall"
 
 	"chainguard.dev/driftlessaf/examples/prvalidation"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
-	"chainguard.dev/driftlessaf/workqueue"
-	"chainguard.dev/go-grpc-kit/pkg/duplex"
-	kmetrics "chainguard.dev/go-grpc-kit/pkg/metrics"
 	"github.com/chainguard-dev/clog"
 	_ "github.com/chainguard-dev/clog/gcp/init"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/profiler"
 	"github.com/google/go-github/v84/github"
-	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
-	"github.com/sethvargo/go-envconfig"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"golang.org/x/oauth2"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health"
-	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-type config struct {
-	Port        int  `env:"PORT,default=8080"`
-	MetricsPort int  `env:"METRICS_PORT,default=2112"`
-	EnablePprof bool `env:"ENABLE_PPROF,default=false"`
+type config struct{}
 
-	// OctoSTS identity for GitHub authentication
-	OctoIdentity string `env:"OCTO_IDENTITY,required"`
+func New(ctx context.Context, identity string, _ githubreconciler.TokenSourceFunc, _ config) (githubreconciler.ReconcilerFunc, error) {
+	sm, err := statusmanager.NewStatusManager[prvalidation.Details](ctx, identity)
+	if err != nil {
+		return nil, fmt.Errorf("creating status manager: %w", err)
+	}
+	return func(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
+		return reconcilePR(ctx, res, gh, sm)
+	}, nil
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	go httpmetrics.ScrapeDiskUsage(ctx)
-	profiler.SetupProfiler()
-	defer httpmetrics.SetupTracer(ctx)()
-
-	var cfg config
-	if err := envconfig.Process(ctx, &cfg); err != nil {
-		clog.FatalContextf(ctx, "processing config: %v", err)
-	}
-
-	// Create the status manager for check run management
-	sm, err := statusmanager.NewStatusManager[prvalidation.Details](ctx, cfg.OctoIdentity)
-	if err != nil {
-		clog.FatalContextf(ctx, "creating status manager: %v", err)
-	}
-
-	clog.InfoContextf(ctx, "Using OctoSTS authentication with identity: %s", cfg.OctoIdentity)
-	clientCache := githubreconciler.NewClientCache(func(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
-		clog.InfoContextf(ctx, "OctoSTS: requesting repo-scoped token for identity=%q org=%q repo=%q", cfg.OctoIdentity, org, repo)
-		return githubreconciler.NewRepoTokenSource(ctx, cfg.OctoIdentity, org, repo), nil
-	})
-
-	d := duplex.New(
-		cfg.Port,
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.ChainStreamInterceptor(kmetrics.StreamServerInterceptor()),
-		grpc.ChainUnaryInterceptor(
-			kmetrics.UnaryServerInterceptor(),
-			recovery.UnaryServerInterceptor(),
-		),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-
-	// Register the GitHub reconciler with PR validation logic
-	workqueue.RegisterWorkqueueServiceServer(d.Server, githubreconciler.NewReconciler(
-		clientCache,
-		githubreconciler.WithReconciler(newReconciler(sm)),
-	))
-
-	d.RegisterListenAndServeMetrics(cfg.MetricsPort, cfg.EnablePprof)
-	healthgrpc.RegisterHealthServer(d.Server, health.NewServer())
-
-	clog.InfoContextf(ctx, "Starting PR Validator reconciler on port %d", cfg.Port)
-	if err := d.ListenAndServe(ctx); err != nil {
+	if err := githubreconciler.RepoMain(ctx, New); err != nil {
 		clog.FatalContextf(ctx, "server failed: %v", err)
-	}
-}
-
-// newReconciler returns a reconciler function that uses the status manager.
-func newReconciler(sm *statusmanager.StatusManager[prvalidation.Details]) githubreconciler.ReconcilerFunc {
-	return func(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
-		return reconcilePR(ctx, res, gh, sm)
 	}
 }
 
@@ -156,7 +96,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	// Step 3: Update status via the status manager
 	// Store generation in Details for idempotency (following qackage pattern)
-	status := &statusmanager.Status[prvalidation.Details]{
+	return session.SetActualState(ctx, summary, &statusmanager.Status[prvalidation.Details]{
 		Status:     "completed",
 		Conclusion: conclusion,
 		Details: prvalidation.Details{
@@ -165,11 +105,5 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 			DescriptionValid: descValid,
 			Issues:           issues,
 		},
-	}
-
-	if err := session.SetActualState(ctx, summary, status); err != nil {
-		return fmt.Errorf("setting status: %w", err)
-	}
-
-	return nil
+	})
 }
