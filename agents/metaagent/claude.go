@@ -8,6 +8,7 @@ package metaagent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -37,7 +38,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		claudeexecutor.WithTemperature[Req, Resp](0.2),
 		claudeexecutor.WithMaxTokens[Req, Resp](32000),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](submitresult.ClaudeToolForResponse[Resp]),
-		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region}),
+		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}
 
 	if config.SystemInstructions != nil {

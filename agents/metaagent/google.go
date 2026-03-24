@@ -8,6 +8,7 @@ package metaagent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -41,7 +42,7 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		googleexecutor.WithTemperature[Req, Resp](0.2),
 		googleexecutor.WithMaxOutputTokens[Req, Resp](32768),
 		googleexecutor.WithSubmitResultProvider[Req, Resp](submitresult.GoogleToolForResponse[Resp]),
-		googleexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region}),
+		googleexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}
 
 	if config.SystemInstructions != nil {
