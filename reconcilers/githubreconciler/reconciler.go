@@ -201,6 +201,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 
 // Process implements the WorkqueueService.Process RPC.
 func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error) {
+	ctx = clog.WithValues(ctx, "key", req.Key)
 	clog.InfoContextf(ctx, "Processing GitHub resource: %s (priority: %d)", req.Key, req.Priority)
 
 	// Call the reconciler

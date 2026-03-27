@@ -46,6 +46,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
 // Process implements the WorkqueueService.
 func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error) {
+	ctx = clog.WithValues(ctx, "key", req.Key)
 	clog.InfoContextf(ctx, "Processing OCI digest: %s (priority: %d)", req.Key, req.Priority)
 
 	err := r.Reconcile(ctx, req.Key)
