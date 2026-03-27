@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	chainguard.dev/apko v1.1.11
-	chainguard.dev/go-grpc-kit v0.17.16
+	chainguard.dev/go-grpc-kit v0.17.17
 	chainguard.dev/sdk v0.1.50
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/storage v1.59.1
@@ -39,7 +39,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.42.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
-	google.golang.org/api v0.271.0
+	google.golang.org/api v0.272.0
 	google.golang.org/genai v1.36.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
