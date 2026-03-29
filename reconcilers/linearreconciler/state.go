@@ -118,7 +118,7 @@ func (sm *StateManager) Load(ctx context.Context, v any) (bool, error) {
 		return false, fmt.Errorf("unmarshaling bot state: %w", err)
 	}
 
-	clog.FromContext(ctx).Infof("Loaded state from attachment %q", sm.client.stateAttachmentTitle())
+	clog.InfoContextf(ctx, "Loaded state from attachment %q", sm.client.stateAttachmentTitle())
 	return true, nil
 }
 

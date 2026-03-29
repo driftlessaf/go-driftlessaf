@@ -124,7 +124,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any](
 		opt(&o)
 	}
 
-	clog.FromContext(ctx).With("mode", o.mode).Info("Starting metapathreconciler")
+	clog.InfoContext(ctx, "Starting metapathreconciler", "mode", o.mode)
 
 	sm, err := statusmanager.NewStatusManager[CheckDetails](ctx, identity)
 	if err != nil {
