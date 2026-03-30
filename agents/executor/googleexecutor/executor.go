@@ -492,11 +492,13 @@ func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, us
 	}
 
 	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
 	e.genaiMetrics.RecordTokens(ctx, e.model, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount), attrs...)
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
 	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
 	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName, attrs...)
 }

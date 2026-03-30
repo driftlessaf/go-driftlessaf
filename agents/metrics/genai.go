@@ -20,11 +20,19 @@ import (
 // It includes counters for token usage (prompt and completion), tool calls,
 // and prompt cache metrics, with support for graceful degradation if metric
 // creation fails.
+//
+// Metrics are emitted in both custom format (genai.token.prompt, genai.token.completion)
+// and OpenTelemetry GenAI semantic conventions (gen_ai.client.token.usage histogram
+// with gen_ai.token.type dimension).
+// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/
 type GenAI struct {
 	meter            metric.Meter
 	promptTokens     metric.Int64Counter
 	completionTokens metric.Int64Counter
 	toolCallCounter  metric.Int64Counter
+	// OpenTelemetry GenAI semconv: token usage histogram with token type dimension.
+	// Uses explicit bucket boundaries from the spec.
+	semconvTokenUsage metric.Float64Histogram
 }
 
 // NewGenAI creates a new GenAI metrics instance with the specified meter name.
@@ -64,11 +72,26 @@ func NewGenAI(meterName string) *GenAI {
 		toolCallCounter = noop.Int64Counter{}
 	}
 
+	// Create GenAI semconv token usage histogram with graceful degradation.
+	// Bucket boundaries are defined by the OpenTelemetry GenAI semantic conventions.
+	// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/
+	semconvTokenUsage, err := meter.Float64Histogram("gen_ai.client.token.usage",
+		metric.WithDescription("Measures the number of input and output tokens used"),
+		metric.WithUnit("{token}"),
+		metric.WithExplicitBucketBoundaries(
+			1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864,
+		))
+	if err != nil {
+		clog.WarnContext(context.Background(), "Failed to create gen_ai.client.token.usage histogram, semconv metrics will be disabled", "error", err, "meter", meterName)
+		semconvTokenUsage = noop.Float64Histogram{}
+	}
+
 	return &GenAI{
-		meter:            meter,
-		promptTokens:     promptTokens,
-		completionTokens: completionTokens,
-		toolCallCounter:  toolCallCounter,
+		meter:             meter,
+		promptTokens:      promptTokens,
+		completionTokens:  completionTokens,
+		toolCallCounter:   toolCallCounter,
+		semconvTokenUsage: semconvTokenUsage,
 	}
 }
 
@@ -77,12 +100,24 @@ func NewGenAI(meterName string) *GenAI {
 func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, completionTokens int64, attrs ...attribute.KeyValue) {
 	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
+		attribute.String("gen_ai.request.model", model),
 	}
 	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
+	// Custom metrics (existing)
 	m.promptTokens.Add(ctx, promptTokens, metric.WithAttributes(baseAttrs...))
 	m.completionTokens.Add(ctx, completionTokens, metric.WithAttributes(baseAttrs...))
+
+	// GenAI semconv: histogram with gen_ai.token.type dimension.
+	// gen_ai.operation.name is Required per spec; callers should pass gen_ai.provider.name via attrs.
+	semconvBase := append(append([]attribute.KeyValue{}, baseAttrs...),
+		attribute.String("gen_ai.operation.name", "invoke_agent"),
+	)
+	inputAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "input"))
+	m.semconvTokenUsage.Record(ctx, float64(promptTokens), metric.WithAttributes(inputAttrs...))
+	outputAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "output"))
+	m.semconvTokenUsage.Record(ctx, float64(completionTokens), metric.WithAttributes(outputAttrs...))
 }
 
 // RecordCacheTokens records Anthropic prompt cache token usage on the existing
@@ -102,13 +137,20 @@ func (m *GenAI) RecordCacheTokens(ctx context.Context, model string, cacheRead, 
 	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
+	semconvBase := append(append([]attribute.KeyValue{}, baseAttrs...),
+		attribute.String("gen_ai.operation.name", "invoke_agent"),
+	)
 	if cacheRead > 0 {
 		readAttrs := append(append([]attribute.KeyValue{}, baseAttrs...), attribute.String("gen_ai.token.type", "cache_read"))
 		m.promptTokens.Add(ctx, cacheRead, metric.WithAttributes(readAttrs...))
+		semconvReadAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "cache_read"))
+		m.semconvTokenUsage.Record(ctx, float64(cacheRead), metric.WithAttributes(semconvReadAttrs...))
 	}
 	if cacheCreation > 0 {
 		creationAttrs := append(append([]attribute.KeyValue{}, baseAttrs...), attribute.String("gen_ai.token.type", "cache_creation"))
 		m.promptTokens.Add(ctx, cacheCreation, metric.WithAttributes(creationAttrs...))
+		semconvCreationAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "cache_creation"))
+		m.semconvTokenUsage.Record(ctx, float64(cacheCreation), metric.WithAttributes(semconvCreationAttrs...))
 	}
 }
 
@@ -117,6 +159,7 @@ func (m *GenAI) RecordCacheTokens(ctx context.Context, model string, cacheRead, 
 func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attrs ...attribute.KeyValue) {
 	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
+		attribute.String("gen_ai.request.model", model),
 		attribute.String("tool", toolName),
 	}
 	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)

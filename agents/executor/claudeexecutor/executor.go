@@ -480,17 +480,20 @@ func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.K
 // recordTokenMetrics records token usage with optional enrichment
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, inputTokens, outputTokens int64) {
 	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
 	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens, attrs...)
 }
 
 // recordCacheMetrics records prompt cache token usage with optional enrichment
 func (e *executor[Request, Response]) recordCacheMetrics(ctx context.Context, cacheRead, cacheCreation int64) {
 	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
 	e.genaiMetrics.RecordCacheTokens(ctx, e.modelName, cacheRead, cacheCreation, attrs...)
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
 	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
 	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
 }

@@ -85,11 +85,19 @@ Google Gemini executor example:
 
 The package emits the following OpenTelemetry metrics:
 
+Custom metrics:
+
   - genai.token.prompt: Counter of prompt tokens used (unit: {tokens})
   - genai.token.completion: Counter of completion tokens used (unit: {tokens})
   - genai.tool.calls: Counter of tool invocations (unit: {calls})
 
+OpenTelemetry GenAI semantic convention metric:
+
+  - gen_ai.client.token.usage: Histogram of token counts with gen_ai.token.type dimension (unit: {token})
+
 All metrics include a "model" attribute. Tool call metrics also include a "tool" attribute.
+The semconv histogram also includes gen_ai.operation.name and gen_ai.request.model attributes.
+Callers should pass gen_ai.provider.name via the attrs parameter.
 
 # Custom Attributes
 

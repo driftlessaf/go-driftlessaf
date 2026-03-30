@@ -66,9 +66,15 @@ func newTraceWithTracer[T any](ctx context.Context, tracer Tracer[T], prompt str
 	tr := otel.Tracer("chainguard.ai.agents.agenttrace",
 		oteltrace.WithInstrumentationVersion("1.0.0"))
 
-	// Add execution context as span attributes
+	// Add execution context as span attributes.
+	// Include both custom attributes and OpenTelemetry GenAI semantic conventions (gen_ai.*).
+	// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
 	spanAttrs := []oteltrace.SpanStartOption{
-		oteltrace.WithAttributes(attribute.String("agent.prompt", prompt)),
+		oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+		oteltrace.WithAttributes(
+			attribute.String("agent.prompt", prompt),
+			attribute.String("gen_ai.operation.name", "invoke_agent"),
+		),
 	}
 	if execCtx.ReconcilerKey != "" {
 		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("reconciler_key", execCtx.ReconcilerKey)))
@@ -80,7 +86,7 @@ func newTraceWithTracer[T any](ctx context.Context, tracer Tracer[T], prompt str
 		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("commit_sha", execCtx.CommitSHA)))
 	}
 
-	ctx, span := tr.Start(ctx, "agent.execution", spanAttrs...)
+	ctx, span := tr.Start(ctx, "invoke_agent", spanAttrs...)
 
 	return &Trace[T]{
 		ID:          generateTraceID(),
@@ -118,16 +124,28 @@ func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCa
 // RecordTokenUsage records model and token usage as span attributes for observability.
 // This allows viewing token consumption directly in Cloud Trace without needing to
 // cross-reference with metrics.
+//
+// Attributes are emitted in both custom format (model, tokens.input, tokens.output)
+// and OpenTelemetry GenAI semantic conventions (gen_ai.request.model, gen_ai.usage.input_tokens,
+// gen_ai.usage.output_tokens).
+// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
 func (t *Trace[T]) RecordTokenUsage(model string, inputTokens, outputTokens int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.span != nil {
+		// Update span name to follow semconv format: "{operation} {model}"
+		t.span.SetName("invoke_agent " + model)
 		t.span.SetAttributes(
+			// Custom attributes (existing)
 			attribute.String("model", model),
 			attribute.Int64("tokens.input", inputTokens),
 			attribute.Int64("tokens.output", outputTokens),
 			attribute.Int64("tokens.total", inputTokens+outputTokens),
+			// OpenTelemetry GenAI semantic conventions
+			attribute.String("gen_ai.request.model", model),
+			attribute.Int64("gen_ai.usage.input_tokens", inputTokens),
+			attribute.Int64("gen_ai.usage.output_tokens", outputTokens),
 		)
 	}
 }
