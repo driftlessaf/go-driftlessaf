@@ -7,6 +7,7 @@ package githubreconciler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -39,11 +40,13 @@ type Functor[T any] func(
 	cfg T,
 ) (ReconcilerFunc, error)
 
-// MainOption configures the behavior of RepoMain/OrgMain.
+// MainOption configures the behavior of Main and its wrappers.
 type MainOption func(*mainOptions)
 
 type mainOptions struct {
-	interceptors []grpc.UnaryServerInterceptor
+	interceptors   []grpc.UnaryServerInterceptor
+	tsff           func(identity string) TokenSourceFunc
+	reconcilerOpts []Option
 }
 
 // WithInterceptors adds gRPC unary server interceptors that run before
@@ -54,39 +57,95 @@ func WithInterceptors(inter ...grpc.UnaryServerInterceptor) MainOption {
 	}
 }
 
+// WithTokenSourceFuncFactory sets the factory that maps an identity string
+// to a TokenSourceFunc. The identity is read from the OCTO_IDENTITY
+// environment variable at startup and forwarded to f, which returns the
+// TokenSourceFunc used to authenticate GitHub API calls.
+//
+// Use this to supply custom authentication; for the standard Octo STS cases
+// prefer RepoMain or OrgMain.
+func WithTokenSourceFuncFactory(f func(identity string) TokenSourceFunc) MainOption {
+	return func(o *mainOptions) {
+		o.tsff = f
+	}
+}
+
+// withReconcilerOptions appends options forwarded to the workqueue reconciler.
+// Used by OrgMain to enable org-scoped credential handling.
+func withReconcilerOptions(opts ...Option) MainOption {
+	return func(o *mainOptions) {
+		o.reconcilerOpts = append(o.reconcilerOpts, opts...)
+	}
+}
+
+// AppMain is the entrypoint for reconcilers that authenticate using a dedicated
+// GitHub App. It reads GITHUB_APP_ID and GITHUB_APP_KEY (a gcpkms:// URI) from
+// the environment, creates the app token source, and delegates to Main.
+// OCTO_IDENTITY is still required and used as the reconciler identity (e.g.
+// for PR author names and bot display names).
+func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
+	var appEnv struct {
+		AppID  int64  `env:"GITHUB_APP_ID,required"`
+		AppKey string `env:"GITHUB_APP_KEY,required"`
+	}
+	if err := envconfig.Process(ctx, &appEnv); err != nil {
+		return fmt.Errorf("process GitHub App environment config: %w", err)
+	}
+
+	tsf, err := NewAppTokenSource(ctx, appEnv.AppID, appEnv.AppKey)
+	if err != nil {
+		return fmt.Errorf("create GitHub App token source: %w", err)
+	}
+
+	return Main(ctx, f, append(opts, WithTokenSourceFuncFactory(func(_ string) TokenSourceFunc {
+		return tsf
+	}))...)
+}
+
 // RepoMain is the entrypoint for reconcilers that use repo-scoped GitHub
-// credentials. It parses environment configuration, sets up metrics and
-// tracing, creates the gRPC server, and runs the reconciler.
+// credentials via Octo STS. It is a convenience wrapper around Main.
 func RepoMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
-	return commonMain(ctx, f, func(identity string) TokenSourceFunc {
+	return Main(ctx, f, append(opts, WithTokenSourceFuncFactory(func(identity string) TokenSourceFunc {
 		return func(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
 			return NewRepoTokenSource(ctx, identity, org, repo), nil
 		}
-	}, nil, opts...)
+	}))...)
 }
 
 // OrgMain is the entrypoint for reconcilers that use org-scoped GitHub
-// credentials. It parses environment configuration, sets up metrics and
-// tracing, creates the gRPC server, and runs the reconciler.
+// credentials via Octo STS. It is a convenience wrapper around Main.
 func OrgMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
-	return commonMain(ctx, f, func(identity string) TokenSourceFunc {
-		return func(ctx context.Context, org, _ string) (oauth2.TokenSource, error) {
-			return NewOrgTokenSource(ctx, identity, org), nil
-		}
-	}, []Option{WithOrgScopedCredentials()}, opts...)
+	return Main(ctx, f, append(opts,
+		WithTokenSourceFuncFactory(func(identity string) TokenSourceFunc {
+			return func(ctx context.Context, org, _ string) (oauth2.TokenSource, error) {
+				return NewOrgTokenSource(ctx, identity, org), nil
+			}
+		}),
+		withReconcilerOptions(WithOrgScopedCredentials()),
+	)...)
 }
 
-func commonMain[T any](
-	ctx context.Context,
-	f Functor[T],
-	tsff func(identity string) TokenSourceFunc,
-	reconcilerOpts []Option,
-	opts ...MainOption,
-) error {
+// Main is the core entrypoint for GitHub reconcilers. It parses environment
+// configuration, sets up metrics and tracing, creates the gRPC server, and
+// runs the reconciler.
+//
+// The token source and reconciler options are configured via MainOption
+// functional options. Use RepoMain or OrgMain for the common Octo STS cases,
+// or pass WithTokenSourceFuncFactory and related options directly for custom
+// authentication (e.g. a dedicated GitHub App).
+//
+// OCTO_IDENTITY is required and is read from the environment and passed to the
+// token source factory.
+func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 	var mo mainOptions
 	for _, o := range opts {
 		o(&mo)
 	}
+
+	if mo.tsff == nil {
+		return errors.New("no token source factory configured: use RepoMain, OrgMain, or WithTokenSourceFuncFactory")
+	}
+
 	env := &struct {
 		Config T
 
@@ -103,18 +162,15 @@ func commonMain[T any](
 	defer httpmetrics.SetupMetrics(ctx)()
 	defer httpmetrics.SetupTracer(ctx)()
 
-	tsf := tsff(env.OctoIdentity)
+	tsf := mo.tsff(env.OctoIdentity)
 
-	// Create GitHub client cache with Octo identity
 	clientCache := NewClientCache(tsf)
 
-	// Create the reconciler
 	rec, err := f(ctx, env.OctoIdentity, clientCache, env.Config)
 	if err != nil {
 		return fmt.Errorf("create reconciler: %w", err)
 	}
 
-	// Create duplex server (HTTP + gRPC on same port) with metrics and tracing
 	d := duplex.New(
 		env.Port,
 		grpc.StatsHandler(traceinterceptors.RestoreTraceParentHandler),
@@ -128,19 +184,15 @@ func commonMain[T any](
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
-	// Register workqueue service with the GitHub reconciler
 	workqueue.RegisterWorkqueueServiceServer(d.Server, NewReconciler(
 		clientCache,
-		append([]Option{WithReconciler(rec)}, reconcilerOpts...)...,
+		append([]Option{WithReconciler(rec)}, mo.reconcilerOpts...)...,
 	))
 
-	// Register health check handler
 	healthgrpc.RegisterHealthServer(d.Server, health.NewServer())
 
-	// Initialize gRPC prometheus metrics and start metrics/pprof server
 	d.RegisterListenAndServeMetrics(env.MetricsPort, env.EnablePprof)
 
-	// Start the server
 	clog.InfoContext(ctx, "Starting reconciler", "port", env.Port)
 	return d.ListenAndServe(ctx)
 }

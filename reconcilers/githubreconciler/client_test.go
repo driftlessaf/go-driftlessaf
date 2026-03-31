@@ -131,10 +131,10 @@ func TestClientCache_GetError(t *testing.T) {
 
 func TestClientCache_ConcurrentAccess(t *testing.T) {
 	ctx := context.Background()
-	var tokenSourceCalls int32
+	var tokenSourceCalls atomic.Int32
 
 	tokenSourceFunc := func(_ context.Context, org, repo string) (oauth2.TokenSource, error) {
-		atomic.AddInt32(&tokenSourceCalls, 1)
+		tokenSourceCalls.Add(1)
 		return &mockTokenSource{token: fmt.Sprintf("token-%s-%s", org, repo)}, nil
 	}
 
@@ -188,7 +188,7 @@ func TestClientCache_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Verify token source was only called once due to caching
-	calls := atomic.LoadInt32(&tokenSourceCalls)
+	calls := tokenSourceCalls.Load()
 	if calls != 1 {
 		t.Errorf("Expected token source to be called once, but was called %d times", calls)
 	}
@@ -196,10 +196,10 @@ func TestClientCache_ConcurrentAccess(t *testing.T) {
 
 func TestClientCache_Clear(t *testing.T) {
 	ctx := context.Background()
-	var tokenSourceCalls int32
+	var tokenSourceCalls atomic.Int32
 
 	tokenSourceFunc := func(_ context.Context, org, repo string) (oauth2.TokenSource, error) {
-		atomic.AddInt32(&tokenSourceCalls, 1)
+		tokenSourceCalls.Add(1)
 		return &mockTokenSource{token: fmt.Sprintf("token-%s-%s", org, repo)}, nil
 	}
 
@@ -226,7 +226,7 @@ func TestClientCache_Clear(t *testing.T) {
 	}
 
 	// Token source should have been called twice
-	calls := atomic.LoadInt32(&tokenSourceCalls)
+	calls := tokenSourceCalls.Load()
 	if calls != 2 {
 		t.Errorf("Expected token source to be called twice, but was called %d times", calls)
 	}
