@@ -111,6 +111,17 @@ func (s *Session[T]) ShouldSkip() bool {
 	return len(s.prAssignees) > 0
 }
 
+// HasSkipLabel returns true if the PR has the skip label applied.
+// Unlike ShouldSkip, this does not consider assignees.
+func (s *Session[T]) HasSkipLabel() bool {
+	return s.prNumber != 0 && slices.Contains(s.prLabels, s.skipLabel())
+}
+
+// HasLabel returns true if the PR has the specified label.
+func (s *Session[T]) HasLabel(labelName string) bool {
+	return s.prNumber != 0 && slices.Contains(s.prLabels, labelName)
+}
+
 // State returns the composite state of the PR as a bit-field.
 // Multiple flags can be set simultaneously.
 func (s *Session[T]) State() State {

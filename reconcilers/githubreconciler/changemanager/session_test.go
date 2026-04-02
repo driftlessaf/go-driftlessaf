@@ -97,6 +97,103 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
+func TestHasSkipLabel(t *testing.T) {
+	tests := []struct {
+		name     string
+		session  Session[testData]
+		wantSkip bool
+	}{{
+		name: "no PR",
+		session: Session[testData]{
+			prNumber: 0,
+		},
+		wantSkip: false,
+	}, {
+		name: "PR with skip label",
+		session: Session[testData]{
+			prNumber: 1,
+			prLabels: []string{"skip:test-bot", "automated pr"},
+			manager:  &CM[testData]{identity: "test-bot"},
+		},
+		wantSkip: true,
+	}, {
+		name: "PR with only assignees, no skip label",
+		session: Session[testData]{
+			prNumber:    2,
+			prLabels:    []string{"automated pr"},
+			prAssignees: []string{"alice"},
+			manager:     &CM[testData]{identity: "test-bot"},
+		},
+		wantSkip: false,
+	}, {
+		name: "PR with no labels and no assignees",
+		session: Session[testData]{
+			prNumber: 3,
+			prLabels: []string{},
+			manager:  &CM[testData]{identity: "test-bot"},
+		},
+		wantSkip: false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.session.HasSkipLabel()
+			if got != tt.wantSkip {
+				t.Errorf("HasSkipLabel(): got = %v, want = %v", got, tt.wantSkip)
+			}
+		})
+	}
+}
+
+func TestHasLabel(t *testing.T) {
+	tests := []struct {
+		name      string
+		session   Session[testData]
+		labelName string
+		wantHas   bool
+	}{{
+		name: "no PR",
+		session: Session[testData]{
+			prNumber: 0,
+		},
+		labelName: "test-label",
+		wantHas:   false,
+	}, {
+		name: "PR with label present",
+		session: Session[testData]{
+			prNumber: 1,
+			prLabels: []string{"test-label", "other-label"},
+		},
+		labelName: "test-label",
+		wantHas:   true,
+	}, {
+		name: "PR with label absent",
+		session: Session[testData]{
+			prNumber: 2,
+			prLabels: []string{"other-label"},
+		},
+		labelName: "test-label",
+		wantHas:   false,
+	}, {
+		name: "PR with no labels",
+		session: Session[testData]{
+			prNumber: 3,
+			prLabels: []string{},
+		},
+		labelName: "test-label",
+		wantHas:   false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.session.HasLabel(tt.labelName)
+			if got != tt.wantHas {
+				t.Errorf("HasLabel(%q): got = %v, want = %v", tt.labelName, got, tt.wantHas)
+			}
+		})
+	}
+}
+
 func TestNeedsRefresh(t *testing.T) {
 	te := mustTemplateExecutor(t)
 
