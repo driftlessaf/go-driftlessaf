@@ -25,4 +25,8 @@ type Config[Resp, CB any] struct {
 	// Compose providers using toolcall.NewFindingToolsProvider,
 	// toolcall.NewWorktreeToolsProvider, and toolcall.NewEmptyToolsProvider.
 	Tools toolcall.ToolProvider[Resp, CB]
+
+	// MaxTurns sets the maximum number of conversation turns (LLM round-trips)
+	// before the executor aborts. Zero means use the executor's default.
+	MaxTurns int
 }

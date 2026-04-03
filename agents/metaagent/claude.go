@@ -41,6 +41,10 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}
 
+	if config.MaxTurns > 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, claudeexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}

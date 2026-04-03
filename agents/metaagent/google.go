@@ -45,6 +45,10 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		googleexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}
 
+	if config.MaxTurns > 0 {
+		executorOpts = append(executorOpts, googleexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, googleexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
