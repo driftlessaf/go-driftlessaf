@@ -9,11 +9,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"time"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
-	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v84/github"
@@ -57,9 +55,13 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		_, err := changeSession.ApplyTurnLimit(ctx)
 		return err
 
-	case state.IsUnknown():
-		log.Info("PR merge status unknown, requeuing to check again shortly")
-		return workqueue.RequeueAfter(2 * time.Minute)
+	// Historically we delayed here (commented code below), but in high-volume
+	// repositories github can take a long time to compute mergeability, so we
+	// are choosing to optimistically proceed as-if there isn't a rebase needed
+	// when github has not computed mergeability.
+	// case state.IsUnknown():
+	// 	log.Info("PR merge status unknown, requeuing to check again shortly")
+	// 	return workqueue.RequeueAfter(2 * time.Minute)
 
 	case state.HasFindings():
 		log.With("findings", len(changeSession.Findings())).Info("PR has CI findings, iterating")
