@@ -109,7 +109,15 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 //
 // The caller's metadata map is not modified; a copy is made before adding the source text.
 func (c *Client) EmbedAndStore(ctx context.Context, id, text string, taskType TaskType, metadata map[string]string) error {
-	vector, err := c.embedder.Embed(ctx, text, taskType)
+	return c.embedAndStore(ctx, id, text, taskType, metadata, c.embedder.Embed)
+}
+
+// embedFn is the signature for generating an embedding vector from text.
+type embedFn func(ctx context.Context, text string, taskType TaskType) ([]float32, error)
+
+// embedAndStore is the core implementation, accepting an embed function for testability.
+func (c *Client) embedAndStore(ctx context.Context, id, text string, taskType TaskType, metadata map[string]string, embed embedFn) error {
+	vector, err := embed(ctx, text, taskType)
 	if err != nil {
 		return fmt.Errorf("embedding text: %w", err)
 	}

@@ -8,7 +8,6 @@ package rag
 import (
 	"context"
 	"errors"
-	"maps"
 	"testing"
 )
 
@@ -31,18 +30,26 @@ func (f *fakeRetriever) Close() error {
 	return nil
 }
 
+// fakeEmbed returns a fixed vector for any input.
+func fakeEmbed(vec []float32) embedFn {
+	return func(_ context.Context, _ string, _ TaskType) ([]float32, error) {
+		return vec, nil
+	}
+}
+
 func TestEmbedAndStoreDoesNotMutateCallerMetadata(t *testing.T) {
 	store := newMemoryStore()
+	client := &Client{
+		store:     store,
+		retriever: &fakeRetriever{},
+	}
 
-	// Simulate the metadata cloning logic from EmbedAndStore.
 	metadata := map[string]string{"key": "value"}
 
-	md := make(map[string]string, len(metadata)+1)
-	maps.Copy(md, metadata)
-	md[MetadataKeySourceText] = "test text"
-
-	if err := store.Upsert(t.Context(), "id-1", []float32{1.0, 2.0}, md); err != nil {
-		t.Fatalf("Upsert: %v", err)
+	err := client.embedAndStore(t.Context(), "id-1", "test text", TaskTypeRetrievalDocument, metadata,
+		fakeEmbed([]float32{1.0, 2.0}))
+	if err != nil {
+		t.Fatalf("EmbedAndStore: %v", err)
 	}
 
 	// Original metadata must not have _source_text.
@@ -63,22 +70,20 @@ func TestEmbedAndStoreDoesNotMutateCallerMetadata(t *testing.T) {
 
 func TestEmbedAndStorePreservesExistingSourceText(t *testing.T) {
 	store := newMemoryStore()
+	client := &Client{
+		store:     store,
+		retriever: &fakeRetriever{},
+	}
 
 	metadata := map[string]string{
 		MetadataKeySourceText: "already set",
 		"other":               "value",
 	}
 
-	// Clone metadata and only set _source_text if not already present —
-	// matching the EmbedAndStore logic.
-	md := make(map[string]string, len(metadata)+1)
-	maps.Copy(md, metadata)
-	if _, exists := md[MetadataKeySourceText]; !exists {
-		md[MetadataKeySourceText] = "should not appear"
-	}
-
-	if err := store.Upsert(t.Context(), "id-2", []float32{1.0}, md); err != nil {
-		t.Fatalf("Upsert: %v", err)
+	err := client.embedAndStore(t.Context(), "id-2", "new text", TaskTypeRetrievalDocument, metadata,
+		fakeEmbed([]float32{1.0}))
+	if err != nil {
+		t.Fatalf("EmbedAndStore: %v", err)
 	}
 
 	r, _ := store.get("id-2")

@@ -181,3 +181,12 @@ func TestStoreUpsertEmptyIDReturnsError(t *testing.T) {
 
 	_ = ms
 }
+
+func TestNewMultiStoreZeroStoresPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("NewMultiStore with zero stores: expected panic, got none")
+		}
+	}()
+	NewMultiStore()
+}

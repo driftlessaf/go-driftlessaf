@@ -117,8 +117,11 @@ type MultiStore struct {
 }
 
 // NewMultiStore creates a store that fans out writes to all provided stores.
-// At least one store must be provided.
+// At least one store must be provided; panics if called with zero stores.
 func NewMultiStore(stores ...Store) *MultiStore {
+	if len(stores) == 0 {
+		panic("NewMultiStore requires at least one store")
+	}
 	return &MultiStore{stores: stores}
 }
 

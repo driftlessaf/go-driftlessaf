@@ -51,6 +51,19 @@ type MatchingEngineRetriever struct {
 //   - publicDomainName: the public endpoint domain (e.g., "1234.us-central1-5678.vdb.vertexai.goog").
 //     Required for public endpoints. For private (VPC) endpoints, pass "".
 func NewMatchingEngineRetriever(ctx context.Context, project, location, indexEndpointID, deployedIndexID, publicDomainName string) (*MatchingEngineRetriever, error) {
+	if project == "" {
+		return nil, fmt.Errorf("project is required")
+	}
+	if location == "" {
+		return nil, fmt.Errorf("location is required")
+	}
+	if indexEndpointID == "" {
+		return nil, fmt.Errorf("indexEndpointID is required")
+	}
+	if deployedIndexID == "" {
+		return nil, fmt.Errorf("deployedIndexID is required")
+	}
+
 	// The MatchClient defaults to aiplatform.googleapis.com:443 which does NOT
 	// serve FindNeighbors. For public endpoints we must connect to the index
 	// endpoint's own domain. For VPC endpoints the regional endpoint works.
