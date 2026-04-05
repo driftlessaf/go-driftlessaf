@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.20.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v1.0.2
+	github.com/chainguard-dev/terraform-infra-common v0.10.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.2.7
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/go-git/go-git/v5 v5.17.2
@@ -25,6 +25,7 @@ require (
 	github.com/invopop/jsonschema v0.13.0
 	github.com/octo-sts/app v0.5.3
 	github.com/olekukonko/tablewriter v1.1.2
+	github.com/openai/openai-go v1.12.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/secure-systems-lab/go-securesystemslib v0.10.0
@@ -287,3 +288,7 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common

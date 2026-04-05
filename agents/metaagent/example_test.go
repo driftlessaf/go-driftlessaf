@@ -49,7 +49,7 @@ func ExampleNew() {
 	if err != nil {
 		fmt.Println("error:", err)
 	}
-	// Output: error: unsupported model: unknown-model (expected gemini-* or claude-*)
+	// Output: error: unsupported model: unknown-model (expected gemini-*, claude-*, or publisher/model format)
 }
 
 // ExampleAgent_Execute demonstrates calling Execute on an Agent to run a request.

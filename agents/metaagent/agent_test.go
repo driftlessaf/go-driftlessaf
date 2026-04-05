@@ -51,13 +51,17 @@ func TestNewModelSelection(t *testing.T) {
 		name:    "partial claude",
 		model:   "cla",
 		wantErr: "unsupported model",
+	}, {
+		name:    "slash routes to openai compat",
+		model:   "google/gemini-2.5-pro",
+		wantErr: "prompt cannot be nil",
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New[*testRequest](t.Context(), "test-project", "us-central1", tt.model, config)
 			if err == nil {
-				t.Errorf("New() got = nil, want error containing %q", tt.wantErr)
+				t.Errorf("New() got = nil, want error")
 				return
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {

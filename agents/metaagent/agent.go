@@ -24,8 +24,9 @@ type Agent[Req promptbuilder.Bindable, Resp, CB any] interface {
 
 // New creates a new meta-agent with the given configuration.
 // The model parameter determines which provider implementation is used:
-//   - Models starting with "gemini-" use Google's Generative AI SDK
-//   - Models starting with "claude-" use Anthropic's SDK via Vertex AI
+//   - Models starting with "gemini-" use Google's Generative AI SDK (native)
+//   - Models starting with "claude-" use Anthropic's SDK via Vertex AI (native)
+//   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
 func New[Req promptbuilder.Bindable, Resp, CB any](
 	ctx context.Context,
 	projectID, region, model string,
@@ -38,7 +39,10 @@ func New[Req promptbuilder.Bindable, Resp, CB any](
 		return newGoogleAgent[Req, Resp, CB](ctx, projectID, region, model, config)
 	case strings.HasPrefix(modelLower, "claude-"):
 		return newClaudeAgent[Req, Resp, CB](ctx, projectID, region, model, config)
+	case strings.Contains(model, "/"):
+		// publisher/model format routes to the Vertex AI OpenAI-compatible endpoint
+		return newOpenAICompatAgent[Req, Resp, CB](ctx, projectID, region, model, config)
 	default:
-		return nil, fmt.Errorf("unsupported model: %s (expected gemini-* or claude-*)", model)
+		return nil, fmt.Errorf("unsupported model: %s (expected gemini-*, claude-*, or publisher/model format)", model)
 	}
 }
