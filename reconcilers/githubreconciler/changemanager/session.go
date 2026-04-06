@@ -173,6 +173,15 @@ func (s *Session[T]) Labels() []string {
 	return s.prLabels
 }
 
+// Extract returns the embedded data from the PR body.
+func (s *Session[T]) Extract() (*T, error) {
+	if !s.State().HasPR() {
+		return nil, nil
+	}
+
+	return s.manager.templateExecutor.Extract(s.prBody)
+}
+
 // ApplyTurnLimit adds a turn-limit label to the PR, preventing further
 // commits from being added. Unlike adding a skip label, this does not
 // block the PR from being rebased if it develops merge conflicts.
