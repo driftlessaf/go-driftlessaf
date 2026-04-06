@@ -318,7 +318,7 @@ func (s *Session[T]) Upsert(
 	makeChanges func(ctx context.Context, branchName string) error,
 ) (prURL string, err error) {
 	// Check if refresh is needed
-	needsRefresh, err := s.needsRefresh(ctx, data)
+	needsRefresh, err := s.needsRefresh(ctx, data, labels)
 	if err != nil {
 		return "", err
 	}
@@ -429,7 +429,7 @@ func (s *Session[T]) Upsert(
 
 // needsRefresh determines if an existing PR needs to be refreshed.
 // Checks embedded data first, then falls through to mergeability and CI state.
-func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error) {
+func (s *Session[T]) needsRefresh(ctx context.Context, expected *T, desiredLabels []string) (bool, error) {
 	state := s.State()
 
 	if !state.HasPR() {
@@ -468,6 +468,18 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T) (bool, error
 	case state.IsUnknown():
 		clog.InfoContext(ctx, "PR mergeable status is still being computed by GitHub, requeueing")
 		return false, workqueue.RequeueAfter(5 * time.Minute)
+	}
+
+	// Check if the PR is missing any desired labels.
+	existingSet := make(map[string]struct{}, len(s.prLabels))
+	for _, l := range s.prLabels {
+		existingSet[l] = struct{}{}
+	}
+	for _, l := range desiredLabels {
+		if _, ok := existingSet[l]; !ok {
+			clog.InfoContextf(ctx, "PR missing desired label %q, refresh needed: existing=%v desired=%v", l, s.prLabels, desiredLabels)
+			return true, nil
+		}
 	}
 
 	return false, nil

@@ -211,11 +211,12 @@ func TestNeedsRefresh(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		session     Session[testData]
-		expected    *testData
-		wantRefresh bool
-		wantRequeue bool
+		name          string
+		session       Session[testData]
+		expected      *testData
+		desiredLabels []string
+		wantRefresh   bool
+		wantRequeue   bool
 	}{{
 		name: "no PR exists",
 		session: Session[testData]{
@@ -311,7 +312,7 @@ func TestNeedsRefresh(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.session.needsRefresh(t.Context(), tt.expected)
+			got, err := tt.session.needsRefresh(t.Context(), tt.expected, tt.desiredLabels)
 
 			if tt.wantRequeue {
 				if _, ok := workqueue.GetRequeueDelay(err); !ok {
