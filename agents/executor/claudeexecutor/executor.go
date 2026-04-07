@@ -37,7 +37,7 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // round-trips) before the executor aborts. Each turn corresponds to one
 // Claude API call. This prevents runaway loops when the model keeps calling
 // tools without converging on a result.
-const DefaultMaxTurns = 50
+const DefaultMaxTurns = 200
 
 // executor provides the private implementation
 type executor[Request promptbuilder.Bindable, Response any] struct {
@@ -307,6 +307,7 @@ func (e *executor[Request, Response]) Execute(
 		// Check if a tool set the final result during seed execution
 		if !reflect.ValueOf(finalResult).IsZero() {
 			log.Info("Seed tool set final result, exiting immediately")
+			e.recordTurns(ctx, 0, false)
 			return finalResult, nil
 		}
 
@@ -406,7 +407,8 @@ func (e *executor[Request, Response]) Execute(
 
 				// Check if a tool set the final result
 				if !reflect.ValueOf(finalResult).IsZero() {
-					log.Info("Tool set final result, exiting conversation loop")
+					log.With("turns_completed", turn+1).Info("Tool set final result, exiting conversation loop")
+					e.recordTurns(ctx, turn+1, false)
 					return finalResult, nil
 				}
 			}
@@ -454,7 +456,8 @@ func (e *executor[Request, Response]) Execute(
 				return response, fmt.Errorf("failed to parse response: %w", err)
 			}
 
-			log.Info("Successfully completed Claude agent execution")
+			log.With("turns_completed", turn+1).Info("Successfully completed Claude agent execution")
+			e.recordTurns(ctx, turn+1, false)
 			return resp, nil
 		}
 
@@ -462,6 +465,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	log.With("max_turns", e.maxTurns).Error("Agent exceeded maximum conversation turns")
+	e.recordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
@@ -496,4 +500,12 @@ func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolNa
 	attrs := e.resourceLabelsToAttributes()
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
 	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
+}
+
+// recordTurns records the number of turns used and, when limitExceeded is true,
+// increments the turn_limit_exceeded counter.
+func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
+	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
 }

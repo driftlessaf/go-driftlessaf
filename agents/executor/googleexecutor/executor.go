@@ -34,7 +34,7 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // round-trips) before the executor aborts. Each turn corresponds to one
 // Gemini API call. This prevents runaway loops when the model keeps calling
 // tools without converging on a result.
-const DefaultMaxTurns = 50
+const DefaultMaxTurns = 200
 
 // executor is the private implementation of Interface
 type executor[Request promptbuilder.Bindable, Response any] struct {
@@ -393,7 +393,8 @@ func (e *executor[Request, Response]) Execute(
 
 				// Check if a tool set the final result
 				if !reflect.ValueOf(finalResult).IsZero() {
-					log.Info("Tool set final result, exiting conversation loop")
+					log.With("turns_completed", turn+1).Info("Tool set final result, exiting conversation loop")
+					e.recordTurns(ctx, turn+1, false)
 					return finalResult, nil
 				}
 
@@ -456,6 +457,8 @@ func (e *executor[Request, Response]) Execute(
 				log.With("response", responseText).With("error", err).Error("Failed to parse AI response")
 				return resp, fmt.Errorf("failed to parse AI response: %w", err)
 			}
+			log.With("turns_completed", turn+1).Info("Successfully completed Google AI agent execution")
+			e.recordTurns(ctx, turn+1, false)
 			return extractedResponse, nil
 		}
 
@@ -465,6 +468,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	log.With("max_turns", e.maxTurns).Error("Agent exceeded maximum conversation turns")
+	e.recordTurns(ctx, e.maxTurns, true)
 	return resp, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
@@ -501,4 +505,12 @@ func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolNa
 	attrs := e.resourceLabelsToAttributes()
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
 	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName, attrs...)
+}
+
+// recordTurns records the number of turns used and, when limitExceeded is true,
+// increments the turn_limit_exceeded counter.
+func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
+	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
+	e.genaiMetrics.RecordTurns(ctx, e.model, turns, limitExceeded, attrs...)
 }

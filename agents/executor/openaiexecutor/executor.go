@@ -32,7 +32,7 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 }
 
 // DefaultMaxTurns is the default maximum number of conversation turns before aborting.
-const DefaultMaxTurns = 50
+const DefaultMaxTurns = 200
 
 type executor[Request promptbuilder.Bindable, Response any] struct {
 	client             openai.Client
@@ -232,7 +232,8 @@ func (e *executor[Request, Response]) Execute(
 
 			// Check if any tool set the final result.
 			if !reflect.ValueOf(finalResult).IsZero() {
-				log.Info("Tool set final result, exiting conversation loop")
+				log.With("turns_completed", turn+1).Info("Tool set final result, exiting conversation loop")
+				e.recordTurns(ctx, turn+1, false)
 				return finalResult, nil
 			}
 			continue
@@ -267,7 +268,8 @@ func (e *executor[Request, Response]) Execute(
 				log.With("response", textContent).With("error", err).Error("Failed to parse response")
 				return response, fmt.Errorf("failed to parse response: %w", err)
 			}
-			log.Info("Successfully completed OpenAI-compatible agent execution")
+			log.With("turns_completed", turn+1).Info("Successfully completed OpenAI-compatible agent execution")
+			e.recordTurns(ctx, turn+1, false)
 			return resp, nil
 		}
 
@@ -275,6 +277,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	log.With("max_turns", e.maxTurns).Error("Agent exceeded maximum conversation turns")
+	e.recordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
@@ -299,4 +302,12 @@ func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolNa
 	attrs := e.resourceLabelsToAttributes()
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", "openai-compat"))
 	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
+}
+
+// recordTurns records the number of turns used and, when limitExceeded is true,
+// increments the turn_limit_exceeded counter.
+func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
+	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "openai-compat"))
+	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
 }

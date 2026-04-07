@@ -33,6 +33,11 @@ type GenAI struct {
 	// OpenTelemetry GenAI semconv: token usage histogram with token type dimension.
 	// Uses explicit bucket boundaries from the spec.
 	semconvTokenUsage metric.Float64Histogram
+	// agentTurns tracks the number of LLM round-trips per execution.
+	// Recorded on every exit path so p50/p95/p99 are observable per service.
+	agentTurns metric.Int64Histogram
+	// turnLimitExceeded counts executions aborted by the maxTurns hard limit.
+	turnLimitExceeded metric.Int64Counter
 }
 
 // NewGenAI creates a new GenAI metrics instance with the specified meter name.
@@ -86,12 +91,33 @@ func NewGenAI(meterName string) *GenAI {
 		semconvTokenUsage = noop.Float64Histogram{}
 	}
 
+	agentTurns, err := meter.Int64Histogram("genai.agent.turns",
+		metric.WithDescription("Number of LLM round-trips (turns) consumed per agent execution"),
+		metric.WithUnit("{turns}"),
+		metric.WithExplicitBucketBoundaries(1, 5, 10, 20, 50, 100, 200, 500),
+	)
+	if err != nil {
+		clog.WarnContext(context.Background(), "Failed to create agent turns histogram, metrics will be disabled", "error", err, "meter", meterName)
+		agentTurns = noop.Int64Histogram{}
+	}
+
+	turnLimitExceeded, err := meter.Int64Counter("genai.agent.turn_limit_exceeded",
+		metric.WithDescription("Number of agent executions aborted by the maxTurns hard limit"),
+		metric.WithUnit("{executions}"),
+	)
+	if err != nil {
+		clog.WarnContext(context.Background(), "Failed to create turn limit exceeded counter, metrics will be disabled", "error", err, "meter", meterName)
+		turnLimitExceeded = noop.Int64Counter{}
+	}
+
 	return &GenAI{
 		meter:             meter,
 		promptTokens:      promptTokens,
 		completionTokens:  completionTokens,
 		toolCallCounter:   toolCallCounter,
 		semconvTokenUsage: semconvTokenUsage,
+		agentTurns:        agentTurns,
+		turnLimitExceeded: turnLimitExceeded,
 	}
 }
 
@@ -166,4 +192,22 @@ func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attr
 	baseAttrs = append(baseAttrs, attrs...)
 
 	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
+}
+
+// RecordTurns records the number of LLM round-trips consumed by an agent execution.
+// It always records the turns histogram and, when limitExceeded is true, also
+// increments the turn_limit_exceeded counter. Call this on every exit path of the
+// executor conversation loop so p50/p95/p99 distributions are observable per service.
+func (m *GenAI) RecordTurns(ctx context.Context, model string, turns int, limitExceeded bool, attrs ...attribute.KeyValue) {
+	baseAttrs := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("gen_ai.request.model", model),
+	}
+	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = append(baseAttrs, attrs...)
+
+	m.agentTurns.Record(ctx, int64(turns), metric.WithAttributes(baseAttrs...))
+	if limitExceeded {
+		m.turnLimitExceeded.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
+	}
 }
