@@ -44,6 +44,11 @@ func NewApp(ctx context.Context, appID int64, keyURI string) (*App, error) {
 	}, nil
 }
 
+// ID returns the GitHub App ID.
+func (a *App) ID() int64 {
+	return a.atr.AppID()
+}
+
 // Client returns a GitHub client authenticated as the app using a JWT (not an
 // installation token). Use this for app-level API calls such as listing
 // installations and their repositories. Unlike the clients vended by
