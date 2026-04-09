@@ -97,6 +97,75 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
+func TestShouldSkip(t *testing.T) {
+	tests := []struct {
+		name             string
+		session          Session[testData]
+		excludeAssignees []string
+		wantSkip         bool
+	}{{
+		name: "no PR",
+		session: Session[testData]{
+			prNumber: 0,
+		},
+		wantSkip: false,
+	}, {
+		name: "PR with skip label",
+		session: Session[testData]{
+			prNumber: 1,
+			prLabels: []string{"skip:test-bot", "automated pr"},
+			manager:  &CM[testData]{identity: "test-bot"},
+		},
+		wantSkip: true,
+	}, {
+		name: "PR with unmanaged assignee",
+		session: Session[testData]{
+			prNumber:    2,
+			prLabels:    []string{"automated pr"},
+			prAssignees: []string{"alice"},
+			manager:     &CM[testData]{identity: "test-bot"},
+		},
+		wantSkip: true,
+	}, {
+		name: "PR with managed assignee only",
+		session: Session[testData]{
+			prNumber:    3,
+			prLabels:    []string{"automated pr"},
+			prAssignees: []string{"alice"},
+			manager:     &CM[testData]{identity: "test-bot"},
+		},
+		excludeAssignees: []string{"alice"},
+		wantSkip:         false,
+	}, {
+		name: "PR with managed and unmanaged assignees",
+		session: Session[testData]{
+			prNumber:    4,
+			prLabels:    []string{"automated pr"},
+			prAssignees: []string{"alice", "bob"},
+			manager:     &CM[testData]{identity: "test-bot"},
+		},
+		excludeAssignees: []string{"alice"},
+		wantSkip:         true,
+	}, {
+		name: "PR with no assignees",
+		session: Session[testData]{
+			prNumber: 5,
+			prLabels: []string{},
+			manager:  &CM[testData]{identity: "test-bot"},
+		},
+		wantSkip: false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.session.ShouldSkip(tt.excludeAssignees...)
+			if got != tt.wantSkip {
+				t.Errorf("ShouldSkip(): got = %v, want = %v", got, tt.wantSkip)
+			}
+		})
+	}
+}
+
 func TestHasSkipLabel(t *testing.T) {
 	tests := []struct {
 		name     string

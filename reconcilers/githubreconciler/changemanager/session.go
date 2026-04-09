@@ -99,16 +99,29 @@ func (s *Session[T]) skipLabel() string {
 }
 
 // ShouldSkip checks if the existing PR should be skipped.
-// Returns true if the PR has a skip label or is assigned to someone.
+// Returns true if the PR has a skip label or is assigned to someone not in
+// excludeAssignees. Assignees listed in excludeAssignees (e.g. the issue
+// creator, assigned by the bot) are excluded from the check; only assignees
+// outside this list indicate that a human has taken over the PR.
 // Returns false if no existing PR exists.
-func (s *Session[T]) ShouldSkip() bool {
+func (s *Session[T]) ShouldSkip(excludeAssignees ...string) bool {
 	if s.prNumber == 0 {
 		return false
 	}
 	if slices.Contains(s.prLabels, s.skipLabel()) {
 		return true
 	}
-	return len(s.prAssignees) > 0
+	// Only skip if there are assignees that are not in the exclude list.
+	excluded := make(map[string]struct{}, len(excludeAssignees))
+	for _, a := range excludeAssignees {
+		excluded[a] = struct{}{}
+	}
+	for _, a := range s.prAssignees {
+		if _, ok := excluded[a]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // HasSkipLabel returns true if the PR has the skip label applied.
@@ -229,6 +242,34 @@ func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) er
 		return fmt.Errorf("closing pull request: %w", err)
 	}
 
+	return nil
+}
+
+// AddAssignees adds the given logins as assignees on the existing PR.
+// This is a no-op if no PR exists or if all provided logins are already assigned.
+func (s *Session[T]) AddAssignees(ctx context.Context, logins []string) error {
+	if s.prNumber == 0 || len(logins) == 0 {
+		return nil
+	}
+	// Filter out logins that are already assigned.
+	existing := make(map[string]struct{}, len(s.prAssignees))
+	for _, a := range s.prAssignees {
+		existing[a] = struct{}{}
+	}
+	var toAdd []string
+	for _, l := range logins {
+		if _, ok := existing[l]; !ok {
+			toAdd = append(toAdd, l)
+		}
+	}
+	if len(toAdd) == 0 {
+		return nil
+	}
+	if _, _, err := s.client.Issues.AddAssignees(ctx, s.owner, s.repo, s.prNumber, toAdd); err != nil {
+		return fmt.Errorf("adding assignees: %w", err)
+	}
+	// Update the cached assignees so subsequent calls are accurate.
+	s.prAssignees = append(s.prAssignees, toAdd...)
 	return nil
 }
 

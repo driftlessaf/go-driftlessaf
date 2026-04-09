@@ -32,10 +32,15 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	if err != nil {
 		return fmt.Errorf("create change session: %w", err)
 	}
+
+	// The issue creator is a bot-managed assignee: assigning the PR to them
+	// should not cause ShouldSkip to return true.
+	creator := issue.GetUser().GetLogin()
+
 	state := changeSession.State()
 	var usePRBranch bool
 	switch {
-	case changeSession.ShouldSkip():
+	case changeSession.ShouldSkip(creator):
 		log.Info("PR should be skipped, not updating")
 		return nil
 
@@ -138,6 +143,13 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	})
 	if err != nil {
 		return fmt.Errorf("upsert PR: %w", err)
+	}
+
+	// Assign the PR to the issue creator so they can easily find it.
+	if creator != "" {
+		if err := changeSession.AddAssignees(ctx, []string{creator}); err != nil {
+			log.With("error", err).Warn("Failed to assign PR to issue creator")
+		}
 	}
 
 	log.With("pr_url", prURL).Info("PR created/updated")
