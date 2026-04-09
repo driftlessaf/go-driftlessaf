@@ -327,10 +327,10 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect unresolved review thread findings from trusted authors
-		findings = append(findings, collectThreadFindings(pr.ReviewThreads)...)
+		findings = append(findings, collectThreadFindings(ctx, pr.ReviewThreads)...)
 
 		// Collect review body findings from trusted authors on the current commit
-		findings = append(findings, collectReviewBodyFindings(pr.HeadRefOid, pr.Reviews)...)
+		findings = append(findings, collectReviewBodyFindings(ctx, pr.HeadRefOid, pr.Reviews)...)
 	}
 
 	return &Session[T]{
@@ -361,11 +361,12 @@ func ptrTo[T any](v T) *T {
 // collectThreadFindings extracts findings from unresolved review threads.
 // All unresolved threads are included regardless of which commit they were left on.
 // Only comments from trusted authors are included; threads with no trusted comments are skipped.
-func collectThreadFindings(threads gqlReviewThreadsConnection) []callbacks.Finding {
+func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection) []callbacks.Finding {
 	findings := make([]callbacks.Finding, 0, len(threads.Nodes))
 
 	for _, thread := range threads.Nodes {
 		if thread.IsResolved {
+			clog.DebugContextf(ctx, "Skipping resolved review thread id=%s path=%s", thread.Id, thread.Path)
 			continue
 		}
 
@@ -374,9 +375,12 @@ func collectThreadFindings(threads gqlReviewThreadsConnection) []callbacks.Findi
 		for _, c := range thread.Comments.Nodes {
 			if _, trusted := trustedAuthorAssociations[c.AuthorAssociation]; trusted {
 				trustedComments = append(trustedComments, c)
+			} else {
+				clog.DebugContextf(ctx, "Skipping untrusted thread comment author=%s association=%s thread=%s", c.Author.Login, c.AuthorAssociation, thread.Id)
 			}
 		}
 		if len(trustedComments) == 0 {
+			clog.DebugContextf(ctx, "Skipping review thread with no trusted comments id=%s path=%s", thread.Id, thread.Path)
 			continue
 		}
 
@@ -397,17 +401,20 @@ const reviewBodyIdentifierPrefix = "review-body:"
 // collectReviewBodyFindings extracts findings from non-empty review bodies by trusted
 // authors on the current commit. Review bodies lack a resolution concept, so they are
 // filtered by commit association: once the bot pushes a new commit, old bodies drop out.
-func collectReviewBodyFindings(headRefOid string, reviews gqlReviewBodiesConnection) []callbacks.Finding {
+func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews gqlReviewBodiesConnection) []callbacks.Finding {
 	var findings []callbacks.Finding
 
 	for _, review := range reviews.Nodes {
 		if _, trusted := trustedAuthorAssociations[review.AuthorAssociation]; !trusted {
+			clog.DebugContextf(ctx, "Skipping untrusted review body author=%s association=%s", review.Author.Login, review.AuthorAssociation)
 			continue
 		}
 		if review.Commit.Oid != headRefOid {
+			clog.DebugContextf(ctx, "Skipping review body on stale commit author=%s commit=%s head=%s", review.Author.Login, review.Commit.Oid, headRefOid)
 			continue
 		}
 		if review.Body == "" {
+			clog.DebugContextf(ctx, "Skipping review body with empty body author=%s", review.Author.Login)
 			continue
 		}
 
