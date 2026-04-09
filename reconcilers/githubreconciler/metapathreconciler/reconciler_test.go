@@ -109,7 +109,7 @@ func TestEnvDecode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var cfg config
-			err := envconfig.ProcessWith(context.Background(), &envconfig.Config{
+			err := envconfig.ProcessWith(t.Context(), &envconfig.Config{
 				Target:   &cfg,
 				Lookuper: envconfig.MapLookuper(map[string]string{"TEST_MODE": tt.val}),
 			})
@@ -189,13 +189,78 @@ func TestWithMode(t *testing.T) {
 	}
 }
 
+func TestWithLabelFunc(t *testing.T) {
+	var callCount int
+
+	fn := func(_ context.Context, diags []Diagnostic, findings []callbacks.Finding) []string {
+		callCount++
+		var labels []string
+		for _, d := range diags {
+			labels = append(labels, "diag:"+d.Rule)
+		}
+		for _, f := range findings {
+			labels = append(labels, "finding:"+string(f.Kind))
+		}
+		return labels
+	}
+
+	var o option
+	WithLabelFunc(fn)(&o)
+
+	if o.labelFn == nil {
+		t.Fatal("labelFn: got = nil, wanted non-nil")
+	}
+
+	// First pass: diagnostics populated, no findings.
+	diags := []Diagnostic{{Rule: "metadata-changed"}, {Rule: "version-update"}}
+	got := o.labelFn(t.Context(), diags, nil)
+	if callCount != 1 {
+		t.Fatalf("callCount: got = %d, wanted = 1", callCount)
+	}
+	want := []string{"diag:metadata-changed", "diag:version-update"}
+	if len(got) != len(want) {
+		t.Fatalf("labels len: got = %d, wanted = %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("labels[%d]: got = %q, wanted = %q", i, got[i], want[i])
+		}
+	}
+
+	// Iteration pass: no diagnostics, findings populated.
+	findings := []callbacks.Finding{
+		{Kind: callbacks.FindingKindCICheck, Identifier: "check-1"},
+		{Kind: callbacks.FindingKindReview, Identifier: "review-1"},
+	}
+	got = o.labelFn(t.Context(), nil, findings)
+	if callCount != 2 {
+		t.Fatalf("callCount: got = %d, wanted = 2", callCount)
+	}
+	want = []string{"finding:ciCheck", "finding:review"}
+	if len(got) != len(want) {
+		t.Fatalf("labels len: got = %d, wanted = %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("labels[%d]: got = %q, wanted = %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestWithLabelFuncDefault(t *testing.T) {
+	var o option
+	if o.labelFn != nil {
+		t.Error("default labelFn: got = non-nil, wanted = nil")
+	}
+}
+
 func TestReconcileReviewOnlySkipsPath(t *testing.T) {
 	rec := &Reconciler[*testRequest, *testResult, testCallbacks]{
 		identity: "test-identity",
 		mode:     ModeReview,
 	}
 
-	err := rec.Reconcile(context.Background(), &githubreconciler.Resource{
+	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{
 		Type:  githubreconciler.ResourceTypePath,
 		Owner: "owner",
 		Repo:  "repo",

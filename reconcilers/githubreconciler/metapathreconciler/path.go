@@ -8,6 +8,7 @@ package metapathreconciler
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -158,12 +159,18 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		log.With("findings", len(findings)).Info("Running agent")
 	}
 
+	// Compute PR labels: static labels + dynamic labels from labelFn.
+	labels := slices.Clone(r.prLabels)
+	if r.labelFn != nil {
+		labels = append(labels, r.labelFn(ctx, diagnostics, findings)...)
+	}
+
 	// Upsert PR with changes (analyzer fixes, agent fixes, or both).
 	prURL, err := session.Upsert(ctx, &PRData[Req]{
 		Identity: r.identity,
 		Path:     res.Path,
 		Request:  request,
-	}, false, r.prLabels, func(ctx context.Context, branchName string) error {
+	}, false, labels, func(ctx context.Context, branchName string) error {
 		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, _ *gogit.Worktree) (string, error) {
 			// If the analyzer already fixed everything, commit its
 			// changes directly without invoking the agent.
