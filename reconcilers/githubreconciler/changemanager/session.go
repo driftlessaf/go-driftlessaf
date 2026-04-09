@@ -467,7 +467,7 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T, desiredLabel
 		return true, nil
 	case state.IsUnknown():
 		clog.InfoContext(ctx, "PR mergeable status is still being computed by GitHub, requeueing")
-		return false, workqueue.RequeueAfter(5 * time.Minute)
+		return false, workqueue.RequeueAfter(30 * time.Second)
 	}
 
 	// Check if the PR is missing any desired labels.
