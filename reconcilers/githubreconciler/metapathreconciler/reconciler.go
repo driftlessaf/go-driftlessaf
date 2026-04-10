@@ -93,7 +93,7 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	buildCallbacks func(context.Context, *changemanager.Session[PRData[Req]], *clonemanager.Lease) (CB, error)
 
 	// labelFn optionally computes additional PR labels from diagnostics/findings.
-	labelFn func(context.Context, []Diagnostic, []callbacks.Finding) []string
+	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
 }
 
 // Option configures a Reconciler.
@@ -101,7 +101,7 @@ type Option func(*option)
 
 type option struct {
 	mode    Mode
-	labelFn func(context.Context, []Diagnostic, []callbacks.Finding) []string
+	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
 }
 
 // WithMode configures the reconciler's operating mode.
@@ -119,7 +119,7 @@ func WithMode(m Mode) Option {
 // contains unfixed diagnostics converted to findings.
 // On iteration passes (PR has CI failures), diagnostics is nil and findings
 // contains the session's CI/review findings.
-func WithLabelFunc(fn func(context.Context, []Diagnostic, []callbacks.Finding) []string) Option {
+func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string) Option {
 	return func(o *option) {
 		o.labelFn = fn
 	}

@@ -192,7 +192,7 @@ func TestWithMode(t *testing.T) {
 func TestWithLabelFunc(t *testing.T) {
 	var callCount int
 
-	fn := func(_ context.Context, diags []Diagnostic, findings []callbacks.Finding) []string {
+	fn := func(_ context.Context, _ *githubreconciler.Resource, diags []Diagnostic, findings []callbacks.Finding) []string {
 		callCount++
 		var labels []string
 		for _, d := range diags {
@@ -213,7 +213,7 @@ func TestWithLabelFunc(t *testing.T) {
 
 	// First pass: diagnostics populated, no findings.
 	diags := []Diagnostic{{Rule: "metadata-changed"}, {Rule: "version-update"}}
-	got := o.labelFn(t.Context(), diags, nil)
+	got := o.labelFn(t.Context(), nil, diags, nil)
 	if callCount != 1 {
 		t.Fatalf("callCount: got = %d, wanted = 1", callCount)
 	}
@@ -232,7 +232,7 @@ func TestWithLabelFunc(t *testing.T) {
 		{Kind: callbacks.FindingKindCICheck, Identifier: "check-1"},
 		{Kind: callbacks.FindingKindReview, Identifier: "review-1"},
 	}
-	got = o.labelFn(t.Context(), nil, findings)
+	got = o.labelFn(t.Context(), nil, nil, findings)
 	if callCount != 2 {
 		t.Fatalf("callCount: got = %d, wanted = 2", callCount)
 	}

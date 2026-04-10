@@ -162,7 +162,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 	// Compute PR labels: static labels + dynamic labels from labelFn.
 	labels := slices.Clone(r.prLabels)
 	if r.labelFn != nil {
-		labels = append(labels, r.labelFn(ctx, diagnostics, findings)...)
+		labels = append(labels, r.labelFn(ctx, res, diagnostics, findings)...)
 	}
 
 	// Upsert PR with changes (analyzer fixes, agent fixes, or both).
