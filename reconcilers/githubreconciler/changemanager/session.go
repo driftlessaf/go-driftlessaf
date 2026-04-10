@@ -429,8 +429,11 @@ func (s *Session[T]) Upsert(
 			}
 		}
 
-		clog.InfoContextf(ctx, "Created PR #%d: %s", pr.GetNumber(), pr.GetHTMLURL())
-		return pr.GetHTMLURL(), nil
+		s.prNumber = pr.GetNumber()
+		s.prURL = pr.GetHTMLURL()
+
+		clog.InfoContextf(ctx, "Created PR #%d: %s", s.prNumber, s.prURL)
+		return s.prURL, nil
 	}
 
 	// Update existing PR
