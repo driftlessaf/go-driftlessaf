@@ -7,11 +7,13 @@ package metapathreconciler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
@@ -171,7 +173,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		Path:     res.Path,
 		Request:  request,
 	}, false, labels, func(ctx context.Context, branchName string) error {
-		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, _ *gogit.Worktree) (string, error) {
+		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
 			// If the analyzer already fixed everything, commit its
 			// changes directly without invoking the agent.
 			if allFixed {
@@ -187,10 +189,24 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 			if err != nil {
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
+
+			// Check if the agent left the worktree clean (no actual file changes).
+			status, err := wt.Status()
+			if err != nil {
+				return "", fmt.Errorf("get worktree status: %w", err)
+			}
+			if status.IsClean() {
+				return "", changemanager.ErrNoChanges
+			}
+
 			return result.GetCommitMessage(), nil
 		})
 	})
 	if err != nil {
+		if errors.Is(err, changemanager.ErrNoChanges) {
+			log.Info("No changes after agent execution, nothing to commit")
+			return nil
+		}
 		return fmt.Errorf("upsert PR: %w", err)
 	}
 
