@@ -22,6 +22,7 @@ func TestByCode(t *testing.T) {
 
 	// Create a tracer with the callback
 	tracer := ByCode[string](callback)
+	ctx = WithTracer[string](ctx, tracer)
 
 	// Create and complete a trace
 	prompt := randomString()
@@ -64,6 +65,7 @@ func TestByCodeWithNilCallback(t *testing.T) {
 
 	// Create a tracer with nil callback
 	tracer := ByCode[string](nil)
+	ctx = WithTracer[string](ctx, tracer)
 
 	// Should not panic
 	trace := tracer.NewTrace(ctx, randomString())
@@ -103,6 +105,7 @@ func TestByCodeWithMultipleCallbacks(t *testing.T) {
 
 	// Create a tracer with multiple callbacks
 	tracer := ByCode[string](callback1, callback2, callback3)
+	ctx = WithTracer[string](ctx, tracer)
 
 	// Create and complete a trace
 	prompt := randomString()
@@ -131,6 +134,7 @@ func TestByCodeWithNoCallbacks(t *testing.T) {
 
 	// Create a tracer with no callbacks
 	tracer := ByCode[string]()
+	ctx = WithTracer[string](ctx, tracer)
 
 	// Should not panic
 	trace := tracer.NewTrace(ctx, randomString())
@@ -166,6 +170,7 @@ func TestByCodeParallelExecution(t *testing.T) {
 
 	// Create a tracer with multiple callbacks
 	tracer := ByCode[string](callback1, callback2, callback3)
+	ctx = WithTracer[string](ctx, tracer)
 
 	// Create and complete a trace
 	prompt := randomString()

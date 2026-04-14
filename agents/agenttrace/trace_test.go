@@ -140,7 +140,7 @@ func TestToolCallDuration(t *testing.T) {
 
 func TestTraceComplete(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := t.Context()
+	ctx := WithTracer[string](t.Context(), tracer)
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Sleep briefly to ensure EndTime is different from StartTime
@@ -168,7 +168,7 @@ func TestTraceComplete(t *testing.T) {
 
 func TestTraceCompleteWithError(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := t.Context()
+	ctx := WithTracer[string](t.Context(), tracer)
 	trace := tracer.NewTrace(ctx, randomString())
 
 	err := errors.New("test error")
@@ -185,7 +185,7 @@ func TestTraceCompleteWithError(t *testing.T) {
 
 func TestTraceDuration(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
-	ctx := t.Context()
+	ctx := WithTracer[string](t.Context(), tracer)
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Test duration before completion
@@ -295,7 +295,9 @@ func TestTraceStringEdgeCases(t *testing.T) {
 	}, {
 		name: "trace with very long result",
 		setupFn: func() *Trace[string] {
-			trace := (&mockTracer[string]{traces: &[]*Trace[string]{}}).NewTrace(context.Background(), "test")
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithTracer[string](context.Background(), tracer)
+			trace := tracer.NewTrace(ctx, "test")
 			longResult := strings.Repeat("b", 1000)
 			trace.Complete(longResult, nil)
 			return trace
@@ -312,7 +314,9 @@ func TestTraceStringEdgeCases(t *testing.T) {
 	}, {
 		name: "trace with metadata",
 		setupFn: func() *Trace[string] {
-			trace := (&mockTracer[string]{traces: &[]*Trace[string]{}}).NewTrace(context.Background(), "test with metadata")
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithTracer[string](context.Background(), tracer)
+			trace := tracer.NewTrace(ctx, "test with metadata")
 			trace.Metadata["custom_key"] = "custom_value"
 			trace.Metadata["number"] = 42
 			trace.Complete("done", nil)
@@ -328,7 +332,9 @@ func TestTraceStringEdgeCases(t *testing.T) {
 	}, {
 		name: "trace with tool calls having long results",
 		setupFn: func() *Trace[string] {
-			trace := (&mockTracer[string]{traces: &[]*Trace[string]{}}).NewTrace(context.Background(), "test")
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithTracer[string](context.Background(), tracer)
+			trace := tracer.NewTrace(ctx, "test")
 			tc := trace.StartToolCall("tc1", "test-tool", map[string]any{
 				"param1": "value1",
 				"param2": 123,
@@ -352,7 +358,9 @@ func TestTraceStringEdgeCases(t *testing.T) {
 	}, {
 		name: "trace with failed tool calls",
 		setupFn: func() *Trace[string] {
-			trace := (&mockTracer[string]{traces: &[]*Trace[string]{}}).NewTrace(context.Background(), "test")
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithTracer[string](context.Background(), tracer)
+			trace := tracer.NewTrace(ctx, "test")
 			tc := trace.StartToolCall("tc1", "failing-tool", nil)
 			tc.Complete(nil, errors.New("tool failed"))
 			trace.Complete("partial success", nil)
@@ -368,7 +376,9 @@ func TestTraceStringEdgeCases(t *testing.T) {
 	}, {
 		name: "trace with mixed tool call states",
 		setupFn: func() *Trace[string] {
-			trace := (&mockTracer[string]{traces: &[]*Trace[string]{}}).NewTrace(context.Background(), "mixed test")
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithTracer[string](context.Background(), tracer)
+			trace := tracer.NewTrace(ctx, "mixed test")
 
 			// Successful tool call
 			tc1 := trace.StartToolCall("tc1", "success-tool", map[string]any{

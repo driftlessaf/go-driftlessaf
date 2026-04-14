@@ -18,7 +18,7 @@ import (
 func ExampleTracer_NewTrace() {
 	// Create a tracer and use it to create a trace
 	tracer := agenttrace.ByCode[string]() // No callbacks for this example
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Analyze security vulnerabilities in the codebase")
 
 	// Start a tool call to scan files
@@ -116,7 +116,7 @@ func ExampleByCode() {
 // ExampleTrace_BadToolCall demonstrates recording failed tool calls.
 func ExampleTrace_BadToolCall() {
 	tracer := agenttrace.ByCode[string]() // No callbacks for this example
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Execute automated tasks")
 
 	// Record a tool call that failed due to bad parameters
@@ -147,7 +147,7 @@ func ExampleTrace_BadToolCall() {
 func ExampleTrace_StartToolCall() {
 	// Create a new trace using a tracer
 	tracer := agenttrace.ByCode[string]() // No callbacks for this example
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Generate a random number")
 
 	// Start and complete a successful tool call
@@ -173,6 +173,7 @@ func ExampleNewDefaultTracer() {
 
 	// Create default tracer (uses clog for logging)
 	tracer := evals.NewDefaultTracer[string](ctx)
+	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
 	// Create and complete a trace
 	trace := tracer.NewTrace(ctx, "System health check")

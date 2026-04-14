@@ -44,7 +44,8 @@ func TestTestingObserver(t *testing.T) {
 	tracer := agenttrace.ByCode[string](traceCallback)
 
 	// Create and complete a successful trace - this will automatically invoke the callback
-	trace := tracer.NewTrace(t.Context(), "Test prompt")
+	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
+	trace := tracer.NewTrace(ctx, "Test prompt")
 	trace.Complete("test result", nil)
 }
 
@@ -72,7 +73,8 @@ func TestTestingObserverWithError(t *testing.T) {
 	tracer := agenttrace.ByCode[string](traceCallback)
 
 	// Create and complete a trace with error - this will automatically invoke the callback
-	trace := tracer.NewTrace(t.Context(), "Error test")
+	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
+	trace := tracer.NewTrace(ctx, "Error test")
 	trace.Complete("test result", errors.New("simulated error"))
 }
 
@@ -101,7 +103,8 @@ func TestTestingObserverWithInject(t *testing.T) {
 	tracer := agenttrace.ByCode[string](traceCallback)
 
 	// Create a trace with tool calls using proper tracer
-	trace := tracer.NewTrace(t.Context(), "Analyze logs")
+	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
+	trace := tracer.NewTrace(ctx, "Analyze logs")
 
 	// Add tool calls
 	tc1 := trace.StartToolCall("tc1", "read_logs", nil)

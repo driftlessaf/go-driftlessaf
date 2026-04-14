@@ -14,7 +14,7 @@ import (
 
 func TestTraceConcurrentToolCalls(t *testing.T) {
 	tracer := ByCode[string]() // No callbacks
-	ctx := t.Context()
+	ctx := WithTracer[string](t.Context(), tracer)
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Number of concurrent tool calls
@@ -86,7 +86,7 @@ func TestTraceConcurrentComplete(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 
-			ctx := t.Context()
+			ctx := WithTracer[string](t.Context(), tracer)
 			trace := tracer.NewTrace(ctx, fmt.Sprintf("trace-%d", idx))
 
 			// Add some tool calls
@@ -122,7 +122,7 @@ func TestTraceConcurrentComplete(t *testing.T) {
 
 func TestToolCallConcurrentAccess(t *testing.T) {
 	tracer := ByCode[string]() // No callbacks
-	ctx := t.Context()
+	ctx := WithTracer[string](t.Context(), tracer)
 	trace := tracer.NewTrace(ctx, randomString())
 
 	// Create a tool call
@@ -161,7 +161,7 @@ func TestToolCallConcurrentAccess(t *testing.T) {
 
 func TestTraceDurationConcurrentAccess(t *testing.T) {
 	tracer := ByCode[string]() // No callbacks
-	ctx := t.Context()
+	ctx := WithTracer[string](t.Context(), tracer)
 	trace := tracer.NewTrace(ctx, randomString())
 	result := randomString()
 

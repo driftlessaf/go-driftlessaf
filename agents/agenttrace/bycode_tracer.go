@@ -26,9 +26,29 @@ func ByCode[T any](callbacks ...TraceCallback[T]) Tracer[T] {
 	}
 }
 
-// NewTrace creates a new trace with the given prompt
+// NewTrace creates a new trace with the given prompt.
+//
+// This deliberately does NOT pass the byCodeTracer itself into newTrace.
+// The trace stores ctx, and Complete() later calls TracerFromContext(ctx) to
+// find the tracer to invoke RecordTrace on.
+//
+// This indirection is what makes decorator composition work. The call path is:
+//
+//  1. Middleware installs decorators via WithTracer(ctx, outerDecorator).
+//  2. StartTrace(ctx, prompt) finds outerDecorator on ctx, calls its NewTrace.
+//  3. Each decorator delegates NewTrace inward (t.wrapped.NewTrace(ctx, ...)),
+//     passing the same ctx through. Crucially, no decorator replaces the tracer
+//     on ctx during NewTrace — the outermost decorator remains on ctx.
+//  4. The leaf (byCodeTracer) reaches here and calls newTrace(ctx, prompt).
+//     The trace stores ctx as-is.
+//  5. trace.Complete() calls TracerFromContext(storedCtx), which resolves to
+//     the outermost decorator — so the entire decorator chain's RecordTrace
+//     methods run (outer → inner), not just the leaf's.
+//
+// Without this, storing a back-pointer to the leaf tracer would silently
+// bypass any decorator that hooks RecordTrace (e.g. a CloudEvents emitter).
 func (t *byCodeTracer[T]) NewTrace(ctx context.Context, prompt string) *Trace[T] {
-	return newTraceWithTracer[T](ctx, t, prompt)
+	return newTrace[T](ctx, prompt)
 }
 
 // RecordTrace invokes all callbacks with the completed trace in parallel

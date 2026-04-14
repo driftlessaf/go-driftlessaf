@@ -26,7 +26,7 @@ func ExampleExactToolCalls() {
 	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create trace with exactly 2 tool calls
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Analyze logs")
 
 	// Add exactly 2 tool calls
@@ -59,7 +59,7 @@ func ExampleRequiredToolCalls() {
 	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create trace and add required tools (plus extra)
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Process data")
 
 	// Add required tools
@@ -103,7 +103,7 @@ func ExampleToolCallValidator() {
 	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create trace with proper reasoning parameters
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Analyze logs")
 
 	// Add tool calls with reasoning parameters
@@ -139,7 +139,7 @@ func ExampleNoErrors() {
 	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
 
 	// Create successful trace with no errors
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Read and analyze")
 
 	// Add successful tool calls

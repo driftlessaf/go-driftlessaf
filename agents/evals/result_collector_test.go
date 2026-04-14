@@ -180,7 +180,8 @@ func TestResultCollectorWithTraceCallback(t *testing.T) {
 	tracer := agenttrace.ByCode[string](evals.Inject(collector, callback))
 
 	// Test with error trace
-	errorTrace := tracer.NewTrace(t.Context(), "test")
+	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
+	errorTrace := tracer.NewTrace(ctx, "test")
 	errorTrace.Complete("failed", errors.New("test error"))
 
 	// Check failures
@@ -190,7 +191,7 @@ func TestResultCollectorWithTraceCallback(t *testing.T) {
 	}
 
 	// Test with successful trace
-	successTrace := tracer.NewTrace(t.Context(), "test")
+	successTrace := tracer.NewTrace(ctx, "test")
 	tc := successTrace.StartToolCall("tc1", "read_logs", nil)
 	tc.Complete("log data", nil)
 	successTrace.Complete("success", nil)

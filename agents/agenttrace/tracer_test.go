@@ -137,15 +137,67 @@ func TestMultipleTracersWithDifferentTypes(t *testing.T) {
 	}
 }
 
+// TestDecoratorRecordTraceComposition verifies that a decorator wrapping
+// RecordTrace is called when a trace completes. This is the core contract
+// for decorator composition: the outermost tracer (set on context by
+// middleware) must be the one that receives the RecordTrace call, not
+// the innermost leaf tracer that created the trace.
+func TestDecoratorRecordTraceComposition(t *testing.T) {
+	ctx := t.Context()
+
+	var innerCount, decoratorCount int
+	inner := &mockTracer[string]{traces: new([]*Trace[string])}
+	inner.onRecord = func() { innerCount++ }
+
+	decorator := &countingDecorator[string]{
+		inner:    inner,
+		onRecord: func() { decoratorCount++ },
+	}
+
+	// Middleware sets the outermost decorator on context
+	ctx = WithTracer[string](ctx, decorator)
+
+	trace := StartTrace[string](ctx, "test prompt")
+	trace.Complete("done", nil)
+
+	if decoratorCount != 1 {
+		t.Errorf("decorator RecordTrace calls: got %d, want 1", decoratorCount)
+	}
+	if innerCount != 1 {
+		t.Errorf("inner RecordTrace calls: got %d, want 1", innerCount)
+	}
+}
+
+// countingDecorator delegates NewTrace to an inner tracer and wraps
+// RecordTrace with a callback. This is the minimal decorator pattern
+// that breaks without the context-based tracer lookup fix.
+type countingDecorator[T any] struct {
+	inner    Tracer[T]
+	onRecord func()
+}
+
+func (d *countingDecorator[T]) NewTrace(ctx context.Context, prompt string) *Trace[T] {
+	return d.inner.NewTrace(ctx, prompt)
+}
+
+func (d *countingDecorator[T]) RecordTrace(trace *Trace[T]) {
+	d.onRecord()
+	d.inner.RecordTrace(trace)
+}
+
 // mockTracer is a generic test implementation of Tracer[T]
 type mockTracer[T any] struct {
-	traces *[]*Trace[T]
+	traces   *[]*Trace[T]
+	onRecord func()
 }
 
 func (m *mockTracer[T]) NewTrace(ctx context.Context, prompt string) *Trace[T] {
-	return newTraceWithTracer[T](ctx, m, prompt)
+	return newTrace[T](ctx, prompt)
 }
 
 func (m *mockTracer[T]) RecordTrace(trace *Trace[T]) {
+	if m.onRecord != nil {
+		m.onRecord()
+	}
 	*m.traces = append(*m.traces, trace)
 }

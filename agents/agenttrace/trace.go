@@ -52,14 +52,15 @@ type Trace[T any] struct {
 	StartTime   time.Time          `json:"start_time"`
 	EndTime     time.Time          `json:"end_time"`
 	Metadata    map[string]any     `json:"metadata,omitempty"`
-	tracer      Tracer[T]          // Tracer for auto-recording
 	mu          sync.Mutex         // Protects mutable fields
 	ctx         context.Context
 	span        oteltrace.Span
 }
 
-// newTraceWithTracer creates a new trace with the given tracer and prompt
-func newTraceWithTracer[T any](ctx context.Context, tracer Tracer[T], prompt string) *Trace[T] {
+// newTrace creates a new trace for the given prompt. The context must
+// already contain a tracer (via WithTracer or StartTrace); Complete
+// will panic otherwise.
+func newTrace[T any](ctx context.Context, prompt string) *Trace[T] {
 	// Extract execution context from Go context
 	execCtx := GetExecutionContext(ctx)
 
@@ -95,7 +96,6 @@ func newTraceWithTracer[T any](ctx context.Context, tracer Tracer[T], prompt str
 		ToolCalls:   []*ToolCall[T]{},
 		StartTime:   time.Now(),
 		Metadata:    make(map[string]any),
-		tracer:      tracer,
 		ctx:         ctx,
 		span:        span,
 	}
@@ -236,13 +236,17 @@ func (tc *ToolCall[T]) Duration() time.Duration {
 	return tc.EndTime.Sub(tc.StartTime)
 }
 
-// Complete marks the trace as complete with the given result and automatically records it
+// Complete marks the trace as complete with the given result and automatically
+// records it via the tracer from the trace's stored context. This uses
+// TracerFromContext rather than a stored back-pointer so that decorator
+// composition works: the outermost tracer (set by middleware) receives the
+// RecordTrace call, not the innermost leaf that created the trace.
 func (t *Trace[T]) Complete(result T, err error) {
 	t.mu.Lock()
 	t.Result = result
 	t.Error = err
 	t.EndTime = time.Now()
-	tracer := t.tracer
+	ctx := t.ctx
 	span := t.span
 	t.mu.Unlock()
 
@@ -256,8 +260,9 @@ func (t *Trace[T]) Complete(result T, err error) {
 		span.End()
 	}
 
-	// Auto-record with tracer
-	tracer.RecordTrace(t)
+	// Look up the outermost decorator, not the leaf that created this trace.
+	// See byCodeTracer.NewTrace for why this works.
+	TracerFromContext[T](ctx).RecordTrace(t)
 }
 
 // Duration returns the total duration of the trace

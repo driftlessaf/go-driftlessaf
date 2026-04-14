@@ -130,7 +130,8 @@ func TestNamespacedObserverAsObserver(t *testing.T) {
 	tracer := agenttrace.ByCode[string](traceCallback)
 
 	// Create and complete a trace - this will automatically invoke the callback
-	trace := tracer.NewTrace(t.Context(), "Test input")
+	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
+	trace := tracer.NewTrace(ctx, "Test input")
 	trace.Complete("test result", nil)
 
 	// The test passes if no panic occurs

@@ -80,7 +80,7 @@ func ExampleResultCollector() {
 	tracer := agenttrace.ByCode[string](evals.Inject(collector, callback))
 
 	// Create a trace that will trigger the evaluation
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Process data")
 
 	// Add a tool call
@@ -135,7 +135,7 @@ func ExampleResultCollector_withNamespacedObserver() {
 	)
 
 	// Create a trace with a failing tool call
-	ctx := context.Background()
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
 	trace := tracer.NewTrace(ctx, "Complex analysis")
 
 	tc := trace.StartToolCall("tc1", "analyzer", nil)
