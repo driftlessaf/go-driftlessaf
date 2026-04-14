@@ -39,11 +39,11 @@ Create and use traces:
 	})
 	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
-	trace := agenttrace.StartTrace[string](ctx, "Analyze the security report")
+	trace, done := agenttrace.StartTrace[string](ctx, "Analyze the security report")
 	toolCall := trace.StartToolCall("tc1", "file-reader", map[string]any{
 		"path": "/var/logs/security.log",
 	})
 	toolCall.Complete("File content here", nil)
-	trace.Complete("Analysis complete", nil)
+	done("Analysis complete", nil)
 */
 package agenttrace

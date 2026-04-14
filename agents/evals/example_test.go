@@ -14,12 +14,12 @@ import (
 	"chainguard.dev/driftlessaf/agents/evals"
 )
 
-// ExampleTracer_NewTrace demonstrates basic trace creation and tool call tracking.
-func ExampleTracer_NewTrace() {
+// ExampleStartTrace_toolCalls demonstrates trace creation and tool call tracking.
+func ExampleStartTrace_toolCalls() {
 	// Create a tracer and use it to create a trace
 	tracer := agenttrace.ByCode[string]() // No callbacks for this example
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Analyze security vulnerabilities in the codebase")
+	trace, done := agenttrace.StartTrace[string](ctx, "Analyze security vulnerabilities in the codebase")
 
 	// Start a tool call to scan files
 	toolCall := trace.StartToolCall("tc1", "file-scanner", map[string]any{
@@ -39,8 +39,8 @@ func ExampleTracer_NewTrace() {
 	})
 	reportCall.Complete("Security report generated", nil)
 
-	// Complete the overall trace
-	trace.Complete("Security analysis completed successfully", nil)
+	// Complete the overall trace via done callback
+	done("Security analysis completed successfully", nil)
 
 	fmt.Printf("Trace completed with %d tool calls\n", len(trace.ToolCalls))
 	// Output: Trace completed with 2 tool calls
@@ -59,7 +59,7 @@ func ExampleStartTrace() {
 	ctx = agenttrace.WithTracer(ctx, tracer)
 
 	// Start a trace using the context tracer
-	trace := agenttrace.StartTrace[string](ctx, "Process user authentication")
+	trace, done := agenttrace.StartTrace[string](ctx, "Process user authentication")
 
 	// Start a tool call
 	tc := trace.StartToolCall("call-1", "text-analyzer", map[string]any{
@@ -74,7 +74,7 @@ func ExampleStartTrace() {
 	}, nil)
 
 	// Complete the trace with the final result (this will automatically record it)
-	trace.Complete("Sentiment analysis complete: positive with 95% confidence", nil)
+	done("Sentiment analysis complete: positive with 95% confidence", nil)
 }
 
 // ExampleByCode demonstrates creating a tracer with multiple callbacks.
@@ -103,10 +103,10 @@ func ExampleByCode() {
 	ctx = agenttrace.WithTracer(ctx, tracer)
 
 	// Simulate agent operations
-	trace := agenttrace.StartTrace[string](ctx, "Process data")
+	trace, done := agenttrace.StartTrace[string](ctx, "Process data")
 	tc := trace.StartToolCall("tool-1", "processor", nil)
 	tc.Complete("done", nil)
-	trace.Complete("Processed", nil)
+	done("Processed", nil)
 
 	fmt.Printf("Total traces: %d, Total tool calls: %d\n", len(traces), toolCallCount)
 	// Output: Trace completed
@@ -117,7 +117,7 @@ func ExampleByCode() {
 func ExampleTrace_BadToolCall() {
 	tracer := agenttrace.ByCode[string]() // No callbacks for this example
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Execute automated tasks")
+	trace, done := agenttrace.StartTrace[string](ctx, "Execute automated tasks")
 
 	// Record a tool call that failed due to bad parameters
 	trace.BadToolCall(
@@ -135,7 +135,7 @@ func ExampleTrace_BadToolCall() {
 	})
 	validCall.Complete("file contents", nil)
 
-	trace.Complete("Task completed with some failures", nil)
+	done("Task completed with some failures", nil)
 
 	fmt.Printf("Total tool calls: %d\n", len(trace.ToolCalls))
 	fmt.Printf("First call had error: %v\n", trace.ToolCalls[0].Error != nil)
@@ -148,7 +148,7 @@ func ExampleTrace_StartToolCall() {
 	// Create a new trace using a tracer
 	tracer := agenttrace.ByCode[string]() // No callbacks for this example
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Generate a random number")
+	trace, done := agenttrace.StartTrace[string](ctx, "Generate a random number")
 
 	// Start and complete a successful tool call
 	tc1 := trace.StartToolCall("rnd-1", "random-generator",
@@ -160,8 +160,8 @@ func ExampleTrace_StartToolCall() {
 		map[string]any{"url": "https://example.com/api"})
 	tc2.Complete(nil, errors.New("connection timeout"))
 
-	// Complete the trace
-	trace.Complete("Generated number: 42", nil)
+	// Complete the trace via done callback
+	done("Generated number: 42", nil)
 
 	fmt.Println("Trace completed successfully")
 	// Output: Trace completed successfully
@@ -176,13 +176,13 @@ func ExampleNewDefaultTracer() {
 	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
 	// Create and complete a trace
-	trace := tracer.NewTrace(ctx, "System health check")
+	trace, done := agenttrace.StartTrace[string](ctx, "System health check")
 
 	healthCall := trace.StartToolCall("health1", "check-services", nil)
 	healthCall.Complete("all services healthy", nil)
 
-	// Completing this trace will log structured information
-	trace.Complete("Health check passed", nil)
+	// Complete the trace via done callback (this logs structured information)
+	done("Health check passed", nil)
 
 	fmt.Println("Health check trace completed")
 	// Output: Health check trace completed

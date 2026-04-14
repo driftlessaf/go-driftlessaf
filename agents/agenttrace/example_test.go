@@ -21,8 +21,8 @@ func ExampleStartTrace() {
 	})
 	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
-	trace := agenttrace.StartTrace[string](ctx, "Analyze the report")
-	trace.Complete("analysis done", nil)
+	_, done := agenttrace.StartTrace[string](ctx, "Analyze the report")
+	done("analysis done", nil)
 	// Output: Trace completed: analysis done
 }
 

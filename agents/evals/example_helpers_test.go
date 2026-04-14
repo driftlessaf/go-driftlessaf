@@ -27,7 +27,7 @@ func ExampleExactToolCalls() {
 
 	// Create trace with exactly 2 tool calls
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Analyze logs")
+	trace, done := agenttrace.StartTrace[string](ctx, "Analyze logs")
 
 	// Add exactly 2 tool calls
 	tc1 := trace.StartToolCall("tc1", "read_logs", nil)
@@ -36,8 +36,8 @@ func ExampleExactToolCalls() {
 	tc2 := trace.StartToolCall("tc2", "analyze", nil)
 	tc2.Complete("analysis done", nil)
 
-	// Complete trace (triggers evaluation)
-	trace.Complete("Analysis complete", nil)
+	// Complete trace via done callback (triggers evaluation)
+	done("Analysis complete", nil)
 
 	if len(obs.failures) == 0 {
 		fmt.Println("Validation passed: exactly 2 tool calls")
@@ -60,7 +60,7 @@ func ExampleRequiredToolCalls() {
 
 	// Create trace and add required tools (plus extra)
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Process data")
+	trace, done := agenttrace.StartTrace[string](ctx, "Process data")
 
 	// Add required tools
 	tc1 := trace.StartToolCall("tc1", "read_logs", nil)
@@ -73,8 +73,8 @@ func ExampleRequiredToolCalls() {
 	tc3 := trace.StartToolCall("tc3", "summarize", nil)
 	tc3.Complete("summary", nil)
 
-	// Complete trace (triggers evaluation)
-	trace.Complete("Processing complete", nil)
+	// Complete trace via done callback (triggers evaluation)
+	done("Processing complete", nil)
 
 	if len(obs.failures) == 0 {
 		fmt.Println("All required tools were called")
@@ -104,7 +104,7 @@ func ExampleToolCallValidator() {
 
 	// Create trace with proper reasoning parameters
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Analyze logs")
+	trace, done := agenttrace.StartTrace[string](ctx, "Analyze logs")
 
 	// Add tool calls with reasoning parameters
 	tc1 := trace.StartToolCall("tc1", "read_logs", map[string]any{
@@ -117,8 +117,8 @@ func ExampleToolCallValidator() {
 	})
 	tc2.Complete("analysis done", nil)
 
-	// Complete trace (triggers evaluation)
-	trace.Complete("Analysis complete", nil)
+	// Complete trace via done callback (triggers evaluation)
+	done("Analysis complete", nil)
 
 	if len(obs.failures) == 0 {
 		fmt.Println("All tool calls have reasoning")
@@ -140,7 +140,7 @@ func ExampleNoErrors() {
 
 	// Create successful trace with no errors
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Read and analyze")
+	trace, done := agenttrace.StartTrace[string](ctx, "Read and analyze")
 
 	// Add successful tool calls
 	tc1 := trace.StartToolCall("tc1", "read_logs", nil)
@@ -149,8 +149,8 @@ func ExampleNoErrors() {
 	tc2 := trace.StartToolCall("tc2", "analyze", nil)
 	tc2.Complete("analysis complete", nil)
 
-	// Complete trace successfully (triggers evaluation)
-	trace.Complete("Processing complete", nil)
+	// Complete trace successfully via done callback (triggers evaluation)
+	done("Processing complete", nil)
 
 	if len(obs.failures) == 0 {
 		fmt.Println("No errors found")

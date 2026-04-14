@@ -25,7 +25,7 @@ func TestClaudeToolHandler(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	trace := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
 	input := map[string]any{
 		"reasoning": "done",

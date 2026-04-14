@@ -90,7 +90,7 @@ func TestToolGoogleMetadata(t *testing.T) {
 
 func TestToolParam(t *testing.T) {
 	ctx := t.Context()
-	trace := agenttrace.StartTrace[string](ctx, "test")
+	trace, _ := agenttrace.StartTrace[string](ctx, "test")
 
 	call := toolcall.ToolCall{
 		ID:   "test-1",
@@ -170,7 +170,7 @@ func TestClaudeHandlerParsesJSON(t *testing.T) {
 
 	meta := claudetool.FromTool(tool)
 	ctx := t.Context()
-	trace := agenttrace.StartTrace[string](ctx, "test")
+	trace, _ := agenttrace.StartTrace[string](ctx, "test")
 
 	input, _ := json.Marshal(map[string]any{"msg": "hello"})
 	toolUse := anthropic.ToolUseBlock{
@@ -200,7 +200,7 @@ func TestGoogleHandlerNilResponse(t *testing.T) {
 
 	meta := googletool.FromTool(tool)
 	ctx := t.Context()
-	trace := agenttrace.StartTrace[string](ctx, "test")
+	trace, _ := agenttrace.StartTrace[string](ctx, "test")
 
 	call := &genai.FunctionCall{
 		ID:   "call-1",

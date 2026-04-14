@@ -41,9 +41,9 @@ for maximum flexibility, as individual tool calls may return varied data types.
 For basic string results from agent interactions:
 
 	tracer := agenttrace.ByCode[string]() // No callbacks
-	ctx := context.Background()
-	trace := tracer.NewTrace(ctx, "Generate summary")
-	trace.Complete("Summary: The analysis shows...", nil)
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
+	_, done := agenttrace.StartTrace[string](ctx, "Generate summary")
+	done("Summary: The analysis shows...", nil)
 
 ### Structured Results
 For complex, type-safe results using custom structs:
@@ -55,9 +55,9 @@ For complex, type-safe results using custom structs:
 	}
 
 	tracer := agenttrace.ByCode[AnalysisResult]() // No callbacks
-	ctx := context.Background()
-	trace := tracer.NewTrace(ctx, "Analyze codebase")
-	trace.Complete(AnalysisResult{
+	ctx := agenttrace.WithTracer[AnalysisResult](context.Background(), tracer)
+	_, done := agenttrace.StartTrace[AnalysisResult](ctx, "Analyze codebase")
+	done(AnalysisResult{
 		TotalFiles:  42,
 		IssuesFound: 3,
 		Confidence:  0.95,
@@ -77,15 +77,15 @@ The same context can hold tracers for different result types:
 	ctx = agenttrace.WithTracer[MetricsData](ctx, metricsTracer)
 
 	// Both coexist without conflict
-	summaryTrace := agenttrace.StartTrace[string](ctx, "Generate summary")
-	metricsTrace := agenttrace.StartTrace[MetricsData](ctx, "Collect metrics")
+	summaryTrace, _ := agenttrace.StartTrace[string](ctx, "Generate summary")
+	metricsTrace, _ := agenttrace.StartTrace[MetricsData](ctx, "Collect metrics")
 
 **Note**: While Trace[interface{}] provides maximum flexibility when result types vary at runtime, prefer specific types when possible for better type safety and API clarity.
 
 # Features
 
   - Thread-safe trace and tool call recording
-  - Automatic trace completion and recording
+  - Done callbacks for trace completion and recording
   - Flexible callback system for custom trace processing
   - Context-based tracer management
   - Structured trace output with timing information
@@ -100,16 +100,17 @@ The same context can hold tracers for different result types:
 
 ## Basic Trace Creation
 
-All traces must be created using a tracer. The simplest approach uses ByCode with no callbacks:
+All traces should be created via StartTrace, which returns a done callback for
+completing and recording the trace:
 
 	tracer := agenttrace.ByCode[string]() // No callbacks
-	ctx := context.Background()
-	trace := tracer.NewTrace(ctx, "Analyze the security report")
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
+	trace, done := agenttrace.StartTrace[string](ctx, "Analyze the security report")
 	toolCall := trace.StartToolCall("tc1", "file-reader", map[string]interface{}{
 		"path": "/var/logs/security.log",
 	})
 	toolCall.Complete("File content here", nil)
-	trace.Complete("Analysis complete", nil)
+	done("Analysis complete", nil)
 
 ## Context-Based Tracing
 
@@ -121,9 +122,9 @@ For more sophisticated scenarios, use context-managed tracers:
 	})
 	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
-	trace := agenttrace.StartTrace[string](ctx, "Process user request")
+	trace, done := agenttrace.StartTrace[string](ctx, "Process user request")
 	// ... perform operations
-	trace.Complete("Request processed", nil)
+	done("Request processed", nil)
 
 ## Custom Evaluation Callbacks
 
@@ -213,7 +214,8 @@ The package integrates with chainguard-dev/clog for structured logging:
 
 	ctx := context.Background()
 	tracer := evals.NewDefaultTracer[string](ctx) // Uses clog from context
-	trace := tracer.NewTrace(ctx, "Execute workflow")
+	ctx = agenttrace.WithTracer[string](ctx, tracer)
+	trace, done := agenttrace.StartTrace[string](ctx, "Execute workflow")
 
 ## Error Handling
 
@@ -227,7 +229,7 @@ The package handles both tool-level and trace-level errors:
 	trace.BadToolCall("tc2", "unknown-tool", badParams, errors.New("unknown tool"))
 
 	// Trace that fails
-	trace.Complete(nil, errors.New("workflow failed"))
+	done(nil, errors.New("workflow failed"))
 
 # Thread Safety
 

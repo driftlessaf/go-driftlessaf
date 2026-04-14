@@ -34,9 +34,10 @@ func TestByCode(t *testing.T) {
 	toolResult := randomString()
 	tc.Complete(toolResult, nil)
 
-	// Complete the trace
+	// Complete the trace and record it
 	finalResult := randomString()
-	trace.Complete(finalResult, nil)
+	trace.complete(finalResult, nil)
+	tracer.RecordTrace(trace)
 
 	// Verify the callback was invoked
 	if capturedTrace == nil {
@@ -72,7 +73,7 @@ func TestByCodeWithNilCallback(t *testing.T) {
 
 	// Complete should not panic even with nil callback
 	result := randomString()
-	trace.Complete(result, nil)
+	trace.complete(result, nil)
 }
 
 func TestByCodeWithMultipleCallbacks(t *testing.T) {
@@ -112,7 +113,8 @@ func TestByCodeWithMultipleCallbacks(t *testing.T) {
 	trace := tracer.NewTrace(ctx, prompt)
 
 	result := randomString()
-	trace.Complete(result, nil)
+	trace.complete(result, nil)
+	tracer.RecordTrace(trace)
 
 	// Verify they all received the same trace
 	for i, captured := range capturedTraces {
@@ -141,7 +143,7 @@ func TestByCodeWithNoCallbacks(t *testing.T) {
 
 	// Complete should not panic
 	result := randomString()
-	trace.Complete(result, nil)
+	trace.complete(result, nil)
 }
 
 func TestByCodeParallelExecution(t *testing.T) {
@@ -176,11 +178,12 @@ func TestByCodeParallelExecution(t *testing.T) {
 	prompt := randomString()
 	trace := tracer.NewTrace(ctx, prompt)
 
-	// Complete the trace in a goroutine so we can verify parallel execution
+	// Record the trace in a goroutine so we can verify parallel callback execution
 	done := make(chan struct{})
 	go func() {
 		result := randomString()
-		trace.Complete(result, nil)
+		trace.complete(result, nil)
+		tracer.RecordTrace(trace)
 		close(done)
 	}()
 

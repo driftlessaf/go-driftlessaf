@@ -96,9 +96,9 @@ func (e *executor[Request, Response]) Execute(
 		return response, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	trace := agenttrace.StartTrace[Response](ctx, prompt)
+	trace, done := agenttrace.StartTrace[Response](ctx, prompt)
 	defer func() {
-		trace.Complete(response, err)
+		done(response, err)
 	}()
 
 	clog.InfoContext(ctx, "Starting OpenAI-compatible agent execution",

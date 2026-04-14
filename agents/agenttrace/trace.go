@@ -236,17 +236,15 @@ func (tc *ToolCall[T]) Duration() time.Duration {
 	return tc.EndTime.Sub(tc.StartTime)
 }
 
-// Complete marks the trace as complete with the given result and automatically
-// records it via the tracer from the trace's stored context. This uses
-// TracerFromContext rather than a stored back-pointer so that decorator
-// composition works: the outermost tracer (set by middleware) receives the
-// RecordTrace call, not the innermost leaf that created the trace.
-func (t *Trace[T]) Complete(result T, err error) {
+// complete marks the trace as complete with the given result. It fills in the
+// result, error, and end time, and ends the OpenTelemetry span. It does NOT
+// record the trace — that is the caller's responsibility (typically via the
+// done callback returned by StartTrace).
+func (t *Trace[T]) complete(result T, err error) {
 	t.mu.Lock()
 	t.Result = result
 	t.Error = err
 	t.EndTime = time.Now()
-	ctx := t.ctx
 	span := t.span
 	t.mu.Unlock()
 
@@ -259,10 +257,6 @@ func (t *Trace[T]) Complete(result T, err error) {
 		}
 		span.End()
 	}
-
-	// Look up the outermost decorator, not the leaf that created this trace.
-	// See byCodeTracer.NewTrace for why this works.
-	TracerFromContext[T](ctx).RecordTrace(t)
 }
 
 // Duration returns the total duration of the trace

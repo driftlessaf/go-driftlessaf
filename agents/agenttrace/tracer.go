@@ -33,8 +33,17 @@ func TracerFromContext[T any](ctx context.Context) Tracer[T] {
 	return NewDefaultTracer[T](ctx)
 }
 
-// StartTrace starts a new trace using the tracer from the context
-func StartTrace[T any](ctx context.Context, prompt string) *Trace[T] {
+// StartTrace starts a new trace using the tracer from the context and returns
+// the trace along with a done callback. The caller must invoke done(result, err)
+// when the operation completes; this fills in the trace and records it via the
+// tracer. Capturing the tracer at start time means decorator composition works
+// without a second context lookup.
+func StartTrace[T any](ctx context.Context, prompt string) (*Trace[T], func(T, error)) {
 	tracer := TracerFromContext[T](ctx)
-	return tracer.NewTrace(ctx, prompt)
+	trace := tracer.NewTrace(ctx, prompt)
+	done := func(result T, err error) {
+		trace.complete(result, err)
+		tracer.RecordTrace(trace)
+	}
+	return trace, done
 }

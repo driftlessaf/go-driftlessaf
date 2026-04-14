@@ -129,10 +129,10 @@ func TestNamespacedObserverAsObserver(t *testing.T) {
 	traceCallback := evals.Inject[string](observer, callback)
 	tracer := agenttrace.ByCode[string](traceCallback)
 
-	// Create and complete a trace - this will automatically invoke the callback
+	// Create and complete a trace via done callback, which records and invokes the callback
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
-	trace := tracer.NewTrace(ctx, "Test input")
-	trace.Complete("test result", nil)
+	_, done := agenttrace.StartTrace[string](ctx, "Test input")
+	done("test result", nil)
 
 	// The test passes if no panic occurs
 }

@@ -62,9 +62,9 @@ func TestObservableTraceCallback(t *testing.T) {
 	tracer := agenttrace.ByCode[string](traceCallback)
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
 
-	// Create and complete a trace - this will automatically invoke the callback
-	trace := tracer.NewTrace(ctx, "Test prompt")
-	trace.Complete("test result", nil)
+	// Create and complete a trace - done() records via the tracer, invoking the callback
+	_, done := agenttrace.StartTrace[string](ctx, "Test prompt")
+	done("test result", nil)
 
 	// Verify the results
 	if obs.failed {
@@ -103,9 +103,9 @@ func TestObservableTraceCallbackWithError(t *testing.T) {
 	tracer := agenttrace.ByCode[string](traceCallback)
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
 
-	// Create and complete a trace with an error - this will automatically invoke the callback
-	trace := tracer.NewTrace(ctx, "Test prompt")
-	trace.Complete("test result", errors.New("test error"))
+	// Create and complete a trace with an error - done() records via the tracer, invoking the callback
+	_, done := agenttrace.StartTrace[string](ctx, "Test prompt")
+	done("test result", errors.New("test error"))
 
 	// Verify the results
 	if !obs.failed {

@@ -43,10 +43,10 @@ func TestTestingObserver(t *testing.T) {
 	traceCallback := evals.Inject[string](namespacedObs, callback)
 	tracer := agenttrace.ByCode[string](traceCallback)
 
-	// Create and complete a successful trace - this will automatically invoke the callback
+	// Create and complete a successful trace via done callback, which records and invokes the callback
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
-	trace := tracer.NewTrace(ctx, "Test prompt")
-	trace.Complete("test result", nil)
+	_, done := agenttrace.StartTrace[string](ctx, "Test prompt")
+	done("test result", nil)
 }
 
 func TestTestingObserverWithError(t *testing.T) {
@@ -72,10 +72,10 @@ func TestTestingObserverWithError(t *testing.T) {
 	traceCallback := evals.Inject[string](namespacedObs, callback)
 	tracer := agenttrace.ByCode[string](traceCallback)
 
-	// Create and complete a trace with error - this will automatically invoke the callback
+	// Create and complete a trace with error via done callback, which records and invokes the callback
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
-	trace := tracer.NewTrace(ctx, "Error test")
-	trace.Complete("test result", errors.New("simulated error"))
+	_, done := agenttrace.StartTrace[string](ctx, "Error test")
+	done("test result", errors.New("simulated error"))
 }
 
 func TestTestingObserverWithInject(t *testing.T) {
@@ -104,7 +104,7 @@ func TestTestingObserverWithInject(t *testing.T) {
 
 	// Create a trace with tool calls using proper tracer
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
-	trace := tracer.NewTrace(ctx, "Analyze logs")
+	trace, done := agenttrace.StartTrace[string](ctx, "Analyze logs")
 
 	// Add tool calls
 	tc1 := trace.StartToolCall("tc1", "read_logs", nil)
@@ -113,6 +113,6 @@ func TestTestingObserverWithInject(t *testing.T) {
 	tc2 := trace.StartToolCall("tc2", "analyze", nil)
 	tc2.Complete("analysis result", nil)
 
-	// Complete the trace - this will automatically invoke the callback
-	trace.Complete("analysis complete", nil)
+	// Complete the trace via done callback, which records and invokes the callback
+	done("analysis complete", nil)
 }

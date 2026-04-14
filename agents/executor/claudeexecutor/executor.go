@@ -123,10 +123,10 @@ func (e *executor[Request, Response]) Execute(
 		return response, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Start trace
-	trace := agenttrace.StartTrace[Response](ctx, prompt)
+	// Start trace — done completes and records via the context tracer
+	trace, done := agenttrace.StartTrace[Response](ctx, prompt)
 	defer func() {
-		trace.Complete(response, err)
+		done(response, err)
 	}()
 
 	clog.InfoContext(ctx, "Starting Claude agent execution",

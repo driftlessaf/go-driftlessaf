@@ -33,7 +33,7 @@ func TestStartTrace(t *testing.T) {
 	ctx := t.Context()
 
 	// Test without tracer in context - should still work with default tracer
-	if trace := StartTrace[string](ctx, randomString()); trace == nil {
+	if trace, _ := StartTrace[string](ctx, randomString()); trace == nil {
 		t.Error("start trace without explicit tracer: got = nil, wanted = non-nil trace")
 	}
 
@@ -43,7 +43,7 @@ func TestStartTrace(t *testing.T) {
 	ctx = WithTracer[string](ctx, tracer)
 
 	prompt := randomString()
-	if trace := StartTrace[string](ctx, prompt); trace == nil {
+	if trace, _ := StartTrace[string](ctx, prompt); trace == nil {
 		t.Fatal("start trace with tracer in context: got = nil, wanted = non-nil trace")
 	} else if trace.InputPrompt != prompt {
 		t.Errorf("trace prompt: got = %q, wanted = %q", trace.InputPrompt, prompt)
@@ -56,8 +56,8 @@ func TestAutoRecordTrace(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &traces}
 	ctx = WithTracer[string](ctx, tracer)
 
-	// Create and record a trace
-	trace := StartTrace[string](ctx, randomString())
+	// StartTrace returns the trace and a done callback that records it
+	trace, done := StartTrace[string](ctx, randomString())
 	if trace == nil {
 		t.Fatal("start trace: got = nil, wanted = non-nil trace")
 	}
@@ -67,19 +67,46 @@ func TestAutoRecordTrace(t *testing.T) {
 
 	// Should not be recorded yet
 	if len(traces) != 0 {
-		t.Errorf("traces before completion: got = %d, wanted = 0", len(traces))
+		t.Errorf("traces before done: got = %d, wanted = 0", len(traces))
 	}
 
-	// Complete the trace - this should auto-record
-	trace.Complete(randomString(), nil)
+	// Calling done completes the trace and records it
+	result := randomString()
+	done(result, nil)
 
-	// Check that trace was auto-recorded
+	// Check that trace was recorded
 	if len(traces) != 1 {
-		t.Fatalf("traces after completion: got = %d, wanted = 1", len(traces))
+		t.Fatalf("traces after done: got = %d, wanted = 1", len(traces))
 	}
 
 	if recorded := traces[0]; recorded != trace {
 		t.Errorf("recorded trace: got = %v, wanted = %v", recorded, trace)
+	}
+
+	if trace.Result != result {
+		t.Errorf("trace result: got = %q, wanted = %q", trace.Result, result)
+	}
+}
+
+// TestCompleteDoesNotRecord verifies that calling complete alone fills in trace
+// fields but does NOT trigger recording. Recording is the executor's job via
+// the done callback from StartTrace.
+func TestCompleteDoesNotRecord(t *testing.T) {
+	ctx := t.Context()
+	var traces []*Trace[string]
+	tracer := &mockTracer[string]{traces: &traces}
+	ctx = WithTracer[string](ctx, tracer)
+
+	trace, _ := StartTrace[string](ctx, randomString())
+
+	tc := trace.StartToolCall("tc1", randomString(), nil)
+	tc.Complete(randomString(), nil)
+
+	// complete fills in result but should not record
+	trace.complete(randomString(), nil)
+
+	if len(traces) != 0 {
+		t.Errorf("traces after complete (not done): got = %d, wanted = 0", len(traces))
 	}
 }
 
@@ -110,13 +137,13 @@ func TestMultipleTracersWithDifferentTypes(t *testing.T) {
 	}
 
 	// Create traces using each tracer
-	stringTrace := StartTrace[string](ctx, randomString())
-	intTrace := StartTrace[int](ctx, randomString())
+	_, stringDone := StartTrace[string](ctx, randomString())
+	_, intDone := StartTrace[int](ctx, randomString())
 
-	// Complete traces with appropriate types
+	// Complete traces with appropriate types via done callbacks
 	stringResult := randomString()
-	stringTrace.Complete(stringResult, nil)
-	intTrace.Complete(42, nil)
+	stringDone(stringResult, nil)
+	intDone(42, nil)
 
 	// Verify traces were recorded by the correct tracers
 	if len(stringTraces) != 1 {
@@ -157,8 +184,8 @@ func TestDecoratorRecordTraceComposition(t *testing.T) {
 	// Middleware sets the outermost decorator on context
 	ctx = WithTracer[string](ctx, decorator)
 
-	trace := StartTrace[string](ctx, "test prompt")
-	trace.Complete("done", nil)
+	_, done := StartTrace[string](ctx, "test prompt")
+	done("done", nil)
 
 	if decoratorCount != 1 {
 		t.Errorf("decorator RecordTrace calls: got %d, want 1", decoratorCount)

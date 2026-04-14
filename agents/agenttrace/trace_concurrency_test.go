@@ -99,8 +99,9 @@ func TestTraceConcurrentComplete(t *testing.T) {
 				tc.Complete(fmt.Sprintf("result-%d-%d", idx, j), nil)
 			}
 
-			// Complete the trace
-			trace.Complete(fmt.Sprintf("final-%d", idx), nil)
+			// Complete the trace and record it
+			trace.complete(fmt.Sprintf("final-%d", idx), nil)
+			tracer.RecordTrace(trace)
 		}(idx)
 	}
 
@@ -180,7 +181,7 @@ func TestTraceDurationConcurrentAccess(t *testing.T) {
 	// Writer goroutine
 	wg.Go(func() {
 		time.Sleep(5 * time.Millisecond)
-		trace.Complete(result, nil)
+		trace.complete(result, nil)
 	})
 
 	// Wait for all goroutines

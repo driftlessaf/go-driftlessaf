@@ -39,8 +39,8 @@ func ExampleNewGoldenEval() {
 	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, eval)))
 
 	// Simulate a judgment call that would normally be traced
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("prompt-%d", rand.Int63()))
-	trace.Complete(&judge.Judgement{
+	_, done := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("prompt-%d", rand.Int63()))
+	done(&judge.Judgement{
 		Score:     0.85,
 		Reasoning: "The response correctly identifies the answer but uses words instead of the expected numeric format",
 		Suggestions: []string{
@@ -48,7 +48,7 @@ func ExampleNewGoldenEval() {
 		},
 	}, nil)
 
-	// The eval will have been called automatically by the tracer
+	// The done callback completes the trace and records it via the tracer
 	for _, log := range obs.logs {
 		fmt.Println(log)
 	}
@@ -82,8 +82,8 @@ func Example_multipleCriteria() {
 	))
 
 	// Simulate evaluation - all criteria will be evaluated automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("eval-%d", rand.Int63()))
-	trace.Complete(&judge.Judgement{
+	_, done := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("eval-%d", rand.Int63()))
+	done(&judge.Judgement{
 		Score:       0.75,
 		Reasoning:   "Code meets most requirements with minor issues",
 		Suggestions: []string{"Add error handling", "Improve variable names"},
@@ -159,13 +159,13 @@ func ExampleValidScore() {
 	obs := &mockObserver{}
 	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, judge.ValidScore(judge.GoldenMode))))
 
-	// Test with valid score - tracer will call validator automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("valid-%d", rand.Int63()))
-	trace.Complete(&judge.Judgement{Score: 0.85}, nil)
+	// Test with valid score
+	_, done := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("valid-%d", rand.Int63()))
+	done(&judge.Judgement{Score: 0.85}, nil)
 
 	// Test with invalid score
-	trace2 := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("invalid-%d", rand.Int63()))
-	trace2.Complete(&judge.Judgement{Score: 1.5}, nil)
+	_, done2 := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("invalid-%d", rand.Int63()))
+	done2(&judge.Judgement{Score: 1.5}, nil)
 
 	fmt.Printf("Validation results: %d messages\n", len(obs.logs))
 	// Output:
@@ -211,15 +211,15 @@ func ExampleHasReasoning() {
 	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, judge.HasReasoning())))
 
 	// Test with reasoning - tracer will call validator automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("with-reasoning-%d", rand.Int63()))
-	trace.Complete(&judge.Judgement{
+	_, done := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("with-reasoning-%d", rand.Int63()))
+	done(&judge.Judgement{
 		Score:     0.8,
 		Reasoning: "The response correctly identifies the main point",
 	}, nil)
 
 	// Test without reasoning
-	trace2 := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-reasoning-%d", rand.Int63()))
-	trace2.Complete(&judge.Judgement{Score: 0.8}, nil)
+	_, done2 := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-reasoning-%d", rand.Int63()))
+	done2(&judge.Judgement{Score: 0.8}, nil)
 
 	fmt.Printf("Validation completed\n")
 	// Output:
@@ -233,8 +233,8 @@ func ExampleNoToolCalls() {
 	ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(evals.Inject(obs, evals.NoToolCalls[*judge.Judgement]())))
 
 	// Test with no tool calls - tracer will call validator automatically
-	trace := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-tools-%d", rand.Int63()))
-	trace.Complete(&judge.Judgement{Score: 0.8}, nil)
+	_, done := agenttrace.StartTrace[*judge.Judgement](ctx, fmt.Sprintf("no-tools-%d", rand.Int63()))
+	done(&judge.Judgement{Score: 0.8}, nil)
 
 	fmt.Printf("Validation completed\n")
 	// Output:

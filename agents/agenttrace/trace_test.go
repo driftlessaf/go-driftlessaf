@@ -147,7 +147,7 @@ func TestTraceComplete(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	result := randomString()
-	trace.Complete(result, nil)
+	trace.complete(result, nil)
 
 	if trace.Result != result {
 		t.Errorf("trace result: got = %v, wanted = %v", trace.Result, result)
@@ -172,7 +172,7 @@ func TestTraceCompleteWithError(t *testing.T) {
 	trace := tracer.NewTrace(ctx, randomString())
 
 	err := errors.New("test error")
-	trace.Complete("", err)
+	trace.complete("", err)
 
 	if !errors.Is(trace.Error, err) {
 		t.Errorf("trace error: got = %v, wanted = %v", trace.Error, err)
@@ -196,7 +196,7 @@ func TestTraceDuration(t *testing.T) {
 	}
 
 	// Test duration after completion
-	trace.Complete(randomString(), nil)
+	trace.complete(randomString(), nil)
 	duration2 := trace.Duration()
 	if duration2 == 0 {
 		t.Error("completed trace duration: got = 0, wanted = non-zero")
@@ -299,7 +299,7 @@ func TestTraceStringEdgeCases(t *testing.T) {
 			ctx := WithTracer[string](context.Background(), tracer)
 			trace := tracer.NewTrace(ctx, "test")
 			longResult := strings.Repeat("b", 1000)
-			trace.Complete(longResult, nil)
+			trace.complete(longResult, nil)
 			return trace
 		},
 		contains: []string{
@@ -319,7 +319,7 @@ func TestTraceStringEdgeCases(t *testing.T) {
 			trace := tracer.NewTrace(ctx, "test with metadata")
 			trace.Metadata["custom_key"] = "custom_value"
 			trace.Metadata["number"] = 42
-			trace.Complete("done", nil)
+			trace.complete("done", nil)
 			return trace
 		},
 		contains: []string{
@@ -341,7 +341,7 @@ func TestTraceStringEdgeCases(t *testing.T) {
 			})
 			longResult := strings.Repeat("c", 300)
 			tc.Complete(longResult, nil)
-			trace.Complete("final", nil)
+			trace.complete("final", nil)
 			return trace
 		},
 		contains: []string{
@@ -363,7 +363,7 @@ func TestTraceStringEdgeCases(t *testing.T) {
 			trace := tracer.NewTrace(ctx, "test")
 			tc := trace.StartToolCall("tc1", "failing-tool", nil)
 			tc.Complete(nil, errors.New("tool failed"))
-			trace.Complete("partial success", nil)
+			trace.complete("partial success", nil)
 			return trace
 		},
 		contains: []string{
@@ -394,7 +394,7 @@ func TestTraceStringEdgeCases(t *testing.T) {
 			tc3 := trace.StartToolCall("tc3", "nil-tool", nil)
 			tc3.Complete(nil, nil)
 
-			trace.Complete("mixed results", nil)
+			trace.complete("mixed results", nil)
 			return trace
 		},
 		contains: []string{

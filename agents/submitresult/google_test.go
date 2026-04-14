@@ -24,7 +24,7 @@ func TestGoogleToolHandler(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	trace := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
 	call := &genai.FunctionCall{
 		ID:   "call-1",

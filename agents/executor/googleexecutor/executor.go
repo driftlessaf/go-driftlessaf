@@ -145,10 +145,10 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Start a trace for this execution
-	trace := agenttrace.StartTrace[Response](ctx, prompt)
+	// Start a trace for this execution — done completes and records
+	trace, done := agenttrace.StartTrace[Response](ctx, prompt)
 	defer func() {
-		trace.Complete(resp, err)
+		done(resp, err)
 	}()
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)

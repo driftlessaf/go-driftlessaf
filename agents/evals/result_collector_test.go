@@ -181,8 +181,8 @@ func TestResultCollectorWithTraceCallback(t *testing.T) {
 
 	// Test with error trace
 	ctx := agenttrace.WithTracer[string](t.Context(), tracer)
-	errorTrace := tracer.NewTrace(ctx, "test")
-	errorTrace.Complete("failed", errors.New("test error"))
+	_, errorDone := agenttrace.StartTrace[string](ctx, "test")
+	errorDone("failed", errors.New("test error"))
 
 	// Check failures
 	failures := collector.Failures()
@@ -191,10 +191,10 @@ func TestResultCollectorWithTraceCallback(t *testing.T) {
 	}
 
 	// Test with successful trace
-	successTrace := tracer.NewTrace(ctx, "test")
+	successTrace, successDone := agenttrace.StartTrace[string](ctx, "test")
 	tc := successTrace.StartToolCall("tc1", "read_logs", nil)
 	tc.Complete("log data", nil)
-	successTrace.Complete("success", nil)
+	successDone("success", nil)
 
 	// Should still have 2 failures (no new ones)
 	failures = collector.Failures()

@@ -185,7 +185,7 @@ func TestHandler_ValidArgs(t *testing.T) {
 	tc.Function.Name = "test_tool"
 	tc.Function.Arguments = `{"reasoning":"testing","query":"hello"}`
 
-	trace := agenttrace.StartTrace[string](context.Background(), "test")
+	trace, _ := agenttrace.StartTrace[string](context.Background(), "test")
 	var result string
 	meta.Handler(context.Background(), tc, trace, &result)
 
@@ -215,7 +215,7 @@ func TestHandler_InvalidJSON(t *testing.T) {
 	tc.Function.Name = "test_tool"
 	tc.Function.Arguments = "not json"
 
-	trace := agenttrace.StartTrace[string](context.Background(), "test")
+	trace, _ := agenttrace.StartTrace[string](context.Background(), "test")
 	var result string
 	got := meta.Handler(context.Background(), tc, trace, &result)
 

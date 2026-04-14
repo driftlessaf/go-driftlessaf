@@ -81,7 +81,7 @@ func ExampleResultCollector() {
 
 	// Create a trace that will trigger the evaluation
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Process data")
+	trace, done := agenttrace.StartTrace[string](ctx, "Process data")
 
 	// Add a tool call
 	tc := trace.StartToolCall("tc1", "data-processor", map[string]any{
@@ -89,8 +89,8 @@ func ExampleResultCollector() {
 	})
 	tc.Complete("processed", nil)
 
-	// Complete the trace (this triggers the evaluation)
-	trace.Complete("Processing complete", nil)
+	// Complete the trace via done callback (this triggers the evaluation)
+	done("Processing complete", nil)
 
 	// Check collected results
 	failures := collector.Failures()
@@ -136,13 +136,13 @@ func ExampleResultCollector_withNamespacedObserver() {
 
 	// Create a trace with a failing tool call
 	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace := tracer.NewTrace(ctx, "Complex analysis")
+	trace, done := agenttrace.StartTrace[string](ctx, "Complex analysis")
 
 	tc := trace.StartToolCall("tc1", "analyzer", nil)
 	tc.Complete(nil, errors.New("analysis failed"))
 
-	// Complete the trace (this triggers both evaluations)
-	trace.Complete("Analysis complete", nil)
+	// Complete the trace via done callback (this triggers both evaluations)
+	done("Analysis complete", nil)
 
 	// Check failures by category
 	toolFailures := toolCollector.Failures()
