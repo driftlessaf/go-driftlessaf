@@ -58,14 +58,15 @@ func ServiceCallback(client workqueue.WorkqueueServiceClient) Callback {
 type Future func() error
 
 // Handle is a synchronous form of HandleAsync.
-func Handle(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback) error {
-	return HandleAsync(ctx, wq, concurrency, batchSize, f, 0)()
+func Handle(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, opts ...Option) error {
+	return HandleAsync(ctx, wq, concurrency, batchSize, f, 0, opts...)()
 }
 
 // HandleAsync initiates a single iteration of the dispatcher, possibly invoking
 // the callback for several different keys.  It returns a future that can be
 // used to block on the result.
-func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int) Future {
+func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) Future {
+	cfg := applyOptions(opts)
 	// Enumerate the state of the queue.
 	wip, next, _, err := wq.Enumerate(ctx)
 	if err != nil {
@@ -191,16 +192,35 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 					if err := oip.Deadletter(cleanupCtx); err != nil {
 						return fmt.Errorf("fail(after reaching max retries) = %w", err)
 					}
+					cfg.errors.emit(cleanupCtx, ErrorContext{
+						Key:      oip.Name(),
+						Err:      err,
+						Attempts: attempts,
+						Action:   ErrorDeadLettered,
+					})
 				} else if d := workqueue.GetNonRetriableDetails(err); d != nil {
 					clog.InfoContextf(ctx, "Key %q is marked as non-retriable - reason: %s, err: %v", oip.Name(), d.GetMessage(), err)
 					// If the error is marked as non-retriable, we should not requeue it.
 					if err := oip.Complete(cleanupCtx); err != nil {
 						return fmt.Errorf("complete(after non-retriable error) = %w", err)
 					}
+					cfg.errors.emit(cleanupCtx, ErrorContext{
+						Key:                oip.Name(),
+						Err:                err,
+						Attempts:           attempts,
+						Action:             ErrorDropped,
+						NonRetriableReason: d.GetMessage(),
+					})
 				} else {
 					if err := oip.Requeue(cleanupCtx); err != nil {
 						return fmt.Errorf("requeue(after failed callback) = %w", err)
 					}
+					cfg.errors.emit(cleanupCtx, ErrorContext{
+						Key:      oip.Name(),
+						Err:      err,
+						Attempts: attempts,
+						Action:   ErrorRequeued,
+					})
 				}
 				return nil // This isn't an error in the dispatcher itself.
 			}
@@ -215,6 +235,11 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	}
 	clog.InfoContextf(ctx, "Launched %d new keys (wip: %d, batch: %d)", launched, nWIP, batchSize)
 
-	// Return the future to wait on outstanding work.
-	return eg.Wait
+	// Return the future to wait on outstanding work, then drain any
+	// in-flight error events so they are not lost on shutdown.
+	return func() error {
+		err := eg.Wait()
+		cfg.errors.drain()
+		return err
+	}
 }

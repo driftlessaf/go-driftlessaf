@@ -50,3 +50,25 @@ func ExampleServiceCallback() {
 	fmt.Println("ServiceCallback created")
 	// Output: ServiceCallback created
 }
+
+// ExampleWithErrorBrokerURL demonstrates enabling error events.
+// When the broker URL is empty, error events are silently disabled.
+func ExampleWithErrorBrokerURL() {
+	wq := inmem.NewWorkQueue(5)
+	ctx := context.Background()
+
+	if err := wq.Queue(ctx, "example-key", workqueue.Options{}); err != nil {
+		panic(err)
+	}
+
+	// Empty URL disables error events (no-op).
+	err := dispatcher.Handle(ctx, wq, 5, 0, func(_ context.Context, _ string, _ workqueue.Options) error {
+		return fmt.Errorf("something went wrong")
+	}, dispatcher.WithErrorBrokerURL(ctx, "", "my-workqueue"))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("dispatched with error events disabled")
+	// Output:
+	// dispatched with error events disabled
+}

@@ -12,13 +12,14 @@ import (
 	"chainguard.dev/driftlessaf/workqueue"
 )
 
-func Handler(wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int) http.Handler {
+func Handler(wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) http.Handler {
 	return &handler{
 		wq:          wq,
 		concurrency: concurrency,
 		batchSize:   batchSize,
 		f:           f,
 		maxRetry:    maxRetry,
+		opts:        opts,
 	}
 }
 
@@ -31,6 +32,7 @@ type handler struct {
 	batchSize   int
 	f           Callback
 	maxRetry    int
+	opts        []Option
 }
 
 var _ http.Handler = (*handler)(nil)
@@ -64,7 +66,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// We do this via a defer to ensure that it is invoked in the event of
 		// a panic during HandleAsync.
 		defer h.doWork.Unlock()
-		return HandleAsync(r.Context(), h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry)
+		return HandleAsync(r.Context(), h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry, h.opts...)
 	}()
 
 	// Once we have initiated the dispatch, allow other dispatches to
