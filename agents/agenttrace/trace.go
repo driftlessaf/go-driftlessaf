@@ -49,21 +49,38 @@ type LLMTurn[T any] struct {
 	once    sync.Once
 }
 
-// Trace represents a complete agent interaction from prompt to result
+// Trace represents a complete agent interaction from prompt to result.
+//
+// Trace implements json.Marshaler so it can be serialized directly.
+// The custom MarshalJSON converts the Error field to a string and
+// excludes unexported runtime handles (mutex, context, span).
+// Serialization is intended to happen after Complete — at that point
+// the trace is immutable and no lock is needed.
 type Trace[T any] struct {
 	ID          string             `json:"id"`
+	OTelTraceID string             `json:"otel_trace_id,omitempty"`
 	InputPrompt string             `json:"input_prompt"`
 	ExecContext ExecutionContext   `json:"exec_context,omitempty"` // PR/commit metadata
 	ToolCalls   []*ToolCall[T]     `json:"tool_calls"`
 	Reasoning   []ReasoningContent `json:"reasoning,omitempty"`
 	Result      T                  `json:"result"`
-	Error       error              `json:"error,omitempty"`
+	Error       error              `json:"-"` // handled by MarshalJSON
 	StartTime   time.Time          `json:"start_time"`
 	EndTime     time.Time          `json:"end_time"`
 	Metadata    map[string]any     `json:"metadata,omitempty"`
-	mu          sync.Mutex         // Protects mutable fields
-	ctx         context.Context
-	span        oteltrace.Span
+
+	// Token usage fields, populated by RecordTokenUsage / RecordCacheTokenUsage.
+	Model               string `json:"model,omitempty"`
+	InputTokens         int64  `json:"input_tokens,omitempty"`
+	OutputTokens        int64  `json:"output_tokens,omitempty"`
+	CacheReadTokens     int64  `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens,omitempty"`
+
+	// mu protects mutable fields during the build-up phase (concurrent
+	// tool calls). After Complete the trace is immutable.
+	mu   sync.Mutex
+	ctx  context.Context
+	span oteltrace.Span
 }
 
 // newTrace creates a new trace for the given prompt. The context must
@@ -98,8 +115,14 @@ func newTrace[T any](ctx context.Context, prompt string) *Trace[T] {
 
 	ctx, span := tr.Start(ctx, "invoke_agent", spanAttrs...)
 
+	var otelTraceID string
+	if sc := span.SpanContext(); sc.HasTraceID() {
+		otelTraceID = sc.TraceID().String()
+	}
+
 	return &Trace[T]{
 		ID:          generateTraceID(),
+		OTelTraceID: otelTraceID,
 		InputPrompt: prompt,
 		ExecContext: execCtx,
 		ToolCalls:   []*ToolCall[T]{},
@@ -220,6 +243,10 @@ func (t *Trace[T]) RecordTokenUsage(model string, inputTokens, outputTokens int6
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	t.Model = model
+	t.InputTokens = inputTokens
+	t.OutputTokens = outputTokens
+
 	if t.span != nil {
 		// Update span name to follow semconv format: "{operation} {model}"
 		t.span.SetName("invoke_agent " + model)
@@ -246,6 +273,9 @@ func (t *Trace[T]) RecordTokenUsage(model string, inputTokens, outputTokens int6
 func (t *Trace[T]) RecordCacheTokenUsage(cacheReadTokens, cacheCreationTokens int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	t.CacheReadTokens = cacheReadTokens
+	t.CacheCreationTokens = cacheCreationTokens
 
 	if t.span != nil {
 		t.span.SetAttributes(
@@ -463,6 +493,77 @@ func (t *Trace[T]) String() string {
 	}
 
 	return sb.String()
+}
+
+// MarshalJSON implements json.Marshaler for Trace.
+// It converts the Error field to a string and excludes unexported fields.
+func (t *Trace[T]) MarshalJSON() ([]byte, error) {
+	type jsonToolCall struct {
+		ID        string         `json:"id"`
+		Name      string         `json:"name"`
+		Params    map[string]any `json:"params,omitempty"`
+		Result    any            `json:"result,omitempty"`
+		Error     string         `json:"error,omitempty"`
+		StartTime time.Time      `json:"start_time"`
+		EndTime   time.Time      `json:"end_time"`
+	}
+
+	toolCalls := make([]jsonToolCall, len(t.ToolCalls))
+	for i, tc := range t.ToolCalls {
+		jtc := jsonToolCall{
+			ID:        tc.ID,
+			Name:      tc.Name,
+			Params:    tc.Params,
+			Result:    tc.Result,
+			StartTime: tc.StartTime,
+			EndTime:   tc.EndTime,
+		}
+		if tc.Error != nil {
+			jtc.Error = tc.Error.Error()
+		}
+		toolCalls[i] = jtc
+	}
+
+	var errStr string
+	if t.Error != nil {
+		errStr = t.Error.Error()
+	}
+
+	return json.Marshal(struct {
+		ID                  string             `json:"id"`
+		OTelTraceID         string             `json:"otel_trace_id,omitempty"`
+		InputPrompt         string             `json:"input_prompt"`
+		ExecContext         ExecutionContext   `json:"exec_context,omitempty"`
+		ToolCalls           []jsonToolCall     `json:"tool_calls"`
+		Reasoning           []ReasoningContent `json:"reasoning,omitempty"`
+		Result              T                  `json:"result"`
+		Error               string             `json:"error,omitempty"`
+		StartTime           time.Time          `json:"start_time"`
+		EndTime             time.Time          `json:"end_time"`
+		Metadata            map[string]any     `json:"metadata,omitempty"`
+		Model               string             `json:"model,omitempty"`
+		InputTokens         int64              `json:"input_tokens,omitempty"`
+		OutputTokens        int64              `json:"output_tokens,omitempty"`
+		CacheReadTokens     int64              `json:"cache_read_tokens,omitempty"`
+		CacheCreationTokens int64              `json:"cache_creation_tokens,omitempty"`
+	}{
+		ID:                  t.ID,
+		OTelTraceID:         t.OTelTraceID,
+		InputPrompt:         t.InputPrompt,
+		ExecContext:         t.ExecContext,
+		ToolCalls:           toolCalls,
+		Reasoning:           t.Reasoning,
+		Result:              t.Result,
+		Error:               errStr,
+		StartTime:           t.StartTime,
+		EndTime:             t.EndTime,
+		Metadata:            t.Metadata,
+		Model:               t.Model,
+		InputTokens:         t.InputTokens,
+		OutputTokens:        t.OutputTokens,
+		CacheReadTokens:     t.CacheReadTokens,
+		CacheCreationTokens: t.CacheCreationTokens,
+	})
 }
 
 // generateTraceID generates a unique trace ID
