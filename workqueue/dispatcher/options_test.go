@@ -46,7 +46,7 @@ func TestErrorEmitter_Requeued(t *testing.T) {
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	cap := &captureEmitter{}
 
-	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return errors.New("transient failure")
 	}, 0, withCapture(cap))
 
@@ -75,7 +75,7 @@ func TestErrorEmitter_DeadLettered(t *testing.T) {
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	cap := &captureEmitter{}
 
-	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return errors.New("persistent failure")
 	}, 5, withCapture(cap))
 
@@ -104,7 +104,7 @@ func TestErrorEmitter_Dropped(t *testing.T) {
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	cap := &captureEmitter{}
 
-	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return workqueue.NonRetriableError(errors.New("bad input"), "invalid key format")
 	}, 0, withCapture(cap))
 
@@ -132,7 +132,7 @@ func TestErrorEmitter_NotCalledOnSuccess(t *testing.T) {
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	cap := &captureEmitter{}
 
-	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return nil
 	}, 0, withCapture(cap))
 
@@ -150,7 +150,7 @@ func TestNopErrorEmitter(t *testing.T) {
 	next := &mockKey{name: "no-handler"}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 
-	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return errors.New("fail")
 	}, 0)
 

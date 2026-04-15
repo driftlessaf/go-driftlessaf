@@ -99,15 +99,15 @@ func (e *cloudEventErrorEmitter) drain() {
 	_ = e.eg.Wait()
 }
 
-// WithErrorBrokerURL configures the dispatcher to emit errors as CloudEvents
+// WithErrorIngressURI configures the dispatcher to emit errors as CloudEvents
 // to the given broker URL. workqueueName is used as the CloudEvent source.
-// When brokerURL is empty, error events are disabled (no-op).
+// When ingressURI is empty, error events are disabled (no-op).
 //
 // The CloudEvents client is constructed eagerly so it is shared across all
 // dispatch rounds. If construction fails the option degrades gracefully
 // to a no-op with a warning log.
-func WithErrorBrokerURL(ctx context.Context, brokerURL, workqueueName string) Option {
-	if brokerURL == "" {
+func WithErrorIngressURI(ctx context.Context, ingressURI, workqueueName string) Option {
+	if ingressURI == "" {
 		return func(*config) {}
 	}
 
@@ -119,14 +119,14 @@ func WithErrorBrokerURL(ctx context.Context, brokerURL, workqueueName string) Op
 		baseTransport = &http.Transport{}
 	}
 
-	tokenSource, err := idtoken.NewTokenSource(ctx, brokerURL)
+	tokenSource, err := idtoken.NewTokenSource(ctx, ingressURI)
 	if err != nil {
 		clog.WarnContextf(ctx, "Failed to create id token source for error events, disabling: %v", err)
 		return func(*config) {}
 	}
 
 	ceClient, err := cloudevents.NewClientHTTP(
-		cloudevents.WithTarget(brokerURL),
+		cloudevents.WithTarget(ingressURI),
 		cehttp.WithClient(http.Client{Transport: httpmetrics.WrapTransport(&oauth2.Transport{
 			Source: tokenSource,
 			Base:   baseTransport,
@@ -143,7 +143,7 @@ func WithErrorBrokerURL(ctx context.Context, brokerURL, workqueueName string) Op
 	}
 	e.eg.SetLimit(ceMaxInflight)
 
-	clog.InfoContextf(ctx, "Error events enabled: broker=%s workqueue=%s", brokerURL, workqueueName)
+	clog.InfoContextf(ctx, "Error events enabled: ingress=%s workqueue=%s", ingressURI, workqueueName)
 
 	return func(c *config) { c.errors = e }
 }

@@ -14,12 +14,12 @@ SPDX-License-Identifier: Apache-2.0
 //
 // When a callback returns an error, the dispatcher requeues, dead-letters,
 // or drops the key depending on the error type and retry budget. To emit
-// these errors as CloudEvents, pass [WithErrorBrokerURL]:
+// these errors as CloudEvents, pass [WithErrorIngressURI]:
 //
 //	handler := dispatcher.Handler(wq, 10, 5, callback, 3,
-//	    dispatcher.WithErrorBrokerURL(ctx, brokerURL, "my-wq"),
+//	    dispatcher.WithErrorIngressURI(ctx, ingressURI, "my-wq"),
 //	)
 //
-// When the broker URL is empty the option is a no-op, making the feature
+// When the ingress URL is empty the option is a no-op, making the feature
 // entirely opt-in.
 package dispatcher

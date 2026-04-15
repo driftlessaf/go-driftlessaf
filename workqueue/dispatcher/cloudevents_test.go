@@ -20,14 +20,14 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 )
 
-func TestWithErrorBrokerURL_EmptyIsNop(t *testing.T) {
+func TestWithErrorIngressURI_EmptyIsNop(t *testing.T) {
 	// Empty broker URL should leave the nop emitter in place.
-	opt := WithErrorBrokerURL(context.Background(), "", "test-wq")
+	opt := WithErrorIngressURI(t.Context(), "", "test-wq")
 	cfg := config{errors: nopErrorEmitter{}}
 	opt(&cfg)
 
 	// Should still be the nop emitter (no panic on emit).
-	cfg.errors.emit(context.Background(), ErrorContext{
+	cfg.errors.emit(t.Context(), ErrorContext{
 		Key: "some-key", Err: errors.New("fail"), Attempts: 1, Action: ErrorRequeued,
 	})
 	cfg.errors.drain()
@@ -64,7 +64,7 @@ func TestCloudEventErrorEmitter_EmitsEvent(t *testing.T) {
 	e.eg.SetLimit(ceMaxInflight)
 
 	key := fmt.Sprintf("test-key-%d", rand.Int64())
-	e.emit(context.Background(), ErrorContext{
+	e.emit(t.Context(), ErrorContext{
 		Key:      key,
 		Err:      errors.New("something broke"),
 		Attempts: 3,
@@ -144,7 +144,7 @@ func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
 	next := &mockKey{name: key, attempts: 10}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 
-	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return errors.New("boom")
 	}, 10, opt)
 
