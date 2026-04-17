@@ -21,8 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 output "recorder-schemas" {
   value = {
     "dev.chainguard.workqueue.error.v1" = {
-      schema          = file("${path.module}/schemas/workqueue_error.schema.json")
-      partition_field = "occurred_at"
+      schema = file("${path.module}/schemas/workqueue_error.schema.json")
     }
   }
 }
