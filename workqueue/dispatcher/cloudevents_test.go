@@ -107,6 +107,12 @@ func TestCloudEventErrorEmitter_EmitsEvent(t *testing.T) {
 	if payload.Action != "dead-lettered" {
 		t.Errorf("payload.Action: got = %q, wanted = %q", payload.Action, "dead-lettered")
 	}
+	if payload.OccurredAt.IsZero() {
+		t.Error("payload.OccurredAt: got = zero, wanted = non-zero")
+	}
+	if !payload.OccurredAt.Equal(received.Time()) {
+		t.Errorf("payload.OccurredAt: got = %v, wanted = %v (ce-time)", payload.OccurredAt, received.Time())
+	}
 }
 
 func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
