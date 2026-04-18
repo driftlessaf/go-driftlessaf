@@ -70,6 +70,12 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 				}, {
 					Name: "limit", Type: "integer", Description: fmt.Sprintf("Maximum commits to return (default: 20, max: %d)", maxListCommitsLimit), Required: false,
 				}},
+				Annotations: &ToolAnnotations{
+					ReadOnly:    true,
+					Destructive: Ptr(false),
+					Idempotent:  true,
+					OpenWorld:   Ptr(false),
+				},
 			},
 			Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 				offset, errResp := OptionalParam[int](call, "offset", 0)
@@ -114,6 +120,12 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 				}, {
 					Name: "limit", Type: "integer", Description: fmt.Sprintf("Maximum bytes of diff to return (default: 20000, max: %d)", maxFileDiffLimit), Required: false,
 				}},
+				Annotations: &ToolAnnotations{
+					ReadOnly:    true,
+					Destructive: Ptr(false),
+					Idempotent:  true,
+					OpenWorld:   Ptr(false),
+				},
 			},
 			Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 				path, errResp := Param[string](call, trace, "path")

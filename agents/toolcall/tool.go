@@ -211,6 +211,13 @@ func FalseSchema() *Schema {
 	return &Schema{False: true}
 }
 
+// Ptr returns a pointer to the given value.
+// Commonly used to set Destructive and OpenWorld fields on ToolAnnotations,
+// which use *bool to distinguish "explicitly false" from "unset (default true)".
+func Ptr[T any](v T) *T {
+	return &v
+}
+
 // SchemaToMap converts a Schema to the map[string]any JSON Schema
 // representation. Returns nil for a nil schema. A false schema (FalseSchema)
 // returns nil; callers that need to emit the JSON boolean false should check

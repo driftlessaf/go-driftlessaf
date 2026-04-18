@@ -96,6 +96,12 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0)", Required: false},
 				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). Pass -1 to read the entire file, but avoid this if you don't know the file size as it may be very large.", Required: false},
 			},
+			Annotations: &ToolAnnotations{
+				ReadOnly:    true,
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				OpenWorld:   Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			path, errResp := Param[string](call, trace, "path")
@@ -140,6 +146,10 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 				{Name: "old_string", Type: "string", Description: "The exact text to find and replace. Maximum 32KB; use write_file for larger replacements.", Required: true},
 				{Name: "new_string", Type: "string", Description: "The replacement text. Pass an empty string to delete the matched text. Maximum 32KB; use write_file for larger replacements.", Required: true},
 				{Name: "replace_all", Type: "boolean", Description: "Replace all occurrences instead of requiring uniqueness (default: false)", Required: false},
+			},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(false),
+				OpenWorld:   Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -187,6 +197,12 @@ func writeFileTool[Resp any](writeFile func(context.Context, string, string, os.
 				{Name: "content", Type: "string", Description: "The complete content to write to the file", Required: true},
 				{Name: "executable", Type: "boolean", Description: "Whether the file should be executable (default: false)", Required: false},
 			},
+			Annotations: &ToolAnnotations{
+				// Overwrites are recoverable via git — not considered destructive in worktree context.
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				OpenWorld:   Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			path, errResp := Param[string](call, trace, "path")
@@ -230,6 +246,10 @@ func deleteFileTool[Resp any](deleteFile func(context.Context, string) error) To
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file to delete (relative to repository root)", Required: true},
 			},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(true),
+				OpenWorld:   Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			path, errResp := Param[string](call, trace, "path")
@@ -261,6 +281,11 @@ func moveFileTool[Resp any](moveFile func(context.Context, string, string) error
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The source path (relative to repository root)", Required: true},
 				{Name: "destination", Type: "string", Description: "The destination path (relative to repository root)", Required: true},
+			},
+			Annotations: &ToolAnnotations{
+				// Destination clobber is recoverable via git — not considered destructive in worktree context.
+				Destructive: Ptr(false),
+				OpenWorld:   Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -299,6 +324,11 @@ func copyFileTool[Resp any](copyFile func(context.Context, string, string) error
 				{Name: "path", Type: "string", Description: "The source path (relative to repository root)", Required: true},
 				{Name: "destination", Type: "string", Description: "The destination path (relative to repository root)", Required: true},
 			},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				OpenWorld:   Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			path, errResp := Param[string](call, trace, "path")
@@ -335,6 +365,11 @@ func chmodTool[Resp any](chmod func(context.Context, string, os.FileMode) error)
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file (relative to repository root)", Required: true},
 				{Name: "mode", Type: "string", Description: "The file mode as an octal string (e.g., \"0755\", \"0644\")", Required: true},
+			},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				OpenWorld:   Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -379,6 +414,10 @@ func symlinkTool[Resp any](createSymlink func(context.Context, string, string) e
 				{Name: "path", Type: "string", Description: "Where to create the symlink (relative to repository root)", Required: true},
 				{Name: "target", Type: "string", Description: "What the symlink points to (relative path)", Required: true},
 			},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(false),
+				OpenWorld:   Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			path, errResp := Param[string](call, trace, "path")
@@ -417,6 +456,12 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 				{Name: "filter", Type: "string", Description: "Filter entries by glob pattern (e.g., \"*.go\") or exact filename (e.g., \"main.go\"). Only * wildcards are supported.", Required: false},
 				{Name: "offset", Type: "integer", Description: "Number of entries to skip (default: 0)", Required: false},
 				{Name: "limit", Type: "integer", Description: "Maximum entries to return (default: 50)", Required: false},
+			},
+			Annotations: &ToolAnnotations{
+				ReadOnly:    true,
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				OpenWorld:   Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -457,6 +502,12 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 				{Name: "filter", Type: "string", Description: "File filter — glob with * wildcards (e.g., \"*.go\") or exact filename (e.g., \"Makefile\")", Required: false},
 				{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false},
 				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 50)", Required: false},
+			},
+			Annotations: &ToolAnnotations{
+				ReadOnly:    true,
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				OpenWorld:   Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {

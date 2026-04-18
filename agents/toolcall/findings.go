@@ -86,6 +86,15 @@ func getFindingDetailsTool[Resp any](getDetails func(context.Context, callbacks.
 				{Name: "kind", Type: "string", Description: "The kind of finding (from the request's findings list)", Required: true},
 				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
 			},
+			Annotations: &ToolAnnotations{
+				ReadOnly:    true,
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				// Finding details are scoped to the current PR's pre-loaded
+				// state; the callback reads from an in-process cache rather
+				// than making a live external network call at tool-call time.
+				OpenWorld: Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			kind, errResp := Param[string](call, trace, "kind")
@@ -130,6 +139,14 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 				Description: "The identifier of the finding to resolve (from the request's findings list)",
 				Required:    true,
 			}},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(false),
+				// resolve_finding mutates PR review state, but the operation
+				// is scoped to the current PR and does not open arbitrary
+				// external connections; the callback uses a pre-authenticated
+				// client bound to this PR's context.
+				OpenWorld: Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			identifier, errResp := Param[string](call, trace, "identifier")
@@ -168,6 +185,14 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 			Parameters: []Parameter{
 				{Name: "kind", Type: "string", Description: "The kind of finding (from the request's findings list)", Required: true},
 				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
+			},
+			Annotations: &ToolAnnotations{
+				Destructive: Ptr(false),
+				// retry_finding triggers a CI re-run scoped to the current
+				// PR; it uses a pre-authenticated client and does not open
+				// arbitrary external connections beyond the CI system already
+				// associated with this PR's context.
+				OpenWorld: Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -261,6 +286,15 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0)", Required: false},
 				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 256000)", Required: false},
 			},
+			Annotations: &ToolAnnotations{
+				ReadOnly:    true,
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				// Logs are fetched once from the CI system and cached
+				// in-process; subsequent reads serve from the local cache
+				// without additional external network calls.
+				OpenWorld: Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
 			kind, errResp := Param[string](call, trace, "kind")
@@ -342,6 +376,15 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 				{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
 				{Name: "skip", Type: "integer", Description: "Number of matches to skip for pagination (default: 0)", Required: false},
 				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 20)", Required: false},
+			},
+			Annotations: &ToolAnnotations{
+				ReadOnly:    true,
+				Destructive: Ptr(false),
+				Idempotent:  true,
+				// Logs are fetched once from the CI system and cached
+				// in-process; subsequent searches operate on the local cache
+				// without additional external network calls.
+				OpenWorld: Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
