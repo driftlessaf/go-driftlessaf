@@ -92,6 +92,10 @@ func updatePRTitleTool(updateFn func(context.Context, string) error) toolcall.To
 			Parameters: []toolcall.Parameter{
 				{Name: "new_title", Type: "string", Description: "The new PR title in conventional commit format", Required: true},
 			},
+			Annotations: &toolcall.ToolAnnotations{
+				Destructive: toolcall.Ptr(false),
+				OpenWorld:   toolcall.Ptr(false),
+			},
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
 			newTitle, errResp := toolcall.Param[string](call, trace, "new_title")
@@ -132,6 +136,10 @@ func updatePRDescriptionTool(updateFn func(context.Context, string) error) toolc
 			Description: updateDescriptionDescription,
 			Parameters: []toolcall.Parameter{
 				{Name: "new_description", Type: "string", Description: "The new PR description", Required: true},
+			},
+			Annotations: &toolcall.ToolAnnotations{
+				Destructive: toolcall.Ptr(false),
+				OpenWorld:   toolcall.Ptr(false),
 			},
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
