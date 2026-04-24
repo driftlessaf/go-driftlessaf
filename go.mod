@@ -3,7 +3,7 @@ module chainguard.dev/driftlessaf
 go 1.25.7
 
 require (
-	chainguard.dev/apko v1.2.6
+	chainguard.dev/apko v1.2.7
 	chainguard.dev/go-grpc-kit v0.17.17
 	chainguard.dev/sdk v0.1.52
 	cloud.google.com/go/aiplatform v1.121.0
