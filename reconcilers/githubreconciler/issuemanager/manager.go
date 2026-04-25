@@ -205,7 +205,7 @@ func (im *IM[T]) NewSession(
 			data, err := im.templateExecutor.Extract(issue.GetBody())
 			if err != nil {
 				// Skip issues with malformed data - they won't be matched anyway
-				clog.FromContext(ctx).Warnf("Skipping issue #%d: failed to extract embedded data: %v", issue.GetNumber(), err)
+				clog.WarnContextf(ctx, "Skipping issue #%d: failed to extract embedded data: %v", issue.GetNumber(), err)
 				continue
 			}
 			existingIssues = append(existingIssues, existingIssue[T]{
