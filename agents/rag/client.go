@@ -46,6 +46,11 @@ type ClientConfig struct {
 
 	// GCSPrefix is an optional path prefix within the GCS bucket.
 	GCSPrefix string
+
+	// Dimensions specifies the output dimensionality for embeddings.
+	// If 0, defaults to DefaultDimensions (768).
+	// Note: different models support different ranges (e.g., text-embedding-005: 1-768).
+	Dimensions int
 }
 
 // Client wraps Embedder, Store, and Retriever for common RAG workflows.
@@ -66,7 +71,7 @@ func (c *Client) Retriever() Retriever { return c.retriever }
 
 // NewClient creates a fully configured RAG client with embedding, storage, and retrieval.
 func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
-	embedder, err := NewEmbedder(ctx, cfg.Project, cfg.Location, cfg.EmbeddingModel)
+	embedder, err := NewEmbedder(ctx, cfg.Project, cfg.Location, cfg.EmbeddingModel, cfg.Dimensions)
 	if err != nil {
 		return nil, fmt.Errorf("creating embedder: %w", err)
 	}
