@@ -28,6 +28,21 @@
     ]
   },
   {
+    "name": "turns",
+    "type": "RECORD",
+    "mode": "REPEATED",
+    "fields": [
+      {"name": "index", "type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "model", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "system", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "input_tokens", "type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "output_tokens", "type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "start_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
+      {"name": "end_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
+      {"name": "error", "type": "STRING", "mode": "NULLABLE"}
+    ]
+  },
+  {
     "name": "reasoning",
     "type": "RECORD",
     "mode": "REPEATED",
@@ -40,6 +55,8 @@
   {"name": "start_time", "type": "TIMESTAMP", "mode": "REQUIRED"},
   {"name": "end_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
   {"name": "metadata", "type": "JSON", "mode": "NULLABLE"},
+  {"name": "agent_name", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "source", "type": "STRING", "mode": "NULLABLE"},
   {"name": "model", "type": "STRING", "mode": "NULLABLE"},
   {"name": "input_tokens", "type": "INTEGER", "mode": "NULLABLE"},
   {"name": "output_tokens", "type": "INTEGER", "mode": "NULLABLE"},

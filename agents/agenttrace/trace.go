@@ -85,12 +85,39 @@ type ToolCall[T any] struct {
 	span      oteltrace.Span
 }
 
-// LLMTurn represents a single LLM call within a trace
+// LLMTurn represents a single LLM call within a trace.
+//
+// LLMTurn is not safe for concurrent use: callers own a turn for the duration
+// of a single model roundtrip and must not hand it across goroutines. The
+// lifecycle methods (RecordTokens, End) read and mutate the accumulated record
+// without locking because the contract is single-goroutine-per-turn, mirroring
+// ToolCall.
 type LLMTurn[T any] struct {
 	span    oteltrace.Span
 	trace   *Trace[T]
 	prevCtx context.Context
 	once    sync.Once
+
+	// record accumulates per-turn data appended to trace.Turns on End.
+	record RecordedTurn
+}
+
+// RecordedTurn is the per-turn data captured on a Trace so each LLM turn
+// surfaces as a queryable row in downstream sinks (e.g. BigQuery via the
+// CloudEvent payload). Token counts reflect a single turn rather than
+// cumulative totals on the parent Trace.
+type RecordedTurn struct {
+	Index        int       `json:"index"`
+	Model        string    `json:"model,omitempty"`
+	System       string    `json:"system,omitempty"`
+	InputTokens  int64     `json:"input_tokens,omitempty"`
+	OutputTokens int64     `json:"output_tokens,omitempty"`
+	StartTime    time.Time `json:"start_time"`
+	EndTime      time.Time `json:"end_time"`
+	// Error is reserved for per-turn completion detail. Nothing populates it
+	// today — End() takes no error argument. A follow-up will wire turn-level
+	// error capture (e.g. retry-exhaustion, malformed response) into this field.
+	Error string `json:"error,omitempty"`
 }
 
 // Trace represents a complete agent interaction from prompt to result.
@@ -106,12 +133,23 @@ type Trace[T any] struct {
 	InputPrompt string             `json:"input_prompt"`
 	ExecContext ExecutionContext   `json:"exec_context,omitempty"` // PR/commit metadata
 	ToolCalls   []*ToolCall[T]     `json:"tool_calls"`
+	Turns       []RecordedTurn     `json:"turns,omitempty"`
 	Reasoning   []ReasoningContent `json:"reasoning,omitempty"`
 	Result      T                  `json:"result"`
 	Error       error              `json:"-"` // handled by MarshalJSON
 	StartTime   time.Time          `json:"start_time"`
 	EndTime     time.Time          `json:"end_time"`
 	Metadata    map[string]any     `json:"metadata,omitempty"`
+
+	// AgentName identifies which logical agent produced this trace (e.g.
+	// "materializer", "skillup-reviewer"). Stamped by a middleware that
+	// knows the agent identity at tracer construction time.
+	AgentName string `json:"agent_name,omitempty"`
+
+	// Source mirrors the CloudEvent Ce-Source header (typically the
+	// reconciler's OCTO_IDENTITY). Duplicated into the payload so BigQuery
+	// can query by service — the recorder records only event.Data().
+	Source string `json:"source,omitempty"`
 
 	// Token usage fields, populated by RecordTokenUsage / RecordCacheTokenUsage.
 	Model               string `json:"model,omitempty"`
@@ -224,8 +262,13 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 		ToolCalls:   []*ToolCall[T]{},
 		StartTime:   time.Now(),
 		Metadata:    make(map[string]any),
-		ctx:         ctx,
-		span:        span,
+		// Derive the payload-side agent name from the same o.agentName the
+		// gen_ai.agent.name span attr uses, so BQ rows and OTel spans always
+		// agree. o.agentName is seeded from WithDefaultAgentName(ctx) and
+		// overridden by any explicit WithAgentName opt.
+		AgentName: o.agentName,
+		ctx:       ctx,
+		span:      span,
 	}
 }
 
@@ -277,6 +320,12 @@ func (t *Trace[T]) BeginTurn(turn int, system, modelName string) *LLMTurn[T] {
 		span:    span,
 		trace:   t,
 		prevCtx: parentCtx,
+		record: RecordedTurn{
+			Index:     turn,
+			Model:     modelName,
+			System:    system,
+			StartTime: time.Now(),
+		},
 	}
 }
 
@@ -288,17 +337,22 @@ func (lt *LLMTurn[T]) RecordTokens(inputTokens, outputTokens int64) {
 			attribute.Int64("gen_ai.usage.output_tokens", outputTokens),
 		)
 	}
+	lt.record.InputTokens = inputTokens
+	lt.record.OutputTokens = outputTokens
 }
 
 // End ends the turn span and restores the trace context to before the turn.
-// It is idempotent: subsequent calls are no-ops.
+// It is idempotent: subsequent calls are no-ops. On the first call, it
+// appends the accumulated RecordedTurn to the parent trace's Turns slice.
 func (lt *LLMTurn[T]) End() {
 	lt.once.Do(func() {
 		if lt.span != nil {
 			lt.span.End()
 		}
+		lt.record.EndTime = time.Now()
 		lt.trace.mu.Lock()
 		lt.trace.ctx = lt.prevCtx
+		lt.trace.Turns = append(lt.trace.Turns, lt.record)
 		lt.trace.mu.Unlock()
 	})
 }
@@ -670,12 +724,15 @@ func (t *Trace[T]) MarshalJSON() ([]byte, error) {
 		InputPrompt         string             `json:"input_prompt"`
 		ExecContext         ExecutionContext   `json:"exec_context,omitempty"`
 		ToolCalls           []jsonToolCall     `json:"tool_calls"`
+		Turns               []RecordedTurn     `json:"turns,omitempty"`
 		Reasoning           []ReasoningContent `json:"reasoning,omitempty"`
 		Result              T                  `json:"result"`
 		Error               string             `json:"error,omitempty"`
 		StartTime           time.Time          `json:"start_time"`
 		EndTime             time.Time          `json:"end_time"`
 		Metadata            map[string]any     `json:"metadata,omitempty"`
+		AgentName           string             `json:"agent_name,omitempty"`
+		Source              string             `json:"source,omitempty"`
 		Model               string             `json:"model,omitempty"`
 		InputTokens         int64              `json:"input_tokens,omitempty"`
 		OutputTokens        int64              `json:"output_tokens,omitempty"`
@@ -687,12 +744,15 @@ func (t *Trace[T]) MarshalJSON() ([]byte, error) {
 		InputPrompt:         t.InputPrompt,
 		ExecContext:         t.ExecContext,
 		ToolCalls:           toolCalls,
+		Turns:               t.Turns,
 		Reasoning:           t.Reasoning,
 		Result:              t.Result,
 		Error:               errStr,
 		StartTime:           t.StartTime,
 		EndTime:             t.EndTime,
 		Metadata:            t.Metadata,
+		AgentName:           t.AgentName,
+		Source:              t.Source,
 		Model:               t.Model,
 		InputTokens:         t.InputTokens,
 		OutputTokens:        t.OutputTokens,

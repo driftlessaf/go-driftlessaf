@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -24,6 +26,11 @@ import (
 func randomString() string {
 	return fmt.Sprintf("test-%d", rand.Int63())
 }
+
+// Whole-value coverage of agent name stamping (ctx default and opt override)
+// lives in TestTraceMarshalJSON's "agent_name from ctx default" and
+// "agent_name opt overrides ctx default" cases, where it sits alongside the
+// rest of the trace shape and a single regression in newTrace fails both.
 
 func TestNewTrace(t *testing.T) {
 	prompt := randomString()
@@ -316,6 +323,52 @@ func TestLLMTurnEndIdempotent(t *testing.T) {
 	}
 
 	turn2.End()
+}
+
+// Whole-value coverage of single-turn and multi-turn append (with model,
+// system, tokens, and payloads) lives in TestTraceMarshalJSON's "single turn
+// round-trip with agent identity" and "multi-turn round-trip" cases.
+
+// ignoreTurnTimes drops the wall-clock fields from RecordedTurn diffs so
+// behavioral tests can assert whole-value on trace.Turns without flake.
+var ignoreTurnTimes = cmpopts.IgnoreFields(RecordedTurn{}, "StartTime", "EndTime")
+
+// End must be idempotent for the turn append so double-End doesn't produce
+// duplicate rows. Asserts on the whole resulting Turns slice — a regression
+// that mis-mutates index, tokens, or anything else fails the same diff.
+func TestLLMTurnEndAppendIdempotent(t *testing.T) {
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+
+	turn := trace.BeginTurn(0, "anthropic", "model")
+	turn.RecordTokens(10, 5)
+	turn.End()
+	turn.End()
+
+	want := []RecordedTurn{
+		{Index: 0, Model: "model", System: "anthropic", InputTokens: 10, OutputTokens: 5},
+	}
+	if diff := cmp.Diff(want, trace.Turns, ignoreTurnTimes); diff != "" {
+		t.Errorf("trace.Turns after double End (-want +got):\n%s", diff)
+	}
+}
+
+// A turn that ends without any RecordTokens call (e.g. the LLM returned an
+// error before token counts were known) still needs a row so the trace shows
+// the attempt and its timing — with zero token counts and no payloads.
+func TestLLMTurnEndWithoutRecordTokens(t *testing.T) {
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+
+	turn := trace.BeginTurn(0, "anthropic", "model")
+	turn.End()
+
+	want := []RecordedTurn{
+		{Index: 0, Model: "model", System: "anthropic"},
+	}
+	if diff := cmp.Diff(want, trace.Turns, ignoreTurnTimes); diff != "" {
+		t.Errorf("trace.Turns (-want +got):\n%s", diff)
+	}
 }
 
 func TestLLMTurnRecordTokens(t *testing.T) {

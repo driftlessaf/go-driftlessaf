@@ -150,6 +150,110 @@ func TestTraceMarshalJSON(t *testing.T) {
 			},
 		},
 	}, {
+		name: "agent_name from ctx default",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithDefaultAgentName(t.Context(), "materializer")
+			trace := tracer.NewTrace(ctx, "prompt")
+			trace.complete("done", nil)
+			return trace
+		},
+		// agent_name must reach the payload whenever it would reach the
+		// gen_ai.agent.name span attr — single source of truth in newTrace.
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"tool_calls":   []any{},
+			"exec_context": map[string]any{},
+			"agent_name":   "materializer",
+		},
+	}, {
+		name: "agent_name opt overrides ctx default",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			ctx := WithDefaultAgentName(t.Context(), "ctx-default")
+			trace := tracer.NewTrace(ctx, "prompt", WithAgentName("opt-override"))
+			trace.complete("done", nil)
+			return trace
+		},
+		// Explicit opt wins over ctx default — this is what the CloudEvent
+		// middleware relies on to inject a per-T agent name.
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"tool_calls":   []any{},
+			"exec_context": map[string]any{},
+			"agent_name":   "opt-override",
+		},
+	}, {
+		name: "single turn round-trip with agent identity",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), "prompt", WithAgentName("materializer"))
+			trace.Source = "octo-identity"
+			turn := trace.BeginTurn(0, "google.vertex", "gemini-2.5-flash")
+			turn.RecordTokens(100, 25)
+			turn.End()
+			trace.complete("done", nil)
+			return trace
+		},
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"tool_calls":   []any{},
+			"exec_context": map[string]any{},
+			"agent_name":   "materializer",
+			"source":       "octo-identity",
+			"turns": []any{
+				map[string]any{
+					"index":         float64(0),
+					"model":         "gemini-2.5-flash",
+					"system":        "google.vertex",
+					"input_tokens":  float64(100),
+					"output_tokens": float64(25),
+				},
+			},
+		},
+	}, {
+		name: "multi-turn round-trip preserves order and per-turn fields",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), "prompt")
+			t0 := trace.BeginTurn(0, "anthropic", "model-a")
+			t0.RecordTokens(100, 50)
+			t0.End()
+			t1 := trace.BeginTurn(1, "openai", "model-b")
+			t1.RecordTokens(200, 75)
+			t1.End()
+			trace.complete("done", nil)
+			return trace
+		},
+		// Each turn lands as its own row in append order, with its own model
+		// and tokens. This is the property BQ rows of a multi-turn trace must
+		// have so per-turn analysis works.
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"tool_calls":   []any{},
+			"exec_context": map[string]any{},
+			"turns": []any{
+				map[string]any{
+					"index":         float64(0),
+					"model":         "model-a",
+					"system":        "anthropic",
+					"input_tokens":  float64(100),
+					"output_tokens": float64(50),
+				},
+				map[string]any{
+					"index":         float64(1),
+					"model":         "model-b",
+					"system":        "openai",
+					"input_tokens":  float64(200),
+					"output_tokens": float64(75),
+				},
+			},
+		},
+	}, {
 		name: "noop provider omits otel_trace_id",
 		setup: func(t *testing.T) *Trace[string] {
 			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
