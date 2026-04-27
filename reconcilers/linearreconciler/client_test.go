@@ -261,23 +261,36 @@ func TestSensitiveHeaders_Filtered(t *testing.T) {
 	}
 }
 
-func TestFetchAttachmentContent_NoAuthToUntrustedHost(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			t.Errorf("Authorization header should not be sent to non-Linear hosts, got %q", auth)
-		}
+func TestFetchAttachmentContent_RejectsUntrustedURLs(t *testing.T) {
+	// Stand up a server that records whether it was contacted; the test
+	// expects FetchAttachmentContent to refuse before any request is sent.
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
 		w.Write([]byte(`{"state":"ok"}`))
 	}))
 	defer srv.Close()
 
 	c := NewClientWithAPIKey("secret-token")
 
-	data, err := c.FetchAttachmentContent(context.Background(), srv.URL+"/attachment.json")
-	if err != nil {
-		t.Fatalf("FetchAttachmentContent() error: %v", err)
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"http (non-https) host", srv.URL + "/attachment.json"},
+		{"non-Linear https host", "https://example.com/attachment.json"},
+		{"plain IP", "https://169.254.169.254/computeMetadata/v1/"},
+		{"file scheme", "file:///etc/passwd"},
 	}
-	if string(data) != `{"state":"ok"}` {
-		t.Errorf("data = %q, want %q", data, `{"state":"ok"}`)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := c.FetchAttachmentContent(t.Context(), tc.url); err == nil {
+				t.Errorf("FetchAttachmentContent(%q) returned nil error, want non-nil", tc.url)
+			}
+		})
+	}
+	if hits != 0 {
+		t.Errorf("test server received %d requests, want 0 (URLs should be rejected before fetch)", hits)
 	}
 }
 

@@ -543,13 +543,35 @@ func isLinearHost(host string) bool {
 	return host == "linear.app" || strings.HasSuffix(host, ".linear.app")
 }
 
+// isAllowedAttachmentURL gates which URLs FetchAttachmentContent will fetch.
+// In production this resolves to HTTPS Linear hosts only. Tests that point
+// the client at a mock server via WithEndpoint can fetch attachments from
+// that same server (matching scheme + host) without needing to weaken the
+// production allowlist.
+func (c *Client) isAllowedAttachmentURL(parsed *url.URL) bool {
+	if parsed.Scheme == "https" && isLinearHost(parsed.Hostname()) {
+		return true
+	}
+	endpointURL, err := url.Parse(c.endpoint)
+	if err != nil {
+		return false
+	}
+	return endpointURL.Scheme == parsed.Scheme && endpointURL.Host == parsed.Host
+}
+
 // FetchAttachmentContent downloads the content of a file attachment by URL.
-// The API token is only sent to trusted Linear hosts (*.linear.app) over HTTPS
-// to prevent credential leakage if an attacker controls the attachment URL.
+// To avoid Server-Side Request Forgery, only HTTPS URLs pointing at trusted
+// Linear hosts (*.linear.app), or URLs sharing the configured endpoint's
+// scheme+host, are accepted. Attachment URLs are attacker-controllable in
+// principle, so an unrestricted fetch could be coerced into reaching
+// internal services or cloud metadata endpoints.
 func (c *Client) FetchAttachmentContent(ctx context.Context, rawURL string) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing attachment URL: %w", err)
+	}
+	if !c.isAllowedAttachmentURL(parsed) {
+		return nil, fmt.Errorf("attachment URL %q is not an allowed host (allowed: *.linear.app or the configured endpoint)", rawURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -557,16 +579,14 @@ func (c *Client) FetchAttachmentContent(ctx context.Context, rawURL string) ([]b
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	if parsed.Scheme == "https" && isLinearHost(parsed.Hostname()) {
-		token, err := c.getToken(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("getting access token: %w", err)
-		}
-		if c.isAPIKey {
-			req.Header.Set("Authorization", token)
-		} else {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+	token, err := c.getToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting access token: %w", err)
+	}
+	if c.isAPIKey {
+		req.Header.Set("Authorization", token)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := c.httpClient.Do(req)

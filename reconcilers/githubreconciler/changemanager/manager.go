@@ -197,6 +197,15 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 	return cm, nil
 }
 
+// Extract returns the embedded data from a PR body. Use when you have the
+// body bytes (e.g. from go-github's PullRequests.Get) but no Session — for
+// example, when an out-of-band trigger (PR webhook, CI status event) hands
+// you a PR URL and you need to recover the originating reconciliation key.
+// Additive helper: existing Session.Extract callers are unaffected.
+func (cm *CM[T]) Extract(body string) (*T, error) {
+	return cm.templateExecutor.Extract(body)
+}
+
 // NewSession creates a new Session for the given resource.
 // It supports Path and Issue resources, constructing branch names as:
 // - Path resources: {identity}/{path}
