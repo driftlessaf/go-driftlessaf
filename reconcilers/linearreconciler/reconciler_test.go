@@ -82,8 +82,8 @@ func TestReconciler_LabelGating(t *testing.T) {
 		WithEndpoint(srv.URL)
 
 	r := &Reconciler{
-		client:        client,
-		requiredLabel: "game",
+		client:         client,
+		requiredLabels: []string{"game"},
 		reconcileFunc: func(_ context.Context, _ *Issue, _ *Client) error {
 			called.Store(true)
 			return nil
@@ -178,5 +178,111 @@ func TestWithStatePrefix_Default(t *testing.T) {
 
 	if got := client.stateAttachmentTitle(); got != "reconciler_state" {
 		t.Errorf("stateAttachmentTitle() = %q, want %q", got, "reconciler_state")
+	}
+}
+
+// newTestServerMulti creates a mock Linear GraphQL server that dispatches to
+// issuesByID based on the "id" variable in the GraphQL request.
+func newTestServerMulti(t *testing.T, issuesByID map[string]*Issue) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		var resp any
+
+		switch {
+		case containsSubstring(req.Query, "viewer"):
+			resp = map[string]any{
+				"viewer": map[string]any{"id": "bot-1", "name": "Test Bot"},
+			}
+		case containsSubstring(req.Query, "issue"):
+			id, _ := req.Variables["id"].(string)
+			issue, ok := issuesByID[id]
+			if !ok {
+				http.Error(w, "issue not found", http.StatusNotFound)
+				return
+			}
+			resp = map[string]any{"issue": issue}
+		default:
+			http.Error(w, "unknown query", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": resp})
+	}))
+}
+
+func TestReconcile_MultipleRequiredLabels_AnyMatch(t *testing.T) {
+	makeIssue := func(id, identifier, label string) *Issue {
+		issue := &Issue{
+			ID:         id,
+			Identifier: identifier,
+			Title:      "Issue " + identifier,
+		}
+		issue.Labels.Nodes = []struct {
+			Name string `json:"name"`
+		}{{Name: label}}
+		issue.Team.Key = "ENG"
+		return issue
+	}
+
+	alphaIssue := makeIssue("issue-alpha", "TEST-A", "alpha")
+	betaIssue := makeIssue("issue-beta", "TEST-B", "beta")
+	gammaIssue := makeIssue("issue-gamma", "TEST-G", "gamma")
+
+	srv := newTestServerMulti(t, map[string]*Issue{
+		"issue-alpha": alphaIssue,
+		"issue-beta":  betaIssue,
+		"issue-gamma": gammaIssue,
+	})
+	defer srv.Close()
+
+	client := NewClientWithAPIKey("test-key").
+		WithHTTPClient(srv.Client()).
+		WithEndpoint(srv.URL)
+
+	var callCount atomic.Int32
+	r := &Reconciler{
+		client:         client,
+		requiredLabels: []string{"alpha", "beta"},
+		reconcileFunc: func(_ context.Context, _ *Issue, _ *Client) error {
+			callCount.Add(1)
+			return nil
+		},
+	}
+	r.client.BotUserID = "bot-1"
+
+	ctx := t.Context()
+
+	// alpha issue has label "alpha" — should be accepted.
+	if err := r.Reconcile(ctx, "issue-alpha"); err != nil {
+		t.Fatalf("Reconcile(alpha) unexpected error: %v", err)
+	}
+	if got := callCount.Load(); got != 1 {
+		t.Errorf("after alpha: reconcileFunc call count = %d, want 1", got)
+	}
+
+	// beta issue has label "beta" — should be accepted.
+	if err := r.Reconcile(ctx, "issue-beta"); err != nil {
+		t.Fatalf("Reconcile(beta) unexpected error: %v", err)
+	}
+	if got := callCount.Load(); got != 2 {
+		t.Errorf("after beta: reconcileFunc call count = %d, want 2", got)
+	}
+
+	// gamma issue has label "gamma" — should be filtered out.
+	if err := r.Reconcile(ctx, "issue-gamma"); err != nil {
+		t.Fatalf("Reconcile(gamma) unexpected error: %v", err)
+	}
+	if got := callCount.Load(); got != 2 {
+		t.Errorf("after gamma: reconcileFunc call count = %d, want 2 (gamma should be skipped)", got)
 	}
 }

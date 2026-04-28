@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"time"
 
 	"chainguard.dev/driftlessaf/workqueue"
@@ -28,8 +29,8 @@ type Reconciler struct {
 	reconcileFunc ReconcilerFunc
 	client        *Client
 
-	requiredLabel string
-	teamFilter    string
+	requiredLabels []string
+	teamFilter     string
 }
 
 // Option configures a Reconciler.
@@ -42,11 +43,15 @@ func WithReconciler(f ReconcilerFunc) Option {
 	}
 }
 
-// WithRequiredLabel configures a label gate: issues without this label are
-// skipped (returns success without calling ReconcilerFunc).
-func WithRequiredLabel(label string) Option {
+// WithRequiredLabel configures a label gate: issues without any of the
+// specified labels are skipped (returns success without calling
+// ReconcilerFunc). Multiple labels are combined with OR semantics — an
+// issue is accepted if it has at least one of the given labels.
+//
+// Backward-compatible: callers passing a single label still work.
+func WithRequiredLabel(labels ...string) Option {
 	return func(r *Reconciler) {
-		r.requiredLabel = label
+		r.requiredLabels = append(r.requiredLabels, labels...)
 	}
 }
 
@@ -107,8 +112,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
 	log := clog.FromContext(ctx).With("identifier", issue.Identifier, "title", issue.Title)
 
-	if r.requiredLabel != "" && !issue.HasLabel(r.requiredLabel) {
-		log.Infof("Issue missing required label %q, skipping", r.requiredLabel)
+	if len(r.requiredLabels) > 0 && !slices.ContainsFunc(r.requiredLabels, issue.HasLabel) {
+		log.With("required_labels", r.requiredLabels).Infof("Issue missing all required labels, skipping")
 		return nil
 	}
 
