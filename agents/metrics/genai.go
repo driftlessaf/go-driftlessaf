@@ -38,6 +38,12 @@ type GenAI struct {
 	agentTurns metric.Int64Histogram
 	// turnLimitExceeded counts executions aborted by the maxTurns hard limit.
 	turnLimitExceeded metric.Int64Counter
+	// apiRequests counts every LLM API attempt with a response_code attribute,
+	// so 200/429/529/5xx all fall out of the same series. Mirrors the shape of
+	// serviceruntime.googleapis.com/api/request_count but on our side of the
+	// wire — and crucially carries the resource-label attributes
+	// (service_name, agent_name, model_name) that the GCP-side metric lacks.
+	apiRequests metric.Int64Counter
 }
 
 // NewGenAI creates a new GenAI metrics instance with the specified meter name.
@@ -110,6 +116,15 @@ func NewGenAI(meterName string) *GenAI {
 		turnLimitExceeded = noop.Int64Counter{}
 	}
 
+	apiRequests, err := meter.Int64Counter("genai.api.requests",
+		metric.WithDescription("LLM API request attempts, labeled by HTTP response code"),
+		metric.WithUnit("{requests}"),
+	)
+	if err != nil {
+		clog.WarnContext(context.Background(), "Failed to create api requests counter, metrics will be disabled", "error", err, "meter", meterName)
+		apiRequests = noop.Int64Counter{}
+	}
+
 	return &GenAI{
 		meter:             meter,
 		promptTokens:      promptTokens,
@@ -118,6 +133,7 @@ func NewGenAI(meterName string) *GenAI {
 		semconvTokenUsage: semconvTokenUsage,
 		agentTurns:        agentTurns,
 		turnLimitExceeded: turnLimitExceeded,
+		apiRequests:       apiRequests,
 	}
 }
 
@@ -192,6 +208,24 @@ func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attr
 	baseAttrs = append(baseAttrs, attrs...)
 
 	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
+}
+
+// RecordAPIRequest counts a single LLM API attempt. Each retry inside an in-process
+// retry loop should call this once with the responseCode it observed — successes
+// pass "200", rate-limit failures pass "429", overloaded failures pass "529", and
+// errors that don't carry an HTTP status pass "unknown". This shape mirrors
+// serviceruntime.googleapis.com/api/request_count's response_code label so PromQL
+// on this metric reads the same as MQL on the GCP-side equivalent.
+func (m *GenAI) RecordAPIRequest(ctx context.Context, model, responseCode string, attrs ...attribute.KeyValue) {
+	baseAttrs := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("gen_ai.request.model", model),
+		attribute.String("response_code", responseCode),
+	}
+	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = append(baseAttrs, attrs...)
+
+	m.apiRequests.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
 }
 
 // RecordTurns records the number of LLM round-trips consumed by an agent execution.

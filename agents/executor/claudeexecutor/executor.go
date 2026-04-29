@@ -357,8 +357,11 @@ func (e *executor[Request, Response]) Execute(
 		// Per-turn retry config wires transient API errors that the retry
 		// recovers from into the turn's Errors list. Without this, retries
 		// that eventually succeed leave no trace of the transients in BQ.
+		// Also count every retried attempt in genai.api.requests; the final
+		// attempt is counted after RetryWithBackoff returns below.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
+		turnCfg = e.withAPIRequestCounter(ctx, turnCfg)
 
 		// Stream response with retry for transient errors
 		message, err := retry.RetryWithBackoff(ctx, turnCfg, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
@@ -375,6 +378,7 @@ func (e *executor[Request, Response]) Execute(
 			}
 			return msg, nil
 		})
+		e.recordAPIRequest(ctx, err)
 		if err != nil {
 			// If the error is a retryable Claude API error (429, 503, 504, 529) that
 			// exhausted inner retries, signal the workqueue to back off instead of
@@ -563,6 +567,32 @@ func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int
 	attrs := e.resourceLabelsToAttributes()
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
 	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
+}
+
+// recordAPIRequest counts a single Claude API attempt with a response_code
+// derived from err. Call this after every retry-wrapped API call (whether the
+// final outcome was success, retryable failure, or non-retryable failure) so
+// the counter sees one increment per HTTP attempt.
+func (e *executor[Request, Response]) recordAPIRequest(ctx context.Context, err error) {
+	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	e.genaiMetrics.RecordAPIRequest(ctx, e.modelName, responseCodeAttr(responseCodeFromError(err)), attrs...)
+}
+
+// withAPIRequestCounter extends cfg.OnAttemptError to also count each retried
+// API attempt in genai.api.requests. The retry loop only invokes
+// OnAttemptError for retryable errors that will be retried, so this captures
+// the intermediate attempts that retry.RetryWithBackoff would otherwise hide;
+// the final attempt is counted by the caller after RetryWithBackoff returns.
+func (e *executor[Request, Response]) withAPIRequestCounter(ctx context.Context, cfg retry.RetryConfig) retry.RetryConfig {
+	base := cfg.OnAttemptError
+	cfg.OnAttemptError = func(err error) {
+		if base != nil {
+			base(err)
+		}
+		e.recordAPIRequest(ctx, err)
+	}
+	return cfg
 }
 
 // supportsSamplingParams reports whether the Anthropic API accepts the

@@ -65,6 +65,27 @@ func ExampleGenAI_RecordToolCall() {
 	// Tool call metrics recorded
 }
 
+// ExampleGenAI_RecordAPIRequest demonstrates counting LLM API attempts by response code.
+func ExampleGenAI_RecordAPIRequest() {
+	ctx := context.Background()
+	m := metrics.NewGenAI("chainguard.ai.agents")
+
+	// Record a successful API call
+	m.RecordAPIRequest(ctx, "gemini-2.5-flash", "200")
+
+	// Record a rate-limited API call with provider attribution
+	m.RecordAPIRequest(ctx, "gemini-2.5-flash", "429",
+		attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
+
+	// Record an error without an HTTP status
+	m.RecordAPIRequest(ctx, "claude-sonnet-4", "unknown")
+
+	fmt.Println("API request metrics recorded")
+
+	// Output:
+	// API request metrics recorded
+}
+
 // ExampleGenAI_multipleModels demonstrates tracking metrics across different models.
 func ExampleGenAI_multipleModels() {
 	ctx := context.Background()

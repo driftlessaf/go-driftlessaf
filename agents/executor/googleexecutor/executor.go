@@ -315,9 +315,10 @@ func (e *executor[Request, Response]) Execute(
 
 	// Send final message to get response with retry for transient errors
 	clog.InfoContext(ctx, "Sending final message")
-	response, err := retry.RetryWithBackoff(ctx, e.retryConfig, "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+	response, err := retry.RetryWithBackoff(ctx, e.withAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 		return chat.Send(ctx, history[len(history)-1].Parts...)
 	})
+	e.recordAPIRequest(ctx, err)
 	if err != nil {
 		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 			return resp, requeueErr
@@ -351,8 +352,11 @@ func (e *executor[Request, Response]) Execute(
 		// recovers from into the turn's Errors list. Without this, retries
 		// that eventually succeed leave no trace of the transients in BQ.
 		// Used by all three in-turn retry call sites below.
+		// Also count every retried attempt in genai.api.requests; the final
+		// attempt is counted by each call site below after RetryWithBackoff.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
+		turnCfg = e.withAPIRequestCounter(ctx, turnCfg)
 
 		// Record tokens for the response being processed in this turn.
 		// Unlike claude/openai executors (which record tokens right after
@@ -391,6 +395,7 @@ func (e *executor[Request, Response]) Execute(
 			retryResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_malformed_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, retryMsg)
 			})
+			e.recordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -491,6 +496,7 @@ func (e *executor[Request, Response]) Execute(
 			nextResponse, err := retry.RetryWithBackoff(ctx, turnCfg, "send_tool_responses", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 				return chat.Send(ctx, toolResponseParts...)
 			})
+			e.recordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -518,6 +524,7 @@ func (e *executor[Request, Response]) Execute(
 					Text: "You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary.",
 				})
 			})
+			e.recordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -590,6 +597,10 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 		TTL:               e.cacheTTL,
 		DisplayName:       fmt.Sprintf("driftlessaf-%s", e.model),
 	})
+	// Caches.Create is a Vertex API call subject to the same quotas as
+	// chat.Send; count it on the same counter so a cache-creation 429 storm
+	// shows up on the rate-limit dashboard alongside chat-send 429s.
+	e.recordAPIRequest(ctx, err)
 	if err != nil {
 		return "", fmt.Errorf("creating cached content: %w", err)
 	}
@@ -673,4 +684,32 @@ func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int
 	attrs := e.resourceLabelsToAttributes()
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
 	e.genaiMetrics.RecordTurns(ctx, e.model, turns, limitExceeded, attrs...)
+}
+
+// recordAPIRequest counts a single Vertex API attempt with a response_code
+// derived from err. Call this after every retry-wrapped API call (whether the
+// final outcome was success, retryable failure, or non-retryable failure) so
+// the counter sees one increment per HTTP attempt — matching what GCP's
+// serviceruntime metric sees on its side of the wire.
+func (e *executor[Request, Response]) recordAPIRequest(ctx context.Context, err error) {
+	attrs := e.resourceLabelsToAttributes()
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
+	e.genaiMetrics.RecordAPIRequest(ctx, e.model, responseCodeAttr(responseCodeFromError(err)), attrs...)
+}
+
+// withAPIRequestCounter extends cfg.OnAttemptError to also count each retried
+// API attempt in genai.api.requests. The retry loop only invokes
+// OnAttemptError for retryable errors that will be retried, so this captures
+// the intermediate attempts that retry.RetryWithBackoff would otherwise hide;
+// the final attempt is counted by the caller after RetryWithBackoff returns.
+// Together they give exactly one increment per HTTP attempt.
+func (e *executor[Request, Response]) withAPIRequestCounter(ctx context.Context, cfg retry.RetryConfig) retry.RetryConfig {
+	base := cfg.OnAttemptError
+	cfg.OnAttemptError = func(err error) {
+		if base != nil {
+			base(err)
+		}
+		e.recordAPIRequest(ctx, err)
+	}
+	return cfg
 }

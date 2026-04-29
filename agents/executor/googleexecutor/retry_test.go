@@ -11,6 +11,9 @@ import (
 	"net/http"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/metrics"
+	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"google.golang.org/api/googleapi"
 )
 
@@ -46,6 +49,10 @@ func TestIsRetryableVertexError(t *testing.T) {
 		{name: "auth error string", err: errors.New("authentication failed"), want: false},
 		{name: "UNAVAILABLE string", err: errors.New("Error 503, Message: Visibility check was unavailable. Please retry the request, Status: UNAVAILABLE, Details: []"), want: true},
 		{name: "unavailable lowercase string", err: errors.New("service unavailable: please retry"), want: true},
+		// Structured codes whose message text matches a transient keyword
+		// must still retry: a real Vertex 529 always carries "Overloaded".
+		{name: "structured 401 with retryable message", err: &googleapi.Error{Code: http.StatusUnauthorized, Message: "rate limit"}, want: true},
+		{name: "structured 529 falls through on Overloaded", err: &googleapi.Error{Code: 529, Message: "Overloaded"}, want: true},
 	}
 
 	for _, tt := range tests {
@@ -53,6 +60,91 @@ func TestIsRetryableVertexError(t *testing.T) {
 			t.Parallel()
 			if got := isRetryableVertexError(tt.err); got != tt.want {
 				t.Errorf("isRetryableVertexError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResponseCodeFromError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "nil error maps to 0", err: nil, want: 0},
+		// googleapi.Error: code copied verbatim
+		{name: "429 googleapi", err: &googleapi.Error{Code: http.StatusTooManyRequests}, want: 429},
+		{name: "500 googleapi", err: &googleapi.Error{Code: http.StatusInternalServerError}, want: 500},
+		{name: "529 googleapi", err: &googleapi.Error{Code: 529}, want: 529},
+		{name: "403 googleapi", err: &googleapi.Error{Code: http.StatusForbidden}, want: 403},
+		{name: "wrapped 429 googleapi", err: fmt.Errorf("send: %w", &googleapi.Error{Code: http.StatusTooManyRequests}), want: 429},
+		// gRPC string fallbacks
+		{name: "RESOURCE_EXHAUSTED", err: errors.New("rpc error: code = ResourceExhausted desc = quota"), want: 429},
+		{name: "rate limit", err: errors.New("rate limit exceeded"), want: 429},
+		{name: "Overloaded", err: errors.New("model Overloaded, try again"), want: 529},
+		{name: "UNAVAILABLE", err: errors.New("Status: UNAVAILABLE, Details: []"), want: 503},
+		{name: "CANCELLED", err: errors.New("rpc error: code = CANCELLED"), want: 499},
+		{name: "Internal error", err: errors.New("Internal error occurred"), want: 500},
+		// Unrecognised → -1, surfaced as "unknown" by responseCodeAttr
+		{name: "opaque error maps to -1", err: errors.New("something weird happened"), want: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := responseCodeFromError(tt.err); got != tt.want {
+				t.Errorf("responseCodeFromError(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResponseCodeFromMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		s    string
+		want int
+	}{
+		{name: "RESOURCE_EXHAUSTED", s: "rpc error: code = ResourceExhausted desc = quota", want: 429},
+		{name: "rate limit", s: "rate limit exceeded", want: 429},
+		{name: "Overloaded", s: "model Overloaded, try again", want: 529},
+		{name: "UNAVAILABLE", s: "Status: UNAVAILABLE", want: 503},
+		{name: "unavailable lowercase", s: "service unavailable", want: 503},
+		{name: "CANCELLED", s: "rpc error: code = CANCELLED", want: 499},
+		{name: "Internal error", s: "Internal error occurred", want: 500},
+		{name: "server error", s: "server error: please retry", want: 500},
+		{name: "no match", s: "permission denied", want: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := responseCodeFromMessage(tt.s); got != tt.want {
+				t.Errorf("responseCodeFromMessage(%q) = %d, want %d", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResponseCodeAttr(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		code int
+		want string
+	}{
+		{name: "0 is success", code: 0, want: "200"},
+		{name: "negative is unknown", code: -1, want: "unknown"},
+		{name: "429", code: 429, want: "429"},
+		{name: "503", code: 503, want: "503"},
+		{name: "529", code: 529, want: "529"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := responseCodeAttr(tt.code); got != tt.want {
+				t.Errorf("responseCodeAttr(%d) = %q, want %q", tt.code, got, tt.want)
 			}
 		})
 	}
@@ -80,4 +172,47 @@ func TestIsRetryableVertexError_WrappedError(t *testing.T) {
 			t.Error("isRetryableVertexError() = false, want true for wrapped ResourceExhausted error")
 		}
 	})
+}
+
+// TestWithAPIRequestCounter_PreservesBaseCallback locks in the composition
+// behaviour of withAPIRequestCounter: it must wrap the existing
+// OnAttemptError, not overwrite it. Per-attempt trace recording relies on
+// the original callback continuing to fire, so a future edit that drops the
+// chaining would silently break llmTurn error capture.
+func TestWithAPIRequestCounter_PreservesBaseCallback(t *testing.T) {
+	t.Parallel()
+
+	e := &executor[promptbuilder.Noop, struct{}]{
+		genaiMetrics: metrics.NewGenAI("test"),
+		model:        "gemini-test",
+	}
+	var got []error
+	cfg := retry.RetryConfig{
+		OnAttemptError: func(err error) { got = append(got, err) },
+	}
+	wrapped := e.withAPIRequestCounter(t.Context(), cfg)
+
+	sentinel := errors.New("transient")
+	wrapped.OnAttemptError(sentinel)
+
+	if len(got) != 1 || !errors.Is(got[0], sentinel) {
+		t.Errorf("base OnAttemptError not invoked: got %v, want one call with sentinel", got)
+	}
+}
+
+// TestWithAPIRequestCounter_NilBase ensures the wrapper handles configs
+// that don't set OnAttemptError (the outer retry call site uses one). It
+// must not panic and must still record the API request.
+func TestWithAPIRequestCounter_NilBase(t *testing.T) {
+	t.Parallel()
+
+	e := &executor[promptbuilder.Noop, struct{}]{
+		genaiMetrics: metrics.NewGenAI("test"),
+		model:        "gemini-test",
+	}
+	cfg := retry.RetryConfig{} // OnAttemptError is nil
+	wrapped := e.withAPIRequestCounter(t.Context(), cfg)
+
+	// Must not panic.
+	wrapped.OnAttemptError(errors.New("boom"))
 }
