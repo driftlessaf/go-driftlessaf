@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/workqueue"
+	"github.com/chainguard-dev/clog"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -148,6 +149,7 @@ func (s *Sharder) Process(ctx context.Context, period time.Duration, keys map[st
 			}); err != nil {
 				return fmt.Errorf("enqueue %q: %w", key, err)
 			}
+			clog.InfoContextf(egCtx, "enqueued %q at %s", key, target.Format(time.RFC3339))
 			return nil
 		})
 	}
