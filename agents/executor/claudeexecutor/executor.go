@@ -407,7 +407,7 @@ func (e *executor[Request, Response]) Execute(
 			if cacheRead > 0 || cacheCreation > 0 {
 				e.recordCacheMetrics(ctx, cacheRead, cacheCreation)
 				trace.RecordCacheTokenUsage(cacheRead, cacheCreation)
-				clog.InfoContext(ctx, "Prompt cache metrics",
+				clog.DebugContext(ctx, "Prompt cache metrics",
 					"cache_read_tokens", cacheRead,
 					"cache_creation_tokens", cacheCreation)
 			}

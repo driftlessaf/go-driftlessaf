@@ -659,7 +659,7 @@ func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, tr
 	if e.cacheControl && usage.CachedContentTokenCount > 0 {
 		e.recordCacheMetrics(ctx, int64(usage.CachedContentTokenCount), 0)
 		trace.RecordCacheTokenUsage(int64(usage.CachedContentTokenCount), 0)
-		clog.InfoContext(ctx, "Prompt cache metrics",
+		clog.DebugContext(ctx, "Prompt cache metrics",
 			"cache_read_tokens", usage.CachedContentTokenCount)
 	}
 }
