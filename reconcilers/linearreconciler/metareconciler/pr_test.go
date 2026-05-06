@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -42,6 +43,27 @@ type linearStateFixture struct {
 	issue          *linearreconciler.Issue
 	lastSavedState atomic.Pointer[[]byte]
 	saveCount      atomic.Int32
+
+	// callOrder records the sequence of side-effecting operations the
+	// fixture observes. "comment" appended on commentCreate/commentUpdate
+	// GraphQL mutations, "save" appended on the upload PUT. Lets tests
+	// assert ordering invariants between UpsertBotComment and Save.
+	callOrderMu sync.Mutex
+	callOrder   []string
+}
+
+func (f *linearStateFixture) recordCall(name string) {
+	f.callOrderMu.Lock()
+	defer f.callOrderMu.Unlock()
+	f.callOrder = append(f.callOrder, name)
+}
+
+func (f *linearStateFixture) getCallOrder() []string {
+	f.callOrderMu.Lock()
+	defer f.callOrderMu.Unlock()
+	out := make([]string, len(f.callOrder))
+	copy(out, f.callOrder)
+	return out
 }
 
 func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFixture {
@@ -70,6 +92,7 @@ func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFi
 		bcopy := append([]byte(nil), body...)
 		f.lastSavedState.Store(&bcopy)
 		f.saveCount.Add(1)
+		f.recordCall("save")
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +105,17 @@ func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFi
 			return
 		}
 		var data any
+		// Match more-specific mutations before generic substring checks
+		// like "issue" (which would also match "issueId" parameters).
 		switch {
+		case strings.Contains(req.Query, "commentCreate"):
+			f.recordCall("comment")
+			data = map[string]any{"commentCreate": map[string]any{"success": true, "comment": map[string]any{"id": "comment-1"}}}
+		case strings.Contains(req.Query, "commentUpdate"):
+			f.recordCall("comment")
+			data = map[string]any{"commentUpdate": map[string]any{"success": true, "comment": map[string]any{"id": "comment-1"}}}
 		case strings.Contains(req.Query, "viewer"):
 			data = map[string]any{"viewer": map[string]any{"id": "bot-1", "name": "Test Bot"}}
-		case strings.Contains(req.Query, "issue"):
-			// Lazy: f.issue is set below after the server URL is known.
-			data = map[string]any{"issue": f.issue}
 		case strings.Contains(req.Query, "fileUpload"):
 			data = map[string]any{"fileUpload": map[string]any{"uploadFile": map[string]any{
 				"uploadUrl": f.server.URL + "/upload",
@@ -98,6 +126,9 @@ func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFi
 			data = map[string]any{"attachmentDelete": map[string]any{"success": true}}
 		case strings.Contains(req.Query, "attachmentCreate"):
 			data = map[string]any{"attachmentCreate": map[string]any{"success": true}}
+		case strings.Contains(req.Query, "issue"):
+			// Lazy: f.issue is set below after the server URL is known.
+			data = map[string]any{"issue": f.issue}
 		default:
 			data = map[string]any{}
 		}
@@ -224,5 +255,26 @@ func TestDispatchMergedOrRequeue(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStateTypeConstants_MatchLinearEnum prevents a regression where the
+// stateTypeCanceled constant carried British "cancelled" spelling while
+// Linear's GraphQL API returns the American "canceled" — the gate at
+// reconcileIssue:45 silently never fired for cancelled issues, so an
+// issue cancelled in Linear could still trigger PR creation. Linear's
+// WorkflowStateType enum is fixed; if this test fails, the constants
+// have drifted from the API contract and the gate is broken again.
+//
+// See https://developers.linear.app/docs/graphql/working-with-the-graphql-api/workflow-states
+func TestStateTypeConstants_MatchLinearEnum(t *testing.T) {
+	cases := map[string]string{
+		"completed": stateTypeCompleted,
+		"canceled":  stateTypeCanceled,
+	}
+	for want, got := range cases {
+		if got != want {
+			t.Errorf("constant for Linear state %q: got = %q, want = %q (must match Linear's GraphQL WorkflowStateType enum exactly)", want, got, want)
+		}
 	}
 }

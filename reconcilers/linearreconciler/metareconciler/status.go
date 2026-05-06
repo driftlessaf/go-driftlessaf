@@ -5,7 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 package metareconciler
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Status is a Linear-issue-driven reconciler's progress state on an issue. It
 // is a distinct string type so callers cannot assign arbitrary strings (typos
@@ -34,6 +37,13 @@ const (
 	// FailureModePRClosed means a human closed the PR without merging it,
 	// abandoning the work.
 	FailureModePRClosed FailureMode = "pr_closed"
+	// FailureModeNoDiff means the agent ran successfully but produced no
+	// changes (clean working tree). Treated as terminal because retrying
+	// without external input (an issue description edit, a comment, etc.)
+	// would just reproduce the same no-op. Operators can re-trigger by
+	// editing the issue description, which the framework picks up via
+	// TriggerDescriptionEditIteration.
+	FailureModeNoDiff FailureMode = "no_diff"
 )
 
 // Trigger values the framework records on State.History entries.
@@ -66,6 +76,11 @@ const (
 	// closed-without-merge PR; the issue transitions to StatusFailed with
 	// FailureModePRClosed.
 	TriggerPRClosed = "pr_closed"
+	// TriggerNoDiff is the trigger recorded when the agent completes with
+	// a clean working tree; the issue transitions to StatusFailed with
+	// FailureModeNoDiff. The agent's intended commit message is captured
+	// on the StateTransition's Note field for operator visibility.
+	TriggerNoDiff = "no_diff"
 )
 
 // State is the framework's persistent state-machine record for a single
@@ -76,12 +91,31 @@ const (
 //
 // History is appended automatically by StateManager.Save when Status or
 // FailureMode changes — callers do not write to it directly.
+//
+// IssueID and IssueURL are framework-managed: StateManager.Save injects
+// them on every save (captured from the Linear *Issue at NewStateManager
+// time) so downstream consumers reading the attachment have everything
+// needed to render a clickable Linear link without an extra API call.
+// Bots never set these themselves; on Load they're populated automatically
+// by JSON deserialization.
 type State struct {
+	IssueID     string            `json:"issue_id,omitempty"`
+	IssueURL    string            `json:"issue_url,omitempty"`
 	PRURL       string            `json:"pr_url,omitempty"`
 	Status      Status            `json:"status,omitempty"`
 	FailureMode FailureMode       `json:"failure_mode,omitempty"`
 	History     []StateTransition `json:"history,omitempty"`
 }
+
+// SetIssueID sets the Linear issue UUID. Part of the StateMachine interface.
+// Called by StateManager.Save with the value captured at NewStateManager
+// time; bots never invoke this directly.
+func (s *State) SetIssueID(id string) { s.IssueID = id }
+
+// SetIssueURL sets the canonical Linear issue URL. Part of the StateMachine
+// interface. Called by StateManager.Save with the value captured at
+// NewStateManager time; bots never invoke this directly.
+func (s *State) SetIssueURL(u string) { s.IssueURL = u }
 
 // GetStatus returns the current Status. Part of the StateMachine interface.
 func (s *State) GetStatus() Status { return s.Status }
@@ -121,6 +155,40 @@ func (s *State) AppendHistory(t StateTransition) {
 	}
 }
 
+// GetHistory returns the History slice. Part of the StateMachine interface.
+// Used by StateManager's post-save hook to surface the just-appended
+// StateTransition without re-querying the attachment.
+func (s *State) GetHistory() []StateTransition { return s.History }
+
+// BeforeSave is called by StateManager.Save immediately before each persist,
+// after the framework has set its own fields (Status, PRURL, IssueID/URL)
+// and before the dirty check. The default implementation is a no-op
+// returning false.
+//
+// Bots that add wrapper-specific fields to their embedded-State struct can
+// shadow this method on their wrapper to populate those fields from
+// reconcile context (e.g. trigger via TriggerFromContext, actor via
+// ActorFromContext, current time). BeforeSave should mutate only
+// wrapper-specific fields, never the framework state-machine fields owned
+// by SetStatus/SetPRURL/SetFailureMode — those are driven by the
+// reconcile flow.
+//
+// The return value controls whether the mutation forces a Linear save:
+//
+//   - return false: cosmetic / observability-only mutation. The Linear
+//     attachment is not written unless something else (Status, FailureMode,
+//     or PRURL) also changed; the post-save callback fires either way so
+//     downstream mirrors capture the new field values.
+//   - return true: meaningful enough to persist on Linear even when no
+//     framework-tracked field changed. Use sparingly — every true return is
+//     an extra Linear write.
+//
+// Method shadowing in Go: when a bot's wrapper struct value-embeds State
+// and defines its own BeforeSave method on the wrapper, that method is
+// chosen by the StateMachine interface dispatch instead of this default.
+// Bots that don't shadow get the no-op for free.
+func (s *State) BeforeSave(_ context.Context) bool { return false }
+
 // StateMachine is the contract a bot's State type must satisfy to be managed
 // by StateManager. It is satisfied automatically when a bot's wrapper struct
 // value-embeds State (or pointer-embeds *State).
@@ -132,6 +200,20 @@ type StateMachine interface {
 	GetFailureMode() FailureMode
 	SetFailureMode(FailureMode)
 	AppendHistory(StateTransition)
+	GetHistory() []StateTransition
+	// SetIssueID and SetIssueURL are called by StateManager.Save before
+	// every persist, with values captured from the *Issue at
+	// NewStateManager time. Bots never call these themselves — when a
+	// bot's wrapper value-embeds State, the methods are promoted and
+	// satisfied automatically.
+	SetIssueID(string)
+	SetIssueURL(string)
+	// BeforeSave is called by StateManager.Save immediately before each
+	// persist; bots populate wrapper-specific fields here. The default
+	// no-op on State is satisfied automatically via embedding; bots that
+	// need custom behavior shadow it on their wrapper. See State.BeforeSave
+	// for return-value semantics.
+	BeforeSave(context.Context) bool
 }
 
 // StateConstraint is the generic constraint linking a value type T to its

@@ -39,6 +39,10 @@ type Issue struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	UpdatedAt   string `json:"updatedAt"`
+	// URL is the canonical Linear-hosted URL for the issue (e.g.
+	// "https://linear.app/{workspace}/issue/{identifier}"). Populated by
+	// GetIssue.
+	URL string `json:"url"`
 
 	State struct {
 		Name string `json:"name"`

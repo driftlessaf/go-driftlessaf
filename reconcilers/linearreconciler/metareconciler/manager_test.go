@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package metareconciler
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -130,6 +131,57 @@ func TestStateManager_FromActiveToFailed(t *testing.T) {
 	}
 	if saved.History[0].Mode != FailureModePRClosed {
 		t.Errorf("History[0].Mode: got = %q, want = %q", saved.History[0].Mode, FailureModePRClosed)
+	}
+}
+
+// TestStateManager_FromActiveToFailedNoDiff covers the no_diff terminal
+// path added for the empty-commit-retry-loop bug: when the agent runs
+// but produces no changes, the framework transitions State to
+// StatusFailed + FailureModeNoDiff. The structured FailureMode is what
+// downstream consumers match on to surface the "agent ran but had
+// nothing to do" outcome instead of a stuck-active retry storm.
+func TestStateManager_FromActiveToFailedNoDiff(t *testing.T) {
+	f := newLinearStateFixture(t, `{"pr_url":"","status":"active"}`)
+	r := newReconcilerForFixture(t, f)
+	mgr := r.NewStateManager(f.issue)
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	s.SetStatus(StatusFailed)
+	s.SetFailureMode(FailureModeNoDiff)
+
+	ctx := WithActor(t.Context(), testActor)
+	ctx = WithTrigger(ctx, TriggerNoDiff)
+	changed, err := mgr.Save(ctx, s)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if !changed {
+		t.Fatalf("changed: got = false, want = true")
+	}
+
+	var saved State
+	loadSavedState(t, f, &saved)
+	if saved.Status != StatusFailed {
+		t.Errorf("Status: got = %q, want = %q", saved.Status, StatusFailed)
+	}
+	if saved.FailureMode != FailureModeNoDiff {
+		t.Errorf("FailureMode: got = %q, want = %q", saved.FailureMode, FailureModeNoDiff)
+	}
+	if got, want := len(saved.History), 1; got != want {
+		t.Fatalf("History len: got = %d, want = %d", got, want)
+	}
+	entry := saved.History[0]
+	if entry.From != StatusActive || entry.To != StatusFailed {
+		t.Errorf("History[0] from/to: got = %q→%q, want = %q→%q", entry.From, entry.To, StatusActive, StatusFailed)
+	}
+	if entry.Trigger != TriggerNoDiff {
+		t.Errorf("History[0].Trigger: got = %q, want = %q", entry.Trigger, TriggerNoDiff)
+	}
+	if entry.Mode != FailureModeNoDiff {
+		t.Errorf("History[0].Mode: got = %q, want = %q", entry.Mode, FailureModeNoDiff)
 	}
 }
 
@@ -378,5 +430,268 @@ func TestStateManager_PreservesBotFields(t *testing.T) {
 	}
 	if saved.Status != StatusComplete {
 		t.Errorf("Status: got = %q, want = %q", saved.Status, StatusComplete)
+	}
+}
+
+// TestStateManager_InjectsIssueIDAndURLOnSave verifies that StateManager
+// captures issue.ID and issue.URL at construction and writes them into the
+// persisted state on every save, regardless of whether the bot touched
+// them. Bots get a self-contained attachment for free.
+func TestStateManager_InjectsIssueIDAndURLOnSave(t *testing.T) {
+	f := newLinearStateFixture(t, `{"status":"active"}`)
+	f.issue.URL = "https://linear.app/example/issue/ENG-1"
+	r := newReconcilerForFixture(t, f)
+	mgr := r.NewStateManager(f.issue)
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	s.SetStatus(StatusComplete)
+
+	ctx := WithActor(t.Context(), testActor)
+	ctx = WithTrigger(ctx, TriggerPRMerge)
+	if _, err := mgr.Save(ctx, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var saved State
+	loadSavedState(t, f, &saved)
+	if saved.IssueID != f.issue.ID {
+		t.Errorf("IssueID: got = %q, want = %q", saved.IssueID, f.issue.ID)
+	}
+	if saved.IssueURL != f.issue.URL {
+		t.Errorf("IssueURL: got = %q, want = %q", saved.IssueURL, f.issue.URL)
+	}
+}
+
+// TestStateManager_SaveCallback_FiresWithStateJSONAndIssueID covers the
+// post-save hook surface that downstream consumers plug into. The callback
+// must fire on every successful save, receive the linear issue ID, and the
+// marshaled bot State (post-Set of framework-managed IssueID/IssueURL).
+func TestStateManager_SaveCallback_FiresWithStateJSONAndIssueID(t *testing.T) {
+	f := newLinearStateFixture(t, `{"status":"active"}`)
+	f.issue.URL = "https://linear.app/example/issue/ENG-1"
+	r := newReconcilerForFixture(t, f)
+
+	type capture struct {
+		issueID string
+		raw     []byte
+		fired   int
+	}
+	var got capture
+	mgr := r.NewStateManager(f.issue).SetSaveCallback(func(_ context.Context, issueID string, stateJSON []byte) {
+		got.issueID = issueID
+		got.raw = stateJSON
+		got.fired++
+	})
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	s.SetStatus(StatusComplete)
+
+	ctx := WithActor(t.Context(), testActor)
+	ctx = WithTrigger(ctx, TriggerPRMerge)
+	if _, err := mgr.Save(ctx, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if got.fired != 1 {
+		t.Fatalf("callback fired: got = %d, want = 1", got.fired)
+	}
+	if got.issueID != f.issue.ID {
+		t.Errorf("callback issueID: got = %q, want = %q", got.issueID, f.issue.ID)
+	}
+
+	var captured State
+	if err := json.Unmarshal(got.raw, &captured); err != nil {
+		t.Fatalf("unmarshal callback stateJSON: %v", err)
+	}
+	if captured.IssueID != f.issue.ID {
+		t.Errorf("captured IssueID: got = %q, want = %q", captured.IssueID, f.issue.ID)
+	}
+	if captured.IssueURL != f.issue.URL {
+		t.Errorf("captured IssueURL: got = %q, want = %q", captured.IssueURL, f.issue.URL)
+	}
+	if captured.Status != StatusComplete {
+		t.Errorf("captured Status: got = %q, want = %q", captured.Status, StatusComplete)
+	}
+}
+
+// TestStateManager_SaveCallback_FiresOnNoOpSave verifies that the post-save
+// callback fires even when the framework skips the Linear write. Downstream
+// mirrors need to see every Save call so wrapper-specific fields populated
+// by a bot's BeforeSave hook (e.g. iteration markers) reach observability
+// stores even when the state machine didn't transition. The Linear save is
+// still gated by the dirty check — the callback fire is independent.
+func TestStateManager_SaveCallback_FiresOnNoOpSave(t *testing.T) {
+	f := newLinearStateFixture(t, `{"status":"complete","pr_url":"https://github.com/o/r/pull/1"}`)
+	r := newReconcilerForFixture(t, f)
+
+	var fired int
+	mgr := r.NewStateManager(f.issue).SetSaveCallback(func(_ context.Context, _ string, _ []byte) {
+		fired++
+	})
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// No mutation — Linear write is skipped (changed=false), but callback
+	// fires anyway so the downstream mirror sees a fresh state JSON.
+	changed, err := mgr.Save(t.Context(), s)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if changed {
+		t.Errorf("changed: got = true, want = false (no field changed, Linear write should be skipped)")
+	}
+	if got := f.saveCount.Load(); got != 0 {
+		t.Errorf("save count: got = %d, want = 0 (no Linear write expected)", got)
+	}
+	if fired != 1 {
+		t.Errorf("callback fired: got = %d, want = 1 (callback must fire even on no-op save)", fired)
+	}
+}
+
+// stateWithBeforeSave is a synthetic bot wrapper that exercises the
+// BeforeSave shadow pattern. callCount tracks invocations; forceSave
+// controls the return value. BotField is populated from the trigger
+// context so the test can assert that BeforeSave's mutations are visible
+// in the callback's stateJSON.
+type stateWithBeforeSave struct {
+	State
+	BotField string `json:"bot_field,omitempty"`
+
+	callCount int
+	forceSave bool
+}
+
+func (s *stateWithBeforeSave) BeforeSave(ctx context.Context) bool {
+	s.callCount++
+	if trigger, _ := TriggerFromContext(ctx); trigger != "" {
+		s.BotField = "set-by-before-save:" + trigger
+	}
+	return s.forceSave
+}
+
+// TestStateManager_BeforeSave_CalledOnEveryNoOpSave verifies the bot's
+// shadowed BeforeSave runs even when nothing else triggers a save, and
+// that the wrapper-field mutations it makes reach the post-save callback
+// even though Linear isn't written.
+func TestStateManager_BeforeSave_CalledOnEveryNoOpSave(t *testing.T) {
+	f := newLinearStateFixture(t, `{"status":"active","pr_url":"https://github.com/o/r/pull/1"}`)
+	r := &Reconciler[testReq, testResp, testCB, stateWithBeforeSave, *stateWithBeforeSave]{
+		identity:     testActor,
+		linearClient: f.newClient(t),
+	}
+
+	var captured []byte
+	mgr := r.NewStateManager(f.issue).SetSaveCallback(func(_ context.Context, _ string, stateJSON []byte) {
+		captured = stateJSON
+	})
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := WithActor(t.Context(), testActor)
+	ctx = WithTrigger(ctx, TriggerCIFailureIteration)
+
+	changed, err := mgr.Save(ctx, s)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if changed {
+		t.Errorf("changed: got = true, want = false (BeforeSave returns false; no Linear write expected)")
+	}
+	if got := f.saveCount.Load(); got != 0 {
+		t.Errorf("save count: got = %d, want = 0", got)
+	}
+	if s.callCount != 1 {
+		t.Errorf("BeforeSave callCount: got = %d, want = 1", s.callCount)
+	}
+
+	var seen stateWithBeforeSave
+	if err := json.Unmarshal(captured, &seen); err != nil {
+		t.Fatalf("unmarshal callback stateJSON: %v", err)
+	}
+	if want := "set-by-before-save:" + TriggerCIFailureIteration; seen.BotField != want {
+		t.Errorf("callback saw BotField: got = %q, want = %q (BeforeSave mutations must reach the callback)", seen.BotField, want)
+	}
+}
+
+// TestStateManager_BeforeSave_ForceSaveTriggersLinear verifies that a bot
+// that returns true from BeforeSave forces a Linear write even when no
+// framework-tracked field changed. The escape hatch lets bots persist
+// wrapper-specific changes durably to the attachment when needed.
+func TestStateManager_BeforeSave_ForceSaveTriggersLinear(t *testing.T) {
+	f := newLinearStateFixture(t, `{"status":"active","pr_url":"https://github.com/o/r/pull/1"}`)
+	r := &Reconciler[testReq, testResp, testCB, stateWithBeforeSave, *stateWithBeforeSave]{
+		identity:     testActor,
+		linearClient: f.newClient(t),
+	}
+	mgr := r.NewStateManager(f.issue)
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	s.forceSave = true
+
+	ctx := WithActor(t.Context(), testActor)
+	ctx = WithTrigger(ctx, TriggerCIFailureIteration)
+
+	changed, err := mgr.Save(ctx, s)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if !changed {
+		t.Errorf("changed: got = false, want = true (BeforeSave returned true; Linear write expected)")
+	}
+	if got := f.saveCount.Load(); got != 1 {
+		t.Errorf("save count: got = %d, want = 1", got)
+	}
+
+	var saved stateWithBeforeSave
+	loadSavedState(t, f, &saved)
+	if want := "set-by-before-save:" + TriggerCIFailureIteration; saved.BotField != want {
+		t.Errorf("saved BotField: got = %q, want = %q", saved.BotField, want)
+	}
+	// Status didn't change, so no History entry should be appended even
+	// though the Linear write fired — the diff-based history append is
+	// independent of the Linear-write decision.
+	if got := len(saved.History); got != 0 {
+		t.Errorf("History len: got = %d, want = 0 (BeforeSave force-save must not fabricate transitions)", got)
+	}
+}
+
+// TestStateManager_BeforeSave_DefaultIsNoOp verifies that a bot wrapper
+// that does not shadow BeforeSave inherits the framework's no-op default
+// via embedding. This is the load-bearing claim for the DX promise that
+// future bots get the hook for free without implementing anything.
+func TestStateManager_BeforeSave_DefaultIsNoOp(t *testing.T) {
+	f := newLinearStateFixture(t, `{"status":"complete","pr_url":"https://github.com/o/r/pull/1"}`)
+	// extendedState (defined above) does NOT shadow BeforeSave, so it
+	// inherits the *State.BeforeSave default returning false.
+	r := &Reconciler[testReq, testResp, testCB, extendedState, *extendedState]{
+		identity:     testActor,
+		linearClient: f.newClient(t),
+	}
+	mgr := r.NewStateManager(f.issue)
+
+	s, _, err := mgr.Load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// No mutation, no shadowed BeforeSave → no Linear write.
+	changed, err := mgr.Save(t.Context(), s)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if changed {
+		t.Errorf("changed: got = true, want = false (default BeforeSave must not force-save)")
 	}
 }

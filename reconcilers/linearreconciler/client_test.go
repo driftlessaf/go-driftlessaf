@@ -294,6 +294,254 @@ func TestFetchAttachmentContent_RejectsUntrustedURLs(t *testing.T) {
 	}
 }
 
+// TestSetIssueStateByType_HappyPath proves the lookup-by-type query
+// finds the right state on the issue's team and feeds its ID into the
+// issueUpdate mutation. Workspace-renamed states ("Done" → "Resolved"
+// etc.) survive this lookup because we key off `state.type`, which is
+// schema-stable, instead of the per-workspace name.
+func TestSetIssueStateByType_HappyPath(t *testing.T) {
+	var sawMutationStateID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case contains(req.Query, "team {"):
+			// Lookup query — return a team with three states, only one of
+			// which has type=canceled. Exercises the type-filter loop.
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id": "issue-id-1",
+						"team": map[string]any{
+							"states": map[string]any{
+								"nodes": []map[string]any{
+									{"id": "state-triage", "type": "triage"},
+									{"id": "state-done", "type": "completed"},
+									{"id": "state-cancel-1", "type": "canceled"},
+								},
+							},
+						},
+					},
+				},
+			})
+		case contains(req.Query, "issueUpdate"):
+			// Mutation — capture the stateId variable.
+			if v, ok := req.Variables["stateId"].(string); ok {
+				sawMutationStateID = v
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issueUpdate": map[string]any{"success": true},
+				},
+			})
+		default:
+			t.Errorf("unexpected query: %q", req.Query)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueStateByType(context.Background(), "issue-id-1", "canceled"); err != nil {
+		t.Fatalf("SetIssueStateByType: %v", err)
+	}
+	if sawMutationStateID != "state-cancel-1" {
+		t.Errorf("mutation stateId = %q, want state-cancel-1 (the only canceled-typed state)", sawMutationStateID)
+	}
+}
+
+// TestSetIssueStateByType_NoMatchingStateNoOps proves the silent-no-op
+// behavior on workspaces that don't have a state of the requested type:
+// returns nil without firing the mutation. Mostly useful for forward
+// compat — if a workspace removes "Canceled" from a team's workflow,
+// the PR-closed event handler should not blow up.
+func TestSetIssueStateByType_NoMatchingStateNoOps(t *testing.T) {
+	var mutationFired atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case contains(req.Query, "team {"):
+			// Team has only triage + completed states — no "canceled".
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id": "issue-id-2",
+						"team": map[string]any{
+							"states": map[string]any{
+								"nodes": []map[string]any{
+									{"id": "state-triage", "type": "triage"},
+									{"id": "state-done", "type": "completed"},
+								},
+							},
+						},
+					},
+				},
+			})
+		case contains(req.Query, "issueUpdate"):
+			mutationFired.Store(true)
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"issueUpdate": map[string]any{"success": true}},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueStateByType(context.Background(), "issue-id-2", "canceled"); err != nil {
+		t.Fatalf("SetIssueStateByType: should silently no-op when team has no canceled state, got error: %v", err)
+	}
+	if mutationFired.Load() {
+		t.Error("issueUpdate mutation must NOT fire when no state of the requested type exists")
+	}
+}
+
+// TestSetIssueStateByType_PreferredNameDisambiguates is the regression
+// test for the observed "PR closed but issue went to Duplicate not
+// Canceled" bug. Linear's schema maps both the "Cancelled"/"Canceled"
+// AND the "Duplicate" workflow states to type=canceled — so a
+// type-only lookup picks whichever the team's `states.nodes` array
+// returns first, which can be Duplicate.
+//
+// Callers pass preferredNames to disambiguate. The lookup must pick
+// the first state whose type matches AND whose name (case-insensitive)
+// appears in preferredNames, ignoring earlier type-matching entries
+// that don't match by name.
+func TestSetIssueStateByType_PreferredNameDisambiguates(t *testing.T) {
+	var sawMutationStateID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case contains(req.Query, "team {"):
+			// Mirror the Chainguard team config: Duplicate appears BEFORE
+			// Canceled in the team's state list, both with type=canceled.
+			// Without preferredNames, the type-only lookup would pick
+			// state-duplicate (the bug). With preferredNames=["Canceled"],
+			// it must pick state-canceled.
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id": "issue-id-3",
+						"team": map[string]any{
+							"states": map[string]any{
+								"nodes": []map[string]any{
+									{"id": "state-triage", "name": "Triage", "type": "triage"},
+									{"id": "state-done", "name": "Done", "type": "completed"},
+									{"id": "state-duplicate", "name": "Duplicate", "type": "canceled"},
+									{"id": "state-canceled", "name": "Canceled", "type": "canceled"},
+								},
+							},
+						},
+					},
+				},
+			})
+		case contains(req.Query, "issueUpdate"):
+			if v, ok := req.Variables["stateId"].(string); ok {
+				sawMutationStateID = v
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issueUpdate": map[string]any{"success": true},
+				},
+			})
+		default:
+			t.Errorf("unexpected query: %q", req.Query)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueStateByType(context.Background(), "issue-id-3", "canceled", "Canceled", "Cancelled"); err != nil {
+		t.Fatalf("SetIssueStateByType: %v", err)
+	}
+	if sawMutationStateID != "state-canceled" {
+		t.Errorf("mutation stateId = %q, want state-canceled (preferredNames must override first-by-type)", sawMutationStateID)
+	}
+}
+
+// TestSetIssueStateByType_PreferredNameFallsBack proves that when no
+// preferred name matches, the lookup falls back to the first state by
+// type alone — preserving the workspace-rename-survival guarantee for
+// teams that use a non-standard cancel name (e.g. "Won't Do").
+func TestSetIssueStateByType_PreferredNameFallsBack(t *testing.T) {
+	var sawMutationStateID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case contains(req.Query, "team {"):
+			// Team uses "Won't Do" instead of "Canceled". Bot still asks
+			// for preferred names ("Canceled","Cancelled") but neither
+			// matches — fall back to the first canceled-typed state.
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id": "issue-id-4",
+						"team": map[string]any{
+							"states": map[string]any{
+								"nodes": []map[string]any{
+									{"id": "state-wontdo", "name": "Won't Do", "type": "canceled"},
+								},
+							},
+						},
+					},
+				},
+			})
+		case contains(req.Query, "issueUpdate"):
+			if v, ok := req.Variables["stateId"].(string); ok {
+				sawMutationStateID = v
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issueUpdate": map[string]any{"success": true},
+				},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueStateByType(context.Background(), "issue-id-4", "canceled", "Canceled", "Cancelled"); err != nil {
+		t.Fatalf("SetIssueStateByType: %v", err)
+	}
+	if sawMutationStateID != "state-wontdo" {
+		t.Errorf("mutation stateId = %q, want state-wontdo (fallback to first-by-type when no name preference matches)", sawMutationStateID)
+	}
+}
+
+// contains is a tiny substring helper so tests don't pull in strings just
+// to do a single Contains check.
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (len(sub) == 0 || indexOf(s, sub) >= 0)
+}
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestIsLinearHost(t *testing.T) {
 	tests := []struct {
 		host    string

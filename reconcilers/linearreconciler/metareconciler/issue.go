@@ -8,9 +8,11 @@ package metareconciler
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
 	"github.com/chainguard-dev/clog"
@@ -19,9 +21,13 @@ import (
 
 // Linear workflow state types. See
 // https://developers.linear.app/docs/graphql/working-with-the-graphql-api/workflow-states
+//
+// IMPORTANT: Linear uses American spelling — "canceled" (one L), NOT
+// "cancelled" (two L's). Both the "Cancelled" and "Duplicate" UI states
+// map to type=canceled. The "Done" UI state maps to type=completed.
 const (
 	stateTypeCompleted = "completed"
-	stateTypeCancelled = "cancelled"
+	stateTypeCanceled  = "canceled"
 )
 
 // reconcileIssue resolves the repo target from the Linear issue, then runs the
@@ -36,8 +42,26 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 		return nil
 	}
 
-	if issue.State.Type == stateTypeCompleted || issue.State.Type == stateTypeCancelled {
+	if issue.State.Type == stateTypeCompleted || issue.State.Type == stateTypeCanceled {
 		clog.InfoContext(ctx, "Issue is closed, skipping")
+		return nil
+	}
+
+	// Terminal-state gate: if the bot already transitioned this issue to
+	// StatusFailed + FailureModeNoDiff, skip reconcile entirely. The agent
+	// has already decided no work is needed; running it again produces the
+	// same no-op, which would post a duplicate Linear comment AND burn
+	// agent inference. Operators who want to re-trigger should clear the
+	// state attachment manually (or post a new task — a future change
+	// could gate on description-hash deltas to allow auto-reset on edit).
+	gateMgr := r.NewStateManager(issue)
+	if existing, loaded, err := gateMgr.Load(ctx); err != nil {
+		// Don't fail-closed on transient Load errors — fall through and
+		// let the rest of reconcile run, where state mutations have their
+		// own retry behaviour.
+		clog.WarnContext(ctx, "Skipping no_diff terminal-state gate: load failed", "error", err)
+	} else if loaded && existing.GetStatus() == StatusFailed && existing.GetFailureMode() == FailureModeNoDiff {
+		clog.InfoContext(ctx, "Skipping reconcile: previously transitioned to no_diff (terminal). Clear state to retry.")
 		return nil
 	}
 
@@ -162,6 +186,12 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 	// implies an iteration that never happened.
 	var agentRan bool
 
+	// agentNoDiffNote captures the agent's intended commit message when
+	// the agent runs but produces no diff. Threaded out of the inner
+	// closure for the Linear bot comment so the human triaging the issue
+	// sees the agent's rationale rather than a bare failure pill.
+	var agentNoDiffNote string
+
 	// Create/update the PR with the changes.
 	prURL, err := changeSession.Upsert(ctx, &PRData[Req]{
 		Identity:         r.identity,
@@ -200,7 +230,7 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 		}()
 
 		// Run the agent and push changes.
-		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, _ *gogit.Worktree) (string, error) {
+		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
 			cbs, err := r.buildCallbacks(ctx, changeSession, lease)
 			if err != nil {
 				return "", fmt.Errorf("build callbacks: %w", err)
@@ -217,10 +247,51 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 			if err != nil {
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
+
+			// No-diff detection: if the agent left the worktree clean, the
+			// underlying worktree.Commit would return git.ErrEmptyCommit
+			// and the workqueue would retry forever. Surfacing as
+			// changemanager.ErrNoChanges lets the outer caller transition
+			// State to StatusFailed + FailureModeNoDiff (terminal) instead.
+			// The agent's intended commit message is captured in the
+			// closure for the caller to record on the State.History entry.
+			status, err := wt.Status()
+			if err != nil {
+				return "", fmt.Errorf("get worktree status: %w", err)
+			}
+			if status.IsClean() {
+				agentNoDiffNote = result.GetCommitMessage()
+				return "", changemanager.ErrNoChanges
+			}
 			return result.GetCommitMessage(), nil
 		})
 	})
 	if err != nil {
+		if errors.Is(err, changemanager.ErrNoChanges) {
+			// "Agent produced no diff" means different things depending
+			// on whether a PR already exists:
+			//
+			//   - Initial run (usePRBranch=false, no PR yet): agent
+			//     reviewed and decided this issue needs no code changes.
+			//     This is genuinely terminal — transition to
+			//     StatusFailed + FailureModeNoDiff so downstream
+			//     consumers see the failure mode and the workqueue
+			//     stops retrying.
+			//
+			//   - Iteration on an existing PR (usePRBranch=true): agent
+			//     re-ran (CI failure, description edit, etc.) and
+			//     produced no further changes. The PR is still valid;
+			//     we must NOT mark the issue failed and must NOT post a
+			//     misleading "no changes needed" comment that would
+			//     contradict the existing PR. Just log and return nil
+			//     so the workqueue stops retrying this reconcile.
+			if usePRBranch {
+				clog.InfoContext(ctx, "Agent produced no diff on iteration; leaving existing PR unchanged")
+				return nil
+			}
+			clog.InfoContext(ctx, "Agent produced no diff on initial run, transitioning to no_diff failure mode")
+			return r.transitionToNoDiff(ctx, issue, agentNoDiffNote)
+		}
 		return fmt.Errorf("upsert PR: %w", err)
 	}
 
@@ -261,5 +332,53 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 	}
 
 	clog.InfoContext(ctx, "PR created/updated", "pr_url", prURL)
+	return nil
+}
+
+// transitionToNoDiff records a terminal StatusFailed + FailureModeNoDiff
+// transition for an issue whose agent run produced no changes, and posts
+// a Linear comment with the agent's rationale so the human triaging the
+// issue knows what happened. Called from reconcileIssue when Upsert
+// returns changemanager.ErrNoChanges.
+//
+// Returns nil so the workqueue does not retry — the agent has already
+// decided the issue needs no work, and the same call would reproduce
+// the same no-op. The TriggerDescriptionEditIteration path re-enters
+// reconcile naturally when the human edits the issue description with
+// new context.
+func (r *Reconciler[Req, Resp, CB, T, PT]) transitionToNoDiff(ctx context.Context, issue *linearreconciler.Issue, note string) error {
+	mgr := r.NewStateManager(issue)
+	s, _, err := mgr.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load state: %w", err)
+	}
+	s.SetStatus(StatusFailed)
+	s.SetFailureMode(FailureModeNoDiff)
+	ctx = WithActor(ctx, r.identity)
+	ctx = WithTrigger(ctx, TriggerNoDiff)
+
+	// Order matters: UpsertBotComment must run BEFORE Save. The framework's
+	// linearreconciler.StateManager only persists the comment-tracking
+	// commentID alongside the state attachment on the next Save call (see
+	// linearreconciler/state.go). Saving first would persist an empty
+	// commentID, then subsequent reconciles that re-enter this path would
+	// post a fresh comment instead of updating the existing one. The
+	// terminal-state gate at the top of reconcileIssue already prevents
+	// most re-entry, but the order swap here is defence-in-depth.
+	body := "I reviewed this issue but determined no code changes are needed."
+	if note != "" {
+		body = "I reviewed this issue but determined no code changes are needed:\n\n> " + note
+	}
+	if err := mgr.UpsertBotComment(ctx, body); err != nil {
+		// Comment failure is logged but not fatal — the state transition
+		// is the more important record. A failed comment also leaves
+		// commentID empty in memory, which is fine; the state still
+		// records the failure mode for downstream consumers.
+		clog.WarnContext(ctx, "Failed to upsert no-diff bot comment", "error", err)
+	}
+
+	if _, err := mgr.Save(ctx, s); err != nil {
+		return fmt.Errorf("save state: %w", err)
+	}
 	return nil
 }

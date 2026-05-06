@@ -300,7 +300,7 @@ func (c *Client) GetViewer(ctx context.Context) (*User, error) {
 func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 	const query = `query($id: String!) {
 		issue(id: $id) {
-			id identifier title description updatedAt
+			id identifier title description updatedAt url
 			state { name type }
 			team { key name }
 			assignee { id name }
@@ -441,6 +441,110 @@ func (c *Client) UpdateIssueDescription(ctx context.Context, issueID, descriptio
 		"id":          issueID,
 		"description": description,
 	}, &result)
+}
+
+// SetIssueStateByType moves a Linear issue to its team's workflow state
+// matching stateType. State NAMES are workspace-renameable ("Done" →
+// "Resolved"); the schema-stable types are: backlog, unstarted, started,
+// completed, canceled, triage.
+//
+// preferredNames disambiguates when a team has multiple workflow states
+// of the same type — most commonly "canceled", which Linear uses for
+// both the "Cancelled"/"Canceled" and "Duplicate" UI states. The lookup
+// picks the first state whose type matches AND whose name
+// (case-insensitive) appears in preferredNames; if no name preference
+// matches, falls back to the first state by type alone (preserving the
+// workspace-rename-survival guarantee for callers that don't care about
+// disambiguation).
+//
+// Looks up the target state ID via the issue's team in a single GraphQL
+// round-trip, then issues the update. Returns nil with no error if the
+// team has no state of the requested type — that's a workspace-config
+// gap rather than a code bug, and silently no-oping keeps event
+// handlers from dying on workspaces that haven't set up the expected
+// workflow.
+func (c *Client) SetIssueStateByType(ctx context.Context, issueID, stateType string, preferredNames ...string) error {
+	const lookup = `query($id: String!) {
+		issue(id: $id) {
+			id
+			team {
+				states {
+					nodes { id name type }
+				}
+			}
+		}
+	}`
+
+	var lookupResult struct {
+		Issue *struct {
+			ID   string `json:"id"`
+			Team struct {
+				States struct {
+					Nodes []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+						Type string `json:"type"`
+					} `json:"nodes"`
+				} `json:"states"`
+			} `json:"team"`
+		} `json:"issue"`
+	}
+	if err := c.graphql(ctx, lookup, map[string]any{"id": issueID}, &lookupResult); err != nil {
+		return fmt.Errorf("look up team states for issue %s: %w", issueID, err)
+	}
+	if lookupResult.Issue == nil {
+		return fmt.Errorf("issue %s not found", issueID)
+	}
+
+	preferredSet := make(map[string]struct{}, len(preferredNames))
+	for _, n := range preferredNames {
+		preferredSet[strings.ToLower(n)] = struct{}{}
+	}
+
+	var preferredID, fallbackID string
+	for _, s := range lookupResult.Issue.Team.States.Nodes {
+		if s.Type != stateType {
+			continue
+		}
+		if fallbackID == "" {
+			fallbackID = s.ID
+		}
+		if _, ok := preferredSet[strings.ToLower(s.Name)]; ok {
+			preferredID = s.ID
+			break // exact preferred match — stop searching
+		}
+	}
+	stateID := preferredID
+	if stateID == "" {
+		stateID = fallbackID
+	}
+	if stateID == "" {
+		// No state of the requested type on this team. Likely a workspace
+		// that's renamed/removed the default state; not a bug worth failing
+		// the whole event handler over.
+		return nil
+	}
+
+	const mutation = `mutation($id: String!, $stateId: String!) {
+		issueUpdate(id: $id, input: { stateId: $stateId }) {
+			success
+		}
+	}`
+	var mutResult struct {
+		IssueUpdate struct {
+			Success bool `json:"success"`
+		} `json:"issueUpdate"`
+	}
+	if err := c.graphql(ctx, mutation, map[string]any{
+		"id":      issueID,
+		"stateId": stateID,
+	}, &mutResult); err != nil {
+		return fmt.Errorf("set issue %s state to %s: %w", issueID, stateType, err)
+	}
+	if !mutResult.IssueUpdate.Success {
+		return fmt.Errorf("set issue %s state to %s: API returned success=false", issueID, stateType)
+	}
+	return nil
 }
 
 // DeleteAttachment deletes an attachment by ID.

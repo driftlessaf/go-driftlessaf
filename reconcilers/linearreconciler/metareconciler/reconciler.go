@@ -60,6 +60,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 	// Clients
 	linearClient  *linearreconciler.Client
 	githubClients *githubreconciler.ClientCache
+
+	// saveCallback is invoked after every successful StateManager save.
+	// Optional; nil means no callback. Set via WithSaveCallback. Threaded
+	// through to every StateManager constructed by (*Reconciler).NewStateManager.
+	saveCallback SaveCallback
 }
 
 // options collects the configurable knobs that don't depend on the
@@ -70,6 +75,7 @@ type options struct {
 	requiredLabel      string
 	upstreamPrefix     string
 	repoTargetResolver RepoTargetResolver
+	saveCallback       SaveCallback
 }
 
 // Option configures a Reconciler. It is intentionally non-generic; the
@@ -104,6 +110,25 @@ func WithUpstreamPrefix(prefix string) Option {
 func WithRepoTargetResolver(resolver RepoTargetResolver) Option {
 	return func(o *options) {
 		o.repoTargetResolver = resolver
+	}
+}
+
+// WithSaveCallback registers a post-save hook that fires after every
+// successful StateManager.Save. The callback receives the persisted JSON
+// and (when the save included a Status or FailureMode change) the
+// StateTransition that was appended to History.
+//
+// Threaded automatically into every StateManager constructed via
+// Reconciler.NewStateManager. Callers using the free-function
+// metareconciler.NewStateManager (e.g. RepoTargetResolver implementations
+// constructed before the Reconciler exists) opt in by chaining
+// .SetSaveCallback(cb) on the returned manager.
+//
+// The callback is intended for downstream mirroring and observability.
+// Errors returned from it are logged at Warn but never fail the save.
+func WithSaveCallback(cb SaveCallback) Option {
+	return func(o *options) {
+		o.saveCallback = cb
 	}
 }
 
@@ -145,6 +170,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT StateConstra
 		buildCallbacks:     buildCallbacks,
 		linearClient:       linearClient,
 		githubClients:      githubClients,
+		saveCallback:       o.saveCallback,
 	}
 }
 
