@@ -51,6 +51,11 @@ type DispatcherErrorEvent struct {
 	// OccurAt is the time the error occurred. This field is used as the
 	// BigQuery partition field.
 	OccurAt time.Time `json:"occurAt"`
+
+	// ReconcilerName is the name of the reconciler / workqueue that produced
+	// this error. It allows distinguishing errors from different reconcilers
+	// that share the same key space.
+	ReconcilerName string `json:"reconcilerName,omitempty"`
 }
 
 // cloudEventErrorEmitter publishes dispatch errors as CloudEvents.
@@ -79,6 +84,7 @@ func (e *cloudEventErrorEmitter) emit(ctx context.Context, ec ErrorContext) {
 		Action:             ec.Action.String(),
 		NonRetriableReason: ec.NonRetriableReason,
 		OccurAt:            occurAt,
+		ReconcilerName:     e.workqueueName,
 	}); err != nil {
 		clog.ErrorContext(ctx, "failed to set dispatcher error event data",
 			"key", ec.Key, "error", err)

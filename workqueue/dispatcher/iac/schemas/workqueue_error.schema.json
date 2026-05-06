@@ -4,5 +4,6 @@
   {"name": "attempts", "type": "INTEGER", "mode": "REQUIRED"},
   {"name": "action", "type": "STRING", "mode": "REQUIRED"},
   {"name": "nonRetriableReason", "type": "STRING", "mode": "NULLABLE"},
-  {"name": "occurAt", "type": "TIMESTAMP", "mode": "NULLABLE"}
+  {"name": "occurAt", "type": "TIMESTAMP", "mode": "NULLABLE"},
+  {"name": "reconcilerName", "type": "STRING", "mode": "NULLABLE"}
 ]

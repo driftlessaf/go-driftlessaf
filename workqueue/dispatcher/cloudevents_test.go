@@ -113,6 +113,9 @@ func TestCloudEventErrorEmitter_EmitsEvent(t *testing.T) {
 	if !payload.OccurAt.Equal(received.Time()) {
 		t.Errorf("payload.OccurAt %v != CE envelope time %v", payload.OccurAt, received.Time())
 	}
+	if payload.ReconcilerName != wqName {
+		t.Errorf("payload.ReconcilerName: got = %q, wanted = %q", payload.ReconcilerName, wqName)
+	}
 }
 
 func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
@@ -181,5 +184,8 @@ func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
 	}
 	if !payload.OccurAt.Equal(received.Time()) {
 		t.Errorf("payload.OccurAt %v != CE envelope time %v", payload.OccurAt, received.Time())
+	}
+	if payload.ReconcilerName != "integration-test" {
+		t.Errorf("payload.ReconcilerName: got = %q, wanted = %q", payload.ReconcilerName, "integration-test")
 	}
 }
