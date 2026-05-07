@@ -34,17 +34,44 @@ type ClientInterface interface {
 	Objects(ctx context.Context, q *storage.Query) *storage.ObjectIterator
 }
 
+// Option configures a GCS-backed workqueue created by NewWorkQueue.
+type Option func(*wq)
+
+// WithName sets the queue_name label applied to every Prometheus metric this
+// workqueue emits. Use it to disambiguate multiple workqueues running in the
+// same Cloud Run service (which share K_SERVICE / K_REVISION). Defaults to "".
+func WithName(name string) Option {
+	return func(w *wq) { w.name = name }
+}
+
 // NewWorkQueue creates a new GCS-backed workqueue.
-func NewWorkQueue(client ClientInterface, limit int) workqueue.Interface {
-	return &wq{
+func NewWorkQueue(client ClientInterface, limit int, opts ...Option) workqueue.Interface {
+	w := &wq{
 		client: client,
 		limit:  limit,
 	}
+	for _, o := range opts {
+		o(w)
+	}
+	return w
 }
 
 type wq struct {
 	client ClientInterface
 	limit  int
+	// name is the queue_name label value applied to all metrics emitted by
+	// this queue; "" if WithName was not provided.
+	name string
+}
+
+// baseLabels returns the {service_name, revision_name, queue_name} labels that
+// every workqueue metric carries.
+func (w *wq) baseLabels() prometheus.Labels {
+	return prometheus.Labels{
+		"service_name":  env.KnativeServiceName,
+		"revision_name": env.KnativeRevisionName,
+		"queue_name":    w.name,
+	}
 }
 
 var _ workqueue.Interface = (*wq)(nil)
@@ -89,10 +116,7 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 	}
 	writer.Metadata[notBeforeMetadataKey] = opts.NotBefore.UTC().Format(time.RFC3339)
 
-	mAddedKeys.With(prometheus.Labels{
-		"service_name":  env.KnativeServiceName,
-		"revision_name": env.KnativeRevisionName,
-	}).Add(1)
+	mAddedKeys.With(w.baseLabels()).Add(1)
 
 	if _, err := writer.Write([]byte("")); err != nil {
 		clog.WarnContextf(ctx, "Queue: Write failed for key %q: %v", key, err)
@@ -103,10 +127,7 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 		return fmt.Errorf("Close() = %w", err)
 	} else if exists {
 		clog.DebugContextf(ctx, "Key %q already exists", key)
-		mDedupedKeys.With(prometheus.Labels{
-			"service_name":  env.KnativeServiceName,
-			"revision_name": env.KnativeRevisionName,
-		}).Add(1)
+		mDedupedKeys.With(w.baseLabels()).Add(1)
 
 		if err := updateMetadata(ctx, w.client, key, writer.Metadata); err != nil {
 			if errors.Is(err, storage.ErrObjectNotExist) {
@@ -171,10 +192,7 @@ func checkPreconditionFailedOk(err error) (bool, error) {
 
 // Enumerate implements workqueue.Interface.
 func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
-	labels := prometheus.Labels{
-		"service_name":  env.KnativeServiceName,
-		"revision_name": env.KnativeRevisionName,
-	}
+	labels := w.baseLabels()
 
 	start := time.Now()
 	defer func() {
@@ -214,31 +232,24 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 					maxAttempts = attempts
 				}
 				if attempts > TrackWorkAttemptMinThreshold {
-					mTaskMaxAttempts.With(
-						prometheus.Labels{
-							"service_name":  env.KnativeServiceName,
-							"revision_name": env.KnativeRevisionName,
-							"task_id":       objAttrs.Name,
-						},
-					).Set(float64(attempts))
+					l := w.baseLabels()
+					l["task_id"] = objAttrs.Name
+					mTaskMaxAttempts.With(l).Set(float64(attempts))
 				}
 			}
 		}
 		// Ensure metric has a value.
-		mTaskMaxAttempts.With(
-			prometheus.Labels{
-				"service_name":  env.KnativeServiceName,
-				"revision_name": env.KnativeRevisionName,
-				"task_id":       "placeholder",
-			},
-		).Set(float64(0))
+		l := w.baseLabels()
+		l["task_id"] = "placeholder"
+		mTaskMaxAttempts.With(l).Set(float64(0))
 
 		switch {
 		case strings.HasPrefix(objAttrs.Name, inProgressPrefix):
 			ipk := &inProgressKey{
-				client:   w.client,
-				attrs:    objAttrs,
-				priority: priority,
+				client:    w.client,
+				attrs:     objAttrs,
+				priority:  priority,
+				queueName: w.name,
 			}
 			wip = append(wip, ipk)
 
@@ -269,9 +280,10 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 			mTimeUntilEligible.With(labels).Observe(timeUntilEligible)
 
 			qd = append(qd, &queuedKey{
-				client:   w.client,
-				attrs:    objAttrs,
-				priority: priority,
+				client:    w.client,
+				attrs:     objAttrs,
+				priority:  priority,
+				queueName: w.name,
 			})
 			sort.Slice(qd, func(i, j int) bool {
 				if lhs, rhs := qd[i].Priority(), qd[j].Priority(); lhs != rhs {
@@ -423,11 +435,23 @@ type inProgressKey struct {
 	ownerCancel context.CancelFunc
 
 	priority int64
+	// queueName is the queue_name label value applied to all metrics emitted
+	// from this key's lifecycle (Requeue, Complete, Deadletter).
+	queueName string
 
 	// Once we start to heartbeat things, then that thread may update attrs,
 	// so use the RWMutex to protect it from concurrent access.
 	rw    sync.RWMutex
 	attrs *storage.ObjectAttrs
+}
+
+// baseLabels returns the labels every metric emitted from this key carries.
+func (o *inProgressKey) baseLabels() prometheus.Labels {
+	return prometheus.Labels{
+		"service_name":  env.KnativeServiceName,
+		"revision_name": env.KnativeRevisionName,
+		"queue_name":    o.queueName,
+	}
 }
 
 var _ workqueue.ObservedInProgressKey = (*inProgressKey)(nil)
@@ -466,10 +490,7 @@ func (o *inProgressKey) GetAttempts() int {
 func (o *inProgressKey) Requeue(ctx context.Context) error {
 	// Check if this key is orphaned (lease expired) before requeueing
 	if o.IsOrphaned() {
-		mExpiredLeases.With(prometheus.Labels{
-			"service_name":  env.KnativeServiceName,
-			"revision_name": env.KnativeRevisionName,
-		}).Add(1)
+		mExpiredLeases.With(o.baseLabels()).Add(1)
 	}
 	// Use RequeueWithOptions with an empty options struct to get default behavior
 	return o.RequeueWithOptions(ctx, workqueue.Options{})
@@ -611,26 +632,19 @@ func (o *inProgressKey) Complete(ctx context.Context) error {
 	o.rw.RLock()
 	defer o.rw.RUnlock()
 
-	mWorkLatency.With(prometheus.Labels{
-		"service_name":   env.KnativeServiceName,
-		"revision_name":  env.KnativeRevisionName,
-		"priority_class": priorityClass(o.priority),
-	}).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
+	workLabels := o.baseLabels()
+	workLabels["priority_class"] = priorityClass(o.priority)
+	mWorkLatency.With(workLabels).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
 
 	// Record the number of attempts for this successful completion
 	attempts := o.GetAttempts()
-	mCompletionAttempts.With(prometheus.Labels{
-		"service_name":  env.KnativeServiceName,
-		"revision_name": env.KnativeRevisionName,
-	}).Observe(float64(attempts))
+	mCompletionAttempts.With(o.baseLabels()).Observe(float64(attempts))
 
 	// Record time to completion
-	mTimeToCompletion.With(prometheus.Labels{
-		"service_name":   env.KnativeServiceName,
-		"revision_name":  env.KnativeRevisionName,
-		"priority_class": priorityClass(o.priority),
-		"status":         "success",
-	}).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
+	ttcLabels := o.baseLabels()
+	ttcLabels["priority_class"] = priorityClass(o.priority)
+	ttcLabels["status"] = "success"
+	mTimeToCompletion.With(ttcLabels).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
 
 	// Best-effort delete of the dead-letter object, if it exists.
 	if err := o.client.Object(o.deadLetterKey()).Delete(ctx); err != nil {
@@ -677,12 +691,10 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 	copier.Metadata[failedTimeMetadataKey] = time.Now().UTC().Format(time.RFC3339)
 
 	// Record time to completion for dead-lettered task
-	mTimeToCompletion.With(prometheus.Labels{
-		"service_name":   env.KnativeServiceName,
-		"revision_name":  env.KnativeRevisionName,
-		"priority_class": priorityClass(o.priority),
-		"status":         "dead-lettered",
-	}).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
+	ttcLabels := o.baseLabels()
+	ttcLabels["priority_class"] = priorityClass(o.priority)
+	ttcLabels["status"] = "dead-lettered"
+	mTimeToCompletion.With(ttcLabels).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
 
 	// Create the dead letter entry
 	_, err := copier.Run(ctx)
@@ -755,6 +767,18 @@ type queuedKey struct {
 	client   ClientInterface
 	attrs    *storage.ObjectAttrs
 	priority int64
+	// queueName is the queue_name label value applied to all metrics emitted
+	// when this key is started.
+	queueName string
+}
+
+// baseLabels returns the labels every metric emitted from this key carries.
+func (q *queuedKey) baseLabels() prometheus.Labels {
+	return prometheus.Labels{
+		"service_name":  env.KnativeServiceName,
+		"revision_name": env.KnativeRevisionName,
+		"queue_name":    q.queueName,
+	}
 }
 
 var _ workqueue.QueuedKey = (*queuedKey)(nil)
@@ -783,11 +807,9 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 			waitStart = time.Unix(lastAttemptedUnix, 0).UTC()
 		}
 	}
-	mWaitLatency.With(prometheus.Labels{
-		"service_name":   env.KnativeServiceName,
-		"revision_name":  env.KnativeRevisionName,
-		"priority_class": priorityClass(q.priority),
-	}).Observe(time.Now().UTC().Sub(waitStart).Seconds())
+	waitLabels := q.baseLabels()
+	waitLabels["priority_class"] = priorityClass(q.priority)
+	mWaitLatency.With(waitLabels).Observe(time.Now().UTC().Sub(waitStart).Seconds())
 
 	// Calculate wait latency from scheduled time.
 	scheduledStart := waitStart
@@ -796,11 +818,9 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 			scheduledStart = notBeforeTime
 		}
 	}
-	mWaitLatencyFromScheduled.With(prometheus.Labels{
-		"service_name":   env.KnativeServiceName,
-		"revision_name":  env.KnativeRevisionName,
-		"priority_class": priorityClass(q.priority),
-	}).Observe(time.Now().UTC().Sub(scheduledStart).Seconds())
+	schedLabels := q.baseLabels()
+	schedLabels["priority_class"] = priorityClass(q.priority)
+	mWaitLatencyFromScheduled.With(schedLabels).Observe(time.Now().UTC().Sub(scheduledStart).Seconds())
 
 	// Create a copier to copy the source object, and then we will delete it
 	// upon success.
@@ -846,9 +866,10 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	}
 
 	oip := &inProgressKey{
-		client:   q.client,
-		attrs:    attrs,
-		priority: q.priority,
+		client:    q.client,
+		attrs:     attrs,
+		priority:  q.priority,
+		queueName: q.queueName,
 	}
 
 	// start a process to heartbeat things, and set up a context that we can
