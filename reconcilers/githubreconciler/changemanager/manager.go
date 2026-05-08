@@ -248,6 +248,7 @@ func (cm *CM[T]) NewSession(
 		prNumber      int
 		prURL         string
 		prBody        string
+		prHeadSHA     string
 		prMergeable   *bool
 		prLabels      []string
 		prAssignees   []string
@@ -307,6 +308,7 @@ func (cm *CM[T]) NewSession(
 		prNumber = pr.Number
 		prURL = pr.Url
 		prBody = pr.Body
+		prHeadSHA = pr.HeadRefOid
 		// Map GraphQL mergeable status to bool pointer
 		switch pr.Mergeable {
 		case "MERGEABLE":
@@ -354,6 +356,7 @@ func (cm *CM[T]) NewSession(
 		prNumber:      prNumber,
 		prURL:         prURL,
 		prBody:        prBody,
+		prHeadSHA:     prHeadSHA,
 		prMergeable:   prMergeable,
 		prLabels:      prLabels,
 		prAssignees:   prAssignees,
