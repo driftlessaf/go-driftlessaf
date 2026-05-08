@@ -24,7 +24,7 @@ require (
 	github.com/google/go-github/v84 v84.0.0
 	github.com/google/uuid v1.6.0
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3
-	github.com/in-toto/in-toto-golang v0.10.0
+	github.com/in-toto/in-toto-golang v0.11.0
 	github.com/invopop/jsonschema v0.14.0
 	github.com/octo-sts/app v0.6.0
 	github.com/olekukonko/tablewriter v1.1.4
