@@ -58,6 +58,31 @@ const (
 // Downstream consumers of the persisted state can match against these
 // constants rather than hardcoding strings. Bots are free to define their
 // own additional trigger constants for transitions they drive themselves.
+//
+// MAINTAINER NOTE — bot-side classification: triggers fall into two
+// classes that bots' BeforeSave hooks may need to distinguish:
+//
+//   - Agent-engagement triggers — the agent ran (or was about to run)
+//     on this reconcile. Bots typically bump iteration markers and
+//     observability fields here. Today: TriggerInitialRun,
+//     TriggerCIFailureIteration, TriggerDescriptionEditIteration,
+//     TriggerMergeConflict, TriggerMaxTurns, TriggerNoDiff,
+//     TriggerNoProgress.
+//
+//   - Framework-observation triggers — the framework wrote State as a
+//     side effect of observing external state (PR webhook, Linear-
+//     state mirror, reactivation reset). The agent did NOT engage on
+//     this reconcile, so bots should typically skip iteration-marker
+//     bumps and treat the trigger as "no agent activity" for derived
+//     observability fields. Today: TriggerPRMerge, TriggerPRClosed,
+//     TriggerReactivated, TriggerLinearStateSync.
+//
+// When adding a new Trigger constant below, classify it in the right
+// bucket and update consumers that switch on the classification —
+// e.g. bots/linear-materializer's frameworkObservationTriggers set
+// in internal/state/state.go. The framework can't enforce this at
+// compile time (the set lives in downstream packages), so the
+// reminder lives here as a tripwire for code reviewers.
 const (
 	// TriggerInitialRun is the trigger for the first reconcile of an issue:
 	// no PR exists yet, the agent is being invoked from scratch.
