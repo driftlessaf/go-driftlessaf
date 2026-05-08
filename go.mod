@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v1.0.2
+	github.com/chainguard-dev/terraform-infra-common v1.0.6
 	github.com/chainguard-dev/terraform-provider-cosign v0.3.4
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.18.0
@@ -290,7 +290,3 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace chainguard.dev/sdk => ../../public/sdk
-
-replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
