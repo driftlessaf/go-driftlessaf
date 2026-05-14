@@ -84,6 +84,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 
 	case state.HasNoConflicts():
 		log.Info("PR is green, leaving it for human review")
+		if _, err := changeSession.ApplyReadyForReview(ctx); err != nil {
+			return fmt.Errorf("apply ready-for-review: %w", err)
+		}
 		return nil
 
 	case !state.HasPR():

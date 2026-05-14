@@ -68,6 +68,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 
 	case state.HasNoConflicts():
 		log.Info("PR is green, leaving it for human review")
+		if _, err := session.ApplyReadyForReview(ctx); err != nil {
+			return fmt.Errorf("apply ready-for-review: %w", err)
+		}
 		return nil
 
 	case !state.HasPR():

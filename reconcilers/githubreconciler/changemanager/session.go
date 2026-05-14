@@ -223,6 +223,25 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 	return s.prURL, nil
 }
 
+// ApplyReadyForReview adds a ready-for-review label to the PR, signaling
+// that the bot has stopped iterating because CI is green and human review
+// is needed. Idempotent: re-running when the label is already present is
+// a no-op. This is a no-op if no PR exists. Returns the PR URL.
+func (s *Session[T]) ApplyReadyForReview(ctx context.Context) (string, error) {
+	if s.prNumber == 0 {
+		return "", nil
+	}
+	label := s.manager.identity + "/ready-for-review"
+	if slices.Contains(s.prLabels, label) {
+		return s.prURL, nil
+	}
+	clog.InfoContext(ctx, "PR is green, adding ready-for-review label", "pr", s.prNumber)
+	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, []string{label}); err != nil {
+		return "", fmt.Errorf("adding ready-for-review label: %w", err)
+	}
+	return s.prURL, nil
+}
+
 // CloseAnyOutstanding closes the existing PR if one exists.
 // If message is non-empty, it posts the message as a comment before closing.
 // This is a no-op if no PR exists.
