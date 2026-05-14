@@ -29,6 +29,12 @@ const cloneDirPrefix = "clonemanager-clone-"
 
 const gitFetchDepth = 1
 
+// ErrNothingToCommit is returned by MakeAndPushChanges when the update function
+// runs without error but leaves the working tree clean (i.e., no diff to commit).
+// changemanager.Upsert translates this into changemanager.ErrNoChanges so callers
+// can use the standard no-changes protocol.
+var ErrNothingToCommit = errors.New("nothing to commit: working tree is clean")
+
 // LeaseOption configures optional parameters for LeaseRef.
 type LeaseOption func(*leaseOptions)
 
@@ -471,6 +477,14 @@ func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) erro
 	worktree, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("getting worktree: %w", err)
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return fmt.Errorf("getting worktree status: %w", err)
+	}
+	if status.IsClean() {
+		return ErrNothingToCommit
 	}
 
 	email := m.identity

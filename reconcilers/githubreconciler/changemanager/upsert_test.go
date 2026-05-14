@@ -8,6 +8,7 @@ package changemanager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"text/template"
 
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"github.com/google/go-github/v84/github"
 )
 
@@ -26,8 +28,10 @@ func TestUpsert(t *testing.T) {
 		name           string
 		prNumber       int // 0 = no existing PR (create path), >0 = existing PR (update path)
 		labels         []string
+		makeChangesErr error // nil = success path; otherwise returned from the makeChanges callback
 		wantPRNumber   int
-		wantAssignable bool // whether AddAssignees should work after Upsert
+		wantAssignable bool  // whether AddAssignees should work after Upsert
+		wantErrIs      error // expected error sentinel for the no-changes path
 	}{{
 		name:           "create new PR sets prNumber and prURL",
 		prNumber:       0,
@@ -45,6 +49,21 @@ func TestUpsert(t *testing.T) {
 		labels:         []string{"automated-pr"},
 		wantPRNumber:   99,
 		wantAssignable: true,
+	}, {
+		name:           "ErrNoChanges propagates as ErrNoChanges",
+		prNumber:       0,
+		makeChangesErr: ErrNoChanges,
+		wantErrIs:      ErrNoChanges,
+	}, {
+		name:           "ErrNothingToCommit translates to ErrNoChanges",
+		prNumber:       0,
+		makeChangesErr: clonemanager.ErrNothingToCommit,
+		wantErrIs:      ErrNoChanges,
+	}, {
+		name:           "wrapped ErrNothingToCommit translates to ErrNoChanges",
+		prNumber:       0,
+		makeChangesErr: fmt.Errorf("committing changes: %w", clonemanager.ErrNothingToCommit),
+		wantErrIs:      ErrNoChanges,
 	}}
 
 	for _, tt := range tests {
@@ -134,8 +153,16 @@ func TestUpsert(t *testing.T) {
 			}
 
 			gotURL, err := session.Upsert(t.Context(), data, false, tt.labels, func(_ context.Context, _ string) error {
-				return nil // no-op: pretend we made changes
+				return tt.makeChangesErr
 			})
+
+			if tt.wantErrIs != nil {
+				if !errors.Is(err, tt.wantErrIs) {
+					t.Errorf("Upsert: got error = %v, wanted errors.Is(_, %v)", err, tt.wantErrIs)
+				}
+				return
+			}
+
 			if err != nil {
 				t.Fatalf("Upsert: got error = %v, wanted nil", err)
 			}

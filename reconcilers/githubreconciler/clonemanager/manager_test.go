@@ -254,6 +254,46 @@ func TestMakeAndPushChanges(t *testing.T) {
 	}
 }
 
+func TestMakeAndPushChanges_NothingToCommit(t *testing.T) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	err = lease.MakeAndPushChanges(ctx, "clonemanager/no-op-branch", func(_ context.Context, _ *git.Worktree) (string, error) {
+		// updateFn returns successfully but makes no changes to the worktree
+		return "this commit message should never be used", nil
+	})
+	if !errors.Is(err, ErrNothingToCommit) {
+		t.Errorf("MakeAndPushChanges with no changes: got = %v, wanted = ErrNothingToCommit", err)
+	}
+}
+
 func initTestRepo(t *testing.T) (string, string) {
 	t.Helper()
 

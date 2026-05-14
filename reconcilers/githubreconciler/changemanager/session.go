@@ -17,6 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
@@ -366,14 +367,18 @@ func resolveReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLCl
 // ErrNoChanges can be returned by the makeChanges callback to signal that no
 // diff was produced. Upsert passes this error through (wrapped) so the caller
 // can decide how to handle it (e.g. close an existing PR, log, or ignore).
+//
+// Upsert also translates clonemanager.ErrNothingToCommit into ErrNoChanges so
+// callbacks using clonemanager.MakeAndPushChanges don't need to map it manually.
 var ErrNoChanges = errors.New("no changes")
 
 // Upsert creates a new PR or updates an existing one with the provided properties.
 // It only calls makeChanges when refresh is needed: no existing PR, merge conflict,
 // CI failures (only when WithFindingsIteration is enabled), or embedded data differs.
 //
-// If makeChanges returns ErrNoChanges, it is passed through (wrapped) so the
-// caller can check for it with errors.Is.
+// If makeChanges returns ErrNoChanges (or clonemanager.ErrNothingToCommit, which
+// is translated to ErrNoChanges), it is passed through (wrapped) so the caller
+// can check for it with errors.Is.
 //
 // Returns a RequeueAfter error if GitHub is still computing the PR's mergeable status.
 // Returns an error if the PR should be skipped (skip label or assigned to someone).
@@ -395,9 +400,12 @@ func (s *Session[T]) Upsert(
 		return s.prURL, nil
 	}
 
-	// Make code changes on the branch
-	if err := makeChanges(ctx, s.branchName); errors.Is(err, ErrNoChanges) {
-		return "", fmt.Errorf("upsert %s: %w", s.branchName, err)
+	// Make code changes on the branch. clonemanager.ErrNothingToCommit is
+	// surfaced when MakeAndPushChanges runs an updateFn that produces no diff;
+	// translate it into the standard ErrNoChanges so callers only have to
+	// check for one sentinel.
+	if err := makeChanges(ctx, s.branchName); errors.Is(err, ErrNoChanges) || errors.Is(err, clonemanager.ErrNothingToCommit) {
+		return "", fmt.Errorf("upsert %s: %w", s.branchName, ErrNoChanges)
 	} else if err != nil {
 		return "", fmt.Errorf("making changes: %w", err)
 	}
