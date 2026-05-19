@@ -6,7 +6,7 @@ require (
 	chainguard.dev/driftlessaf v0.0.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/go-git/go-git/v5 v5.19.0
+	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/go-github/v84 v84.0.0
 	golang.org/x/tools v0.44.0
 )
