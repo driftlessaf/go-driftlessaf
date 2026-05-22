@@ -6,7 +6,7 @@ require (
 	chainguard.dev/driftlessaf v0.0.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/go-git/go-git/v5 v5.19.0
+	github.com/go-git/go-git/v5 v5.19.1
 	github.com/google/go-github/v84 v84.0.0
 	golang.org/x/tools v0.44.0
 )
@@ -62,7 +62,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chainguard-dev/terraform-infra-common v1.0.5 // indirect
+	github.com/chainguard-dev/terraform-infra-common v1.0.10 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.18.2 // indirect
@@ -261,7 +261,3 @@ require (
 )
 
 replace chainguard.dev/driftlessaf => ../
-
-replace chainguard.dev/sdk => ../../../public/sdk
-
-replace github.com/chainguard-dev/terraform-infra-common => ../../terraform-infra-common
