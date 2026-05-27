@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v1.0.10
+	github.com/chainguard-dev/terraform-infra-common v1.0.11
 	github.com/chainguard-dev/terraform-provider-cosign v0.3.4
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.18.0
