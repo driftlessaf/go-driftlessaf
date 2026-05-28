@@ -420,7 +420,7 @@ func TestReconcilerFields(t *testing.T) {
 		analyzer: &fakeAnalyzer{},
 		prLabels: []string{"label1", "label2"},
 		agent:    &fakeAgent{},
-		buildRequest: func(_ context.Context, _ *gogit.Worktree, findings []callbacks.Finding) (*testRequest, error) {
+		buildRequest: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *gogit.Worktree, findings []callbacks.Finding) (*testRequest, error) {
 			return &testRequest{Findings: findings}, nil
 		},
 		buildCallbacks: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
@@ -446,7 +446,7 @@ func TestReconcilerWithEmptyLabels(t *testing.T) {
 		identity: "test-identity",
 		analyzer: &fakeAnalyzer{},
 		agent:    &fakeAgent{},
-		buildRequest: func(_ context.Context, _ *gogit.Worktree, _ []callbacks.Finding) (*testRequest, error) {
+		buildRequest: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *gogit.Worktree, _ []callbacks.Finding) (*testRequest, error) {
 			return &testRequest{}, nil
 		},
 		buildCallbacks: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {

@@ -68,7 +68,7 @@ func newReconciler[CB any](
 	}
 
 	return metapathreconciler.New(ctx, identity, &goModernize{}, cm, cloneMeta, prLabels, agent,
-		func(_ context.Context, _ *gogit.Worktree, findings []callbacks.Finding) (*Request, error) {
+		func(_ context.Context, _ *changemanager.Session[metapathreconciler.PRData[*Request]], _ *gogit.Worktree, findings []callbacks.Finding) (*Request, error) {
 			return &Request{Findings: findings}, nil
 		},
 		buildCallbacks,

@@ -99,7 +99,7 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
-	buildRequest   func(context.Context, *gogit.Worktree, []callbacks.Finding) (Req, error)
+	buildRequest   func(context.Context, *changemanager.Session[PRData[Req]], *gogit.Worktree, []callbacks.Finding) (Req, error)
 	buildCallbacks func(context.Context, *changemanager.Session[PRData[Req]], *clonemanager.Lease) (CB, error)
 
 	// labelFn optionally computes additional PR labels from diagnostics/findings.
@@ -144,7 +144,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any](
 	cloneMeta *clonemanager.Meta,
 	prLabels []string,
 	agent metaagent.Agent[Req, Resp, CB],
-	buildRequest func(context.Context, *gogit.Worktree, []callbacks.Finding) (Req, error),
+	buildRequest func(context.Context, *changemanager.Session[PRData[Req]], *gogit.Worktree, []callbacks.Finding) (Req, error),
 	buildCallbacks func(context.Context, *changemanager.Session[PRData[Req]], *clonemanager.Lease) (CB, error),
 	opts ...Option,
 ) (*Reconciler[Req, Resp, CB], error) {

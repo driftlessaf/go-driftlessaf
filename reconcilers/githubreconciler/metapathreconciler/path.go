@@ -171,7 +171,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 	// Build the request for PRData. Even when the analyzer fixed everything,
 	// we still build the request so that any stable fields (e.g. SkillsHash)
 	// are captured in PRData for change detection.
-	request, err := r.buildRequest(ctx, wt, findings)
+	request, err := r.buildRequest(ctx, session, wt, findings)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}

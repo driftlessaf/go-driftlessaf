@@ -300,6 +300,22 @@ func (s *Session[T]) AddAssignees(ctx context.Context, logins []string) error {
 	return nil
 }
 
+// StoredData returns the PRData embedded in the existing PR body, or false if
+// no PR exists or the data cannot be extracted. Callers can use this on
+// ITERATION passes to recover request metadata that was embedded during the
+// FRESH pass, avoiding the need for in-process caches that break under
+// multi-replica deployments.
+func (s *Session[T]) StoredData() (*T, bool) {
+	if s.prBody == "" {
+		return nil, false
+	}
+	data, err := s.manager.templateExecutor.Extract(s.prBody)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
 // Findings returns the list of findings to be addressed.
 // Returns nil if no PR exists or if all checks passed.
 func (s *Session[T]) Findings() []callbacks.Finding {
