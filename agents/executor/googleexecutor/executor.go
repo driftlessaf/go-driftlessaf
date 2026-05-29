@@ -386,6 +386,25 @@ func (e *executor[Request, Response]) Execute(
 
 		candidate := response.Candidates[0]
 
+		// Capture per-turn LLM payload alongside RecordTokens. Unlike the
+		// claude/openai executors (which capture params.Messages before the
+		// SDK call), the genai chat handle owns conversation state — so we
+		// read it from chat.History(false), which at this point includes the
+		// just-returned response. PromptMessages therefore carries the full
+		// context the model saw *plus* its own response; Completion holds
+		// just the response candidate. The redundancy is benign — SQL queries
+		// pick the column matching the question, and prompt_hash stays unique
+		// per (context, response) pair. History(false) is uncurated so
+		// malformed/filtered turns persist verbatim, matching the security
+		// posture documented on agenttrace.SpanEventType. Gated inside on
+		// agenttrace.WithPayloadsEnabled.
+		if err := llmTurn.RecordRequest(chat.History(false)); err != nil {
+			clog.WarnContext(ctx, "failed to record llm prompt payload", "error", err)
+		}
+		if err := llmTurn.RecordResponse(candidate.Content); err != nil {
+			clog.WarnContext(ctx, "failed to record llm response payload", "error", err)
+		}
+
 		// Check for malformed function call
 		if candidate.FinishReason == genai.FinishReasonMalformedFunctionCall {
 			clog.WarnContext(ctx, "Model attempted a malformed function call, asking it to retry",

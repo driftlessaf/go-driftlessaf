@@ -363,6 +363,15 @@ func (e *executor[Request, Response]) Execute(
 		turnCfg.OnAttemptError = llmTurn.RecordError
 		turnCfg = e.withAPIRequestCounter(ctx, turnCfg)
 
+		// Capture the cumulative prompt as sent to Anthropic. params.Messages
+		// grows across turns (tool results are appended in-place after each
+		// turn), so this row carries the full context the model saw. Gated
+		// inside RecordRequest on agenttrace.WithPayloadsEnabled — a no-op
+		// when payloads are disabled. See span_test.go for shape coverage.
+		if err := llmTurn.RecordRequest(params.Messages); err != nil {
+			clog.WarnContext(ctx, "failed to record llm prompt payload", "error", err)
+		}
+
 		// Stream response with retry for transient errors
 		message, err := retry.RetryWithBackoff(ctx, turnCfg, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
 			stream := e.client.Messages.NewStreaming(ctx, params)
@@ -395,6 +404,13 @@ func (e *executor[Request, Response]) Execute(
 		if message.Usage.InputTokens > 0 || message.Usage.OutputTokens > 0 {
 			e.recordTokenMetrics(ctx, message.Usage.InputTokens, message.Usage.OutputTokens)
 			llmTurn.RecordTokens(message.Usage.InputTokens, message.Usage.OutputTokens)
+		}
+
+		// Capture the assistant content blocks (text + tool_use + thinking)
+		// as the completion for this turn. Pairs with RecordRequest above to
+		// produce a per-span row keyed on prompt_hash. Gated inside the call.
+		if err := llmTurn.RecordResponse(message.Content); err != nil {
+			clog.WarnContext(ctx, "failed to record llm response payload", "error", err)
 		}
 
 		// Record prompt cache metrics. The API response includes two cache-specific

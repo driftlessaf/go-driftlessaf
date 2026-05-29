@@ -198,6 +198,14 @@ func (e *executor[Request, Response]) Execute(
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
 
+		// Capture the cumulative prompt as sent. reqParams.Messages grows
+		// across turns (assistant + tool result messages are appended in
+		// place), so each row carries the full context the model saw.
+		// Gated inside on agenttrace.WithPayloadsEnabled.
+		if err := llmTurn.RecordRequest(reqParams.Messages); err != nil {
+			clog.WarnContext(ctx, "failed to record llm prompt payload", "error", err)
+		}
+
 		completion, err := retry.RetryWithBackoff(ctx, turnCfg, "chat_completion", isRetryableOpenAIError, func() (*openai.ChatCompletion, error) {
 			return e.client.Chat.Completions.New(ctx, reqParams)
 		})
@@ -218,6 +226,13 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		choice := completion.Choices[0]
+
+		// Capture the assistant message (content + tool_calls + role) as the
+		// completion for this turn. Pairs with RecordRequest above to produce
+		// a per-span row keyed on prompt_hash. Gated inside the call.
+		if err := llmTurn.RecordResponse(choice.Message); err != nil {
+			clog.WarnContext(ctx, "failed to record llm response payload", "error", err)
+		}
 
 		// Capture reasoning_content from thinking models (e.g. kimi-k2-thinking-maas).
 		// This field is non-standard and arrives via ExtraFields.
