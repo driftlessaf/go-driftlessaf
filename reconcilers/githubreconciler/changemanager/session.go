@@ -194,6 +194,11 @@ func (s *Session[T]) Labels() []string {
 	return s.prLabels
 }
 
+// Path returns the resource path being reconciled (e.g. "packages/foo.yaml").
+func (s *Session[T]) Path() string {
+	return s.resource.Path
+}
+
 // Extract returns the embedded data from the PR body.
 func (s *Session[T]) Extract() (*T, error) {
 	if !s.State().HasPR() {
