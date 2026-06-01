@@ -151,6 +151,59 @@ func WithoutCacheControl[Request promptbuilder.Bindable, Response any]() Option[
 	}
 }
 
+// WithCacheFirstUserBlock places an additional Anthropic cache breakpoint on
+// the first user content block (the rendered prompt), in addition to the tool
+// definitions and system prompt that are cached by default.
+//
+// This is useful when the first user message carries a large payload (for
+// example, per-request evidence embedded in the prompt) and the agent loop
+// spans several turns: with the breakpoint, the API reads that payload from
+// cache at 10% of the base input price on turns after the first, instead of
+// re-billing it at full price each turn.
+//
+// The breakpoint is only placed when prompt caching is enabled and a breakpoint
+// slot remains within the API's limit, so it can never cause the API to reject
+// a request for having too many breakpoints. Off by default.
+//
+// Caching benefits accrue within a single model's iteration loop. A workflow
+// that switches models mid-flight (for example, a cheap first pass that
+// escalates to a stronger model) does not share a cached prefix across the
+// switch, because the cache is keyed by the exact request prefix including the
+// model.
+// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+func WithCacheFirstUserBlock[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.cacheFirstUserBlock = true
+		return nil
+	}
+}
+
+// WithMaxToolCallsBeforeFinalize bounds the agentic loop with a soft cap: once
+// the model has made n investigative (non-terminal) tool calls, the executor
+// injects a single instruction asking it to call its terminal submit tool now
+// and forces that tool on the next turn.
+//
+// This is distinct from WithMaxTurns, which aborts the run when exceeded. The
+// soft cap instead steers the model toward emitting a result based on the
+// evidence gathered so far, which is preferable for workflows that should
+// always return a verdict rather than fail. A value of zero (the default)
+// disables the nudge entirely. The nudge only takes effect when a terminal
+// tool is configured via WithSubmitResultProvider; without one there is no
+// tool to steer toward, so the option is a no-op.
+//
+// Not compatible with WithThinking; the API requires tool_choice auto/none
+// while thinking is active, and the forced tool_choice this option uses on
+// the finalize turn returns a 400.
+func WithMaxToolCallsBeforeFinalize[Request promptbuilder.Bindable, Response any](n int) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if n < 0 {
+			return fmt.Errorf("max tool calls before finalize must be non-negative, got %d", n)
+		}
+		e.maxToolCallsBeforeFinalize = n
+		return nil
+	}
+}
+
 // WithResourceLabels sets labels for GCP billing attribution when using Claude via Vertex AI.
 // Automatically includes default labels from environment variables:
 //   - service_name: from K_SERVICE (defaults to "unknown")

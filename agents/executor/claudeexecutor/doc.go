@@ -67,6 +67,8 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithTemperature: Set response temperature (defaults to 0.1)
 //   - WithSystemInstructions: Provide system-level instructions
 //   - WithThinking: Enable extended thinking mode with a token budget
+//   - WithCacheFirstUserBlock: Also cache the first user message (off by default)
+//   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
 //
 // # Extended Thinking
 //

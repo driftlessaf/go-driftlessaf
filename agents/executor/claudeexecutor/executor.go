@@ -64,7 +64,38 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// Enabled by default — disable with WithoutCacheControl() if needed.
 	// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 	cacheControl bool
+
+	// cacheFirstUserBlock, when true, places an additional cache breakpoint on the
+	// first user content block (the rendered prompt). This caches the initial user
+	// message alongside the tool definitions and system prompt, so a large per-request
+	// payload embedded in the prompt is read from cache on the second and subsequent
+	// turns of a single conversation instead of re-billing at full price each turn.
+	// Requires cacheControl. Off by default — opt in with WithCacheFirstUserBlock()
+	// for agents whose first user message is large and whose loop spans several turns.
+	// The breakpoint is only placed when doing so keeps the request within the API's
+	// limit of four cache breakpoints.
+	cacheFirstUserBlock bool
+
+	// maxToolCallsBeforeFinalize, when greater than zero, bounds the agentic loop by
+	// nudging the model to finish once it has made this many tool calls. After the
+	// live tool-call count reaches the threshold, a single instruction is injected
+	// asking the model to call its terminal (submit) tool now. Zero disables the
+	// nudge entirely. This is a soft cap distinct from maxTurns: it steers the model
+	// toward emitting a result rather than aborting the run. It is only meaningful
+	// when a submit tool is configured (the terminal tool to call); without one it
+	// has no effect.
+	maxToolCallsBeforeFinalize int
 }
+
+// maxCacheBreakpoints is the Anthropic API's hard limit on the number of
+// cache_control breakpoints permitted in a single request. The executor
+// places at most one breakpoint each on the last tool definition, the system
+// block, and the first user block, so it never approaches the limit — the
+// guard exists so a future caller-supplied breakpoint or an additional
+// executor breakpoint cannot silently push a request over the limit and cause
+// the API to reject it.
+// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+const maxCacheBreakpoints = 4
 
 // New creates a new Executor with minimal required configuration
 func New[Request promptbuilder.Bindable, Response any](
@@ -148,89 +179,16 @@ func (e *executor[Request, Response]) Execute(
 		tools = mergedTools
 	}
 
-	// Build tool definitions for Claude, sorted by name for deterministic ordering.
-	//
-	// Why sort? The Anthropic API uses prompt caching to avoid re-processing the
-	// same content on every turn. It works by hashing the request prefix (tools →
-	// system prompt → messages, in that order). If the hash matches a previous
-	// request, cached tokens are served at 10% of the normal input token price.
-	//
-	// Go maps iterate in non-deterministic order, so without sorting, the tool
-	// definitions would serialize differently on every turn — producing a different
-	// hash and invalidating the cache every time, even though the tools haven't
-	// changed. Sorting by name ensures a stable hash across turns and executions.
-	toolDefs := make([]anthropic.ToolUnionParam, 0, len(tools))
-	for _, meta := range tools {
-		toolDefs = append(toolDefs, anthropic.ToolUnionParam{
-			OfTool: &meta.Definition,
-		})
+	// Assemble the base request parameters: sorted tool definitions, the
+	// system prompt, the initial user message, and the cache breakpoints. The
+	// temperature warning is deferred to the caller because it needs ctx.
+	params, dropTemperatureWarn, err := e.assembleParams(prompt, tools)
+	if err != nil {
+		return response, err
 	}
-	slices.SortFunc(toolDefs, func(a, b anthropic.ToolUnionParam) int {
-		return cmp.Compare(a.OfTool.Name, b.OfTool.Name)
-	})
-
-	// Place a cache breakpoint on the last tool definition.
-	//
-	// A "breakpoint" (cache_control) tells the API: "everything from the start of
-	// the request up to and including this block can be cached." The API hashes
-	// that prefix — if the next request has the same hash, the cached computation
-	// is reused instead of re-processing all those tokens.
-	//
-	// Tools come first in the API prefix order (tools → system → messages), so
-	// a breakpoint here caches all tool definitions. This benefits both multi-turn
-	// conversations (same tools every turn) and separate executions that share the
-	// same tool set (cache is keyed by content hash, not by session).
-	if e.cacheControl && len(toolDefs) > 0 {
-		toolDefs[len(toolDefs)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
-	}
-
-	// Create initial messages, starting with the user prompt
-	messages := []anthropic.MessageParam{{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewTextBlock(prompt),
-		},
-	}}
-
-	// Create request parameters
-	params := anthropic.MessageNewParams{
-		Model:     e.modelName,
-		MaxTokens: e.maxTokens,
-		Messages:  messages,
-		Tools:     toolDefs,
-	}
-
-	// Opus 4.7 removed the sampling-param fields (temperature, top_p, top_k);
-	// the API returns a 400 when any are set to a non-default value. Gate here
-	// so callers don't need model-aware logic.
-	// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
-	if supportsSamplingParams(e.modelName) {
-		params.Temperature = anthropic.Float(e.temperature)
-		// Extended thinking requires temperature=1.0.
-		// See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
-		if e.thinkingBudgetTokens != nil {
-			params.Temperature = anthropic.Float(1.0)
-		}
-	} else if e.temperatureSet {
+	if dropTemperatureWarn {
 		clog.WarnContext(ctx, "dropping temperature: not supported by this model",
 			"model", e.modelName, "temperature", e.temperature)
-	}
-
-	// Add system instructions if provided
-	if e.systemInstructions != nil {
-		systemPrompt, err := e.systemInstructions.Build()
-		if err != nil {
-			return response, fmt.Errorf("building system prompt: %w", err)
-		}
-		systemBlock := anthropic.TextBlockParam{Text: systemPrompt}
-		// Place a second cache breakpoint on the system prompt. Since the API prefix
-		// order is tools → system → messages, this breakpoint caches both the tool
-		// definitions AND the system prompt together. On subsequent turns, the API
-		// reads both from cache instead of re-processing them as fresh input tokens.
-		if e.cacheControl {
-			systemBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
-		}
-		params.System = []anthropic.TextBlockParam{systemBlock}
 	}
 
 	// Add thinking configuration if enabled. Opus 4.7 removed extended-thinking
@@ -260,6 +218,25 @@ func (e *executor[Request, Response]) Execute(
 	// finalResult stores the result if a tool sets it
 	var finalResult Response
 	finalResultPtr := &finalResult
+
+	// submitToolName is the configured terminal tool the model calls to
+	// return its result. Empty when no submit tool is registered.
+	submitToolName := ""
+	if e.submitTool.Handler != nil {
+		submitToolName = e.submitTool.Definition.Name
+		if submitToolName == "" {
+			submitToolName = "submit_result"
+		}
+	}
+
+	// liveToolCalls counts the model's investigative (non-terminal) tool
+	// calls across turns. It drives the optional early-finalize nudge
+	// (maxToolCallsBeforeFinalize). The terminal submit tool is excluded so
+	// the nudge measures investigation effort, not the act of finishing.
+	liveToolCalls := 0
+	// finalizeNudged records whether the early-finalize instruction has
+	// already been injected, so it fires at most once per execution.
+	finalizeNudged := false
 
 	// executeToolCall handles executing a single tool call and returning the result
 	executeToolCall := func(toolUse anthropic.ToolUseBlock) (anthropic.ContentBlockParamUnion, error) {
@@ -466,6 +443,13 @@ func (e *executor[Request, Response]) Execute(
 				// Record tool call metric
 				e.recordToolCall(ctx, toolUse.Name)
 
+				// Count investigative (non-terminal) tool calls toward the
+				// early-finalize threshold. The terminal submit tool is the
+				// model converging, not investigating, so it is excluded.
+				if submitToolName == "" || toolUse.Name != submitToolName {
+					liveToolCalls++
+				}
+
 				result, err := executeToolCall(toolUse)
 				if err != nil {
 					return response, true, err
@@ -486,6 +470,27 @@ func (e *executor[Request, Response]) Execute(
 				Content: toolResults,
 			})
 
+			// Optional early-finalize nudge. When the investigative tool-call
+			// count reaches the configured threshold and a terminal tool is
+			// configured, inject a single instruction asking the model to emit
+			// its result now and force that tool on the next turn. This bounds
+			// runaway investigation by steering toward a result rather than
+			// aborting at maxTurns. Off when maxToolCallsBeforeFinalize is zero.
+			if shouldNudgeFinalize(e.maxToolCallsBeforeFinalize, liveToolCalls, finalizeNudged, submitToolName) {
+				finalizeNudged = true
+				e.recordToolCall(ctx, "early_finalize_nudge")
+				clog.InfoContext(ctx, "early-finalize threshold reached, nudging model to emit result",
+					"live_tool_calls", liveToolCalls,
+					"threshold", e.maxToolCallsBeforeFinalize)
+				params.Messages = append(params.Messages, anthropic.MessageParam{
+					Role: anthropic.MessageParamRoleUser,
+					Content: []anthropic.ContentBlockParamUnion{
+						anthropic.NewTextBlock(fmt.Sprintf("You have gathered enough evidence. Call the %s tool now to return your result based on what you have found so far.", submitToolName)),
+					},
+				})
+				params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
+			}
+
 			return response, false, nil
 		}
 
@@ -495,11 +500,6 @@ func (e *executor[Request, Response]) Execute(
 		if e.submitTool.Handler != nil && textContent != "" {
 			clog.WarnContext(ctx, "Claude responded with text instead of calling submit_result, redirecting with tool_choice")
 			e.recordToolCall(ctx, "submit_result_redirect")
-
-			submitToolName := e.submitTool.Definition.Name
-			if submitToolName == "" {
-				submitToolName = "submit_result"
-			}
 
 			params.Messages = append(params.Messages, message.ToParam())
 			params.Messages = append(params.Messages, anthropic.MessageParam{
@@ -544,6 +544,146 @@ func (e *executor[Request, Response]) Execute(
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
 	e.recordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+}
+
+// assembleParams builds the base request parameters shared by every turn: the
+// sorted tool definitions, the system prompt, the initial user message, the
+// sampling parameters, and the cache breakpoints. It returns the assembled
+// params and a flag indicating that an explicitly-set temperature was dropped
+// for a model that does not accept sampling params, so the caller can log the
+// warning with its context. Pulling this out of Execute keeps the breakpoint
+// placement and the breakpoint-count guard in one place that tests can drive
+// directly without a live client.
+func (e *executor[Request, Response]) assembleParams(prompt string, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, bool, error) {
+	// Build tool definitions for Claude, sorted by name for deterministic ordering.
+	//
+	// Why sort? The Anthropic API uses prompt caching to avoid re-processing the
+	// same content on every turn. It works by hashing the request prefix (tools →
+	// system prompt → messages, in that order). If the hash matches a previous
+	// request, cached tokens are served at 10% of the normal input token price.
+	//
+	// Go maps iterate in non-deterministic order, so without sorting, the tool
+	// definitions would serialize differently on every turn — producing a different
+	// hash and invalidating the cache every time, even though the tools haven't
+	// changed. Sorting by name ensures a stable hash across turns and executions.
+	toolDefs := make([]anthropic.ToolUnionParam, 0, len(tools))
+	for _, meta := range tools {
+		toolDefs = append(toolDefs, anthropic.ToolUnionParam{
+			OfTool: &meta.Definition,
+		})
+	}
+	slices.SortFunc(toolDefs, func(a, b anthropic.ToolUnionParam) int {
+		return cmp.Compare(a.OfTool.Name, b.OfTool.Name)
+	})
+
+	// breakpoints counts the cache_control markers placed so far so the
+	// running total stays within maxCacheBreakpoints. The first-user-block
+	// breakpoint is only placed when room remains.
+	breakpoints := 0
+
+	// Place a cache breakpoint on the last tool definition.
+	//
+	// A "breakpoint" (cache_control) tells the API: "everything from the start of
+	// the request up to and including this block can be cached." The API hashes
+	// that prefix — if the next request has the same hash, the cached computation
+	// is reused instead of re-processing all those tokens.
+	//
+	// Tools come first in the API prefix order (tools → system → messages), so
+	// a breakpoint here caches all tool definitions. This benefits both multi-turn
+	// conversations (same tools every turn) and separate executions that share the
+	// same tool set (cache is keyed by content hash, not by session).
+	if e.cacheControl && len(toolDefs) > 0 {
+		toolDefs[len(toolDefs)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		breakpoints++
+	}
+
+	// Create initial messages, starting with the user prompt
+	messages := []anthropic.MessageParam{{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			anthropic.NewTextBlock(prompt),
+		},
+	}}
+
+	// Create request parameters
+	params := anthropic.MessageNewParams{
+		Model:     e.modelName,
+		MaxTokens: e.maxTokens,
+		Messages:  messages,
+		Tools:     toolDefs,
+	}
+
+	// Opus 4.7 removed the sampling-param fields (temperature, top_p, top_k);
+	// the API returns a 400 when any are set to a non-default value. Gate here
+	// so callers don't need model-aware logic.
+	// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
+	dropTemperatureWarn := false
+	if supportsSamplingParams(e.modelName) {
+		params.Temperature = anthropic.Float(e.temperature)
+		// Extended thinking requires temperature=1.0.
+		// See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
+		if e.thinkingBudgetTokens != nil {
+			params.Temperature = anthropic.Float(1.0)
+		}
+	} else if e.temperatureSet {
+		dropTemperatureWarn = true
+	}
+
+	// Add system instructions if provided
+	if e.systemInstructions != nil {
+		systemPrompt, err := e.systemInstructions.Build()
+		if err != nil {
+			return anthropic.MessageNewParams{}, false, fmt.Errorf("building system prompt: %w", err)
+		}
+		systemBlock := anthropic.TextBlockParam{Text: systemPrompt}
+		// Place a second cache breakpoint on the system prompt. Since the API prefix
+		// order is tools → system → messages, this breakpoint caches both the tool
+		// definitions AND the system prompt together. On subsequent turns, the API
+		// reads both from cache instead of re-processing them as fresh input tokens.
+		if e.cacheControl {
+			systemBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			breakpoints++
+		}
+		params.System = []anthropic.TextBlockParam{systemBlock}
+	}
+
+	// Optionally place a cache breakpoint on the first user content block (the
+	// rendered prompt). Messages come last in the API prefix order, so this
+	// caches everything before it — the tool definitions, the system prompt,
+	// and the initial user message — together. For agents whose first user
+	// message carries a large payload and whose loop spans several turns, this
+	// lets the API read that payload from cache on turns after the first
+	// instead of re-billing it at full price. Off by default; only applied when
+	// a breakpoint slot remains, so it can never push a request past the API
+	// limit. The breakpoint lives on the per-block ContentBlockParamUnion, so
+	// it travels with the message as params.Messages grows across turns.
+	//
+	// This is the last breakpoint the executor places, so the running count is
+	// only read here; it is not incremented afterward.
+	if e.cacheControl && e.cacheFirstUserBlock && breakpoints < maxCacheBreakpoints &&
+		len(params.Messages) > 0 && len(params.Messages[0].Content) > 0 {
+		if tb := params.Messages[0].Content[0].OfText; tb != nil {
+			tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+	}
+
+	return params, dropTemperatureWarn, nil
+}
+
+// shouldNudgeFinalize reports whether the early-finalize instruction should be
+// injected on this turn. It fires once the investigative tool-call count
+// reaches the threshold, and only when:
+//   - a positive threshold is configured (zero disables the nudge),
+//   - the nudge has not already been sent this execution, and
+//   - a terminal submit tool is configured to steer the model toward.
+//
+// A non-positive threshold or an empty submit tool name always returns false,
+// preserving identical behavior for callers that do not opt in.
+func shouldNudgeFinalize(threshold, liveToolCalls int, alreadyNudged bool, submitToolName string) bool {
+	if threshold <= 0 || alreadyNudged || submitToolName == "" {
+		return false
+	}
+	return liveToolCalls >= threshold
 }
 
 // resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
