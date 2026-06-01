@@ -242,7 +242,7 @@ func (e *executor[Request, Response]) Execute(
 	executeToolCall := func(toolUse anthropic.ToolUseBlock) (anthropic.ContentBlockParamUnion, error) {
 		kvs := []any{"tool", toolUse.Name, "id", toolUse.ID}
 		var args map[string]any
-		if err := json.Unmarshal(toolUse.Input, &args); err == nil {
+		if err := json.Unmarshal(normalizeToolUseInput(toolUse.Input), &args); err == nil {
 			for k, v := range args {
 				kvs = append(kvs, "args."+k, v)
 			}
@@ -356,6 +356,17 @@ func (e *executor[Request, Response]) Execute(
 			for stream.Next() {
 				event := stream.Current()
 				if err := msg.Accumulate(event); err != nil {
+					// The SDK re-marshals accumulated content on content_block_stop
+					// and message_stop to refresh its JSON cache. A tool_use block
+					// whose Input is a non-nil zero-length json.RawMessage (model
+					// emitted a tool call with no input_json_delta events) causes
+					// json.Marshal to fail with "unexpected end of JSON input".
+					// The structural accumulation is intact -- only the JSON cache
+					// refresh failed -- so normalize the empty tool inputs to "{}"
+					// and continue.
+					if isEmptyRawMessageMarshalErr(err) && normalizeEmptyToolInputs(&msg) {
+						continue
+					}
 					return msg, fmt.Errorf("failed to accumulate event: %w", err)
 				}
 			}
@@ -420,7 +431,7 @@ func (e *executor[Request, Response]) Execute(
 				toolUseBlocks = append(toolUseBlocks, anthropic.ToolUseBlock{
 					ID:    content.ID,
 					Name:  content.Name,
-					Input: content.Input,
+					Input: normalizeToolUseInput(content.Input),
 				})
 			case "thinking", "redacted_thinking":
 				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
