@@ -85,6 +85,23 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// when a submit tool is configured (the terminal tool to call); without one it
 	// has no effect.
 	maxToolCallsBeforeFinalize int
+
+	// forceSubmitToolChoice, when true, forces the model to call its terminal
+	// submit tool via tool_choice rather than leaving the choice to the model.
+	// This removes the wasted turn the executor would otherwise spend
+	// reactively redirecting a model that answered with text instead of
+	// calling the submit tool. Off by default; opt in with
+	// WithForceSubmitToolChoice. Only meaningful when a submit tool is
+	// configured. Incompatible with thinking (validated in New).
+	forceSubmitToolChoice bool
+
+	// forceSubmitDeferUntilTool, when non-empty, names a tool whose presence in
+	// the run's tool set defers the forced tool_choice past the first turn. When
+	// that tool is registered, the first turn stays at auto so the model can
+	// call it (for example to fetch deferred evidence) before being forced to
+	// finalize. Empty means force on the first turn unconditionally. Only
+	// consulted when forceSubmitToolChoice is true.
+	forceSubmitDeferUntilTool string
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -129,6 +146,14 @@ func New[Request promptbuilder.Bindable, Response any](
 		if err := opt(e); err != nil {
 			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
+	}
+
+	// Forcing a submit tool_choice is incompatible with extended thinking: the
+	// API rejects a forced tool_choice while thinking is active. Checked after
+	// all options are applied so the conflict is caught regardless of the order
+	// the two options were supplied in.
+	if e.forceSubmitToolChoice && e.thinkingBudgetTokens != nil {
+		return nil, errors.New("WithForceSubmitToolChoice is incompatible with WithThinking: the API rejects a forced tool_choice while extended thinking is active")
 	}
 
 	return e, nil
@@ -221,13 +246,7 @@ func (e *executor[Request, Response]) Execute(
 
 	// submitToolName is the configured terminal tool the model calls to
 	// return its result. Empty when no submit tool is registered.
-	submitToolName := ""
-	if e.submitTool.Handler != nil {
-		submitToolName = e.submitTool.Definition.Name
-		if submitToolName == "" {
-			submitToolName = "submit_result"
-		}
-	}
+	submitToolName := e.submitToolName()
 
 	// liveToolCalls counts the model's investigative (non-terminal) tool
 	// calls across turns. It drives the optional early-finalize nudge
@@ -237,8 +256,15 @@ func (e *executor[Request, Response]) Execute(
 	// finalizeNudged records whether the early-finalize instruction has
 	// already been injected, so it fires at most once per execution.
 	finalizeNudged := false
+	// deferredGateResolved records whether the deferral gate tool (when one is
+	// configured via WithForceSubmitToolChoice) has been called at least once.
+	// While a gate tool is registered but unresolved, the first turn was left
+	// at auto by assembleParams; once it resolves, the submit tool is forced on
+	// the next turn. False when no gate tool applies.
+	deferredGateResolved := false
 
-	// executeToolCall handles executing a single tool call and returning the result
+	// executeToolCall handles executing a single tool call and returning the
+	// result.
 	executeToolCall := func(toolUse anthropic.ToolUseBlock) (anthropic.ContentBlockParamUnion, error) {
 		kvs := []any{"tool", toolUse.Name, "id", toolUse.ID}
 		var args map[string]any
@@ -298,7 +324,7 @@ func (e *executor[Request, Response]) Execute(
 			}},
 		})
 
-		// Execute the tool call
+		// Execute the tool call.
 		result, err := executeToolCall(toolCall)
 		if err != nil {
 			return response, err
@@ -461,6 +487,15 @@ func (e *executor[Request, Response]) Execute(
 					liveToolCalls++
 				}
 
+				// Track resolution of the deferral gate tool. When
+				// WithForceSubmitToolChoice deferred the force because this gate
+				// tool was registered, calling it clears the deferral so the
+				// submit tool is forced on the next turn.
+				if e.forceSubmitToolChoice && e.forceSubmitDeferUntilTool != "" &&
+					toolUse.Name == e.forceSubmitDeferUntilTool {
+					deferredGateResolved = true
+				}
+
 				result, err := executeToolCall(toolUse)
 				if err != nil {
 					return response, true, err
@@ -499,6 +534,18 @@ func (e *executor[Request, Response]) Execute(
 						anthropic.NewTextBlock(fmt.Sprintf("You have gathered enough evidence. Call the %s tool now to return your result based on what you have found so far.", submitToolName)),
 					},
 				})
+				params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
+			}
+
+			// Force the submit tool on the next turn once the deferral gate tool
+			// has resolved. assembleParams left the first turn at auto because
+			// the gate tool was registered; now that it has been called, the
+			// deferred evidence is available and the model should finalize.
+			// Skipped when the early-finalize nudge above already forced the
+			// submit tool, when no submit tool is configured, or when a forced
+			// choice from a prior turn is already in place.
+			if submitToolName != "" && deferredGateResolved &&
+				params.ToolChoice.OfTool == nil {
 				params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
 			}
 
@@ -678,7 +725,45 @@ func (e *executor[Request, Response]) assembleParams(prompt string, tools map[st
 		}
 	}
 
+	// Optionally force the terminal submit tool on the first turn. This is the
+	// last field set so it overrides the default (unset = auto). When a deferral
+	// gate tool is registered the first turn stays at auto so the model can call
+	// that tool first; the force is then applied on a later turn by the turn
+	// loop. See shouldForceSubmitOnFirstTurn for the exact condition.
+	if name := e.submitToolName(); name != "" && e.shouldForceSubmitOnFirstTurn(tools) {
+		params.ToolChoice = anthropic.ToolChoiceParamOfTool(name)
+	}
+
 	return params, dropTemperatureWarn, nil
+}
+
+// submitToolName returns the configured terminal submit tool's name, or "" when
+// no submit tool is registered. The default name "submit_result" is used when a
+// submit tool is registered without an explicit name.
+func (e *executor[Request, Response]) submitToolName() string {
+	if e.submitTool.Handler == nil {
+		return ""
+	}
+	if e.submitTool.Definition.Name == "" {
+		return "submit_result"
+	}
+	return e.submitTool.Definition.Name
+}
+
+// shouldForceSubmitOnFirstTurn reports whether the forced submit tool_choice
+// should be applied on the first turn. It is true only when the option is
+// enabled and either no deferral gate tool is named or the named gate tool is
+// not registered for this run. When the gate tool IS registered, the first turn
+// stays at auto so the model can call it before being forced to finalize.
+func (e *executor[Request, Response]) shouldForceSubmitOnFirstTurn(tools map[string]claudetool.Metadata[Response]) bool {
+	if !e.forceSubmitToolChoice {
+		return false
+	}
+	if e.forceSubmitDeferUntilTool == "" {
+		return true
+	}
+	_, gateRegistered := tools[e.forceSubmitDeferUntilTool]
+	return !gateRegistered
 }
 
 // shouldNudgeFinalize reports whether the early-finalize instruction should be

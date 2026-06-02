@@ -204,6 +204,36 @@ func WithMaxToolCallsBeforeFinalize[Request promptbuilder.Bindable, Response any
 	}
 }
 
+// WithForceSubmitToolChoice forces the model to call its terminal submit tool
+// via tool_choice instead of leaving the choice to the model. This eliminates
+// the wasted turn the executor would otherwise spend reactively redirecting a
+// model that answered with plain text instead of calling the submit tool.
+//
+// The force is applied on the first turn when deferUntilToolName is empty or
+// names a tool that is NOT registered for the run. When deferUntilToolName
+// names a tool that IS registered (for example a deferred-evidence fetch tool),
+// the first turn stays at tool_choice auto so the model can gather that
+// deferred evidence first; the submit tool is forced only on the turn after
+// that gate tool has been called at least once.
+//
+// The option is a no-op unless a terminal submit tool is configured via
+// WithSubmitResultProvider — without one there is no tool to force toward. It
+// is opt-in and off by default, so callers that do not set it keep the existing
+// reactive behavior unchanged.
+//
+// Not compatible with WithThinking: the API requires tool_choice auto/none
+// while extended thinking is active and returns a 400 for a forced tool_choice,
+// so construction fails when both are set. The order in which the two options
+// are applied does not matter — the conflict is checked after all options are
+// applied.
+func WithForceSubmitToolChoice[Request promptbuilder.Bindable, Response any](deferUntilToolName string) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.forceSubmitToolChoice = true
+		e.forceSubmitDeferUntilTool = deferUntilToolName
+		return nil
+	}
+}
+
 // WithResourceLabels sets labels for GCP billing attribution when using Claude via Vertex AI.
 // Automatically includes default labels from environment variables:
 //   - service_name: from K_SERVICE (defaults to "unknown")

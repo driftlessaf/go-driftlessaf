@@ -69,6 +69,7 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
+//   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //
 // # Extended Thinking
 //
