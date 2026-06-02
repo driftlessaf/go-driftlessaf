@@ -97,6 +97,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	prLabels      []string
 	mode          Mode
 
+	// baseRevalidation, when true, makes iteration passes re-run the analyzer
+	// against the base branch (and the PR branch) before iterating, closing
+	// PRs whose update has already landed or been superseded. See
+	// WithBaseRevalidation.
+	baseRevalidation bool
+
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
 	buildRequest   func(context.Context, *changemanager.Session[PRData[Req]], *gogit.Worktree, []callbacks.Finding) (Req, error)
@@ -110,8 +116,9 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 type Option func(*option)
 
 type option struct {
-	mode    Mode
-	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+	mode             Mode
+	labelFn          func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+	baseRevalidation bool
 }
 
 // WithMode configures the reconciler's operating mode.
@@ -132,6 +139,17 @@ func WithMode(m Mode) Option {
 func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string) Option {
 	return func(o *option) {
 		o.labelFn = fn
+	}
+}
+
+// WithBaseRevalidation makes the reconciler re-run the analyzer against the
+// base branch before iterating on a PR with CI findings, closing PRs whose
+// update has already landed or been superseded by a newer version (see
+// baseRevalidate). Off by default to avoid the extra analyzer runs for
+// reconcilers that do not need it.
+func WithBaseRevalidation() Option {
+	return func(o *option) {
+		o.baseRevalidation = true
 	}
 }
 
@@ -160,17 +178,18 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any](
 		return nil, fmt.Errorf("create status manager: %w", err)
 	}
 	return &Reconciler[Req, Resp, CB]{
-		identity:       identity,
-		analyzer:       analyzer,
-		statusManager:  sm,
-		changeManager:  changeManager,
-		cloneMeta:      cloneMeta,
-		prLabels:       prLabels,
-		mode:           o.mode,
-		agent:          agent,
-		buildRequest:   buildRequest,
-		buildCallbacks: buildCallbacks,
-		labelFn:        o.labelFn,
+		identity:         identity,
+		analyzer:         analyzer,
+		statusManager:    sm,
+		changeManager:    changeManager,
+		cloneMeta:        cloneMeta,
+		prLabels:         prLabels,
+		mode:             o.mode,
+		baseRevalidation: o.baseRevalidation,
+		agent:            agent,
+		buildRequest:     buildRequest,
+		buildCallbacks:   buildCallbacks,
+		labelFn:          o.labelFn,
 	}, nil
 }
 

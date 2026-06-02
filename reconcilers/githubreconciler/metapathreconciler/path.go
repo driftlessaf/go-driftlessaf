@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v84/github"
@@ -86,12 +88,34 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		return fmt.Errorf("get clone manager: %w", err)
 	}
 
+	// PR branch name, used by the base-revalidation probe and the lease below.
+	branchName := r.identity + "/" + githubreconciler.PathToBranchSuffix(res.Path)
+
+	// Before iterating on a PR with CI findings, re-check whether the update is
+	// still warranted; otherwise a PR for an already-landed or superseded
+	// version iterates on build failures forever. See WithBaseRevalidation.
+	if usePRBranch && r.baseRevalidation {
+		closeReason, requeue, err := r.baseRevalidate(ctx, cloneMgr, session, res, branchName)
+		if err != nil {
+			return err
+		}
+		if closeReason != "" {
+			log.With("reason", closeReason).Info("Closing PR after base revalidation")
+			if err := session.CloseAnyOutstanding(ctx, closeReason); err != nil {
+				return err
+			}
+			if requeue {
+				return workqueue.RequeueAfter(30 * time.Second)
+			}
+			return nil
+		}
+	}
+
 	// Lease based on current state:
 	// - CI failures on a mergeable PR: lease PR branch for iteration
 	// - Otherwise (no PR, needs rebase, or fresh run): lease default branch
 	var lease *clonemanager.Lease
 	if usePRBranch {
-		branchName := r.identity + "/" + githubreconciler.PathToBranchSuffix(res.Path)
 		log.With("branch", branchName).Info("Acquiring clone lease for pull request branch")
 		lease, err = cloneMgr.LeaseRef(ctx, res, branchName,
 			clonemanager.WithCommitDepth(session.CommitCount()+1))
@@ -230,4 +254,72 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 
 	log.With("pr_url", prURL).Info("PR created/updated")
 	return nil
+}
+
+// baseRevalidate re-validates an iterating PR against the current state of the
+// repository before iterating. It returns a non-empty close reason when the PR
+// should be closed (and whether the path should be requeued to open a fresh
+// PR), or "" to keep iterating:
+//   - base no longer wants the change → the update already landed (superseded);
+//     close, no requeue.
+//   - base wants it but the PR branch does not → the PR is on-target; iterate.
+//   - both still want it → the PR is stale (a newer version exists); close and
+//     requeue so a fresh PR is opened for the current target.
+func (r *Reconciler[Req, Resp, CB]) baseRevalidate(ctx context.Context, cloneMgr *clonemanager.Manager, session *changemanager.Session[PRData[Req]], res *githubreconciler.Resource, branchName string) (closeReason string, requeue bool, err error) {
+	depth := session.CommitCount() + 1
+
+	wantsBase, err := r.revalidate(ctx, cloneMgr, res, res.Ref, depth)
+	if err != nil {
+		return "", false, fmt.Errorf("revalidate base branch: %w", err)
+	}
+	if !wantsBase {
+		return "Closing this PR: the target update has already landed on the base branch.", false, nil
+	}
+
+	wantsPR, err := r.revalidate(ctx, cloneMgr, res, branchName, depth)
+	if err != nil {
+		return "", false, fmt.Errorf("revalidate PR branch: %w", err)
+	}
+	if wantsPR {
+		return "Closing this PR: it is superseded by a newer update. A fresh PR will be opened for the current target.", true, nil
+	}
+	return "", false, nil
+}
+
+// revalidate leases ref, runs the analyzer against its worktree, and reports
+// whether the analyzer still wants a change, returning the lease before it
+// returns. "Wants a change" means an unfixed diagnostic or a modified worktree:
+// monitored packages mutate the worktree and return a Fixed diagnostic, while
+// the checker agent returns unfixed diagnostics without mutating it. An
+// informational Fixed diagnostic that changes nothing (e.g. image-main-package)
+// correctly counts as no change wanted.
+func (r *Reconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *clonemanager.Manager, res *githubreconciler.Resource, ref string, depth int) (bool, error) {
+	lease, err := cloneMgr.LeaseRef(ctx, res, ref, clonemanager.WithCommitDepth(depth))
+	if err != nil {
+		return false, fmt.Errorf("acquire lease for %s: %w", ref, err)
+	}
+	defer func() {
+		if err := lease.Return(ctx); err != nil {
+			clog.WarnContext(ctx, "Failed to return revalidation lease", "error", err)
+		}
+	}()
+
+	wt, err := lease.Repo().Worktree()
+	if err != nil {
+		return false, fmt.Errorf("get worktree: %w", err)
+	}
+	diags, err := r.analyzer.Analyze(ctx, wt, res.Path)
+	if err != nil {
+		return false, fmt.Errorf("run analyzer: %w", err)
+	}
+	for _, d := range diags {
+		if !d.Fixed {
+			return true, nil
+		}
+	}
+	status, err := wt.Status()
+	if err != nil {
+		return false, fmt.Errorf("get worktree status: %w", err)
+	}
+	return !status.IsClean(), nil
 }
