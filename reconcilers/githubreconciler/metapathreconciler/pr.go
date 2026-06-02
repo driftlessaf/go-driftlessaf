@@ -41,41 +41,41 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 	log = clog.FromContext(ctx)
 	session := r.statusManager.NewSession(gh, res, sha)
 
-	// Check if the status is already at the PR HEAD, completed, and neutral.
-	// This lets us skip redundant SetActualState calls in cases 1 and 2.
-	currentStatus, err := session.ObservedState(ctx)
-	if err != nil {
-		return fmt.Errorf("get observed state: %w", err)
-	}
-	neutralAtHead := currentStatus != nil &&
-		currentStatus.ObservedGeneration == sha &&
-		currentStatus.Status == "completed" &&
-		currentStatus.Conclusion == "neutral"
-
-	// Case 1: Skip label → report neutral/skipped status.
-	if hasLabel(pr, fmt.Sprintf("skip:%s", r.identity)) {
-		if neutralAtHead {
-			log.Debug("Skip status already set for this SHA")
+	// reportNeutral posts a completed/neutral status for this SHA, but only
+	// after confirming we have not already done so. ObservedState issues a
+	// check-runs API request, so it is deferred into here: the cases that
+	// ignore a PR outright (the common case on a busy repository) cost only
+	// the single PR fetch above, not an extra check-runs read per event.
+	reportNeutral := func(title string) error {
+		current, err := session.ObservedState(ctx)
+		if err != nil {
+			return fmt.Errorf("get observed state: %w", err)
+		}
+		if current != nil &&
+			current.ObservedGeneration == sha &&
+			current.Status == "completed" &&
+			current.Conclusion == "neutral" {
+			clog.DebugContext(ctx, "Neutral status already set for this SHA")
 			return nil
 		}
-		log.Info("PR has skip label, reporting skipped status")
-		return session.SetActualState(ctx, "Skipped", &statusmanager.Status[CheckDetails]{
+		return session.SetActualState(ctx, title, &statusmanager.Status[CheckDetails]{
 			Status:     "completed",
 			Conclusion: "neutral",
 		})
+	}
+
+	// Case 1: Skip label → report neutral/skipped status.
+	if hasLabel(pr, fmt.Sprintf("skip:%s", r.identity)) {
+		clog.InfoContext(ctx, "PR has skip label, reporting skipped status")
+		return reportNeutral("Skipped")
 	}
 
 	// Case 2: Our PR → report neutral status + re-queue the path for processing.
 	branch := pr.GetHead().GetRef()
 	prefix := r.identity + "/"
 	if strings.HasPrefix(branch, prefix) {
-		if !neutralAtHead {
-			if err := session.SetActualState(ctx, "Managed by "+r.identity, &statusmanager.Status[CheckDetails]{
-				Status:     "completed",
-				Conclusion: "neutral",
-			}); err != nil {
-				return fmt.Errorf("set managed status: %w", err)
-			}
+		if err := reportNeutral("Managed by " + r.identity); err != nil {
+			return fmt.Errorf("set managed status: %w", err)
 		}
 
 		path := githubreconciler.BranchSuffixToPath(strings.TrimPrefix(branch, prefix))
@@ -89,18 +89,22 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 		})
 	}
 
-	// Case 3: Other PR → run analyzer on changed files.
+	// Case 3: Other PR. In fix-only mode there is nothing to do for a PR that
+	// isn't ours, so return immediately — skipping the check-runs read and
+	// status write the cases above perform. This is the dominant case on a
+	// busy repository, so keeping it to the single PR fetch above bounds the
+	// reconciler's GitHub API load to managed PRs rather than total PR volume.
 	if !r.mode.ShouldReview() && !r.mode.IsConfig() {
-		if !neutralAtHead {
-			return session.SetActualState(ctx, "Skipped (fix-only)", &statusmanager.Status[CheckDetails]{
-				Status:     "completed",
-				Conclusion: "neutral",
-			})
-		}
+		clog.DebugContext(ctx, "Unrelated PR in fix-only mode, skipping")
 		return nil
 	}
 
-	// Check if we already processed this SHA to avoid redundant work.
+	// Review/config mode: we will run the analyzer. Read the observed state to
+	// avoid re-processing a SHA we have already reported on.
+	currentStatus, err := session.ObservedState(ctx)
+	if err != nil {
+		return fmt.Errorf("get observed state: %w", err)
+	}
 	if currentStatus != nil && currentStatus.ObservedGeneration == sha && currentStatus.Status == "completed" {
 		log.Debug("Already processed this SHA, skipping")
 		return nil
@@ -150,13 +154,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 			return fmt.Errorf("load repo config: %w", err)
 		}
 		if !m.ShouldReview() {
-			if !neutralAtHead {
-				return session.SetActualState(ctx, "Skipped (config)", &statusmanager.Status[CheckDetails]{
-					Status:     "completed",
-					Conclusion: "neutral",
-				})
-			}
-			return nil
+			// currentStatus was already read at the gate above and, having
+			// passed the already-processed check, is never a completed status
+			// at this SHA — so post directly rather than re-reading via
+			// reportNeutral.
+			return session.SetActualState(ctx, "Skipped (config)", &statusmanager.Status[CheckDetails]{
+				Status:     "completed",
+				Conclusion: "neutral",
+			})
 		}
 	}
 
