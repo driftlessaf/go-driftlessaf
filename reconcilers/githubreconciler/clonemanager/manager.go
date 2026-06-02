@@ -17,6 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -254,7 +255,12 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 	if !strings.HasPrefix(ref, "refs/") {
 		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(ref)
 	}
-	repo, err := git.PlainClone(dir, false, cloneOpts)
+	var repo *git.Repository
+	err = gitexec.Observe(ctx, "clone", func() error {
+		var cloneErr error
+		repo, cloneErr = git.PlainClone(dir, false, cloneOpts)
+		return cloneErr
+	}, gitexec.WithRepoURL(remote))
 	if err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("cloning repository: %w", err)
@@ -287,7 +293,13 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	}
 
 	clog.InfoContextf(ctx, "Fetching ref %s", ref)
-	if err := repo.Fetch(fetchOpts); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+	if err := gitexec.Observe(ctx, "fetch", func() error {
+		err := repo.Fetch(fetchOpts)
+		if errors.Is(err, git.NoErrAlreadyUpToDate) {
+			return nil
+		}
+		return err
+	}, gitexec.WithRepoURL(repoURL(res))); err != nil {
 		return "", false, fmt.Errorf("fetching ref %s: %w", ref, err)
 	}
 
@@ -516,19 +528,27 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 	refSpec := gitconfig.RefSpec(fmt.Sprintf("%s:%s", ref.String(), ref.String()))
 	clog.InfoContextf(ctx, "Force pushing to %s", refSpec)
 
-	if err := repo.Push(&git.PushOptions{
-		RemoteName: "origin",
-		Auth: &githttp.BasicAuth{
-			Username: "unused-when-using-access-tokens",
-			Password: token.AccessToken,
-		},
-		Force:    true,
-		RefSpecs: []gitconfig.RefSpec{refSpec},
-	}); err != nil {
+	var pushOpts []gitexec.Option
+	if r, err := repo.Remote("origin"); err == nil && len(r.Config().URLs) > 0 {
+		pushOpts = append(pushOpts, gitexec.WithRepoURL(r.Config().URLs[0]))
+	}
+
+	if err := gitexec.Observe(ctx, "push", func() error {
+		err := repo.Push(&git.PushOptions{
+			RemoteName: "origin",
+			Auth: &githttp.BasicAuth{
+				Username: "unused-when-using-access-tokens",
+				Password: token.AccessToken,
+			},
+			Force:    true,
+			RefSpecs: []gitconfig.RefSpec{refSpec},
+		})
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			clog.InfoContextf(ctx, "Branch already up to date")
 			return nil
 		}
+		return err
+	}, pushOpts...); err != nil {
 		return fmt.Errorf("force pushing: %w", err)
 	}
 
