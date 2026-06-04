@@ -60,6 +60,14 @@ func WithMaxCommits[T any](n int) Option[T] {
 	}
 }
 
+// WithCloseOnEmptyDiff controls whether Upsert closes the PR when the branch
+// has no net diff against base. Default true.
+func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
+	return func(cm *CM[T]) {
+		cm.closeOnEmptyDiff = close
+	}
+}
+
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
@@ -71,6 +79,7 @@ type CM[T any] struct {
 	repo             string
 	handlesFindings  bool
 	maxCommits       int
+	closeOnEmptyDiff bool
 }
 
 // GraphQL types for querying check runs
@@ -188,6 +197,7 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 		titleTemplate:    titleTemplate,
 		bodyTemplate:     bodyTemplate,
 		templateExecutor: templateExecutor,
+		closeOnEmptyDiff: true,
 	}
 
 	for _, opt := range opts {

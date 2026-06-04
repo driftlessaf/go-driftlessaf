@@ -431,16 +431,18 @@ func (s *Session[T]) Upsert(
 		return "", fmt.Errorf("making changes: %w", err)
 	}
 
-	// Compare the branch to base to check if the PR has any aggregate diff.
-	// If the branch is identical to base after changes, close any existing PR
-	// or skip creation entirely.
-	comp, _, err := s.client.Repositories.CompareCommits(ctx, s.owner, s.repo, s.ref, s.branchName, &github.ListOptions{PerPage: 1})
-	if err != nil {
-		return "", fmt.Errorf("comparing branch to base: %w", err)
-	}
-	if len(comp.Files) == 0 {
-		clog.InfoContextf(ctx, "Branch %s has no aggregate diff against %s", s.branchName, s.ref)
-		return "", s.CloseAnyOutstanding(ctx, "Closing PR because all changes have been resolved.")
+	// Catch agent-revert: makeChanges pushed commits, but they net-zero against
+	// base. When closeOnEmptyDiff is false, fall through to update so the body
+	// re-embeds current data and breaks the trigger/agent cycle.
+	if s.manager.closeOnEmptyDiff {
+		comp, _, err := s.client.Repositories.CompareCommits(ctx, s.owner, s.repo, s.ref, s.branchName, &github.ListOptions{PerPage: 1})
+		if err != nil {
+			return "", fmt.Errorf("comparing branch to base: %w", err)
+		}
+		if len(comp.Files) == 0 {
+			clog.InfoContextf(ctx, "Branch %s has no aggregate diff against %s", s.branchName, s.ref)
+			return "", s.CloseAnyOutstanding(ctx, "Closing PR because all changes have been resolved.")
+		}
 	}
 
 	// Generate PR title and body from templates
