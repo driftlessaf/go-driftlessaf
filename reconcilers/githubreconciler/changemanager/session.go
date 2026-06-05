@@ -524,9 +524,22 @@ func (s *Session[T]) Upsert(
 		return "", fmt.Errorf("updating pull request: %w", err)
 	}
 
-	// Replace labels
-	if _, _, err := s.client.Issues.ReplaceLabelsForIssue(ctx, s.owner, s.repo, s.prNumber, labels); err != nil {
-		return "", fmt.Errorf("replacing labels: %w", err)
+	// Only add labels missing from the PR, preserving labels set by other bots
+	// or humans that this reconciler does not manage.
+	existingLabelSet := make(map[string]struct{}, len(freshPR.Labels))
+	for _, l := range freshPR.Labels {
+		existingLabelSet[l.GetName()] = struct{}{}
+	}
+	var missingLabels []string
+	for _, l := range labels {
+		if _, ok := existingLabelSet[l]; !ok {
+			missingLabels = append(missingLabels, l)
+		}
+	}
+	if len(missingLabels) > 0 {
+		if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, missingLabels); err != nil {
+			return "", fmt.Errorf("adding labels: %w", err)
+		}
 	}
 
 	clog.InfoContextf(ctx, "Updated PR #%d: %s", s.prNumber, s.prURL)
