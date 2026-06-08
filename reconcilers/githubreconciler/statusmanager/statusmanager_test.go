@@ -722,6 +722,43 @@ func TestBuildDetailsURL(t *testing.T) {
 	}
 }
 
+func TestBuildDetailsURLOption(t *testing.T) {
+	res := &githubreconciler.Resource{
+		Owner: "chainguard-dev",
+		Repo:  "mono",
+		URL:   "https://github.com/chainguard-dev/mono/pull/123",
+	}
+
+	// WithoutDetailsURL omits the link entirely.
+	cfg := &config{}
+	WithoutDetailsURL()(cfg)
+	s := &Session[TestDetails]{
+		manager:  &StatusManager[TestDetails]{detailsURLFunc: cfg.detailsURL},
+		resource: res,
+		sha:      "abc123",
+	}
+	if got := s.buildDetailsURL(); got != "" {
+		t.Errorf("WithoutDetailsURL: buildDetailsURL() = %q, want empty", got)
+	}
+
+	// WithDetailsURL provides a custom (e.g. public) link derived from the
+	// resource and SHA.
+	cfg = &config{}
+	WithDetailsURL(func(r *githubreconciler.Resource, sha string) string {
+		return r.URL + "/checks?sha=" + sha
+	})(cfg)
+	s.manager = &StatusManager[TestDetails]{detailsURLFunc: cfg.detailsURL}
+	if got, want := s.buildDetailsURL(), res.URL+"/checks?sha=abc123"; got != want {
+		t.Errorf("WithDetailsURL: buildDetailsURL() = %q, want %q", got, want)
+	}
+
+	// Default (no option) falls back to the Cloud Logging console URL.
+	s.manager = &StatusManager[TestDetails]{projectID: "p", serviceName: "svc"}
+	if got := s.buildDetailsURL(); !strings.HasPrefix(got, "https://console.cloud.google.com/logs/query") {
+		t.Errorf("default: buildDetailsURL() = %q, want Cloud Logging URL", got)
+	}
+}
+
 func TestJSONFormattingConsistency(t *testing.T) {
 	identity := "test-reconciler"
 

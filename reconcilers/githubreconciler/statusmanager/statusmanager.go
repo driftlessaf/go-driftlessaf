@@ -45,21 +45,49 @@ type StatusManager[T any] struct {
 	projectID        string
 	serviceName      string
 	readOnly         bool
+	detailsURLFunc   DetailsURLFunc
 	templateExecutor *internaltemplate.Template[Status[T]]
 }
 
+// DetailsURLFunc builds the "Details" link attached to a reconciler's check run
+// for the given resource and SHA. Returning an empty string omits the link,
+// which is appropriate for externally-facing bots whose operators' logs (e.g.
+// the default Cloud Logging query) are not accessible to the repositories the
+// bot runs against.
+type DetailsURLFunc func(res *githubreconciler.Resource, sha string) string
+
+// Option configures a StatusManager.
+type Option func(*config)
+
+type config struct {
+	detailsURL DetailsURLFunc
+}
+
+// WithDetailsURL overrides how the check run "Details" link is built. By default
+// the link points at the reconciler's Cloud Logging query in the GCP console.
+func WithDetailsURL(fn DetailsURLFunc) Option {
+	return func(c *config) { c.detailsURL = fn }
+}
+
+// WithoutDetailsURL omits the check run "Details" link entirely. Use this for
+// externally-facing reconcilers, since the default Cloud Logging link is not
+// accessible to external repositories.
+func WithoutDetailsURL() Option {
+	return WithDetailsURL(func(*githubreconciler.Resource, string) string { return "" })
+}
+
 // NewStatusManager creates a new status manager with the given identity
-func NewStatusManager[T any](ctx context.Context, identity string) (*StatusManager[T], error) {
-	return newStatusManager[T](ctx, identity, false)
+func NewStatusManager[T any](ctx context.Context, identity string, opts ...Option) (*StatusManager[T], error) {
+	return newStatusManager[T](ctx, identity, false, opts...)
 }
 
 // NewReadOnlyStatusManager creates a new read-only status manager with the given identity.
 // A read-only status manager will fail any operations that attempt to mutate GitHub state.
-func NewReadOnlyStatusManager[T any](ctx context.Context, identity string) (*StatusManager[T], error) {
-	return newStatusManager[T](ctx, identity, true)
+func NewReadOnlyStatusManager[T any](ctx context.Context, identity string, opts ...Option) (*StatusManager[T], error) {
+	return newStatusManager[T](ctx, identity, true, opts...)
 }
 
-func newStatusManager[T any](ctx context.Context, identity string, readOnly bool) (*StatusManager[T], error) {
+func newStatusManager[T any](ctx context.Context, identity string, readOnly bool, opts ...Option) (*StatusManager[T], error) {
 	// Get project ID from metadata
 	projectID, err := metadata.ProjectIDWithContext(ctx)
 	if err != nil {
@@ -77,11 +105,17 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 		return nil, fmt.Errorf("creating template executor: %w", err)
 	}
 
+	cfg := &config{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	return &StatusManager[T]{
 		identity:         identity,
 		projectID:        projectID,
 		serviceName:      serviceName,
 		readOnly:         readOnly,
+		detailsURLFunc:   cfg.detailsURL,
 		templateExecutor: templateExecutor,
 	}, nil
 }
@@ -125,8 +159,14 @@ func (s *Session[T]) setCheckRunID(id int64) {
 	s.checkRunID = &id
 }
 
-// buildDetailsURL builds the Cloud Logging URL with filters for this resource and SHA
+// buildDetailsURL builds the check run "Details" link for this resource and SHA.
+// When a custom DetailsURLFunc is configured it is used (and may return "" to
+// omit the link); otherwise it defaults to the reconciler's Cloud Logging query.
 func (s *Session[T]) buildDetailsURL() string {
+	if s.manager.detailsURLFunc != nil {
+		return s.manager.detailsURLFunc(s.resource, s.sha)
+	}
+
 	// Build the Cloud Logging URL with both key and SHA filters
 	// The query filters for:
 	// - Cloud Run revision logs
@@ -235,8 +275,12 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		return fmt.Errorf("building output: %w", err)
 	}
 
-	// Build the details URL for logs
-	detailsURL := s.buildDetailsURL()
+	// Build the details URL for logs. An empty URL (e.g. an externally-facing
+	// bot that opted out) is omitted rather than sent as a blank link.
+	var detailsURLPtr *string
+	if detailsURL := s.buildDetailsURL(); detailsURL != "" {
+		detailsURLPtr = &detailsURL
+	}
 
 	// Only pass Conclusion if it's not empty
 	var conclusionPtr *string
@@ -266,7 +310,7 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 			Name:       name,
 			Status:     &status.Status,
 			Conclusion: conclusionPtr,
-			DetailsURL: &detailsURL,
+			DetailsURL: detailsURLPtr,
 			Output:     checkOutput,
 		})
 
@@ -283,7 +327,7 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		HeadSHA:    s.sha,
 		Status:     &status.Status,
 		Conclusion: conclusionPtr,
-		DetailsURL: &detailsURL,
+		DetailsURL: detailsURLPtr,
 		Output:     checkOutput,
 	})
 
