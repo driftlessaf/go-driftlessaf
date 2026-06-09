@@ -10,15 +10,16 @@ import (
 	"fmt"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/vertex"
 )
 
-// claudeAgent implements Agent using Claude via Vertex AI.
+// claudeAgent implements Agent using Claude via Vertex AI (default) or the
+// Anthropic-direct first-party API + WIF backend when configured (see
+// anthropicauth).
 type claudeAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	executor claudeexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
@@ -29,9 +30,13 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	projectID, region, model string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
-	client := anthropic.NewClient(
-		vertex.WithGoogleAuth(ctx, region, projectID, "https://www.googleapis.com/auth/cloud-platform"),
-	)
+	// Backend selection is env-driven: ANY binary embedding this package —
+	// production reconcilers included, not just evals — switches from Vertex to
+	// Anthropic-direct when ANTHROPIC_FEDERATION_RULE_ID and
+	// ANTHROPIC_IDENTITY_TOKEN_FILE are present in its environment. That is the
+	// intended per-deployment rollout lever (DEV-1839); anthropicauth logs which
+	// backend it picked.
+	client := anthropicauth.NewClient(ctx, projectID, region, anthropicauth.ConfigFromEnv())
 
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
 		claudeexecutor.WithModel[Req, Resp](model),
