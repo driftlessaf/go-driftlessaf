@@ -13,6 +13,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
+	"github.com/chainguard-dev/clog"
 )
 
 // NewGoldenEval creates an evaluation function for golden mode judgment
@@ -65,10 +66,15 @@ func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, ca
 			Criterion:       criterion,
 		})
 		if err != nil {
+			// Also log: the observer's Fail text only reaches the results
+			// JSON, which CI does not surface — without this, a judge outage
+			// is indistinguishable in the job log from a genuine 0.0 grade.
+			clog.WarnContext(ctx, "judge eval failed", "criterion", criterion, "error", err)
 			o.Fail(fmt.Sprintf("Judge failed: %v", err))
 			return
 		}
 		if resp == nil {
+			clog.WarnContext(ctx, "judge eval returned nil response", "criterion", criterion)
 			o.Fail("Judge returned nil response")
 			return
 		}
@@ -134,10 +140,14 @@ func NewStandaloneEval[T any](j Interface, criterion string, callbacks ...agentt
 			Criterion:    criterion,
 		})
 		if err != nil {
+			// See NewGoldenEval: surface judge outages in the job log, not
+			// only the results JSON.
+			clog.WarnContext(ctx, "judge eval failed", "criterion", criterion, "error", err)
 			o.Fail(fmt.Sprintf("Judge failed: %v", err))
 			return
 		}
 		if resp == nil {
+			clog.WarnContext(ctx, "judge eval returned nil response", "criterion", criterion)
 			o.Fail("Judge returned nil response")
 			return
 		}

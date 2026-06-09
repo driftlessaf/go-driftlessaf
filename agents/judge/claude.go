@@ -33,7 +33,12 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	// ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_IDENTITY_TOKEN_FILE are present
 	// in its environment. That is the intended per-deployment rollout lever
 	// (DEV-1839); anthropicauth logs which backend it picked.
-	client := anthropicauth.NewClient(ctx, projectID, region, anthropicauth.ConfigFromEnv())
+	authCfg := anthropicauth.ConfigFromEnv()
+	client := anthropicauth.NewClient(ctx, projectID, region, authCfg)
+	if authCfg.Configured() {
+		// The first-party API rejects Vertex-style "name@version" model IDs.
+		model = anthropicauth.ModelID(model)
+	}
 
 	// Use pre-parsed templates from prompts.go
 

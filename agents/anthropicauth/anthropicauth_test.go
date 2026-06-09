@@ -24,30 +24,28 @@ func TestConfigured(t *testing.T) {
 		cfg:  anthropicauth.Config{},
 		want: false,
 	}, {
-		name: "rule and token file select anthropic-direct",
+		name: "rule and org select anthropic-direct (source resolves separately)",
 		cfg: anthropicauth.Config{
-			FederationRuleID:  "fdrl_0123456789",
-			IdentityTokenFile: "/run/oidc/token",
+			FederationRuleID: "fdrl_0123456789",
+			OrganizationID:   "12345678-1234-1234-1234-123456789012",
 		},
 		want: true,
 	}, {
-		name: "rule without token file selects vertex",
+		name: "rule without org selects vertex",
 		cfg: anthropicauth.Config{
 			FederationRuleID: "fdrl_0123456789",
 		},
 		want: false,
 	}, {
-		name: "token file without rule selects vertex",
+		name: "org without rule selects vertex",
 		cfg: anthropicauth.Config{
-			IdentityTokenFile: "/run/oidc/token",
+			OrganizationID: "12345678-1234-1234-1234-123456789012",
 		},
 		want: false,
 	}, {
-		name: "optional fields alone do not select anthropic-direct",
+		name: "a token file alone does not select anthropic-direct",
 		cfg: anthropicauth.Config{
-			OrganizationID:   "12345678-1234-1234-1234-123456789012",
-			ServiceAccountID: "svac_0123456789",
-			WorkspaceID:      "wrkspc_0123456789",
+			IdentityTokenFile: "/run/oidc/token",
 		},
 		want: false,
 	}}
@@ -69,28 +67,37 @@ func TestConfigFromEnv(t *testing.T) {
 	}{{
 		name: "empty environment yields zero value",
 		env: map[string]string{
-			anthropicauth.EnvIdentityTokenFile: "",
-			anthropicauth.EnvFederationRuleID:  "",
-			anthropicauth.EnvOrganizationID:    "",
-			anthropicauth.EnvServiceAccountID:  "",
-			anthropicauth.EnvWorkspaceID:       "",
+			anthropicauth.EnvIdentityTokenFile:          "",
+			anthropicauth.EnvFederationRuleID:           "",
+			anthropicauth.EnvOrganizationID:             "",
+			anthropicauth.EnvServiceAccountID:           "",
+			anthropicauth.EnvWorkspaceID:                "",
+			anthropicauth.EnvActionsIDTokenRequestURL:   "",
+			anthropicauth.EnvActionsIDTokenRequestToken: "",
+			anthropicauth.EnvIdentityTokenSource:        "",
 		},
 		want: anthropicauth.Config{},
 	}, {
 		name: "all variables map to their fields",
 		env: map[string]string{
-			anthropicauth.EnvIdentityTokenFile: "/run/oidc/token",
-			anthropicauth.EnvFederationRuleID:  "fdrl_0123456789",
-			anthropicauth.EnvOrganizationID:    "12345678-1234-1234-1234-123456789012",
-			anthropicauth.EnvServiceAccountID:  "svac_0123456789",
-			anthropicauth.EnvWorkspaceID:       "wrkspc_0123456789",
+			anthropicauth.EnvIdentityTokenFile:          "/run/oidc/token",
+			anthropicauth.EnvFederationRuleID:           "fdrl_0123456789",
+			anthropicauth.EnvOrganizationID:             "12345678-1234-1234-1234-123456789012",
+			anthropicauth.EnvServiceAccountID:           "svac_0123456789",
+			anthropicauth.EnvWorkspaceID:                "wrkspc_0123456789",
+			anthropicauth.EnvActionsIDTokenRequestURL:   "https://token.invalid/?api-version=2",
+			anthropicauth.EnvActionsIDTokenRequestToken: "reqtok",
+			anthropicauth.EnvIdentityTokenSource:        "file",
 		},
 		want: anthropicauth.Config{
-			IdentityTokenFile: "/run/oidc/token",
-			FederationRuleID:  "fdrl_0123456789",
-			OrganizationID:    "12345678-1234-1234-1234-123456789012",
-			ServiceAccountID:  "svac_0123456789",
-			WorkspaceID:       "wrkspc_0123456789",
+			IdentityTokenFile:          "/run/oidc/token",
+			FederationRuleID:           "fdrl_0123456789",
+			OrganizationID:             "12345678-1234-1234-1234-123456789012",
+			ServiceAccountID:           "svac_0123456789",
+			WorkspaceID:                "wrkspc_0123456789",
+			ActionsIDTokenRequestURL:   "https://token.invalid/?api-version=2",
+			ActionsIDTokenRequestToken: "reqtok",
+			Source:                     anthropicauth.SourceFile,
 		},
 	}}
 
@@ -102,6 +109,47 @@ func TestConfigFromEnv(t *testing.T) {
 			got := anthropicauth.ConfigFromEnv()
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("ConfigFromEnv() mismatch (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestResolveSource(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  anthropicauth.Config
+		want anthropicauth.IdentityTokenSource
+	}{{
+		name: "explicit source wins over auto-detection",
+		cfg: anthropicauth.Config{
+			Source:                     anthropicauth.SourceGoogle,
+			ActionsIDTokenRequestURL:   "https://token.invalid/?api-version=2",
+			ActionsIDTokenRequestToken: "reqtok",
+			IdentityTokenFile:          "/run/oidc/token",
+		},
+		want: anthropicauth.SourceGoogle,
+	}, {
+		name: "actions endpoint auto-detects github",
+		cfg: anthropicauth.Config{
+			ActionsIDTokenRequestURL:   "https://token.invalid/?api-version=2",
+			ActionsIDTokenRequestToken: "reqtok",
+			IdentityTokenFile:          "/run/oidc/token",
+		},
+		want: anthropicauth.SourceGitHubActions,
+	}, {
+		name: "token file auto-detects file when no actions endpoint",
+		cfg:  anthropicauth.Config{IdentityTokenFile: "/run/oidc/token"},
+		want: anthropicauth.SourceFile,
+	}, {
+		name: "nothing set defaults to google (cloud run)",
+		cfg:  anthropicauth.Config{},
+		want: anthropicauth.SourceGoogle,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.ResolveSource(); got != tc.want {
+				t.Errorf("ResolveSource() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -145,4 +193,24 @@ func TestNewClient(t *testing.T) {
 			t.Error("NewClient() with configured Config: got client with nil Options, want federation request options")
 		}
 	})
+}
+
+func TestModelID(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "vertex default suffix", model: "claude-sonnet-4-6@default", want: "claude-sonnet-4-6"},
+		{name: "vertex dated suffix", model: "claude-sonnet-4@20250514", want: "claude-sonnet-4"},
+		{name: "first-party id unchanged", model: "claude-sonnet-4-6", want: "claude-sonnet-4-6"},
+		{name: "empty", model: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := anthropicauth.ModelID(tt.model); got != tt.want {
+				t.Errorf("ModelID(%q) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
+	}
 }
