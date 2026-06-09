@@ -10,68 +10,60 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/workqueue"
-	"chainguard.dev/sdk/octosts"
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/terraform-infra-common/modules/github-bots/sdk"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// octoTokenFunc is the function used to get tokens from Octo STS.
-// This is a variable so tests can override it with a mock.
-var octoTokenFunc = octosts.Token
-
-// tokenSource implements oauth2.TokenSource using octosts
-type tokenSource struct {
-	ctx      context.Context
-	identity string
-	org      string
-	repo     string
+// requeueOnNotFound wraps an oauth2.TokenSource so that gRPC NotFound errors
+// from Octo STS are surfaced as workqueue.RequeueAfter. NotFound typically
+// means the org's GitHub App installation quota has been exhausted; backing
+// off lets the quota reset (or operators intervene) before we retry.
+type requeueOnNotFound struct {
+	ctx       context.Context
+	inner     oauth2.TokenSource
+	org, repo string
 }
 
-// Token implements oauth2.TokenSource
-func (ts *tokenSource) Token() (*oauth2.Token, error) {
-	ctx, cancel := context.WithTimeout(ts.ctx, 1*time.Minute)
-	defer cancel()
-	tok, err := octoTokenFunc(ctx, ts.identity, ts.org, ts.repo)
-	if err != nil {
-		// Check if this is a gRPC NotFound error
-		if status.Code(err) == codes.NotFound {
-			// A common reason for NotFound from Octo STS is that the org's GitHub App
-			// installation quota has been exhausted. We log this and requeue with a delay
-			// to give time for the quota to reset or for manual intervention.
-			scope := ts.org
-			if ts.repo != "" {
-				scope = ts.org + "/" + ts.repo
-			}
-			clog.ErrorContextf(ctx, "Got NotFound error from Octo STS for %q: %v", scope, err)
-			return nil, workqueue.RequeueAfter(10 * time.Minute)
-		}
-		return nil, err
+func (ts *requeueOnNotFound) Token() (*oauth2.Token, error) {
+	tok, err := ts.inner.Token()
+	if err == nil {
+		return tok, nil
 	}
-	return &oauth2.Token{
-		AccessToken: tok,
-		TokenType:   "Bearer",
-		Expiry:      time.Now().Add(55 * time.Minute), // Tokens from Octo STS are valid for 60 minutes
-	}, nil
+	if status.Code(err) == codes.NotFound {
+		scope := ts.org
+		if ts.repo != "" {
+			scope = ts.org + "/" + ts.repo
+		}
+		clog.ErrorContextf(ts.ctx, "Got NotFound error from Octo STS for %q: %v", scope, err)
+		return nil, workqueue.RequeueAfter(10 * time.Minute)
+	}
+	return nil, err
 }
 
-// NewOrgTokenSource creates a new token source for org-scoped GitHub credentials
+// NewOrgTokenSource creates a new token source for org-scoped GitHub credentials.
+// Token-source construction and caching come from the SDK primitive; this
+// wrapper adds the workqueue-aware NotFound→RequeueAfter behaviour that DAF
+// reconcilers depend on.
 func NewOrgTokenSource(ctx context.Context, identity, org string) oauth2.TokenSource {
-	return oauth2.ReuseTokenSource(nil, &tokenSource{
-		ctx:      ctx,
-		identity: identity,
-		org:      org,
-		repo:     "",
-	})
+	return &requeueOnNotFound{
+		ctx:   ctx,
+		inner: sdk.NewOrgTokenSource(ctx, identity, org),
+		org:   org,
+	}
 }
 
-// NewRepoTokenSource creates a new token source for repo-scoped GitHub credentials
+// NewRepoTokenSource creates a new token source for repo-scoped GitHub credentials.
+// Token-source construction and caching come from the SDK primitive; this
+// wrapper adds the workqueue-aware NotFound→RequeueAfter behaviour that DAF
+// reconcilers depend on.
 func NewRepoTokenSource(ctx context.Context, identity, org, repo string) oauth2.TokenSource {
-	return oauth2.ReuseTokenSource(nil, &tokenSource{
-		ctx:      ctx,
-		identity: identity,
-		org:      org,
-		repo:     repo,
-	})
+	return &requeueOnNotFound{
+		ctx:   ctx,
+		inner: sdk.NewRepoTokenSource(ctx, identity, org, repo),
+		org:   org,
+		repo:  repo,
+	}
 }
