@@ -849,19 +849,36 @@ func (e *executor[Request, Response]) withAPIRequestCounter(ctx context.Context,
 	return cfg
 }
 
-// supportsSamplingParams reports whether the Anthropic API accepts the
-// temperature, top_p, and top_k parameters for the given model. Opus 4.7
-// returns a 400 ("`temperature` is deprecated for this model.") when any of
-// these is set to a non-default value.
+// samplingParamsRemovedPrefixes lists model-name prefixes for which the
+// Anthropic API removed the sampling parameters (temperature, top_p, top_k)
+// AND the extended-thinking budget parameter (thinking.type="enabled",
+// budget_tokens=N) in favor of adaptive thinking. Opus 4.7 introduced this
+// surface; Opus 4.8 and Fable 5 share it.
 // See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
+var samplingParamsRemovedPrefixes = []string{
+	"claude-opus-4-7",
+	"claude-opus-4-8",
+	"claude-fable-5",
+}
+
+// supportsSamplingParams reports whether the Anthropic API accepts the
+// temperature, top_p, and top_k parameters for the given model. Models with
+// the removed surface return a 400 ("`temperature` is deprecated for this
+// model.") when any of these is set to a non-default value.
 func supportsSamplingParams(modelName string) bool {
-	return !strings.HasPrefix(modelName, "claude-opus-4-7")
+	for _, prefix := range samplingParamsRemovedPrefixes {
+		if strings.HasPrefix(modelName, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // supportsExtendedThinkingBudget reports whether the Anthropic API accepts the
 // extended-thinking budget parameter (thinking.type="enabled", budget_tokens=N)
-// for the given model. Opus 4.7 removed this in favor of adaptive thinking.
+// for the given model. The models that removed sampling params removed the
+// budget parameter with them.
 // See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#extended-thinking-budgets-removed
 func supportsExtendedThinkingBudget(modelName string) bool {
-	return !strings.HasPrefix(modelName, "claude-opus-4-7")
+	return supportsSamplingParams(modelName)
 }
