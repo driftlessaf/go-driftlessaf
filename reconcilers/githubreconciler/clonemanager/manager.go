@@ -82,6 +82,13 @@ type Lease struct {
 	manager *Manager
 	clone   *clone
 
+	// remoteURL is the trusted push target, resolved from the GitHub resource at
+	// lease time (before any untrusted code runs). forcePushBranch pushes here
+	// rather than trusting .git/config: the worktree (including .git/) is mounted
+	// read-write into untrusted microvm guests, so a guest could rewrite
+	// [remote "origin"] url and redirect the credentialed push.
+	remoteURL string
+
 	sha        string
 	pathExists bool
 	// baseCommit is the merge-base resolved at lease creation time by
@@ -204,6 +211,7 @@ func (m *Manager) leaseRef(ctx context.Context, res *githubreconciler.Resource, 
 	return &Lease{
 		manager:    m,
 		clone:      cl,
+		remoteURL:  repoURL(res),
 		sha:        sha,
 		pathExists: exists,
 		baseCommit: baseCommit,
@@ -454,7 +462,7 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 		return fmt.Errorf("committing changes: %w", err)
 	}
 
-	if err := l.manager.forcePushBranch(ctx, l.clone.repo, ref); err != nil {
+	if err := l.manager.forcePushBranch(ctx, l.clone.repo, ref, l.remoteURL); err != nil {
 		return fmt.Errorf("force pushing branch: %w", err)
 	}
 
@@ -519,22 +527,34 @@ func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) erro
 	return nil
 }
 
-func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName) error {
+func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, remoteURL string) error {
+	if remoteURL == "" {
+		return errors.New("refusing to push: no trusted remote URL")
+	}
+
 	token, err := m.tokenSource.Token()
 	if err != nil {
 		return fmt.Errorf("getting token: %w", err)
 	}
 
 	refSpec := gitconfig.RefSpec(fmt.Sprintf("%s:%s", ref.String(), ref.String()))
-	clog.InfoContextf(ctx, "Force pushing to %s", refSpec)
+	clog.InfoContextf(ctx, "Force pushing %s to %s", refSpec, remoteURL)
 
-	var pushOpts []gitexec.Option
-	if r, err := repo.Remote("origin"); err == nil && len(r.Config().URLs) > 0 {
-		pushOpts = append(pushOpts, gitexec.WithRepoURL(r.Config().URLs[0]))
-	}
+	// Push to the trusted remote URL resolved from the GitHub resource at lease
+	// time — never to whatever .git/config currently names. The worktree
+	// (including .git/) is mounted read-write into untrusted microvm guests, so a
+	// guest can rewrite [remote "origin"] url; resolving the push target from
+	// repo.Config() would redirect the push and leak the bot's token (carried as
+	// the BasicAuth password) to an attacker-chosen host. Building the remote
+	// explicitly here pins the push to the known-good URL regardless of any
+	// on-disk config tampering.
+	remote := git.NewRemote(repo.Storer, &gitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remoteURL},
+	})
 
 	if err := gitexec.Observe(ctx, "push", func() error {
-		err := repo.Push(&git.PushOptions{
+		err := remote.PushContext(ctx, &git.PushOptions{
 			RemoteName: "origin",
 			Auth: &githttp.BasicAuth{
 				Username: "unused-when-using-access-tokens",
@@ -548,7 +568,7 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 			return nil
 		}
 		return err
-	}, pushOpts...); err != nil {
+	}, gitexec.WithRepoURL(remoteURL)); err != nil {
 		return fmt.Errorf("force pushing: %w", err)
 	}
 
