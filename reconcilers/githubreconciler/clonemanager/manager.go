@@ -82,11 +82,12 @@ type Lease struct {
 	manager *Manager
 	clone   *clone
 
-	// remoteURL is the trusted push target, resolved from the GitHub resource at
-	// lease time (before any untrusted code runs). forcePushBranch pushes here
-	// rather than trusting .git/config: the worktree (including .git/) is mounted
-	// read-write into untrusted microvm guests, so a guest could rewrite
-	// [remote "origin"] url and redirect the credentialed push.
+	// remoteURL is the trusted push target, resolved from the GitHub resource
+	// when the lease is created (before any untrusted code runs). forcePushBranch
+	// pushes here rather than to the clone's on-disk .git/config: a consumer may
+	// expose the lease's working tree (which contains .git/) to untrusted code
+	// with write access, and a rewritten [remote "origin"] url would otherwise
+	// redirect the credentialed push.
 	remoteURL string
 
 	sha        string
@@ -294,20 +295,27 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	}
 
 	dst := plumbing.NewRemoteReferenceName("origin", ref)
+	fetchURL := repoURL(res)
 	fetchOpts := &git.FetchOptions{
-		RefSpecs: []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+%s:%s", resolveRefName(ref), dst))},
-		Auth:     auth,
-		Depth:    depth,
+		RemoteName: "origin",
+		RefSpecs:   []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+%s:%s", resolveRefName(ref), dst))},
+		Auth:       auth,
+		Depth:      depth,
 	}
 
+	// Fetch from the trusted URL (see trustedRemote), never from the clone's
+	// on-disk .git/config: a pooled clone is reused across reconciles and
+	// resetClone does not restore .git/config, so untrusted code that rewrote
+	// [remote "origin"] url in an earlier lease could otherwise redirect this
+	// credentialed fetch.
 	clog.InfoContextf(ctx, "Fetching ref %s", ref)
 	if err := gitexec.Observe(ctx, "fetch", func() error {
-		err := repo.Fetch(fetchOpts)
+		err := trustedRemote(repo, fetchURL).FetchContext(ctx, fetchOpts)
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
 		return err
-	}, gitexec.WithRepoURL(repoURL(res))); err != nil {
+	}, gitexec.WithRepoURL(fetchURL)); err != nil {
 		return "", false, fmt.Errorf("fetching ref %s: %w", ref, err)
 	}
 
@@ -527,6 +535,19 @@ func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) erro
 	return nil
 }
 
+// trustedRemote returns an in-memory git remote pinned to remoteURL, so push and
+// fetch resolve their target from it rather than the clone's on-disk .git/config.
+// A consumer may expose the lease's working tree (which contains .git/) to
+// untrusted code with write access; resolving the target from repo.Config() would
+// let a rewritten [remote "origin"] url redirect the operation and leak the access
+// token (carried as the BasicAuth password) to an attacker-chosen host.
+func trustedRemote(repo *git.Repository, remoteURL string) *git.Remote {
+	return git.NewRemote(repo.Storer, &gitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remoteURL},
+	})
+}
+
 func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, remoteURL string) error {
 	if remoteURL == "" {
 		return errors.New("refusing to push: no trusted remote URL")
@@ -540,18 +561,7 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 	refSpec := gitconfig.RefSpec(fmt.Sprintf("%s:%s", ref.String(), ref.String()))
 	clog.InfoContextf(ctx, "Force pushing %s to %s", refSpec, remoteURL)
 
-	// Push to the trusted remote URL resolved from the GitHub resource at lease
-	// time — never to whatever .git/config currently names. The worktree
-	// (including .git/) is mounted read-write into untrusted microvm guests, so a
-	// guest can rewrite [remote "origin"] url; resolving the push target from
-	// repo.Config() would redirect the push and leak the bot's token (carried as
-	// the BasicAuth password) to an attacker-chosen host. Building the remote
-	// explicitly here pins the push to the known-good URL regardless of any
-	// on-disk config tampering.
-	remote := git.NewRemote(repo.Storer, &gitconfig.RemoteConfig{
-		Name: "origin",
-		URLs: []string{remoteURL},
-	})
+	remote := trustedRemote(repo, remoteURL)
 
 	if err := gitexec.Observe(ctx, "push", func() error {
 		err := remote.PushContext(ctx, &git.PushOptions{
