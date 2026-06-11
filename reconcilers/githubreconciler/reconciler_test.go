@@ -289,6 +289,29 @@ func TestReconciler_RateLimitHandling(t *testing.T) {
 	}
 }
 
+func TestReconciler_Process_RequeueFloor(t *testing.T) {
+	ctx := context.Background()
+	cc := NewClientCache(mockTokenSourceFunc)
+
+	// A reconciler that asks for a floored requeue should produce a ProcessResponse
+	// carrying both the delay and RequeueFloor, so the dispatcher requeues with a
+	// floor (RequeueNotBefore) rather than an undercuttable delay.
+	r := NewReconciler(cc, WithReconciler(func(_ context.Context, _ *Resource, _ *github.Client) error {
+		return workqueue.RequeueNotBefore(90 * time.Second)
+	}))
+
+	resp, err := r.Process(ctx, &workqueue.ProcessRequest{Key: "https://github.com/owner/repo/issues/123"})
+	if err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if resp.GetRequeueAfterSeconds() != 90 {
+		t.Errorf("RequeueAfterSeconds = %d, want 90", resp.GetRequeueAfterSeconds())
+	}
+	if !resp.GetRequeueFloor() {
+		t.Error("RequeueFloor = false, want true for RequeueNotBefore")
+	}
+}
+
 func ptrDuration(d time.Duration) *time.Duration {
 	return &d
 }

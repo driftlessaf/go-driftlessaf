@@ -26,6 +26,12 @@ message ProcessResponse {
   // This field is only honored when the RPC returns successfully (no error).
   int64 requeue_after_seconds = 1;
 
+  // Optional: When true, requeue_after_seconds is treated as a floor that a
+  // subsequent enqueue cannot pull earlier (RequeueNotBefore semantics), rather
+  // than an undercuttable delay (RequeueAfter). Only meaningful when
+  // requeue_after_seconds > 0.
+  bool requeue_floor = 3;
+
   // Optional: Additional keys to queue as a result of processing this item.
   // These keys are queued BEFORE the current key is completed, ensuring dependent
   // work is guaranteed to be queued before we mark the triggering work as done.

@@ -181,6 +181,33 @@ func TestServiceCallbackWithDelay(t *testing.T) {
 	}
 }
 
+func TestServiceCallbackWithFloor(t *testing.T) {
+	// A response with RequeueFloor set should map to RequeueNotBefore (a floor),
+	// not RequeueAfter.
+	mockClient := &mockWorkqueueClient{
+		processFunc: func(_ context.Context, _ *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error) {
+			return &workqueue.ProcessResponse{
+				RequeueAfterSeconds: 30,
+				RequeueFloor:        true,
+			}, nil
+		},
+	}
+
+	callback := ServiceCallback(mockClient)
+	err := callback(context.Background(), "test-key", workqueue.Options{})
+
+	delay, floor, ok := workqueue.GetRequeueOptions(err)
+	if !ok {
+		t.Fatalf("Expected requeue error, got: %v", err)
+	}
+	if delay != 30*time.Second {
+		t.Errorf("Expected 30 second delay, got %v", delay)
+	}
+	if !floor {
+		t.Error("Expected floor=true (RequeueFloor set in response), got false")
+	}
+}
+
 // Mock client for testing
 type mockWorkqueueClient struct {
 	workqueue.WorkqueueServiceClient

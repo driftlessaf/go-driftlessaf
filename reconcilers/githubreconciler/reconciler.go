@@ -207,10 +207,11 @@ func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest)
 	err := r.Reconcile(ctx, req.Key)
 	if err != nil {
 		// Check if we can extract a requeue delay from the error
-		if delay, ok := workqueue.GetRequeueDelay(err); ok {
-			clog.InfoContextf(ctx, "Reconciliation requested requeue after %v for key: %s", delay, req.Key)
+		if delay, floor, ok := workqueue.GetRequeueOptions(err); ok {
+			clog.InfoContextf(ctx, "Reconciliation requested requeue after %v (floor=%t) for key: %s", delay, floor, req.Key)
 			return &workqueue.ProcessResponse{
 				RequeueAfterSeconds: int64(delay.Seconds()),
+				RequeueFloor:        floor,
 			}, nil
 		}
 

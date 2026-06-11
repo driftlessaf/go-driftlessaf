@@ -33,7 +33,11 @@ func ServiceCallback(client workqueue.WorkqueueServiceClient) Callback {
 		// Handle requeue_after_seconds (backward compatibility).
 		// This should NOT be combined with queue_keys.
 		if resp.GetRequeueAfterSeconds() > 0 {
-			return workqueue.RequeueAfter(time.Duration(resp.GetRequeueAfterSeconds()) * time.Second)
+			delay := time.Duration(resp.GetRequeueAfterSeconds()) * time.Second
+			if resp.GetRequeueFloor() {
+				return workqueue.RequeueNotBefore(delay)
+			}
+			return workqueue.RequeueAfter(delay)
 		}
 
 		// Handle queue_keys from response.
