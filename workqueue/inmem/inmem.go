@@ -57,18 +57,43 @@ func (w *wq) Queue(_ context.Context, key string, opts workqueue.Options) error 
 		}
 		return nil
 	}
-	// Always choose the highest priority.
-	if qi.Priority < opts.Priority {
-		qi.Priority = opts.Priority
-		w.queue[key] = qi
-	}
-	// Always choose the lowest not-before.
-	if qi.NotBefore.After(opts.NotBefore) {
-		// Update the NotBefore time.
-		qi.NotBefore = opts.NotBefore
-		w.queue[key] = qi
-	}
+	mergeOptions(&qi.Options, opts)
+	w.queue[key] = qi
 	return nil
+}
+
+// mergeOptions merges an incoming enqueue's options (src) into an already-queued
+// entry (dst). Priority always rises to the highest of the two. The NotBefore
+// merge follows the floor semantics documented on Options.NotBeforeFloor:
+//   - both are floors: the later NotBefore wins.
+//   - src is a floor and dst is not: src replaces dst's NotBefore outright (in
+//     either direction) and dst becomes floored; the non-floor time was
+//     undercuttable anyway.
+//   - dst is a floor and src is not: keep dst untouched (a non-floor enqueue can
+//     neither pull a floored entry earlier nor push it later).
+//   - neither is a floor: the earliest NotBefore wins, so a fresh enqueue
+//     processes the key promptly.
+func mergeOptions(dst *workqueue.Options, src workqueue.Options) {
+	if dst.Priority < src.Priority {
+		dst.Priority = src.Priority
+	}
+	switch {
+	case src.NotBeforeFloor && dst.NotBeforeFloor:
+		// Two floors: the later (max) NotBefore wins.
+		if dst.NotBefore.Before(src.NotBefore) {
+			dst.NotBefore = src.NotBefore
+		}
+	case src.NotBeforeFloor:
+		// Incoming floor over a non-floor entry: the floor wins outright,
+		// replacing the (undercuttable) NotBefore in either direction.
+		dst.NotBefore = src.NotBefore
+		dst.NotBeforeFloor = true
+	case dst.NotBeforeFloor:
+		// Existing floor, non-floor incoming: keep the floored entry as-is.
+	case dst.NotBefore.After(src.NotBefore):
+		// Neither is a floor: the earliest NotBefore wins.
+		dst.NotBefore = src.NotBefore
+	}
 }
 
 // Get implements workqueue.Interface.
@@ -226,14 +251,7 @@ func (o *inProgressKey) RequeueWithOptions(_ context.Context, opts workqueue.Opt
 			queued:   time.Now().UTC(),
 		}
 	} else {
-		// Always choose the highest priority.
-		if qi.Priority < opts.Priority {
-			qi.Priority = opts.Priority
-		}
-		// Always choose the lowest not-before.
-		if qi.NotBefore.After(opts.NotBefore) {
-			qi.NotBefore = opts.NotBefore
-		}
+		mergeOptions(&qi.Options, opts)
 		o.wq.queue[o.key] = qi
 	}
 

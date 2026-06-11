@@ -21,6 +21,13 @@ var (
 	// MaximumBackoffPeriod is a cap on the period a key must wait before
 	// being retried.
 	MaximumBackoffPeriod = 10 * time.Minute
+
+	// MaximumRequeueFloor caps the delay of a floored requeue (RequeueNotBefore).
+	// A floor cannot be undercut by events or resync, so an unbounded floor would
+	// starve a key indefinitely; the dispatcher clamps floored requeue delays to
+	// this value. It is a variable so binaries can adjust it (e.g. to a resync
+	// period) and tests can shrink it.
+	MaximumRequeueFloor = time.Hour
 )
 
 // Interface is the interface that workqueue implementations must implement.
@@ -46,12 +53,26 @@ type Options struct {
 	Priority int64
 
 	// NotBefore is the earliest time that the key should be processed.
-	// When deduplicating, the oldest time is used.
+	// When deduplicating, the earliest time is used unless NotBeforeFloor is set
+	// on the queued entry (see NotBeforeFloor).
 	NotBefore time.Time
 
 	// Delay is an optional duration to wait before processing the key.
 	// This is used when requeueing with a custom delay.
 	Delay time.Duration
+
+	// NotBeforeFloor, when true, marks NotBefore as a floor that a non-floor
+	// enqueue of the same key cannot dedup to an earlier time. Merge rules for a
+	// queued entry:
+	//   - a floored enqueue over a non-floored entry replaces its NotBefore
+	//     outright (in either direction) and marks it floored — the non-floored
+	//     time was undercuttable anyway;
+	//   - a floored enqueue over a floored entry takes the later NotBefore;
+	//   - a non-floor enqueue over a floored entry leaves it untouched (neither
+	//     earlier nor later);
+	//   - between two non-floor enqueues the earliest NotBefore wins (the default).
+	// Set via RequeueNotBefore.
+	NotBeforeFloor bool
 }
 
 // Key is a shared interface that all key types must implement.

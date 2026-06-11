@@ -89,15 +89,17 @@ var RefreshInterval = 5 * time.Minute
 var TrackWorkAttemptMinThreshold = 20
 
 const (
-	queuedPrefix          = "queued/"
-	inProgressPrefix      = "in-progress/"
-	deadLetterPrefix      = "dead-letter/"
-	expirationMetadataKey = "lease-expiration"
-	attemptsMetadataKey   = "attempts"
-	priorityMetadataKey   = "priority"
-	notBeforeMetadataKey  = "not-before"
-	failedTimeMetadataKey = "failed-time"
-	lastAttemptedKey      = "last-attempted"
+	queuedPrefix              = "queued/"
+	inProgressPrefix          = "in-progress/"
+	deadLetterPrefix          = "dead-letter/"
+	expirationMetadataKey     = "lease-expiration"
+	attemptsMetadataKey       = "attempts"
+	priorityMetadataKey       = "priority"
+	notBeforeMetadataKey      = "not-before"
+	notBeforeFloorMetadataKey = "not-before-floor"
+	notBeforeFloorValue       = "true"
+	failedTimeMetadataKey     = "failed-time"
+	lastAttemptedKey          = "last-attempted"
 )
 
 var noPriority = fmt.Sprintf("%08d", 0)
@@ -115,6 +117,9 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 		priorityMetadataKey: fmt.Sprintf("%08d", opts.Priority),
 	}
 	writer.Metadata[notBeforeMetadataKey] = opts.NotBefore.UTC().Format(time.RFC3339)
+	if opts.NotBeforeFloor {
+		writer.Metadata[notBeforeFloorMetadataKey] = notBeforeFloorValue
+	}
 
 	mAddedKeys.With(w.baseLabels()).Add(1)
 
@@ -157,10 +162,35 @@ func updateMetadata(ctx context.Context, client ClientInterface, key string, met
 		attrs.Metadata[priorityMetadataKey] = metadata[priorityMetadataKey]
 		update = true
 	}
-	// Always choose the lowest not-before.
-	if ts, ok := attrs.Metadata[notBeforeMetadataKey]; ok && ts > metadata[notBeforeMetadataKey] {
-		clog.InfoContextf(ctx, "Updating %s not-before from %q to %q", key, ts, metadata[notBeforeMetadataKey])
-		attrs.Metadata[notBeforeMetadataKey] = metadata[notBeforeMetadataKey]
+	// not-before merge, following the floor semantics on Options.NotBeforeFloor.
+	// RFC3339 UTC timestamps sort lexicographically by time, so string compares
+	// stand in for time compares; an absent existing value ("") sorts earliest,
+	// which is correct (there is no floor to honor yet).
+	existingNB, hasNB := attrs.Metadata[notBeforeMetadataKey]
+	incomingNB := metadata[notBeforeMetadataKey]
+	existingFloor := attrs.Metadata[notBeforeFloorMetadataKey] == notBeforeFloorValue
+	incomingFloor := metadata[notBeforeFloorMetadataKey] == notBeforeFloorValue
+	switch {
+	case incomingFloor && existingFloor:
+		// Two floors: take the later (max) not-before.
+		if existingNB < incomingNB {
+			clog.InfoContextf(ctx, "Raising %s floor not-before from %q to %q", key, existingNB, incomingNB)
+			attrs.Metadata[notBeforeMetadataKey] = incomingNB
+			update = true
+		}
+	case incomingFloor:
+		// Incoming floor over a non-floor entry: the floor wins outright,
+		// replacing the (undercuttable) not-before in either direction.
+		clog.InfoContextf(ctx, "Floor %q replaces %s non-floor not-before %q", incomingNB, key, existingNB)
+		attrs.Metadata[notBeforeMetadataKey] = incomingNB
+		attrs.Metadata[notBeforeFloorMetadataKey] = notBeforeFloorValue
+		update = true
+	case existingFloor:
+		// Existing floor, non-floor incoming: keep it untouched (no undercut, no postpone).
+	case hasNB && existingNB > incomingNB:
+		// Neither is a floor: the earliest not-before wins.
+		clog.InfoContextf(ctx, "Updating %s not-before from %q to %q", key, existingNB, incomingNB)
+		attrs.Metadata[notBeforeMetadataKey] = incomingNB
 		update = true
 	}
 	if update {
@@ -539,6 +569,12 @@ func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.O
 		copier.Metadata[notBeforeMetadataKey] = time.Now().UTC().Add(backoffDelay).Format(time.RFC3339)
 	}
 
+	// Apply this requeue's floor intent. Start clears any stale floor from the
+	// in-progress object, so we only need to set it (never clear) here.
+	if opts.NotBeforeFloor {
+		copier.Metadata[notBeforeFloorMetadataKey] = notBeforeFloorValue
+	}
+
 	// Update priority if specified
 	if opts.Priority != 0 {
 		copier.Metadata[priorityMetadataKey] = strconv.FormatInt(opts.Priority, 10)
@@ -850,6 +886,10 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	// We set it to the zero value instead of deleting it so that we can assume
 	// the invariant that this key is always present and date-formatted.
 	copier.Metadata[notBeforeMetadataKey] = noNotBefore
+	// The not-before floor only applies to queued entries; clear it so it does
+	// not leak onto the in-progress object (or, via Deadletter's verbatim copy,
+	// onto dead-letter objects). RequeueWithOptions re-applies it on request.
+	delete(copier.Metadata, notBeforeFloorMetadataKey)
 
 	attrs, err := copier.Run(ctx)
 	if err != nil {

@@ -25,7 +25,7 @@ func TestDurability(t *testing.T, ctor func(int) workqueue.Interface) {
 			t.Fatal("NewWorkQueue returned nil")
 		}
 		t.Cleanup(func() {
-			if err := drain(wq); err != nil {
+			if err := drain(t, wq); err != nil {
 				t.Fatalf("Drain failed: %v", err)
 			}
 

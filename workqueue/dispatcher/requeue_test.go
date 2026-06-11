@@ -121,6 +121,43 @@ func TestRequeueWithDelay(t *testing.T) {
 	}
 }
 
+func TestRequeueFloorClamped(t *testing.T) {
+	ctx := context.Background()
+	wq := inmem.NewWorkQueue(10)
+
+	// Shrink the ceiling so the test doesn't have to reason about an hour.
+	orig := workqueue.MaximumRequeueFloor
+	workqueue.MaximumRequeueFloor = 2 * time.Second
+	t.Cleanup(func() { workqueue.MaximumRequeueFloor = orig })
+
+	key := "floored-key"
+	if err := wq.Queue(ctx, key, workqueue.Options{Priority: 1}); err != nil {
+		t.Fatalf("Queue failed: %v", err)
+	}
+
+	// The callback asks for a floored requeue far beyond the ceiling.
+	cb := func(_ context.Context, _ string, _ workqueue.Options) error {
+		return workqueue.RequeueNotBefore(time.Hour)
+	}
+	if err := Handle(ctx, wq, 1, 0, cb); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+
+	st, err := wq.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	notBefore := time.Unix(st.NotBeforeTime, 0)
+	// The floor is still applied (in the future)...
+	if !notBefore.After(time.Now()) {
+		t.Errorf("NotBefore %v is not in the future; floor was dropped", notBefore)
+	}
+	// ...but clamped to roughly now+MaximumRequeueFloor, not now+1h.
+	if upper := time.Now().Add(workqueue.MaximumRequeueFloor + time.Minute); notBefore.After(upper) {
+		t.Errorf("NotBefore %v not clamped; want <= ~now+%v", notBefore, workqueue.MaximumRequeueFloor)
+	}
+}
+
 func TestServiceCallbackWithDelay(t *testing.T) {
 	// Create a mock client that returns a response with RequeueAfterSeconds
 	mockClient := &mockWorkqueueClient{

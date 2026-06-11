@@ -143,11 +143,19 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			cleanupCtx := context.WithoutCancel(ctx)
 
 			// Check if this is a requeue error with custom delay
-			if delay, ok := workqueue.GetRequeueDelay(err); ok {
-				clog.InfoContextf(ctx, "Key %q requested requeue after %v", oip.Name(), delay)
+			if delay, floor, ok := workqueue.GetRequeueOptions(err); ok {
+				// A floor can't be undercut by events or resync, so clamp it to
+				// MaximumRequeueFloor to keep an over-large floor from starving the
+				// key. RequeueAfter (non-floor) is left alone: it stays undercuttable.
+				if floor && delay > workqueue.MaximumRequeueFloor {
+					clog.InfoContextf(ctx, "Key %q floored requeue delay %v exceeds MaximumRequeueFloor %v, clamping", oip.Name(), delay, workqueue.MaximumRequeueFloor)
+					delay = workqueue.MaximumRequeueFloor
+				}
+				clog.InfoContextf(ctx, "Key %q requested requeue after %v (floor=%t)", oip.Name(), delay, floor)
 				if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{
-					Priority: oip.Priority(),
-					Delay:    delay,
+					Priority:       oip.Priority(),
+					Delay:          delay,
+					NotBeforeFloor: floor,
 				}); err != nil {
 					return fmt.Errorf("requeue(after delay request) = %w", err)
 				}

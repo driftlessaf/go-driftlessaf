@@ -24,7 +24,11 @@ type ExpectedState struct {
 
 func checkQueue(t *testing.T, wq workqueue.Interface, es ExpectedState) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey) {
 	t.Helper()
-	wip, qd, _, err := wq.Enumerate(t.Context())
+	// Derive from t.Context() but drop cancellation: checkQueue also runs from
+	// t.Cleanup, and since Go 1.24 t.Context() is canceled before cleanup runs,
+	// which would fail Enumerate on backends that honor the context (e.g. gcs).
+	// WithoutCancel keeps any context values while surviving that cancellation.
+	wip, qd, _, err := wq.Enumerate(context.WithoutCancel(t.Context()))
 	if err != nil {
 		t.Fatalf("Enumerate failed: %v", err)
 	}
@@ -61,14 +65,14 @@ func (ct *conformanceTester) scenario(name string, f func(context.Context, *test
 		}
 		// For conformance, we always expect the queue to start empty, but drain
 		// it because a durable queue will bleed across tests.
-		if err := drain(wq); err != nil {
+		if err := drain(t, wq); err != nil {
 			t.Fatalf("Drain failed: %v", err)
 		}
 
 		_, _ = checkQueue(t, wq, ExpectedState{})
 
 		t.Cleanup(func() {
-			if err := drain(wq); err != nil {
+			if err := drain(t, wq); err != nil {
 				t.Fatalf("Drain failed: %v", err)
 			}
 
@@ -483,6 +487,230 @@ func TestSemantics(t *testing.T, ctor func(int) workqueue.Interface) {
 		})
 	})
 
+	ct.scenario("requeue not before is a floor", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// A NotBeforeFloor requeue cannot be undercut by a subsequent Queue:
+		// incoming enqueues coalesce onto the floor instead of pulling the key
+		// forward. (This is the inverse of "requeue doesn't reset not before".)
+		floorDelay := workqueue.BackoffPeriod
+
+		// Leading edge: a fresh key is immediately eligible.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+
+		// Process it, then requeue with a floored NotBefore floorDelay out.
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{
+			WorkInProgress: []string{"foo"},
+		})
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{
+			Delay:          floorDelay,
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+
+		// Not eligible yet (floor not reached).
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// A fresh enqueue with no NotBefore must NOT pull the key earlier than
+		// the floor; it is coalesced onto the existing entry.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// After the floor passes, the (single) key becomes eligible.
+		time.Sleep(floorDelay)
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
+	ct.scenario("queue with floor is honored", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// Options.NotBeforeFloor is honored on a direct Queue (not only on
+		// requeue), consistently across backends.
+		floorDelay := workqueue.BackoffPeriod
+		if err := wq.Queue(ctx, "foo", workqueue.Options{
+			NotBefore:      time.Now().UTC().Add(floorDelay),
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		// Not eligible, and a plain enqueue cannot undercut the floor.
+		_, _ = checkQueue(t, wq, ExpectedState{})
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+		// Eligible once the floor passes.
+		time.Sleep(floorDelay)
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
+	ct.scenario("a later floor extends the floor", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// Floor-vs-floor merging takes the later not-before.
+		shortDelay := workqueue.BackoffPeriod
+		longDelay := 3 * workqueue.BackoffPeriod
+		if err := wq.Queue(ctx, "foo", workqueue.Options{
+			NotBefore:      time.Now().UTC().Add(shortDelay),
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+		// A later floor pushes the entry further out.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{
+			NotBefore:      time.Now().UTC().Add(longDelay),
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		// Past the short delay it is still not eligible (the floor moved out).
+		time.Sleep(shortDelay)
+		_, _ = checkQueue(t, wq, ExpectedState{})
+		// Past the long delay it becomes eligible.
+		time.Sleep(longDelay)
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
+	ct.scenario("plain requeue clears the floor", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// After a floored requeue, a subsequent non-floor requeue drops the floor,
+		// so a fresh enqueue can undercut the key again.
+		floorDelay := workqueue.BackoffPeriod
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+
+		// Floor it.
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{
+			Delay:          floorDelay,
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// Wait out the floor, then requeue WITHOUT a floor.
+		time.Sleep(floorDelay)
+		_, qd = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+		owned, err = qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{Delay: floorDelay}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// The floor is gone, so a plain enqueue undercuts it and the key is
+		// eligible immediately.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
+	ct.scenario("incoming floor replaces a non-floor entry", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// An incoming floor wins outright over a non-floored entry (rather than
+		// max-ing with it): a non-floored NotBefore is undercuttable anyway, so it
+		// can be pulled to the floor.
+		shortDelay := workqueue.BackoffPeriod
+		longDelay := 3 * workqueue.BackoffPeriod
+
+		// Non-floored entry far out.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{
+			NotBefore: time.Now().UTC().Add(longDelay),
+		}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// A floor with a SHORTER not-before replaces it (pulled forward), and the
+		// entry becomes floored.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{
+			NotBefore:      time.Now().UTC().Add(shortDelay),
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// A plain enqueue can no longer undercut it (it is now a floor).
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// It fires at the short floor, well before the original long not-before.
+		time.Sleep(shortDelay)
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
+	ct.scenario("incoming floor replaces a non-floor entry on requeue", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// Same rule via the requeue-collision path: a floored requeue replaces a
+		// non-floored queued entry left by a concurrent enqueue (dual state).
+		shortDelay := workqueue.BackoffPeriod
+		longDelay := 3 * workqueue.BackoffPeriod
+
+		if err := wq.Queue(ctx, "foo", workqueue.Options{Priority: 1}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		// While in progress, a non-floored enqueue lands far out (dual state).
+		if err := wq.Queue(ctx, "foo", workqueue.Options{
+			NotBefore: time.Now().UTC().Add(longDelay),
+		}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+
+		// The in-progress key requeues with a shorter floor, which must win over
+		// the queued non-floored entry.
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{
+			Delay:          shortDelay,
+			NotBeforeFloor: true,
+		}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// Fires at the short floor, not the long non-floored time.
+		time.Sleep(shortDelay)
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
 	ct.scenario("requeuing a priority task has backoff", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
 		// Queue a key without NotBefore set, but with a Priority
 		if err := wq.Queue(ctx, "foo", workqueue.Options{
@@ -715,9 +943,13 @@ func TestSemantics(t *testing.T, ctor func(int) workqueue.Interface) {
 	})
 }
 
-func drain(wq workqueue.Interface) error {
+func drain(t *testing.T, wq workqueue.Interface) error {
+	t.Helper()
+	// Match checkQueue: derive from t.Context() but drop cancellation, so drain
+	// works from t.Cleanup, where since Go 1.24 t.Context() is already canceled.
+	ctx := context.WithoutCancel(t.Context())
 	for {
-		wip, qd, _, err := wq.Enumerate(context.Background())
+		wip, qd, _, err := wq.Enumerate(ctx)
 		if err != nil {
 			return fmt.Errorf("enumerate failed: %w", err)
 		}
@@ -725,16 +957,16 @@ func drain(wq workqueue.Interface) error {
 			return nil
 		}
 		for _, k := range wip {
-			if err := k.Requeue(context.Background()); err != nil {
+			if err := k.Requeue(ctx); err != nil {
 				return fmt.Errorf("requeue failed: %w", err)
 			}
 		}
 		for _, k := range qd {
-			owned, err := k.Start(context.Background())
+			owned, err := k.Start(ctx)
 			if err != nil {
 				return fmt.Errorf("start failed: %w", err)
 			}
-			if err := owned.Complete(context.Background()); err != nil {
+			if err := owned.Complete(ctx); err != nil {
 				return fmt.Errorf("complete failed: %w", err)
 			}
 		}

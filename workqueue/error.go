@@ -60,30 +60,54 @@ func GetNonRetriableDetails(err error) *NoRetryDetails {
 // requeued with a specific delay.
 type requeueError struct {
 	delay time.Duration
+	// floor, when true, marks the requeue NotBefore as a floor that subsequent
+	// enqueues of the same key cannot pull earlier (see RequeueNotBefore).
+	floor bool
 }
 
 // Error implements the error interface.
 func (e *requeueError) Error() string {
-	return "requeue requested"
+	return fmt.Sprintf("requeue after %v (floor=%t)", e.delay, e.floor)
 }
 
 // RequeueAfter returns an error that indicates the work item should be requeued
-// after the specified delay.
+// after the specified delay. The resulting NotBefore is undercuttable: a fresh
+// enqueue of the same key (e.g. from a new event) before the delay elapses will
+// pull the key forward and process it immediately. Use this for retry/backoff
+// where promptly reacting to new events is desirable.
 func RequeueAfter(delay time.Duration) error {
 	return &requeueError{delay: delay}
 }
 
+// RequeueNotBefore is like RequeueAfter, but the resulting NotBefore is a floor:
+// subsequent enqueues of the same key that arrive before the delay elapses are
+// coalesced onto it rather than pulling the key forward. This debounces a burst
+// of events for a key the reconciler has decided to revisit at a fixed cadence
+// (e.g. polling for CI to settle) into roughly one reconcile per delay, while
+// still observing the latest state when the key fires.
+func RequeueNotBefore(delay time.Duration) error {
+	return &requeueError{delay: delay, floor: true}
+}
+
 // GetRequeueDelay extracts the requeue delay from an error if it's a requeue error.
 // Returns the delay and true if the error is a requeue error, or 0 and false otherwise.
+// It is a convenience wrapper over GetRequeueOptions for callers that don't need the
+// floor flag.
 func GetRequeueDelay(err error) (time.Duration, bool) {
-	if err == nil {
-		return 0, false
-	}
+	delay, _, ok := GetRequeueOptions(err)
+	return delay, ok
+}
+
+// GetRequeueOptions extracts the requeue delay and whether its NotBefore should
+// be treated as a floor from an error, if it is a requeue error (RequeueAfter or
+// RequeueNotBefore). floor is true only for RequeueNotBefore; ok is false for
+// non-requeue errors.
+func GetRequeueOptions(err error) (delay time.Duration, floor bool, ok bool) {
 	var re *requeueError
 	if errors.As(err, &re) {
-		return re.delay, true
+		return re.delay, re.floor, true
 	}
-	return 0, false
+	return 0, false, false
 }
 
 // QueueKey represents a key to be queued with optional priority and delay.

@@ -113,6 +113,37 @@ func TestGetRequeueDelay(t *testing.T) {
 	}
 }
 
+func TestGetRequeueOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantDelay time.Duration
+		wantFloor bool
+		wantOk    bool
+	}{
+		{name: "requeue not before", err: RequeueNotBefore(10 * time.Second), wantDelay: 10 * time.Second, wantFloor: true, wantOk: true},
+		{name: "requeue after is not a floor", err: RequeueAfter(10 * time.Second), wantDelay: 10 * time.Second, wantFloor: false, wantOk: true},
+		{name: "wrapped requeue not before", err: fmt.Errorf("outer: %w", RequeueNotBefore(time.Second)), wantDelay: time.Second, wantFloor: true, wantOk: true},
+		{name: "regular error", err: errors.New("some error"), wantOk: false},
+		{name: "nil error", err: nil, wantOk: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			delay, floor, ok := GetRequeueOptions(tt.err)
+			if ok != tt.wantOk {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOk)
+			}
+			if delay != tt.wantDelay {
+				t.Errorf("delay = %v, want %v", delay, tt.wantDelay)
+			}
+			if floor != tt.wantFloor {
+				t.Errorf("floor = %v, want %v", floor, tt.wantFloor)
+			}
+		})
+	}
+}
+
 func TestQueueKeys(t *testing.T) {
 	tests := []struct {
 		name     string
