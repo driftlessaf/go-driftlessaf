@@ -46,9 +46,19 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		clog.InfoContext(ctx, "PR needs rebase, starting fresh from default branch")
 
 	case state.HitMaxCommits():
-		clog.InfoContext(ctx, "PR hit turn limit")
-		_, err := session.ApplyTurnLimit(ctx)
-		return err
+		// Unresolved review feedback grants a fresh commit budget (a no-op
+		// unless WithDynamicCommitBudget is enabled). If the limit is still
+		// hit after the reset, the turn limit stands.
+		if session.HasUnresolvedReviews() {
+			session.ResetCommitBudget(ctx)
+		}
+		if session.State().HitMaxCommits() {
+			clog.InfoContext(ctx, "PR hit turn limit")
+			_, err := session.ApplyTurnLimit(ctx)
+			return err
+		}
+		log.Info("PR hit turn limit but has unresolved reviews, iterating with fresh commit budget")
+		usePRBranch = true
 
 	// Historically we delayed here (commented code below), but in high-volume
 	// repositories github can take a long time to compute mergeability, so we
