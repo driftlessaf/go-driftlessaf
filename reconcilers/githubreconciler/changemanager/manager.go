@@ -6,7 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 package changemanager
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -60,6 +62,49 @@ func WithMaxCommits[T any](n int) Option[T] {
 	}
 }
 
+// WithDynamicCommitBudget measures the turn limit against commits since the last
+// Session.ResetCommitBudget rather than the PR's total commit count. The baseline
+// is persisted in the PR body, so resetting it grants a fresh WithMaxCommits-sized
+// budget on the existing PR. Off by default.
+func WithDynamicCommitBudget[T any]() Option[T] {
+	return func(cm *CM[T]) {
+		cm.dynamicCommitBudget = true
+	}
+}
+
+// metadata is changemanager state persisted in the PR body alongside the
+// caller's data (see embeddedData).
+type metadata struct {
+	// CommitBudgetBaseline is the total commit count at the last
+	// ResetCommitBudget call; see WithDynamicCommitBudget.
+	CommitBudgetBaseline int `json:"commit_budget_baseline"`
+}
+
+// embeddedData is the single JSON block changemanager stores in a PR body,
+// wrapping the caller's data with changemanager's own metadata.
+type embeddedData[T any] struct {
+	Data T        `json:"data"`
+	Meta metadata `json:"meta"`
+}
+
+// UnmarshalJSON also accepts the legacy block format, where the caller's data
+// was embedded bare rather than wrapped — without this, bodies of pre-existing
+// PRs would silently decode as zero-value Data.
+func (e *embeddedData[T]) UnmarshalJSON(b []byte) error {
+	var probe struct {
+		Data json.RawMessage `json:"data"`
+		Meta metadata        `json:"meta"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return err
+	}
+	if probe.Data == nil {
+		return json.Unmarshal(b, &e.Data)
+	}
+	e.Meta = probe.Meta
+	return json.Unmarshal(probe.Data, &e.Data)
+}
+
 // WithCloseOnEmptyDiff controls whether Upsert closes the PR when the branch
 // has no net diff against base. Default true.
 func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
@@ -83,16 +128,17 @@ func WithManagedLabels[T any](labels ...string) Option[T] {
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
-	identity         string
-	titleTemplate    *template.Template
-	bodyTemplate     *template.Template
-	templateExecutor *internaltemplate.Template[T]
-	owner            string
-	repo             string
-	handlesFindings  bool
-	maxCommits       int
-	closeOnEmptyDiff bool
-	managedLabels    []string
+	identity            string
+	titleTemplate       *template.Template
+	bodyTemplate        *template.Template
+	templateExecutor    *internaltemplate.Template[embeddedData[T]]
+	owner               string
+	repo                string
+	handlesFindings     bool
+	maxCommits          int
+	dynamicCommitBudget bool
+	closeOnEmptyDiff    bool
+	managedLabels       []string
 }
 
 // GraphQL types for querying check runs
@@ -200,7 +246,7 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 		return nil, errors.New("bodyTemplate cannot be nil")
 	}
 
-	templateExecutor, err := internaltemplate.New[T](identity, "-pr-data", "PR")
+	templateExecutor, err := internaltemplate.New[embeddedData[T]](identity, "-pr-data", "PR")
 	if err != nil {
 		return nil, fmt.Errorf("creating template executor: %w", err)
 	}
@@ -226,7 +272,21 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 // you a PR URL and you need to recover the originating reconciliation key.
 // Additive helper: existing Session.Extract callers are unaffected.
 func (cm *CM[T]) Extract(body string) (*T, error) {
-	return cm.templateExecutor.Extract(body)
+	ed, err := cm.templateExecutor.Extract(body)
+	if err != nil {
+		return nil, err
+	}
+	return &ed.Data, nil
+}
+
+// render executes tmpl with the caller's *T. templateExecutor is typed on the
+// embeddedData[T] wrapper, so it can't render the caller's templates directly.
+func (cm *CM[T]) render(tmpl *template.Template, data *T) (string, error) {
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("executing template: %w", err)
+	}
+	return buf.String(), nil
 }
 
 // NewSession creates a new Session for the given resource.
@@ -278,6 +338,7 @@ func (cm *CM[T]) NewSession(
 		commitCount   int
 		findings      []callbacks.Finding
 		pendingChecks []string
+		meta          metadata
 	)
 
 	// Initial query for PR and first page of check suites/runs
@@ -365,6 +426,17 @@ func (cm *CM[T]) NewSession(
 
 		// Collect review body findings from trusted authors on the current commit
 		findings = append(findings, collectReviewBodyFindings(ctx, pr.HeadRefOid, pr.Reviews)...)
+
+		// Recover the embedded metadata (e.g. the commit-budget baseline);
+		// absent on PRs whose body predates this block.
+		if ed, err := cm.templateExecutor.Extract(prBody); err == nil {
+			meta = ed.Meta
+		}
+		// Clamp a stale baseline left behind when a rebase rebuilds the
+		// branch, so it cannot grant budget beyond maxCommits.
+		if meta.CommitBudgetBaseline > commitCount {
+			meta.CommitBudgetBaseline = commitCount
+		}
 	}
 
 	return &Session[T]{
@@ -386,6 +458,7 @@ func (cm *CM[T]) NewSession(
 		commitCount:   commitCount,
 		findings:      findings,
 		pendingChecks: pendingChecks,
+		meta:          meta,
 	}, nil
 }
 

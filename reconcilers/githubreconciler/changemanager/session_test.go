@@ -15,18 +15,18 @@ import (
 	"chainguard.dev/driftlessaf/workqueue"
 )
 
-func mustTemplateExecutor(t *testing.T) *internaltemplate.Template[testData] {
+func mustTemplateExecutor(t *testing.T) *internaltemplate.Template[embeddedData[testData]] {
 	t.Helper()
-	te, err := internaltemplate.New[testData]("test-bot", "-pr-data", "PR")
+	te, err := internaltemplate.New[embeddedData[testData]]("test-bot", "-pr-data", "PR")
 	if err != nil {
 		t.Fatalf("creating template executor: %v", err)
 	}
 	return te
 }
 
-func mustEmbedBody(t *testing.T, te *internaltemplate.Template[testData], data *testData) string {
+func mustEmbedBody(t *testing.T, te *internaltemplate.Template[embeddedData[testData]], data *testData) string {
 	t.Helper()
-	body, err := te.Embed("PR body text", data)
+	body, err := te.Embed("PR body text", &embeddedData[testData]{Data: *data})
 	if err != nil {
 		t.Fatalf("embedding data: %v", err)
 	}
@@ -95,6 +95,121 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestHasUnresolvedReviews(t *testing.T) {
+	tests := []struct {
+		name     string
+		findings []callbacks.Finding
+		want     bool
+	}{{
+		name:     "no findings",
+		findings: nil,
+		want:     false,
+	}, {
+		name:     "only CI check findings",
+		findings: []callbacks.Finding{{Kind: callbacks.FindingKindCICheck, Identifier: "1"}},
+		want:     false,
+	}, {
+		name: "review finding among CI findings",
+		findings: []callbacks.Finding{
+			{Kind: callbacks.FindingKindCICheck, Identifier: "1"},
+			{Kind: callbacks.FindingKindReview, Identifier: "thread-abc"},
+		},
+		want: true,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := Session[testData]{findings: tt.findings}
+			if got := s.HasUnresolvedReviews(); got != tt.want {
+				t.Errorf("HasUnresolvedReviews(): got = %v, want = %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHitMaxCommitsDynamicBudget(t *testing.T) {
+	tests := []struct {
+		name        string
+		dynamic     bool
+		commitCount int
+		baseline    int
+		want        bool
+	}{{
+		name:        "static under limit",
+		commitCount: 4,
+		want:        false,
+	}, {
+		name:        "static at limit ignores baseline",
+		commitCount: 5,
+		baseline:    3,
+		want:        true,
+	}, {
+		name:        "dynamic counts commits since baseline",
+		dynamic:     true,
+		commitCount: 7,
+		baseline:    3,
+		want:        false,
+	}, {
+		name:        "dynamic at limit",
+		dynamic:     true,
+		commitCount: 8,
+		baseline:    3,
+		want:        true,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := Session[testData]{
+				manager:     &CM[testData]{maxCommits: 5, dynamicCommitBudget: tt.dynamic},
+				prNumber:    1,
+				prMergeable: ptrTo(true),
+				commitCount: tt.commitCount,
+				meta:        metadata{CommitBudgetBaseline: tt.baseline},
+			}
+			if got := s.State().HitMaxCommits(); got != tt.want {
+				t.Errorf("HitMaxCommits(): got = %v, want = %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResetCommitBudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		dynamic  bool
+		prNumber int
+		want     int
+	}{{
+		name:     "resets baseline to commit count",
+		dynamic:  true,
+		prNumber: 7,
+		want:     12,
+	}, {
+		name:     "no-op when dynamic budget disabled",
+		prNumber: 7,
+		want:     4,
+	}, {
+		name:    "no-op when no PR exists",
+		dynamic: true,
+		want:    4,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session[testData]{
+				manager:     &CM[testData]{dynamicCommitBudget: tt.dynamic},
+				prNumber:    tt.prNumber,
+				commitCount: 12,
+				meta:        metadata{CommitBudgetBaseline: 4},
+			}
+			s.ResetCommitBudget(t.Context())
+			if s.meta.CommitBudgetBaseline != tt.want {
+				t.Errorf("baseline: got = %d, want = %d", s.meta.CommitBudgetBaseline, tt.want)
+			}
+		})
+	}
 }
 
 func TestShouldSkip(t *testing.T) {
@@ -266,12 +381,12 @@ func TestHasLabel(t *testing.T) {
 func TestNeedsRefresh(t *testing.T) {
 	te := mustTemplateExecutor(t)
 
-	embeddedData := &testData{
+	sameData := &testData{
 		PackageName: fmt.Sprintf("pkg-%d", rand.Int64()),
 		Version:     fmt.Sprintf("v%d.%d.%d", rand.IntN(10), rand.IntN(10), rand.IntN(10)),
 		Commit:      fmt.Sprintf("abc%d", rand.Int64()),
 	}
-	bodyWithData := mustEmbedBody(t, te, embeddedData)
+	bodyWithData := mustEmbedBody(t, te, sameData)
 
 	differentData := &testData{
 		PackageName: fmt.Sprintf("other-%d", rand.Int64()),
@@ -291,7 +406,7 @@ func TestNeedsRefresh(t *testing.T) {
 		session: Session[testData]{
 			manager: &CM[testData]{templateExecutor: te},
 		},
-		expected:    embeddedData,
+		expected:    sameData,
 		wantRefresh: true,
 	}, {
 		name: "data matches and mergeable",
@@ -301,7 +416,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prBody:      bodyWithData,
 			prMergeable: ptrTo(true),
 		},
-		expected:    embeddedData,
+		expected:    sameData,
 		wantRefresh: false,
 	}, {
 		name: "data differs and mergeable",
@@ -321,7 +436,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prBody:      bodyWithData,
 			prMergeable: ptrTo(false),
 		},
-		expected:    embeddedData,
+		expected:    sameData,
 		wantRefresh: true,
 	}, {
 		name: "data matches and unknown mergeability",
@@ -331,7 +446,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prBody:      bodyWithData,
 			prMergeable: nil,
 		},
-		expected:    embeddedData,
+		expected:    sameData,
 		wantRefresh: false,
 		wantRequeue: true,
 	}, {
@@ -364,7 +479,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prMergeable: ptrTo(true),
 			findings:    []callbacks.Finding{{Kind: callbacks.FindingKindCICheck, Identifier: "1"}},
 		},
-		expected:    embeddedData,
+		expected:    sameData,
 		wantRefresh: true,
 	}, {
 		name: "data matches with pending checks",
@@ -375,7 +490,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prMergeable:   ptrTo(true),
 			pendingChecks: []string{"ci"},
 		},
-		expected:    embeddedData,
+		expected:    sameData,
 		wantRefresh: false,
 	}, {
 		name: "data matches but managed label no longer desired",
@@ -386,7 +501,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prMergeable: ptrTo(true),
 			prLabels:    []string{"skip:approver-bot"},
 		},
-		expected:      embeddedData,
+		expected:      sameData,
 		desiredLabels: nil, // skip:approver-bot is managed, present, but not desired
 		wantRefresh:   true,
 	}, {
@@ -398,7 +513,7 @@ func TestNeedsRefresh(t *testing.T) {
 			prMergeable: ptrTo(true),
 			prLabels:    []string{"skip:approver-bot"},
 		},
-		expected:      embeddedData,
+		expected:      sameData,
 		desiredLabels: []string{"skip:approver-bot"},
 		wantRefresh:   false,
 	}}

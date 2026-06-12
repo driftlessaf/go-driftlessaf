@@ -108,7 +108,7 @@ func TestExtractFromBody(t *testing.T) {
 		Commit:      "abcdef",
 		Nested:      &testNested{Field1: "hello", Field2: 42},
 	}
-	body, err := cm.templateExecutor.Embed("body text", want)
+	body, err := cm.templateExecutor.Embed("body text", &embeddedData[testData]{Data: *want})
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
@@ -126,6 +126,37 @@ func TestExtractFromBody(t *testing.T) {
 
 	if _, err := cm.Extract("PR body with no embedded data"); err == nil {
 		t.Error("Extract on body without data: got nil error, want non-nil")
+	}
+}
+
+// TestExtractLegacyFormat verifies Extract still recovers data from PR bodies
+// created before the embeddedData wrapper, which embed the caller's data bare.
+func TestExtractLegacyFormat(t *testing.T) {
+	titleTmpl := template.Must(template.New("title").Parse("x"))
+	bodyTmpl := template.Must(template.New("body").Parse("x"))
+	cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `PR body text
+
+<!--test-bot-pr-data-->
+<!--
+{
+  "PackageName": "pkg",
+  "Version": "1.2.3",
+  "Commit": "abcdef"
+}
+-->
+<!--/test-bot-pr-data-->`
+
+	got, err := cm.Extract(body)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if got.PackageName != "pkg" || got.Version != "1.2.3" || got.Commit != "abcdef" {
+		t.Errorf("Extract = %+v, want pkg/1.2.3/abcdef", got)
 	}
 }
 
@@ -153,11 +184,11 @@ func TestExtractFromBody_RealisticPRBody(t *testing.T) {
 		Commit:      "abcdef",
 		Nested:      &testNested{Field1: "with-dashes-and_underscores", Field2: 99},
 	}
-	rendered, err := cm.templateExecutor.Execute(bodyTmpl, want)
+	rendered, err := cm.render(bodyTmpl, want)
 	if err != nil {
-		t.Fatalf("Execute: %v", err)
+		t.Fatalf("render: %v", err)
 	}
-	body, err := cm.templateExecutor.Embed(rendered, want)
+	body, err := cm.templateExecutor.Embed(rendered, &embeddedData[testData]{Data: *want})
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}

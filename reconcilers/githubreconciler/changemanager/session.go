@@ -94,6 +94,7 @@ type Session[T any] struct {
 	commitCount   int                 // Total number of commits on the PR
 	findings      []callbacks.Finding // CI failures detected on the existing PR
 	pendingChecks []string            // Names of checks that are not yet complete
+	meta          metadata            // Changemanager state embedded in the PR body
 }
 
 // skipLabel returns the skip label for this session's identity.
@@ -151,7 +152,7 @@ func (s *Session[T]) State() State {
 	case !*s.prMergeable:
 		state |= StateNeedsRebase
 	}
-	if s.manager.maxCommits > 0 && s.commitCount >= s.manager.maxCommits {
+	if s.manager.maxCommits > 0 && s.commitBudgetUsed() >= s.manager.maxCommits {
 		state |= StateMaxCommits
 	}
 	if s.manager.handlesFindings && len(s.findings) > 0 {
@@ -167,6 +168,16 @@ func (s *Session[T]) State() State {
 // Returns 0 if no PR exists.
 func (s *Session[T]) CommitCount() int {
 	return s.commitCount
+}
+
+// commitBudgetUsed returns the commit count the turn limit is measured against:
+// commits since the last ResetCommitBudget under WithDynamicCommitBudget
+// (NewSession clamps the baseline, so never negative), else the total count.
+func (s *Session[T]) commitBudgetUsed() int {
+	if !s.manager.dynamicCommitBudget {
+		return s.commitCount
+	}
+	return s.commitCount - s.meta.CommitBudgetBaseline
 }
 
 // PendingChecks returns the names of checks that are not yet complete.
@@ -205,7 +216,7 @@ func (s *Session[T]) Extract() (*T, error) {
 		return nil, nil
 	}
 
-	return s.manager.templateExecutor.Extract(s.prBody)
+	return s.manager.Extract(s.prBody)
 }
 
 // ApplyTurnLimit adds a turn-limit label to the PR, preventing further
@@ -227,6 +238,25 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("adding turn-limit label: %w", err)
 	}
 	return s.prURL, nil
+}
+
+// ResetCommitBudget gives the PR a fresh WithMaxCommits-sized budget by moving
+// the baseline to the current commit count. The change is in memory and persisted
+// by the next Upsert, so reset and then iterate. No-op without a PR or
+// WithDynamicCommitBudget.
+//
+// Gate the reset on review state that clears once addressed (e.g.
+// HasUnresolvedReviews): if the gating signal never clears, the budget renews
+// every round and maxCommits becomes a per-turn rather than total limit.
+func (s *Session[T]) ResetCommitBudget(ctx context.Context) {
+	if s.prNumber == 0 || !s.manager.dynamicCommitBudget {
+		return
+	}
+	if s.meta.CommitBudgetBaseline == s.commitCount {
+		return
+	}
+	clog.InfoContext(ctx, "Resetting dynamic commit budget", "pr", s.prNumber, "baseline", s.commitCount, "previous", s.meta.CommitBudgetBaseline)
+	s.meta.CommitBudgetBaseline = s.commitCount
 }
 
 // ApplyReadyForReview adds a ready-for-review label to the PR, signaling
@@ -314,7 +344,7 @@ func (s *Session[T]) StoredData() (*T, bool) {
 	if s.prBody == "" {
 		return nil, false
 	}
-	data, err := s.manager.templateExecutor.Extract(s.prBody)
+	data, err := s.manager.Extract(s.prBody)
 	if err != nil {
 		return nil, false
 	}
@@ -325,6 +355,19 @@ func (s *Session[T]) StoredData() (*T, bool) {
 // Returns nil if no PR exists or if all checks passed.
 func (s *Session[T]) Findings() []callbacks.Finding {
 	return s.findings
+}
+
+// HasUnresolvedReviews reports whether the PR has any review findings: an
+// unresolved review thread, or a review body on the current head commit — in
+// either case from a trusted author. These represent human review feedback the
+// bot has not yet addressed. Returns false if no PR exists.
+func (s *Session[T]) HasUnresolvedReviews() bool {
+	for _, f := range s.findings {
+		if f.Kind == callbacks.FindingKindReview {
+			return true
+		}
+	}
+	return false
 }
 
 // FindingCallbacks returns callbacks for fetching finding details.
@@ -446,27 +489,28 @@ func (s *Session[T]) Upsert(
 	}
 
 	// Generate PR title and body from templates
-	title, err := s.manager.templateExecutor.Execute(s.manager.titleTemplate, data)
+	title, err := s.manager.render(s.manager.titleTemplate, data)
 	if err != nil {
 		return "", fmt.Errorf("executing title template: %w", err)
 	}
 
-	body, err := s.manager.templateExecutor.Execute(s.manager.bodyTemplate, data)
+	body, err := s.manager.render(s.manager.bodyTemplate, data)
 	if err != nil {
 		return "", fmt.Errorf("executing body template: %w", err)
 	}
 
 	body += fmt.Sprintf("\n\n> **Note:** If you need to make manual changes to this PR, apply the `skip:%s` label. This gives full control of the PR to human operators: the automation will not post updates, close the PR, or delete the branch.", s.manager.identity)
 
-	// Embed data in body
-	body, err = s.manager.templateExecutor.Embed(body, data)
-	if err != nil {
-		return "", fmt.Errorf("embedding data: %w", err)
-	}
-
 	// Append trace ID so developers can map this PR back to the agent trace.
 	if spanCtx := trace.SpanFromContext(ctx).SpanContext(); spanCtx.IsValid() {
 		body += fmt.Sprintf("\n\nTrace-ID: %s", spanCtx.TraceID().String())
+	}
+
+	// Persist the caller's data and changemanager metadata in one block; carrying
+	// findingsMeta keeps the commit-budget baseline across body regenerations.
+	body, err = s.manager.templateExecutor.Embed(body, &embeddedData[T]{Data: *data, Meta: s.meta})
+	if err != nil {
+		return "", fmt.Errorf("embedding data: %w", err)
 	}
 
 	if s.prNumber == 0 {
@@ -584,7 +628,8 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T, desiredLabel
 		return true, nil
 	}
 
-	existingJSON, err := json.Marshal(existing)
+	// Compare only the caller's data; a budget-baseline change must not force a refresh.
+	existingJSON, err := json.Marshal(existing.Data)
 	if err != nil {
 		clog.WarnContextf(ctx, "Failed to marshal existing data: %v", err)
 		return true, nil

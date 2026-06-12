@@ -297,6 +297,67 @@ func TestUpsert(t *testing.T) {
 	}
 }
 
+// TestUpsertEmbedsWrapper verifies Upsert persists one block with both the
+// caller's data and the budget metadata, so an in-memory reset round-trips.
+func TestUpsertEmbedsWrapper(t *testing.T) {
+	titleTmpl := template.Must(template.New("title").Parse("{{.PackageName}}"))
+	bodyTmpl := template.Must(template.New("body").Parse("Update {{.PackageName}}"))
+
+	var createdBody string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/test-owner/test-repo/pulls", func(w http.ResponseWriter, r *http.Request) {
+		var pr github.NewPullRequest
+		if err := json.NewDecoder(r.Body).Decode(&pr); err == nil {
+			createdBody = pr.GetBody()
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(t, w, &github.PullRequest{Number: github.Ptr(7), HTMLURL: github.Ptr("https://example.test/pull/7")})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
+
+	cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl,
+		WithDynamicCommitBudget[testData](), WithCloseOnEmptyDiff[testData](false))
+	if err != nil {
+		t.Fatalf("creating CM: %v", err)
+	}
+
+	// findingsMeta mimics a prior in-memory ResetCommitBudget; Upsert must carry it.
+	session := &Session[testData]{
+		manager:    cm,
+		client:     client,
+		owner:      "test-owner",
+		repo:       "test-repo",
+		branchName: "test-bot/pkg",
+		ref:        "main",
+		meta:       metadata{CommitBudgetBaseline: 9},
+	}
+
+	data := &testData{PackageName: "pkg"}
+	if _, err := session.Upsert(t.Context(), data, false, nil, func(_ context.Context, _ string) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	ed, err := cm.templateExecutor.Extract(createdBody)
+	if err != nil {
+		t.Fatalf("extracting wrapper from created PR body: %v", err)
+	}
+	if ed.Data.PackageName != "pkg" {
+		t.Errorf("embedded Data.PackageName: got = %q, want = %q", ed.Data.PackageName, "pkg")
+	}
+	if ed.Meta.CommitBudgetBaseline != 9 {
+		t.Errorf("embedded baseline: got = %d, want = 9", ed.Meta.CommitBudgetBaseline)
+	}
+}
+
 // slicesEqualUnordered reports whether a and b contain the same elements,
 // ignoring order. Both nil and empty slices are treated as equal.
 func slicesEqualUnordered(a, b []string) bool {
