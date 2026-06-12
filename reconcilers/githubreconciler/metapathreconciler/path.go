@@ -10,13 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
-	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v84/github"
@@ -93,21 +91,21 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 
 	// Before iterating on a PR with CI findings, re-check whether the update is
 	// still warranted; otherwise a PR for an already-landed or superseded
-	// version iterates on build failures forever. See WithBaseRevalidation.
+	// version iterates on build failures forever. An already-landed update
+	// closes the PR; a superseded one is refreshed in place with the newest
+	// update from the default branch. See WithBaseRevalidation.
 	if usePRBranch && r.baseRevalidation {
-		closeReason, requeue, err := r.baseRevalidate(ctx, cloneMgr, session, res, branchName)
+		closePR, refresh, err := r.needsRefresh(ctx, cloneMgr, session, res, branchName)
 		if err != nil {
 			return err
 		}
-		if closeReason != "" {
-			log.With("reason", closeReason).Info("Closing PR after base revalidation")
-			if err := session.CloseAnyOutstanding(ctx, closeReason); err != nil {
-				return err
-			}
-			if requeue {
-				return workqueue.RequeueAfter(30 * time.Second)
-			}
-			return nil
+		switch {
+		case closePR:
+			log.Info("Update already landed on the base branch, closing PR")
+			return session.CloseAnyOutstanding(ctx, "Closing this PR: the target update has already landed on the base branch.")
+		case refresh:
+			log.Info("PR is superseded by a newer update, refreshing it from the default branch")
+			usePRBranch = false
 		}
 	}
 
@@ -256,34 +254,28 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 	return nil
 }
 
-// baseRevalidate re-validates an iterating PR against the current state of the
-// repository before iterating. It returns a non-empty close reason when the PR
-// should be closed (and whether the path should be requeued to open a fresh
-// PR), or "" to keep iterating:
-//   - base no longer wants the change → the update already landed (superseded);
-//     close, no requeue.
+// needsRefresh re-validates an iterating PR against the current state of the
+// repository before iterating:
+//   - base no longer wants the change → the update already landed; closePR.
 //   - base wants it but the PR branch does not → the PR is on-target; iterate.
-//   - both still want it → the PR is stale (a newer version exists); close and
-//     requeue so a fresh PR is opened for the current target.
-func (r *Reconciler[Req, Resp, CB]) baseRevalidate(ctx context.Context, cloneMgr *clonemanager.Manager, session *changemanager.Session[PRData[Req]], res *githubreconciler.Resource, branchName string) (closeReason string, requeue bool, err error) {
+//   - both still want it → the PR is stale (a newer version exists); refresh
+//     the existing PR with the newest update from the default branch.
+func (r *Reconciler[Req, Resp, CB]) needsRefresh(ctx context.Context, cloneMgr *clonemanager.Manager, session *changemanager.Session[PRData[Req]], res *githubreconciler.Resource, branchName string) (closePR bool, refresh bool, err error) {
 	depth := session.CommitCount() + 1
 
 	wantsBase, err := r.revalidate(ctx, cloneMgr, res, res.Ref, depth)
 	if err != nil {
-		return "", false, fmt.Errorf("revalidate base branch: %w", err)
+		return false, false, fmt.Errorf("revalidate base branch: %w", err)
 	}
 	if !wantsBase {
-		return "Closing this PR: the target update has already landed on the base branch.", false, nil
+		return true, false, nil
 	}
 
 	wantsPR, err := r.revalidate(ctx, cloneMgr, res, branchName, depth)
 	if err != nil {
-		return "", false, fmt.Errorf("revalidate PR branch: %w", err)
+		return false, false, fmt.Errorf("revalidate PR branch: %w", err)
 	}
-	if wantsPR {
-		return "Closing this PR: it is superseded by a newer update. A fresh PR will be opened for the current target.", true, nil
-	}
-	return "", false, nil
+	return false, wantsPR, nil
 }
 
 // revalidate leases ref, runs the analyzer against its worktree, and reports

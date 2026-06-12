@@ -99,8 +99,8 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 
 	// baseRevalidation, when true, makes iteration passes re-run the analyzer
 	// against the base branch (and the PR branch) before iterating, closing
-	// PRs whose update has already landed or been superseded. See
-	// WithBaseRevalidation.
+	// PRs whose update has already landed and refreshing superseded PRs with
+	// the newest update. See WithBaseRevalidation.
 	baseRevalidation bool
 
 	// Agent and its adapters
@@ -144,9 +144,9 @@ func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagno
 
 // WithBaseRevalidation makes the reconciler re-run the analyzer against the
 // base branch before iterating on a PR with CI findings, closing PRs whose
-// update has already landed or been superseded by a newer version (see
-// baseRevalidate). Off by default to avoid the extra analyzer runs for
-// reconcilers that do not need it.
+// update has already landed and refreshing PRs superseded by a newer version
+// with the newest update (see needsRefresh). Off by default to avoid the
+// extra analyzer runs for reconcilers that do not need it.
 func WithBaseRevalidation() Option {
 	return func(o *option) {
 		o.baseRevalidation = true
