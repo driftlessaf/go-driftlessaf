@@ -68,6 +68,18 @@ func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
 	}
 }
 
+// WithManagedLabels declares the set of labels this reconciler owns. On an
+// update, any managed label present on the PR but absent from the desired
+// labels passed to Upsert is removed, while labels added by humans or other
+// bots are preserved. Use this for labels the reconciler toggles on and off
+// based on the current state (e.g. a "manual review needed" label applied
+// only when a diff requires it). Labels not listed here are never removed.
+func WithManagedLabels[T any](labels ...string) Option[T] {
+	return func(cm *CM[T]) {
+		cm.managedLabels = labels
+	}
+}
+
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
@@ -80,6 +92,7 @@ type CM[T any] struct {
 	handlesFindings  bool
 	maxCommits       int
 	closeOnEmptyDiff bool
+	managedLabels    []string
 }
 
 // GraphQL types for querying check runs

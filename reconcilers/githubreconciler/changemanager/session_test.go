@@ -377,6 +377,30 @@ func TestNeedsRefresh(t *testing.T) {
 		},
 		expected:    embeddedData,
 		wantRefresh: false,
+	}, {
+		name: "data matches but managed label no longer desired",
+		session: Session[testData]{
+			manager:     &CM[testData]{templateExecutor: te, managedLabels: []string{"skip:approver-bot"}},
+			prNumber:    1,
+			prBody:      bodyWithData,
+			prMergeable: ptrTo(true),
+			prLabels:    []string{"skip:approver-bot"},
+		},
+		expected:      embeddedData,
+		desiredLabels: nil, // skip:approver-bot is managed, present, but not desired
+		wantRefresh:   true,
+	}, {
+		name: "data matches and managed label still desired",
+		session: Session[testData]{
+			manager:     &CM[testData]{templateExecutor: te, managedLabels: []string{"skip:approver-bot"}},
+			prNumber:    1,
+			prBody:      bodyWithData,
+			prMergeable: ptrTo(true),
+			prLabels:    []string{"skip:approver-bot"},
+		},
+		expected:      embeddedData,
+		desiredLabels: []string{"skip:approver-bot"},
+		wantRefresh:   false,
 	}}
 
 	for _, tt := range tests {

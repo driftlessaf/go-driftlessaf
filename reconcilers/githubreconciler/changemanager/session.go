@@ -530,6 +530,10 @@ func (s *Session[T]) Upsert(
 	for _, l := range freshPR.Labels {
 		existingLabelSet[l.GetName()] = struct{}{}
 	}
+	desiredLabelSet := make(map[string]struct{}, len(labels))
+	for _, l := range labels {
+		desiredLabelSet[l] = struct{}{}
+	}
 	var missingLabels []string
 	for _, l := range labels {
 		if _, ok := existingLabelSet[l]; !ok {
@@ -539,6 +543,21 @@ func (s *Session[T]) Upsert(
 	if len(missingLabels) > 0 {
 		if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, missingLabels); err != nil {
 			return "", fmt.Errorf("adding labels: %w", err)
+		}
+	}
+
+	// Remove managed labels that the reconciler previously set but no longer
+	// wants. Labels not declared as managed (set by humans or other bots) are
+	// left untouched.
+	for _, l := range s.manager.managedLabels {
+		if _, desired := desiredLabelSet[l]; desired {
+			continue
+		}
+		if _, present := existingLabelSet[l]; !present {
+			continue
+		}
+		if _, err := s.client.Issues.RemoveLabelForIssue(ctx, s.owner, s.repo, s.prNumber, l); err != nil {
+			return "", fmt.Errorf("removing label %q: %w", l, err)
 		}
 	}
 
@@ -597,6 +616,23 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T, desiredLabel
 	for _, l := range desiredLabels {
 		if _, ok := existingSet[l]; !ok {
 			clog.InfoContextf(ctx, "PR missing desired label %q, refresh needed: existing=%v desired=%v", l, s.prLabels, desiredLabels)
+			return true, nil
+		}
+	}
+
+	// Check if the PR carries a managed label that is no longer desired, which
+	// Upsert needs to remove (e.g. a "manual review needed" label that should
+	// be cleared once the diff that triggered it is gone).
+	desiredSet := make(map[string]struct{}, len(desiredLabels))
+	for _, l := range desiredLabels {
+		desiredSet[l] = struct{}{}
+	}
+	for _, l := range s.manager.managedLabels {
+		if _, onPR := existingSet[l]; !onPR {
+			continue
+		}
+		if _, desired := desiredSet[l]; !desired {
+			clog.InfoContextf(ctx, "PR has managed label %q that is no longer desired, refresh needed: existing=%v desired=%v", l, s.prLabels, desiredLabels)
 			return true, nil
 		}
 	}

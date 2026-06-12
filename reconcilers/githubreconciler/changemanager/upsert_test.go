@@ -30,11 +30,13 @@ func TestUpsert(t *testing.T) {
 		labels               []string // desired labels passed to Upsert
 		existingPRLabels     []string // labels already on the PR returned by GET /pulls
 		makeChangesErr       error    // nil = success path; otherwise returned from the makeChanges callback
+		managedLabels        []string // labels declared managed via WithManagedLabels
 		wantPRNumber         int
 		wantAssignable       bool     // whether AddAssignees should work after Upsert
 		wantErrIs            error    // expected error sentinel for the no-changes path
 		wantAddLabelsCalled  bool     // whether POST /labels should be called
 		wantAddLabelsPayload []string // labels expected in the POST /labels body, if called
+		wantRemovedLabels    []string // labels expected to be removed via DELETE /labels/{name}
 	}{{
 		name:           "create new PR sets prNumber and prURL",
 		prNumber:       0,
@@ -85,6 +87,33 @@ func TestUpsert(t *testing.T) {
 		wantAssignable:       true,
 		wantAddLabelsCalled:  true,                        // "cve-remediation" is missing
 		wantAddLabelsPayload: []string{"cve-remediation"}, // only the missing one
+	}, {
+		name:              "update existing PR removes managed label no longer desired",
+		prNumber:          99,
+		labels:            []string{"automated-pr"},
+		existingPRLabels:  []string{"automated-pr", "skip:approver-bot", "agentic"},
+		managedLabels:     []string{"skip:approver-bot"},
+		wantPRNumber:      99,
+		wantAssignable:    true,
+		wantRemovedLabels: []string{"skip:approver-bot"}, // managed, on PR, no longer desired
+	}, {
+		name:                 "update existing PR keeps managed label still desired",
+		prNumber:             99,
+		labels:               []string{"automated-pr", "skip:approver-bot"},
+		existingPRLabels:     []string{"automated-pr"},
+		managedLabels:        []string{"skip:approver-bot"},
+		wantPRNumber:         99,
+		wantAssignable:       true,
+		wantAddLabelsCalled:  true,
+		wantAddLabelsPayload: []string{"skip:approver-bot"}, // still desired and missing, so added
+	}, {
+		name:             "update existing PR never removes unmanaged label",
+		prNumber:         99,
+		labels:           []string{"automated-pr"},
+		existingPRLabels: []string{"automated-pr", "skip:approver-bot"},
+		managedLabels:    nil, // skip:approver-bot is not managed, so it stays
+		wantPRNumber:     99,
+		wantAssignable:   true,
 	}}
 
 	for _, tt := range tests {
@@ -93,6 +122,7 @@ func TestUpsert(t *testing.T) {
 			var replaceLabelsCalledCount int
 			var addLabelsCalled bool
 			var addLabelsPayload []string
+			var removedLabels []string
 
 			mux := http.NewServeMux()
 
@@ -146,6 +176,12 @@ func TestUpsert(t *testing.T) {
 				writeJSON(t, w, []*github.Label{})
 			})
 
+			// Remove label (DELETE) — track which labels are removed.
+			mux.HandleFunc("DELETE /api/v3/repos/test-owner/test-repo/issues/{number}/labels/{name}", func(w http.ResponseWriter, r *http.Request) {
+				removedLabels = append(removedLabels, r.PathValue("name"))
+				writeJSON(t, w, []*github.Label{})
+			})
+
 			// Add assignees — track whether this is called
 			mux.HandleFunc("POST /api/v3/repos/test-owner/test-repo/issues/{number}/assignees", func(w http.ResponseWriter, _ *http.Request) {
 				addAssigneesCalled = true
@@ -160,7 +196,7 @@ func TestUpsert(t *testing.T) {
 				t.Fatalf("creating client: %v", err)
 			}
 
-			cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl)
+			cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl, WithManagedLabels[testData](tt.managedLabels...))
 			if err != nil {
 				t.Fatalf("creating CM: %v", err)
 			}
@@ -252,8 +288,32 @@ func TestUpsert(t *testing.T) {
 					t.Errorf("POST /labels payload length: got %d, want %d; payload=%v", len(addLabelsPayload), len(tt.wantAddLabelsPayload), addLabelsPayload)
 				}
 			}
+
+			// Verify managed labels no longer desired were removed (and nothing else).
+			if !slicesEqualUnordered(removedLabels, tt.wantRemovedLabels) {
+				t.Errorf("DELETE /labels: got removed = %v, want = %v", removedLabels, tt.wantRemovedLabels)
+			}
 		})
 	}
+}
+
+// slicesEqualUnordered reports whether a and b contain the same elements,
+// ignoring order. Both nil and empty slices are treated as equal.
+func slicesEqualUnordered(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[v]++
+	}
+	for _, v := range b {
+		counts[v]--
+		if counts[v] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
