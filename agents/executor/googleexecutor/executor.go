@@ -405,6 +405,48 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "failed to record llm response payload", "error", err)
 		}
 
+		// Check for safety/blocking reasons before processing content
+		if candidate.FinishReason == genai.FinishReasonSafety {
+			clog.WarnContext(ctx, "Gemini blocked response due to safety filters",
+				"finish_message", candidate.FinishMessage,
+				"safety_ratings", candidate.SafetyRatings)
+			return zero, nil, true, fmt.Errorf("response blocked by safety filters: %s", candidate.FinishMessage)
+		}
+
+		if candidate.FinishReason == genai.FinishReasonRecitation {
+			clog.WarnContext(ctx, "Gemini blocked response due to recitation concerns",
+				"finish_message", candidate.FinishMessage)
+			return zero, nil, true, fmt.Errorf("response blocked due to recitation: %s", candidate.FinishMessage)
+		}
+
+		// Check for MAX_TOKENS - response was truncated due to output token limit
+		if candidate.FinishReason == genai.FinishReasonMaxTokens {
+			clog.WarnContext(ctx, "Gemini hit max output tokens limit, asking for more concise response",
+				"finish_message", candidate.FinishMessage,
+				"turn", turn)
+
+			// Ask the model to provide a more concise version
+			retryMsg := genai.Part{Text: "Your response exceeded the maximum output token limit. Please provide a more concise response that focuses on the most critical information while still completing the task."}
+			retryResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_max_tokens_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+				return chat.SendMessage(ctx, retryMsg)
+			})
+			e.recordAPIRequest(ctx, err)
+			if err != nil {
+				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
+					return zero, nil, true, requeueErr
+				}
+				return zero, nil, true, fmt.Errorf("failed to send retry message after hitting max tokens: %w", err)
+			}
+
+			// Record metrics for retry call
+			if retryResp != nil && retryResp.UsageMetadata != nil {
+				e.recordTokenMetrics(ctx, retryResp.UsageMetadata)
+			}
+
+			// Continue with the new response
+			return zero, retryResp, false, nil
+		}
+
 		// Check for malformed function call
 		if candidate.FinishReason == genai.FinishReasonMalformedFunctionCall {
 			clog.WarnContext(ctx, "Model attempted a malformed function call, asking it to retry",
@@ -440,11 +482,19 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		if candidate.Content == nil {
-			return zero, nil, true, errors.New("no content generated - candidate content is nil")
+			clog.ErrorContext(ctx, "Gemini returned nil content",
+				"finish_reason", candidate.FinishReason,
+				"finish_message", candidate.FinishMessage)
+			return zero, nil, true, fmt.Errorf("no content generated - candidate content is nil (finish_reason=%v, finish_message=%q)",
+				candidate.FinishReason, candidate.FinishMessage)
 		}
 
 		if len(candidate.Content.Parts) == 0 {
-			return zero, nil, true, errors.New("no content generated - no parts in candidate")
+			clog.ErrorContext(ctx, "Gemini returned empty parts",
+				"finish_reason", candidate.FinishReason,
+				"finish_message", candidate.FinishMessage)
+			return zero, nil, true, fmt.Errorf("no content generated - no parts in candidate (finish_reason=%v, finish_message=%q)",
+				candidate.FinishReason, candidate.FinishMessage)
 		}
 
 		// Check for function calls or text

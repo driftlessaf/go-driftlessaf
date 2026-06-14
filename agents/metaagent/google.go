@@ -40,7 +40,7 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	executorOpts := []googleexecutor.Option[Req, Resp]{
 		googleexecutor.WithModel[Req, Resp](model),
 		googleexecutor.WithTemperature[Req, Resp](0.2),
-		googleexecutor.WithMaxOutputTokens[Req, Resp](32768),
+		googleexecutor.WithMaxOutputTokens[Req, Resp](65536), // Gemini 2.5 Flash max output tokens
 		googleexecutor.WithSubmitResultProvider[Req, Resp](submitresult.GoogleToolForResponse[Resp]),
 		googleexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}
