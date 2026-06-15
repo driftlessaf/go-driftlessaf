@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	chainguard.dev/apko v1.2.16
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.56
+	chainguard.dev/sdk v0.1.59
 	cloud.google.com/go/aiplatform v1.121.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.31.0
