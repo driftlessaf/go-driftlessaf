@@ -26,10 +26,11 @@ type Comment struct {
 
 // Attachment represents a file or link attachment on a Linear issue.
 type Attachment struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Subtitle string `json:"subtitle"`
-	URL      string `json:"url"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Subtitle  string    `json:"subtitle"`
+	URL       string    `json:"url"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Issue represents a Linear issue with its comments, attachments, and labels.
@@ -38,11 +39,11 @@ type Issue struct {
 	Identifier  string `json:"identifier"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
-	UpdatedAt   string `json:"updatedAt"`
 	// URL is the canonical Linear-hosted URL for the issue (e.g.
 	// "https://linear.app/{workspace}/issue/{identifier}"). Populated by
 	// GetIssue.
-	URL string `json:"url"`
+	URL       string `json:"url"`
+	UpdatedAt string `json:"updatedAt"`
 
 	State struct {
 		Name string `json:"name"`
@@ -50,11 +51,17 @@ type Issue struct {
 	} `json:"state"`
 
 	Team struct {
+		ID   string `json:"id"`
 		Key  string `json:"key"`
 		Name string `json:"name"`
 	} `json:"team"`
 
 	Assignee *User `json:"assignee"`
+
+	// Creator is the Linear user who originally filed the issue. Populated
+	// by GetIssue. Nil for issues created via integrations (e.g. webhook
+	// imports) that don't carry a Linear-user attribution.
+	Creator *User `json:"creator"`
 
 	Attachments struct {
 		Nodes []Attachment `json:"nodes"`
@@ -69,6 +76,20 @@ type Issue struct {
 			Name string `json:"name"`
 		} `json:"nodes"`
 	} `json:"labels"`
+
+	// Documents are Linear documents whose parent is this issue (via
+	// `Document.issue`). Native first-class link surfaced in Linear's
+	// right-rail "Documents" panel — distinct from URL attachments in
+	// `Attachments.Nodes`. Fetched by GetIssue with the same id/slugId/url
+	// fragment GetDocument uses.
+	Documents struct {
+		Nodes []struct {
+			ID    string `json:"id"`
+			Slug  string `json:"slugId"`
+			Title string `json:"title"`
+			URL   string `json:"url"`
+		} `json:"nodes"`
+	} `json:"documents"`
 }
 
 // HasLabel returns true if the issue has a label with the given name (case-insensitive).
@@ -100,6 +121,42 @@ func (i *Issue) FindAttachment(title string) *Attachment {
 		}
 	}
 	return nil
+}
+
+// FindAttachmentsByTitle returns every attachment whose title matches, in
+// the order Linear returned them. Useful when a delete-then-upload upsert
+// has raced and left multiple attachments under the same title — callers
+// can merge their payloads instead of silently picking whichever happens
+// to come first.
+func (i *Issue) FindAttachmentsByTitle(title string) []Attachment {
+	var matches []Attachment
+	for idx := range i.Attachments.Nodes {
+		if i.Attachments.Nodes[idx].Title == title {
+			matches = append(matches, i.Attachments.Nodes[idx])
+		}
+	}
+	return matches
+}
+
+// FindLatestAttachment returns the matching attachment with the most recent
+// CreatedAt, or nil if no match exists. Use this instead of FindAttachment
+// when reading state attachments written by a delete-then-upload Save() —
+// concurrent reconciliations can race the delete and leave multiple
+// attachments under the same title, and the latest is the source of truth.
+// Falls back to the first match when CreatedAt is zero (e.g. older queries
+// that didn't request the field).
+func (i *Issue) FindLatestAttachment(title string) *Attachment {
+	var latest *Attachment
+	for idx := range i.Attachments.Nodes {
+		if i.Attachments.Nodes[idx].Title != title {
+			continue
+		}
+		a := &i.Attachments.Nodes[idx]
+		if latest == nil || a.CreatedAt.After(latest.CreatedAt) {
+			latest = a
+		}
+	}
+	return latest
 }
 
 // UnprocessedComments returns comments that appear after the last comment

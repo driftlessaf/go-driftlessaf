@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,31 @@ const (
 	maxAttachmentSize = 10 << 20
 	// maxErrorBodySize caps error response bodies included in error messages (1 KB).
 	maxErrorBodySize = 1 << 10
+
+	// maxTokenCacheTTL caps how long an issued access token is cached
+	// locally before getToken() forces a refresh, regardless of the
+	// `expires_in` value Linear advertises.
+	//
+	// Background: a long-running bot was observed running for ~22 hours
+	// on a single cached token. Linear's token endpoint returned
+	// expires_in ≈ 30 days, which getToken() trusted, so the local
+	// tokenExpiry was set 30 days out and the cache was never refreshed.
+	// Around the 22-hour mark every GraphQL request started returning
+	// HTTP 401 "Authentication required, not authenticated" — the token
+	// was being rejected on use even though the local cache still
+	// considered it valid. A manual client_credentials exchange against
+	// the same OAuth app produced a fresh token that worked immediately,
+	// confirming the credentials and the OAuth app were healthy and the
+	// failure was specifically in the cache-versus-server-side-TTL skew.
+	// Restarting the bot process (which reset the cache) restored service.
+	//
+	// Linear's effective server-side token TTL is undocumented and
+	// clearly shorter than the advertised expires_in. Capping the local
+	// cache at 6h gives a safe lower bound well below the observed
+	// failure point, keeps refresh traffic to the token endpoint modest
+	// (~4 refreshes/day per process), and bounds how long any individual
+	// stale-token outage can last to roughly the cap.
+	maxTokenCacheTTL = 6 * time.Hour
 )
 
 // OAuth scope constants for Linear API permissions.
@@ -209,8 +235,13 @@ func (c *Client) getToken(ctx context.Context) (string, error) {
 	}
 
 	c.token = tr.AccessToken
-	// Refresh 30 seconds early to avoid edge-case expiry.
-	c.tokenExpiry = time.Now().Add(time.Duration(tr.ExpiresIn)*time.Second - 30*time.Second)
+	// Cache lifetime is min(advertised expires_in, maxTokenCacheTTL),
+	// minus a 30s safety buffer to avoid edge-case expiry. The cap
+	// protects against the documented case where Linear advertises a
+	// multi-week expires_in but invalidates the token server-side much
+	// sooner; see the maxTokenCacheTTL comment for the incident detail.
+	advertised := min(time.Duration(tr.ExpiresIn)*time.Second, maxTokenCacheTTL)
+	c.tokenExpiry = time.Now().Add(advertised - 30*time.Second)
 	return c.token, nil
 }
 
@@ -271,14 +302,28 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 	var gqlResp struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string         `json:"message"`
+			Path       []any          `json:"path,omitempty"`
+			Extensions map[string]any `json:"extensions,omitempty"`
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(respBody, &gqlResp); err != nil {
 		return fmt.Errorf("unmarshaling response: %w", err)
 	}
 	if len(gqlResp.Errors) > 0 {
-		return fmt.Errorf("graphql error: %s", gqlResp.Errors[0].Message)
+		// Linear's "Argument Validation Error" only tells you something
+		// failed — the actual offending field/value is in extensions
+		// (e.g. extensions.userPresentableMessage, extensions.code).
+		// Include the whole extensions blob so callers can see *what*
+		// was rejected without having to mirror an HTTP capture.
+		first := gqlResp.Errors[0]
+		details := first.Message
+		if first.Extensions != nil {
+			if extJSON, mErr := json.Marshal(first.Extensions); mErr == nil {
+				details = fmt.Sprintf("%s (extensions=%s)", details, extJSON)
+			}
+		}
+		return fmt.Errorf("graphql error: %s", details)
 	}
 
 	return json.Unmarshal(gqlResp.Data, result)
@@ -302,10 +347,12 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 		issue(id: $id) {
 			id identifier title description updatedAt url
 			state { name type }
-			team { key name }
+			team { id key name }
 			assignee { id name }
+			creator { id name }
 			labels { nodes { name } }
-			attachments { nodes { id title subtitle url } }
+			documents { nodes { id slugId title url } }
+			attachments { nodes { id title subtitle url createdAt } }
 			comments(first: 100, orderBy: createdAt) {
 				nodes {
 					id body createdAt
@@ -547,6 +594,70 @@ func (c *Client) SetIssueStateByType(ctx context.Context, issueID, stateType str
 	return nil
 }
 
+// FindStateIDByType returns the workflow state UUID on the given team
+// matching stateType, optionally disambiguated by preferredNames.
+//
+// Mirrors the lookup-half of SetIssueStateByType so callers can resolve
+// a state ID once per team and reuse it across many writes (e.g. setting
+// the initial state on a batch of newly-created child issues without
+// issuing N follow-up update mutations). Returns "" with no error when
+// the team has no state of the requested type — this matches
+// SetIssueStateByType's "missing-config is not a code bug" behavior.
+//
+// stateType is the schema-stable Linear workflow type ("backlog",
+// "unstarted", "started", "completed", "canceled", "triage"). Names
+// like "Todo"/"In Progress" are workspace-renameable; pass them via
+// preferredNames only as disambiguation, not as the primary key.
+func (c *Client) FindStateIDByType(ctx context.Context, teamID, stateType string, preferredNames ...string) (string, error) {
+	const lookup = `query($id: String!) {
+		team(id: $id) {
+			states {
+				nodes { id name type }
+			}
+		}
+	}`
+	var result struct {
+		Team *struct {
+			States struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+					Type string `json:"type"`
+				} `json:"nodes"`
+			} `json:"states"`
+		} `json:"team"`
+	}
+	if err := c.graphql(ctx, lookup, map[string]any{"id": teamID}, &result); err != nil {
+		return "", fmt.Errorf("look up states for team %s: %w", teamID, err)
+	}
+	if result.Team == nil {
+		return "", fmt.Errorf("team %s not found", teamID)
+	}
+
+	preferredSet := make(map[string]struct{}, len(preferredNames))
+	for _, n := range preferredNames {
+		preferredSet[strings.ToLower(n)] = struct{}{}
+	}
+
+	var preferredID, fallbackID string
+	for _, s := range result.Team.States.Nodes {
+		if s.Type != stateType {
+			continue
+		}
+		if fallbackID == "" {
+			fallbackID = s.ID
+		}
+		if _, ok := preferredSet[strings.ToLower(s.Name)]; ok {
+			preferredID = s.ID
+			break
+		}
+	}
+	if preferredID != "" {
+		return preferredID, nil
+	}
+	return fallbackID, nil
+}
+
 // DeleteAttachment deletes an attachment by ID.
 func (c *Client) DeleteAttachment(ctx context.Context, attachmentID string) error {
 	const mutation = `mutation($id: String!) {
@@ -704,4 +815,73 @@ func (c *Client) FetchAttachmentContent(ctx context.Context, rawURL string) ([]b
 	}
 
 	return io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
+}
+
+// Document represents a Linear document.
+type Document struct {
+	ID        string
+	Slug      string
+	Title     string
+	Content   string
+	URL       string
+	IssueID   string
+	ProjectID string
+}
+
+// ErrDocumentNotFound is returned by GetDocument when Linear has no document
+// with the requested id/slug.
+var ErrDocumentNotFound = errors.New("document not found")
+
+// GetDocument fetches a Linear document by id or slug.
+// Returns ErrDocumentNotFound if Linear returns null for the document.
+func (c *Client) GetDocument(ctx context.Context, idOrSlug string) (Document, error) {
+	const query = `query($id: String!) {
+		document(id: $id) {
+			id
+			slugId
+			title
+			content
+			url
+			issue { id }
+			project { id }
+		}
+	}`
+
+	var result struct {
+		Document *struct {
+			ID      string `json:"id"`
+			SlugID  string `json:"slugId"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+			URL     string `json:"url"`
+			Issue   *struct {
+				ID string `json:"id"`
+			} `json:"issue"`
+			Project *struct {
+				ID string `json:"id"`
+			} `json:"project"`
+		} `json:"document"`
+	}
+
+	if err := c.graphql(ctx, query, map[string]any{"id": idOrSlug}, &result); err != nil {
+		return Document{}, fmt.Errorf("query document: %w", err)
+	}
+	if result.Document == nil {
+		return Document{}, ErrDocumentNotFound
+	}
+
+	doc := Document{
+		ID:      result.Document.ID,
+		Slug:    result.Document.SlugID,
+		Title:   result.Document.Title,
+		Content: result.Document.Content,
+		URL:     result.Document.URL,
+	}
+	if result.Document.Issue != nil {
+		doc.IssueID = result.Document.Issue.ID
+	}
+	if result.Document.Project != nil {
+		doc.ProjectID = result.Document.Project.ID
+	}
+	return doc, nil
 }

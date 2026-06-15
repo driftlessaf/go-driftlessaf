@@ -76,8 +76,20 @@ func (sm *StateManager) UnprocessedComments(botUserID string) []Comment {
 // Load reads the state attachment and deserializes the bot data into v.
 // Internal metadata is extracted and stored on the StateManager.
 // Returns true if state was found and loaded, false if no state exists.
+//
+// When multiple attachments share the state title, Load picks the one
+// with the most recent CreatedAt. Save() is delete-then-upload against
+// the attachment list snapshotted at reconcile-start, so two
+// concurrent reconciliations of the same issue (extremely common when
+// child events keep enqueueing the parent) can each create a new
+// attachment while only one set of deletes wins, leaving 2+ live
+// attachments under the same title. Picking the first by Linear's
+// order would route to a stale snapshot — symptoms include phase
+// regression (executing → pending) and the dedup guards in
+// reconcileScaffolding being bypassed because state.ProjectID looked
+// empty. See DEV-1272 (2026-05-12) for the original incident.
 func (sm *StateManager) Load(ctx context.Context, v any) (bool, error) {
-	att := sm.issue.FindAttachment(sm.client.stateAttachmentTitle())
+	att := sm.issue.FindLatestAttachment(sm.client.stateAttachmentTitle())
 	if att == nil || att.URL == "" {
 		return false, nil
 	}

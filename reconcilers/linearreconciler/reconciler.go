@@ -140,10 +140,30 @@ func New(ctx context.Context, client *Client, opts ...Option) (*Reconciler, erro
 		opt(r)
 	}
 
-	// Resolve bot identity.
-	viewer, err := client.GetViewer(ctx)
+	// Resolve bot identity. Retry on transient failures — Linear's OAuth
+	// endpoint can return 401s when multiple instances request tokens
+	// concurrently during a fresh deploy, and failing startup on the first
+	// such error takes down the whole Cloud Run revision.
+	var viewer *User
+	var err error
+	for attempt := range 5 {
+		viewer, err = client.GetViewer(ctx)
+		if err == nil {
+			break
+		}
+		if attempt == 4 {
+			break
+		}
+		backoff := time.Duration(attempt+1) * time.Second
+		clog.WarnContextf(ctx, "Resolving bot identity failed (attempt %d/5): %v — retrying in %v", attempt+1, err, backoff)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("resolving bot identity: %w", err)
+		return nil, fmt.Errorf("resolving bot identity after 5 attempts: %w", err)
 	}
 	client.BotUserID = viewer.ID
 

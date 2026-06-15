@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 package linearreconciler
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -106,7 +106,7 @@ func TestGetToken_OAuth(t *testing.T) {
 	c := NewClient("test-client-id", "test-client-secret").
 		WithTokenURL(srv.URL)
 
-	token, err := c.getToken(context.Background())
+	token, err := c.getToken(t.Context())
 	if err != nil {
 		t.Fatalf("getToken() error: %v", err)
 	}
@@ -130,13 +130,13 @@ func TestGetToken_Caching(t *testing.T) {
 	c := NewClient("id", "secret").WithTokenURL(srv.URL)
 
 	// First call fetches a new token.
-	_, err := c.getToken(context.Background())
+	_, err := c.getToken(t.Context())
 	if err != nil {
 		t.Fatalf("first getToken() error: %v", err)
 	}
 
 	// Second call should return the cached token without hitting the server.
-	token, err := c.getToken(context.Background())
+	token, err := c.getToken(t.Context())
 	if err != nil {
 		t.Fatalf("second getToken() error: %v", err)
 	}
@@ -148,6 +148,64 @@ func TestGetToken_Caching(t *testing.T) {
 	}
 }
 
+func TestGetToken_CachedExpiryCappedAtMaxTTL(t *testing.T) {
+	// Linear has been observed advertising expires_in values of ~30 days
+	// while the token is invalidated server-side much sooner. The client
+	// must cap the cache lifetime so getToken() refreshes within
+	// maxTokenCacheTTL regardless of what the token endpoint advertises.
+	const advertisedSeconds = 30 * 24 * 60 * 60 // 30 days
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "long-lived-token",
+			"expires_in":   advertisedSeconds,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient("id", "secret").WithTokenURL(srv.URL)
+	if _, err := c.getToken(t.Context()); err != nil {
+		t.Fatalf("getToken() error: %v", err)
+	}
+
+	// The cached expiry should land within maxTokenCacheTTL of now,
+	// not 30 days out as the advertised value would suggest. Allow a
+	// small slack window for test execution time around the cap.
+	gotTTL := time.Until(c.tokenExpiry)
+	if gotTTL > maxTokenCacheTTL {
+		t.Errorf("cached TTL = %v, want <= maxTokenCacheTTL (%v) — cap not applied", gotTTL, maxTokenCacheTTL)
+	}
+	if gotTTL < maxTokenCacheTTL-time.Minute {
+		t.Errorf("cached TTL = %v, want close to maxTokenCacheTTL (%v) — cap unexpectedly tight", gotTTL, maxTokenCacheTTL)
+	}
+}
+
+func TestGetToken_CachedExpiryRespectsShortAdvertisedTTL(t *testing.T) {
+	// When the advertised TTL is below maxTokenCacheTTL, the cache must
+	// honour the smaller value so the client doesn't outlive a token
+	// the server already considers expired.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "short-lived-token",
+			"expires_in":   600, // 10 minutes
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient("id", "secret").WithTokenURL(srv.URL)
+	if _, err := c.getToken(t.Context()); err != nil {
+		t.Fatalf("getToken() error: %v", err)
+	}
+
+	gotTTL := time.Until(c.tokenExpiry)
+	// 10 minutes minus 30s buffer = 9m30s, ±1s for test timing.
+	want := 600*time.Second - 30*time.Second
+	if gotTTL > want || gotTTL < want-time.Second {
+		t.Errorf("cached TTL = %v, want ~%v (advertised TTL minus 30s buffer)", gotTTL, want)
+	}
+}
+
 func TestGetToken_APIKey_NeverFetches(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("token endpoint should not be called for API key client")
@@ -156,7 +214,7 @@ func TestGetToken_APIKey_NeverFetches(t *testing.T) {
 
 	c := NewClientWithAPIKey("my-api-key").WithTokenURL(srv.URL)
 
-	token, err := c.getToken(context.Background())
+	token, err := c.getToken(t.Context())
 	if err != nil {
 		t.Fatalf("getToken() error: %v", err)
 	}
@@ -174,7 +232,7 @@ func TestGetToken_OAuthError(t *testing.T) {
 
 	c := NewClient("bad-id", "bad-secret").WithTokenURL(srv.URL)
 
-	_, err := c.getToken(context.Background())
+	_, err := c.getToken(t.Context())
 	if err == nil {
 		t.Fatal("expected error for failed token exchange")
 	}
@@ -196,7 +254,7 @@ func TestAuthHeader_APIKey(t *testing.T) {
 	c := NewClientWithAPIKey("lin_api_test123").
 		WithEndpoint(srv.URL)
 
-	_, _ = c.GetViewer(context.Background())
+	_, _ = c.GetViewer(t.Context())
 
 	if gotAuth != "lin_api_test123" {
 		t.Errorf("Authorization header = %q, want raw API key %q", gotAuth, "lin_api_test123")
@@ -230,7 +288,7 @@ func TestAuthHeader_OAuth_Bearer(t *testing.T) {
 		WithTokenURL(tokenSrv.URL).
 		WithEndpoint(apiSrv.URL)
 
-	_, _ = c.GetViewer(context.Background())
+	_, _ = c.GetViewer(t.Context())
 
 	if gotAuth != "Bearer oauth-access-token" {
 		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer oauth-access-token")
@@ -346,7 +404,7 @@ func TestSetIssueStateByType_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
-	if err := c.SetIssueStateByType(context.Background(), "issue-id-1", "canceled"); err != nil {
+	if err := c.SetIssueStateByType(t.Context(), "issue-id-1", "canceled"); err != nil {
 		t.Fatalf("SetIssueStateByType: %v", err)
 	}
 	if sawMutationStateID != "state-cancel-1" {
@@ -396,7 +454,7 @@ func TestSetIssueStateByType_NoMatchingStateNoOps(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
-	if err := c.SetIssueStateByType(context.Background(), "issue-id-2", "canceled"); err != nil {
+	if err := c.SetIssueStateByType(t.Context(), "issue-id-2", "canceled"); err != nil {
 		t.Fatalf("SetIssueStateByType: should silently no-op when team has no canceled state, got error: %v", err)
 	}
 	if mutationFired.Load() {
@@ -465,7 +523,7 @@ func TestSetIssueStateByType_PreferredNameDisambiguates(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
-	if err := c.SetIssueStateByType(context.Background(), "issue-id-3", "canceled", "Canceled", "Cancelled"); err != nil {
+	if err := c.SetIssueStateByType(t.Context(), "issue-id-3", "canceled", "Canceled", "Cancelled"); err != nil {
 		t.Fatalf("SetIssueStateByType: %v", err)
 	}
 	if sawMutationStateID != "state-canceled" {
@@ -520,7 +578,7 @@ func TestSetIssueStateByType_PreferredNameFallsBack(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
-	if err := c.SetIssueStateByType(context.Background(), "issue-id-4", "canceled", "Canceled", "Cancelled"); err != nil {
+	if err := c.SetIssueStateByType(t.Context(), "issue-id-4", "canceled", "Canceled", "Cancelled"); err != nil {
 		t.Fatalf("SetIssueStateByType: %v", err)
 	}
 	if sawMutationStateID != "state-wontdo" {
@@ -564,5 +622,65 @@ func TestIsLinearHost(t *testing.T) {
 				t.Errorf("isLinearHost(%q) = %v, want %v", tc.host, got, tc.trusted)
 			}
 		})
+	}
+}
+
+func TestGetDocument_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Variables["id"] != "abc123" {
+			t.Errorf("variables.id = %v, want abc123", req.Variables["id"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"document": map[string]any{
+					"id":      "doc-uuid-1",
+					"slugId":  "abc123",
+					"title":   "Design",
+					"content": "# heading\n\nbody",
+					"url":     "https://linear.app/test/document/abc123",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClientWithAPIKey("test-key").WithEndpoint(srv.URL)
+	doc, err := client.GetDocument(t.Context(), "abc123")
+	if err != nil {
+		t.Fatalf("GetDocument() error: %v", err)
+	}
+	if doc.ID != "doc-uuid-1" {
+		t.Errorf("ID = %v, want doc-uuid-1", doc.ID)
+	}
+	if doc.Slug != "abc123" {
+		t.Errorf("Slug = %v, want abc123", doc.Slug)
+	}
+	if doc.Content != "# heading\n\nbody" {
+		t.Errorf("Content = %v, want # heading\\n\\nbody", doc.Content)
+	}
+	if doc.URL != "https://linear.app/test/document/abc123" {
+		t.Errorf("URL = %v", doc.URL)
+	}
+}
+
+func TestGetDocument_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"document": nil,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClientWithAPIKey("test-key").WithEndpoint(srv.URL)
+	_, err := client.GetDocument(t.Context(), "missing")
+	if !errors.Is(err, ErrDocumentNotFound) {
+		t.Fatalf("GetDocument() error = %v, want ErrDocumentNotFound", err)
 	}
 }
