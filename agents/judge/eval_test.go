@@ -114,17 +114,20 @@ func TestNewEvalWithError(t *testing.T) {
 	// Run the eval
 	evalCallback(obs, trace)
 
-	// Should fail with the error
-	logs := obs.getLogs()
-	found := false
-	for _, log := range logs {
-		if strings.Contains(log, "Judge failed") && strings.Contains(log, "API error") {
-			found = true
-			break
-		}
+	// A judge transport/parse error is not a quality signal: after retrying,
+	// the eval skips the metric rather than recording a failure or a grade, so
+	// a judge-infra blip cannot fail the test.
+	if failures := obs.getFailures(); len(failures) != 0 {
+		t.Errorf("failures on judge error: got = %v, want = none (metric skipped)", failures)
 	}
-	if !found {
-		t.Errorf("failure log: got = %v, wanted = containing 'Judge failed' and 'API error'", logs)
+	if grades := obs.getGrades(); len(grades) != 0 {
+		t.Errorf("grades on judge error: got = %v, want = none (metric skipped)", grades)
+	}
+
+	// The judge call is retried before giving up, so it is invoked more than
+	// once.
+	if calls := judgeImpl.callCount(); calls <= 1 {
+		t.Errorf("judge call count: got = %d, want = > 1 (retried before skip)", calls)
 	}
 }
 

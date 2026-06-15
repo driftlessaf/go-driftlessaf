@@ -90,11 +90,24 @@ func (m *mockObserver) getGrades() []gradeRecord {
 type mockJudge struct {
 	judgment *judge.Judgement
 	err      error
+
+	mu    sync.Mutex
+	calls int
 }
 
 func (m *mockJudge) Judge(ctx context.Context, request *judge.Request) (*judge.Judgement, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
 	if m.err != nil {
 		return nil, m.err
 	}
 	return m.judgment, nil
+}
+
+// callCount returns how many times Judge was invoked.
+func (m *mockJudge) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
 }
