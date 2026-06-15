@@ -134,6 +134,20 @@ func (s *Session[T]) HasSkipLabel() bool {
 	return s.prNumber != 0 && slices.Contains(s.prLabels, s.skipLabel())
 }
 
+// IssueHasSkipLabel returns true if issue carries this identity's skip label.
+// It is the issue-scoped counterpart to ShouldSkip's PR check: a reconciler can
+// leave an issue (and any PR) alone via the same skip:<identity> label, read
+// from the already-fetched issue.
+func (s *Session[T]) IssueHasSkipLabel(issue *github.Issue) bool {
+	skip := s.skipLabel()
+	for _, l := range issue.Labels {
+		if l.GetName() == skip {
+			return true
+		}
+	}
+	return false
+}
+
 // HasLabel returns true if the PR has the specified label.
 func (s *Session[T]) HasLabel(labelName string) bool {
 	return s.prNumber != 0 && slices.Contains(s.prLabels, labelName)

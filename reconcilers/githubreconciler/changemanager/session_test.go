@@ -13,6 +13,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 	"chainguard.dev/driftlessaf/workqueue"
+	"github.com/google/go-github/v84/github"
 )
 
 func mustTemplateExecutor(t *testing.T) *internaltemplate.Template[embeddedData[testData]] {
@@ -324,6 +325,42 @@ func TestHasSkipLabel(t *testing.T) {
 			got := tt.session.HasSkipLabel()
 			if got != tt.wantSkip {
 				t.Errorf("HasSkipLabel(): got = %v, want = %v", got, tt.wantSkip)
+			}
+		})
+	}
+}
+
+func TestIssueHasSkipLabel(t *testing.T) {
+	issueWith := func(names ...string) *github.Issue {
+		labels := make([]*github.Label, 0, len(names))
+		for _, n := range names {
+			labels = append(labels, &github.Label{Name: github.Ptr(n)})
+		}
+		return &github.Issue{Labels: labels}
+	}
+	tests := []struct {
+		name  string
+		issue *github.Issue
+		want  bool
+	}{{
+		name:  "issue with skip label",
+		issue: issueWith("other", "skip:test-bot"),
+		want:  true,
+	}, {
+		name:  "issue without skip label",
+		issue: issueWith("test-bot/managed", "automated"),
+		want:  false,
+	}, {
+		name:  "issue with no labels",
+		issue: issueWith(),
+		want:  false,
+	}}
+
+	s := Session[testData]{manager: &CM[testData]{identity: "test-bot"}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.IssueHasSkipLabel(tt.issue); got != tt.want {
+				t.Errorf("IssueHasSkipLabel(): got = %v, want = %v", got, tt.want)
 			}
 		})
 	}

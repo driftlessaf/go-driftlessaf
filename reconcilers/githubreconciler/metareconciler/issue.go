@@ -50,6 +50,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		}
 		return nil
 
+	case changeSession.IssueHasSkipLabel(issue):
+		clog.InfoContext(ctx, "Issue has skip label, leaving it and any PR alone")
+		return nil
+
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		clog.InfoContext(ctx, "Issue missing required label, closing any outstanding PRs", "required_label", r.requiredLabel)
 		return changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue no longer has the required label.")
