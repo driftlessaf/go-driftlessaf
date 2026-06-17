@@ -25,6 +25,9 @@ import (
 type openAICompatAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	executor openaiexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
+	// validateTool is the non-terminal companion to submit_result, merged into
+	// the tool set on each Execute. Zero value (nil Handler) when unavailable.
+	validateTool openaistool.Metadata[Resp]
 }
 
 // newOpenAICompatAgent creates an agent using Vertex AI's OpenAI-compatible endpoint.
@@ -70,11 +73,16 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		}),
 	)
 
+	submitTool, validateTool, err := submitresult.OpenAISubmitAndValidateForResponse[Resp]()
+	if err != nil {
+		return nil, fmt.Errorf("building submit/validate tools: %w", err)
+	}
+
 	executorOpts := []openaiexecutor.Option[Req, Resp]{
 		openaiexecutor.WithModel[Req, Resp](model),
 		openaiexecutor.WithTemperature[Req, Resp](0.2),
 		openaiexecutor.WithMaxTokens[Req, Resp](32768),
-		openaiexecutor.WithSubmitResultProvider[Req, Resp](submitresult.OpenAIToolForResponse[Resp]),
+		openaiexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.Metadata[Resp], error) { return submitTool, nil }),
 		openaiexecutor.WithResourceLabels[Req, Resp](map[string]string{
 			"projectID":  projectID,
 			"region":     region,
@@ -96,8 +104,9 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 	}
 
 	return &openAICompatAgent[Req, Resp, CB]{
-		executor: exec,
-		config:   config,
+		executor:     exec,
+		config:       config,
+		validateTool: validateTool,
 	}, nil
 }
 
@@ -107,5 +116,12 @@ func (a *openAICompatAgent[Req, Resp, CB]) Execute(ctx context.Context, request 
 		var zero Resp
 		return zero, fmt.Errorf("building tools: %w", err)
 	}
-	return a.executor.Execute(ctx, request, openaistool.Map(tools))
+	openaiTools := openaistool.Map(tools)
+	if a.validateTool.Handler != nil {
+		name := a.validateTool.Definition.Function.Name
+		if _, exists := openaiTools[name]; !exists {
+			openaiTools[name] = a.validateTool
+		}
+	}
+	return a.executor.Execute(ctx, request, openaiTools)
 }

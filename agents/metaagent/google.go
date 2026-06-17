@@ -21,6 +21,9 @@ import (
 type googleAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	executor googleexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
+	// validateTool is the non-terminal companion to submit_result, merged into
+	// the tool set on each Execute. Zero value (nil Handler) when unavailable.
+	validateTool googletool.Metadata[Resp]
 }
 
 func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
@@ -37,11 +40,16 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("creating Google AI client: %w", err)
 	}
 
+	submitTool, validateTool, err := submitresult.GoogleSubmitAndValidateForResponse[Resp]()
+	if err != nil {
+		return nil, fmt.Errorf("building submit/validate tools: %w", err)
+	}
+
 	executorOpts := []googleexecutor.Option[Req, Resp]{
 		googleexecutor.WithModel[Req, Resp](model),
 		googleexecutor.WithTemperature[Req, Resp](0.2),
 		googleexecutor.WithMaxOutputTokens[Req, Resp](65536), // Gemini 2.5 Flash max output tokens
-		googleexecutor.WithSubmitResultProvider[Req, Resp](submitresult.GoogleToolForResponse[Resp]),
+		googleexecutor.WithSubmitResultProvider[Req, Resp](func() (googletool.Metadata[Resp], error) { return submitTool, nil }),
 		googleexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}
 
@@ -59,8 +67,9 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	}
 
 	return &googleAgent[Req, Resp, CB]{
-		executor: executor,
-		config:   config,
+		executor:     executor,
+		config:       config,
+		validateTool: validateTool,
 	}, nil
 }
 
@@ -70,5 +79,11 @@ func (a *googleAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, c
 		var zero Resp
 		return zero, fmt.Errorf("building tools: %w", err)
 	}
-	return a.executor.Execute(ctx, request, googletool.Map(tools))
+	googleTools := googletool.Map(tools)
+	if a.validateTool.Handler != nil && a.validateTool.Definition != nil {
+		if _, exists := googleTools[a.validateTool.Definition.Name]; !exists {
+			googleTools[a.validateTool.Definition.Name] = a.validateTool
+		}
+	}
+	return a.executor.Execute(ctx, request, googleTools)
 }

@@ -7,10 +7,8 @@ package submitresult
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
@@ -43,7 +41,7 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 		payloadRaw, errResp := googletool.Param[map[string]any](call, opts.PayloadFieldName)
 		if errResp != nil {
 			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("parameter error"))
-			return errResp
+			return googleWithValidateHint(errResp, opts.ValidateToolName, opts.ToolName)
 		}
 
 		clog.InfoContext(ctx, "Submitting result",
@@ -52,30 +50,10 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 
 		tc := trace.StartToolCall(call.ID, call.Name, call.Args)
 
-		payloadJSON, err := json.Marshal(payloadRaw)
+		parsed, err := parsePayload[Response](payloadRaw)
 		if err != nil {
 			tc.Complete(nil, err)
-			return googletool.Error(call, "failed to marshal payload: %v", err)
-		}
-
-		typ := reflect.TypeFor[Response]()
-		var dest any
-		if typ.Kind() == reflect.Pointer {
-			dest = reflect.New(typ.Elem()).Interface()
-		} else {
-			dest = reflect.New(typ).Interface()
-		}
-
-		if err := json.Unmarshal(payloadJSON, dest); err != nil {
-			tc.Complete(nil, err)
-			return googletool.Error(call, "failed to unmarshal payload: %v", err)
-		}
-
-		var parsed Response
-		if typ.Kind() == reflect.Pointer {
-			parsed = dest.(Response)
-		} else {
-			parsed = reflect.ValueOf(dest).Elem().Interface().(Response)
+			return googleWithValidateHint(googletool.Error(call, "%v", err), opts.ValidateToolName, opts.ToolName)
 		}
 
 		*result = parsed
@@ -97,17 +75,82 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 		Definition: &genai.FunctionDeclaration{
 			Name:        opts.ToolName,
 			Description: opts.Description,
-			Parameters: &genai.Schema{
-				Type: genai.TypeObject,
-				Properties: map[string]*genai.Schema{
-					"reasoning": {
-						Type:        genai.TypeString,
-						Description: "Explain why you are confident this result is complete and accurate.",
-					},
-					opts.PayloadFieldName: genaiPayload,
-				},
-				Required: []string{"reasoning", opts.PayloadFieldName},
+			Parameters:  googleInputSchema(opts.PayloadFieldName, genaiPayload),
+		},
+		Handler: handler,
+	}, nil
+}
+
+// googleInputSchema builds the {reasoning, <payload>} schema shared by the
+// terminal submit_result tool and the non-terminal validate tool.
+func googleInputSchema(payloadFieldName string, payloadSchema *genai.Schema) *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"reasoning": {
+				Type:        genai.TypeString,
+				Description: "Explain why you are confident this result is complete and accurate.",
 			},
+			payloadFieldName: payloadSchema,
+		},
+		Required: []string{"reasoning", payloadFieldName},
+	}
+}
+
+// googleWithValidateHint appends the validate-tool hint to a submit tool's error
+// FunctionResponse, mirroring withValidateHint for the generic error maps.
+func googleWithValidateHint(resp *genai.FunctionResponse, validateToolName, submitToolName string) *genai.FunctionResponse {
+	if validateToolName == "" || resp == nil {
+		return resp
+	}
+	resp.Response = withValidateHint(resp.Response, validateToolName, submitToolName)
+	return resp
+}
+
+// GoogleValidateTool constructs the non-terminal validate tool for the Google
+// executor. It takes submit_result's identical schema and reports whether a
+// payload would be accepted, without setting the run's final result.
+func GoogleValidateTool[Response any](opts Options[Response]) (googletool.Metadata[Response], error) {
+	opts.setDefaults()
+	if err := opts.validate(); err != nil {
+		return googletool.Metadata[Response]{}, err
+	}
+
+	name := opts.ValidateToolName
+	if name == "" {
+		name = defaultValidateToolName
+	}
+
+	responseSchema := opts.schemaForResponse()
+	responseSchema.Description = opts.PayloadDescription
+	genaiPayload := schemaToGenai(responseSchema)
+	if genaiPayload == nil {
+		return googletool.Metadata[Response]{}, fmt.Errorf("failed to derive payload schema")
+	}
+
+	handler := func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], _ *Response) *genai.FunctionResponse {
+		payloadRaw, errResp := googletool.Param[map[string]any](call, opts.PayloadFieldName)
+		if errResp != nil {
+			trace.BadToolCall(call.ID, call.Name, call.Args, errors.New("parameter error"))
+			return errResp
+		}
+
+		tc := trace.StartToolCall(call.ID, call.Name, call.Args)
+		if _, err := parsePayload[Response](payloadRaw); err != nil {
+			tc.Complete(nil, err)
+			return googletool.Error(call, "%v", err)
+		}
+
+		success := validateSuccess(opts.ToolName)
+		tc.Complete(success, nil)
+		return &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: success}
+	}
+
+	return googletool.Metadata[Response]{
+		Definition: &genai.FunctionDeclaration{
+			Name:        name,
+			Description: "Check whether a result payload would be accepted by " + opts.ToolName + ", without ending the run. Takes the identical schema as " + opts.ToolName + ". Use this to verify your payload's shape if you are unsure; it returns a validation error or confirms the payload is valid. It never returns a final answer — call " + opts.ToolName + " for that.",
+			Parameters:  googleInputSchema(opts.PayloadFieldName, genaiPayload),
 		},
 		Handler: handler,
 	}, nil
@@ -117,4 +160,23 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.Metadata[Respo
 // response type annotations.
 func GoogleToolForResponse[Response any]() (googletool.Metadata[Response], error) {
 	return GoogleTool(OptionsForResponse[Response]())
+}
+
+// GoogleSubmitAndValidateForResponse constructs the terminal submit_result tool
+// and its non-terminal validate companion from one Options, so they share an
+// identical schema and submit_result's payload errors point at the validate tool.
+func GoogleSubmitAndValidateForResponse[Response any]() (submit, validate googletool.Metadata[Response], err error) {
+	opts := OptionsForResponse[Response]()
+	opts.setDefaults()
+	opts.ValidateToolName = defaultValidateToolName
+
+	submit, err = GoogleTool(opts)
+	if err != nil {
+		return googletool.Metadata[Response]{}, googletool.Metadata[Response]{}, err
+	}
+	validate, err = GoogleValidateTool(opts)
+	if err != nil {
+		return googletool.Metadata[Response]{}, googletool.Metadata[Response]{}, err
+	}
+	return submit, validate, nil
 }

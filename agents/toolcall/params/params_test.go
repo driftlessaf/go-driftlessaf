@@ -7,6 +7,7 @@ package params_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
@@ -113,6 +114,50 @@ func TestExtract(t *testing.T) {
 		_, err := params.Extract[bool](args, "name")
 		if err == nil {
 			t.Fatal("expected error for wrong type")
+		}
+	})
+}
+
+func TestExtractTypeMismatchMessage(t *testing.T) {
+	t.Run("uses JSON type names, not Go types", func(t *testing.T) {
+		// A string where an object is expected is the submit_result double-encode
+		// failure mode: the error must speak JSON ("object"/"string"), not Go
+		// ("map[string]interface {}").
+		_, err := params.Extract[map[string]any](map[string]any{"result": "not an object"}, "result")
+		if err == nil {
+			t.Fatal("expected error: got = nil, want = type mismatch")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "map[string]interface") {
+			t.Errorf("message leaks Go type: got = %q, want = JSON type names", msg)
+		}
+		for _, want := range []string{"JSON object", "got string"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message missing %q: got = %q", want, msg)
+			}
+		}
+	})
+
+	t.Run("hints at double-encoding when object expected but string given", func(t *testing.T) {
+		_, err := params.Extract[map[string]any](map[string]any{"result": `{"text":"hi"}`}, "result")
+		if err == nil {
+			t.Fatal("expected error: got = nil, want = type mismatch")
+		}
+		if !strings.Contains(err.Error(), "JSON-encoded the object into a string") {
+			t.Errorf("missing double-encode hint: got = %q", err.Error())
+		}
+	})
+
+	t.Run("no double-encode hint for non-object targets", func(t *testing.T) {
+		_, err := params.Extract[int](map[string]any{"n": "twelve"}, "n")
+		if err == nil {
+			t.Fatal("expected error: got = nil, want = type mismatch")
+		}
+		if strings.Contains(err.Error(), "JSON-encoded the object") {
+			t.Errorf("unexpected double-encode hint: got = %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "JSON number") {
+			t.Errorf("expected JSON number in message: got = %q", err.Error())
 		}
 	})
 }

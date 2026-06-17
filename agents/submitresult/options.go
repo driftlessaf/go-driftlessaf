@@ -23,6 +23,13 @@ type Options[Response any] struct {
 	PayloadFieldName   string
 	PayloadDescription string
 	Generator          *schema.Generator
+
+	// ValidateToolName names the non-terminal companion tool that takes the
+	// identical schema and reports whether a payload would be accepted without
+	// ending the run. When non-empty, submit_result's payload errors point the
+	// model at it. Empty (the default) emits no such hint, for callers that
+	// register submit_result without a validate companion.
+	ValidateToolName string
 }
 
 func (o *Options[Response]) setDefaults() {
@@ -30,7 +37,13 @@ func (o *Options[Response]) setDefaults() {
 		o.ToolName = "submit_result"
 	}
 	if o.Description == "" {
-		o.Description = "Submit the final result and complete the analysis."
+		o.Description = "Submit the final result and complete the analysis. " +
+			"This call is terminal: it immediately ends the agent loop and the payload you " +
+			"provide becomes the final answer returned to the user. Call it exactly once, with " +
+			"your complete answer. Never call it with placeholder or probe content (e.g. \"test\") " +
+			"to experiment with the schema — the loop terminates on whatever you submit, and your " +
+			"real answer will be lost. If a previous call failed validation, resend the full result " +
+			"with the corrected shape, not a minimal test value."
 	}
 	if o.SuccessMessage == "" {
 		o.SuccessMessage = "Result submitted successfully."

@@ -28,3 +28,21 @@ func ExampleClaudeTool() {
 	fmt.Println("tool name:", tool.Definition.Name)
 	// Output: tool name: submit_result
 }
+
+// ExampleClaudeSubmitAndValidateForResponse demonstrates building the terminal
+// submit_result tool together with its non-terminal validate_result companion.
+func ExampleClaudeSubmitAndValidateForResponse() {
+	type MyResult struct {
+		Summary string `json:"summary" jsonschema:"required,description=Summary of findings"`
+	}
+
+	submit, validate, err := submitresult.ClaudeSubmitAndValidateForResponse[*MyResult]()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("submit:", submit.Definition.Name)
+	fmt.Println("validate:", validate.Definition.Name)
+	// Output:
+	// submit: submit_result
+	// validate: validate_result
+}
