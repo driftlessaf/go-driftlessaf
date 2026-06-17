@@ -341,6 +341,39 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 	return nil
 }
 
+// ResetForRerun resets a check so its owning reconciler reprocesses the
+// resource. It honors a user's "Re-run" click in the GitHub UI (a
+// check_run.rerequested webhook).
+//
+// It creates a fresh check run rather than updating the existing one. A
+// completed check run's conclusion is sticky: GitHub will not let an update move
+// it back to a non-terminal state, so an in-place update leaves the prior
+// red/green state showing. A new check run with the same name and head SHA
+// supersedes the old one — GitHub surfaces the latest run per name — resetting
+// the displayed state to a pending (queued) state. ListCheckRunsForRef likewise
+// defaults to the latest run per name, so the owning reconciler observes this one.
+//
+// The new run carries a summary with no embedded status marker, so the
+// reconciler's next ObservedState reports no observed state (see
+// extractStatusFromOutput) and it does the work again, overwriting this
+// placeholder.
+//
+// client must be authenticated as the GitHub App that owns the check.
+func ResetForRerun(ctx context.Context, client *github.Client, owner, repo, name, headSHA string) error {
+	if _, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
+		Name:    name,
+		HeadSHA: headSHA,
+		Status:  github.Ptr("queued"),
+		Output: &github.CheckRunOutput{
+			Title:   github.Ptr("Re-run requested"),
+			Summary: github.Ptr("Re-run requested; awaiting reprocessing."),
+		},
+	}); err != nil {
+		return fmt.Errorf("creating check run for re-run: %w", err)
+	}
+	return nil
+}
+
 // markdownProvider is an interface for types that can provide markdown representation
 type markdownProvider interface {
 	Markdown() string
@@ -383,12 +416,22 @@ func (sm *StatusManager[T]) buildCheckRunOutput(status *Status[T]) (string, erro
 	return sm.templateExecutor.Embed(markdown, status)
 }
 
-// extractStatusFromOutput extracts the status JSON from check run output
+// extractStatusFromOutput extracts the embedded status from a check run's output.
+// A nil output, or one whose summary carries no parseable embedded status — e.g.
+// cleared by a re-run reset, or otherwise corrupt — yields a nil status, which
+// the reconciler treats as no observed state and reprocesses. This keeps stored
+// status self-healing. The error result is retained for symmetry with the
+// Observed* callers; extraction failures are deliberately reported as "no
+// observed state" rather than surfaced.
+//
+//nolint:unparam // see above: error is always nil by design
 func (sm *StatusManager[T]) extractStatusFromOutput(output *github.CheckRunOutput) (*Status[T], error) {
 	if output == nil || output.Summary == nil {
 		return nil, nil
 	}
-
-	// Extract status data using the template executor
-	return sm.templateExecutor.Extract(*output.Summary)
+	status, err := sm.templateExecutor.Extract(*output.Summary)
+	if err != nil {
+		return nil, nil //nolint:nilerr // no parseable status means "no observed state"
+	}
+	return status, nil
 }

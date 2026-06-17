@@ -9,6 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -268,29 +272,29 @@ func TestExtractStatusFromOutputEdgeCases(t *testing.T) {
 			Summary: github.Ptr(""),
 		},
 		wantNil: true,
-		wantErr: true,
+		wantErr: false,
 	}, {
 		name: "no markers in summary",
 		output: &github.CheckRunOutput{
 			Summary: github.Ptr("Just some random text without markers"),
 		},
 		wantNil: true,
-		wantErr: true,
+		wantErr: false,
 	}, {
 		name: "only start marker",
 		output: &github.CheckRunOutput{
 			Summary: github.Ptr(fmt.Sprintf("%s\n<!--\n{}\n", expectedMarker)),
 		},
-		wantNil: true, // Should return nil
-		wantErr: true, // With error for missing end marker
+		wantNil: true,  // Should return nil
+		wantErr: false, // Missing end marker: no observed state, no error.
 	}, {
 		name: "malformed JSON",
 		output: &github.CheckRunOutput{
 			Summary: github.Ptr(fmt.Sprintf("%s\n<!--\n{invalid json}\n-->\n%s",
 				expectedMarker, expectedEndMarker)),
 		},
-		wantNil: true, // Returns nil when JSON unmarshal fails
-		wantErr: true, // And returns error
+		wantNil: true,  // Returns nil when JSON unmarshal fails
+		wantErr: false, // Corrupt JSON: no observed state, no error.
 	}, {
 		name: "valid but empty JSON",
 		output: &github.CheckRunOutput{
@@ -861,5 +865,71 @@ func TestReadOnlyStatusManager(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "read-only") {
 		t.Errorf("Error should mention read-only, got: %v", err)
+	}
+}
+
+func TestResetForRerun(t *testing.T) {
+	const (
+		identity = "test-reconciler"
+		owner    = "test-owner"
+		repo     = "test-repo"
+		headSHA  = "abc123def456"
+	)
+
+	// A re-run creates a fresh check run (a completed run's conclusion is sticky,
+	// so an update could not clear the red/green state). Capture the POST body.
+	var gotMethod, gotPath string
+	var gotOpts github.CreateCheckRunOptions
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotOpts); err != nil {
+			t.Errorf("unmarshal request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id": 1}`)
+	}))
+	defer server.Close()
+
+	client := github.NewClient(server.Client())
+	client.BaseURL, _ = url.Parse(server.URL + "/")
+
+	if err := ResetForRerun(t.Context(), client, owner, repo, identity, headSHA); err != nil {
+		t.Fatalf("ResetForRerun() error = %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got = %s, want = POST", gotMethod)
+	}
+	if want := fmt.Sprintf("/repos/%s/%s/check-runs", owner, repo); gotPath != want {
+		t.Errorf("path: got = %q, want = %q", gotPath, want)
+	}
+	if gotOpts.Name != identity {
+		t.Errorf("name: got = %q, want = %q", gotOpts.Name, identity)
+	}
+	if gotOpts.HeadSHA != headSHA {
+		t.Errorf("head SHA: got = %q, want = %q", gotOpts.HeadSHA, headSHA)
+	}
+	if got := gotOpts.GetStatus(); got != "queued" {
+		t.Errorf("status: got = %q, want = queued", got)
+	}
+	if gotOpts.Conclusion != nil {
+		t.Errorf("conclusion: got = %q, want = unset", gotOpts.GetConclusion())
+	}
+
+	// The fresh run must carry no parseable embedded status, so the owning
+	// reconciler's ObservedState reports nil and reprocesses rather than
+	// short-circuiting on a stale completed generation.
+	templateExecutor, err := internaltemplate.New[Status[TestDetails]](identity, "-status", "status")
+	if err != nil {
+		t.Fatalf("Failed to create template executor: %v", err)
+	}
+	sm := &StatusManager[TestDetails]{identity: identity, templateExecutor: templateExecutor}
+	extracted, err := sm.extractStatusFromOutput(gotOpts.Output)
+	if err != nil {
+		t.Fatalf("extractStatusFromOutput() error = %v", err)
+	}
+	if extracted != nil {
+		t.Errorf("observed state after reset: got = %+v, want = nil", extracted)
 	}
 }
