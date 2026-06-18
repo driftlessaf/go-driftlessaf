@@ -63,6 +63,29 @@ func WithMaxTurns[Request promptbuilder.Bindable, Response any](turns int) Optio
 	}
 }
 
+// WithToolCallConcurrency bounds how many of a single turn's tool calls run
+// concurrently when the model emits more than one in a turn (parallel tool
+// calls). Defaults to DefaultToolCallConcurrency.
+//
+// Tool result messages are always appended in the order the model emitted the
+// calls. A value of 1 forces strictly sequential dispatch. Set it to 1 for
+// agents whose tool handlers mutate shared state (a worktree, a cache) without
+// their own synchronization; concurrent dispatch is otherwise safe because
+// handlers share only the trace, which is concurrency-safe.
+//
+// Note: some OpenAI-compatible models disable parallel tool calls when strict
+// structured output is in force, in which case the model emits one tool call
+// per turn and this option has no effect.
+func WithToolCallConcurrency[Request promptbuilder.Bindable, Response any](n int) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if n < 1 {
+			return fmt.Errorf("tool call concurrency must be at least 1, got %d", n)
+		}
+		e.toolCallConcurrency = n
+		return nil
+	}
+}
+
 // WithSystemInstructions sets the system prompt.
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {

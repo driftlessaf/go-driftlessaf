@@ -24,6 +24,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 )
 
@@ -39,6 +40,14 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // Gemini API call. This prevents runaway loops when the model keeps calling
 // tools without converging on a result.
 const DefaultMaxTurns = 200
+
+// DefaultToolCallConcurrency is the default bound on how many of a single
+// turn's tool calls run concurrently. Models routinely emit several
+// independent function calls in one turn (parallel function calling);
+// dispatching their handlers concurrently cuts wall-clock latency. Override
+// with WithToolCallConcurrency — a value of 1 restores strictly sequential
+// dispatch.
+const DefaultToolCallConcurrency = 10
 
 // executor is the private implementation of Interface
 type executor[Request promptbuilder.Bindable, Response any] struct {
@@ -74,6 +83,15 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	cacheMu             sync.Mutex
 	cachedContentName   string    // resource name of active CachedContent ("" = none)
 	cachedContentExpiry time.Time // when the current cache expires
+
+	// toolCallConcurrency bounds how many of a single turn's function calls run
+	// concurrently when the model emits more than one (parallel function
+	// calling). Defaults to DefaultToolCallConcurrency. A value of 1 runs the
+	// turn's function calls strictly in order, one at a time. Concurrent
+	// dispatch is only safe when the registered tool handlers are themselves
+	// safe for concurrent use (they share the trace, which is safe). Set via
+	// WithToolCallConcurrency.
+	toolCallConcurrency int
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -92,16 +110,17 @@ func New[Request promptbuilder.Bindable, Response any](
 
 	// Create executor with defaults
 	exec := &executor[Request, Response]{
-		client:          client,
-		prompt:          prompt,
-		model:           "gemini-2.5-flash", // Default to Gemini 2.5 Flash
-		temperature:     0.1,                // Default temperature for consistency
-		maxOutputTokens: 8192,               // Default max tokens
-		maxTurns:        DefaultMaxTurns,    // Default max conversation turns
-		genaiMetrics:    genaiMetrics,
-		retryConfig:     retry.DefaultRetryConfig(), // Default retry config for rate limit handling
-		cacheControl:    true,                       // Context caching on by default — see cacheControl field comment
-		cacheTTL:        30 * time.Minute,           // Default cache TTL
+		client:              client,
+		prompt:              prompt,
+		model:               "gemini-2.5-flash", // Default to Gemini 2.5 Flash
+		temperature:         0.1,                // Default temperature for consistency
+		maxOutputTokens:     8192,               // Default max tokens
+		maxTurns:            DefaultMaxTurns,    // Default max conversation turns
+		genaiMetrics:        genaiMetrics,
+		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
+		cacheControl:        true,                       // Context caching on by default — see cacheControl field comment
+		cacheTTL:            30 * time.Minute,           // Default cache TTL
+		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
 	}
 
 	// Apply options
@@ -529,10 +548,14 @@ func (e *executor[Request, Response]) Execute(
 
 		// If there are tool calls, execute them and send responses
 		if len(toolCalls) > 0 {
-			var toolResponseParts []*genai.Part
-
-			for _, call := range toolCalls {
-				kvs := []any{"tool", call.Name, "id", call.ID}
+			// executeToolCall runs a single function call and returns its
+			// response part. The handler writes any terminal result into
+			// resultPtr; the sequential path passes the shared finalResultPtr,
+			// while the concurrent path passes a per-call slot so handlers never
+			// race on the same pointer.
+			executeToolCall := func(call *genai.FunctionCall, resultPtr *Response) *genai.Part {
+				kvs := make([]any, 0, 4+2*len(call.Args))
+				kvs = append(kvs, "tool", call.Name, "id", call.ID)
 				for k, v := range call.Args {
 					kvs = append(kvs, "args."+k, v)
 				}
@@ -552,19 +575,42 @@ func (e *executor[Request, Response]) Execute(
 					trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown function: %q", call.Name))
 				} else {
 					// Execute the tool handler
-					toolResponse = toolMeta.Handler(ctx, call, trace, finalResultPtr)
+					toolResponse = toolMeta.Handler(ctx, call, trace, resultPtr)
 				}
 
-				// Check if a tool set the final result
-				if !reflect.ValueOf(finalResult).IsZero() {
+				return &genai.Part{FunctionResponse: toolResponse}
+			}
+
+			// Dispatch the turn's function calls under a bounded pool. The model
+			// may emit several independent function calls in one turn (parallel
+			// function calling, which the API maps back by id); a concurrency of 1
+			// runs them strictly in order, higher values run them concurrently.
+			// Each handler writes into its own result slot so the shared
+			// finalResultPtr is never raced; the response parts are then consumed
+			// in the model's original order and the first terminal result (in
+			// order) ends the run. Tool handlers must be safe for concurrent use
+			// when concurrency exceeds 1.
+			perCallResults := make([]Response, len(toolCalls))
+			parts := make([]*genai.Part, len(toolCalls))
+
+			g := new(errgroup.Group)
+			g.SetLimit(max(1, e.toolCallConcurrency))
+			for i, call := range toolCalls {
+				g.Go(func() error {
+					parts[i] = executeToolCall(call, &perCallResults[i])
+					return nil
+				})
+			}
+			_ = g.Wait()
+
+			var toolResponseParts []*genai.Part
+			for i := range toolCalls {
+				if !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.recordTurns(ctx, turn+1, false)
-					return finalResult, nil, true, nil
+					return perCallResults[i], nil, true, nil
 				}
-
-				toolResponseParts = append(toolResponseParts, &genai.Part{
-					FunctionResponse: toolResponse,
-				})
+				toolResponseParts = append(toolResponseParts, parts[i])
 			}
 
 			// Send tool responses back to the chat with retry for transient errors

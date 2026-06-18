@@ -25,6 +25,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 // Interface is the public interface for Claude agent execution
@@ -39,6 +40,14 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // Claude API call. This prevents runaway loops when the model keeps calling
 // tools without converging on a result.
 const DefaultMaxTurns = 200
+
+// DefaultToolCallConcurrency is the default bound on how many of a single
+// turn's tool calls run concurrently. Models routinely emit several
+// independent tool calls in one turn (parallel tool use); dispatching their
+// handlers concurrently cuts wall-clock latency. Override with
+// WithToolCallConcurrency — a value of 1 restores strictly sequential
+// dispatch.
+const DefaultToolCallConcurrency = 10
 
 // executor provides the private implementation
 type executor[Request promptbuilder.Bindable, Response any] struct {
@@ -102,6 +111,14 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// finalize. Empty means force on the first turn unconditionally. Only
 	// consulted when forceSubmitToolChoice is true.
 	forceSubmitDeferUntilTool string
+
+	// toolCallConcurrency bounds how many of a single turn's tool calls run
+	// concurrently when the model emits more than one (parallel tool use).
+	// Defaults to DefaultToolCallConcurrency. A value of 1 runs the turn's tool
+	// calls strictly in order, one at a time. Concurrent dispatch is only safe
+	// when the registered tool handlers are themselves safe for concurrent use
+	// (they share the trace, which is safe). Set via WithToolCallConcurrency.
+	toolCallConcurrency int
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -130,15 +147,16 @@ func New[Request promptbuilder.Bindable, Response any](
 	genaiMetrics := metrics.NewGenAI("chainguard.ai.agents")
 
 	e := &executor[Request, Response]{
-		client:       client,
-		modelName:    "claude-sonnet-4@20250514", // Default to Sonnet 4
-		prompt:       prompt,
-		maxTokens:    8192,            // Default max tokens
-		maxTurns:     DefaultMaxTurns, // Default max conversation turns
-		temperature:  0.1,             // Default temperature for consistency
-		genaiMetrics: genaiMetrics,
-		retryConfig:  retry.DefaultRetryConfig(), // Default retry config for rate limit handling
-		cacheControl: true,                       // Prompt caching on by default — see cacheControl field comment
+		client:              client,
+		modelName:           "claude-sonnet-4@20250514", // Default to Sonnet 4
+		prompt:              prompt,
+		maxTokens:           8192,            // Default max tokens
+		maxTurns:            DefaultMaxTurns, // Default max conversation turns
+		temperature:         0.1,             // Default temperature for consistency
+		genaiMetrics:        genaiMetrics,
+		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
+		cacheControl:        true,                       // Prompt caching on by default — see cacheControl field comment
+		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
 	}
 
 	// Apply options
@@ -264,8 +282,10 @@ func (e *executor[Request, Response]) Execute(
 	deferredGateResolved := false
 
 	// executeToolCall handles executing a single tool call and returning the
-	// result.
-	executeToolCall := func(toolUse anthropic.ToolUseBlock) (anthropic.ContentBlockParamUnion, error) {
+	// result. The handler writes any terminal result into resultPtr; the
+	// sequential path passes the shared finalResultPtr, while the concurrent
+	// path passes a per-call slot so handlers never race on the same pointer.
+	executeToolCall := func(toolUse anthropic.ToolUseBlock, resultPtr *Response) (anthropic.ContentBlockParamUnion, error) {
 		kvs := []any{"tool", toolUse.Name, "id", toolUse.ID}
 		var args map[string]any
 		if err := json.Unmarshal(normalizeToolUseInput(toolUse.Input), &args); err == nil {
@@ -279,7 +299,7 @@ func (e *executor[Request, Response]) Execute(
 
 		if meta, ok := tools[toolUse.Name]; ok {
 			// Execute registered handler with result pointer
-			result = meta.Handler(ctx, toolUse, trace, finalResultPtr)
+			result = meta.Handler(ctx, toolUse, trace, resultPtr)
 		} else {
 			// Unknown tool
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)
@@ -325,7 +345,7 @@ func (e *executor[Request, Response]) Execute(
 		})
 
 		// Execute the tool call.
-		result, err := executeToolCall(toolCall)
+		result, err := executeToolCall(toolCall, finalResultPtr)
 		if err != nil {
 			return response, err
 		}
@@ -474,39 +494,61 @@ func (e *executor[Request, Response]) Execute(
 			// Add Claude's response to conversation
 			params.Messages = append(params.Messages, message.ToParam())
 
-			// Execute the tool calls
-			var toolResults []anthropic.ContentBlockParamUnion
+			// account records the per-tool bookkeeping that depends only on the
+			// tool name: the tool-call metric, the investigative-call counter
+			// that drives the early-finalize nudge (the terminal submit tool is
+			// the model converging, not investigating, so it is excluded), and
+			// resolution of the deferral gate tool. It runs sequentially before
+			// dispatch so these shared counters are never raced by concurrent
+			// handlers.
 			for _, toolUse := range toolUseBlocks {
-				// Record tool call metric
 				e.recordToolCall(ctx, toolUse.Name)
-
-				// Count investigative (non-terminal) tool calls toward the
-				// early-finalize threshold. The terminal submit tool is the
-				// model converging, not investigating, so it is excluded.
 				if submitToolName == "" || toolUse.Name != submitToolName {
 					liveToolCalls++
 				}
-
-				// Track resolution of the deferral gate tool. When
-				// WithForceSubmitToolChoice deferred the force because this gate
-				// tool was registered, calling it clears the deferral so the
-				// submit tool is forced on the next turn.
 				if e.forceSubmitToolChoice && e.forceSubmitDeferUntilTool != "" &&
 					toolUse.Name == e.forceSubmitDeferUntilTool {
 					deferredGateResolved = true
 				}
+			}
 
-				result, err := executeToolCall(toolUse)
-				if err != nil {
-					return response, true, err
+			// Dispatch the turn's tool calls under a bounded pool. The model may
+			// emit several independent tool calls in a single turn (parallel tool
+			// use, which the Anthropic API documents as unordered); a concurrency
+			// of 1 runs them strictly in order, higher values run them
+			// concurrently. Each handler writes into its own result slot so the
+			// shared finalResultPtr is never raced; results are then consumed in
+			// the model's original order to preserve the tool_use/tool_result
+			// pairing, and the first terminal result (in order) ends the run. Tool
+			// handlers must be safe for concurrent use when concurrency exceeds 1.
+			type toolOutcome struct {
+				result anthropic.ContentBlockParamUnion
+				err    error
+			}
+			outcomes := make([]toolOutcome, len(toolUseBlocks))
+			perCallResults := make([]Response, len(toolUseBlocks))
+
+			g := new(errgroup.Group)
+			g.SetLimit(max(1, e.toolCallConcurrency))
+			for i, toolUse := range toolUseBlocks {
+				g.Go(func() error {
+					res, cerr := executeToolCall(toolUse, &perCallResults[i])
+					outcomes[i] = toolOutcome{result: res, err: cerr}
+					return nil
+				})
+			}
+			_ = g.Wait()
+
+			var toolResults []anthropic.ContentBlockParamUnion
+			for i := range toolUseBlocks {
+				if outcomes[i].err != nil {
+					return response, true, outcomes[i].err
 				}
-				toolResults = append(toolResults, result)
-
-				// Check if a tool set the final result
-				if !reflect.ValueOf(finalResult).IsZero() {
+				toolResults = append(toolResults, outcomes[i].result)
+				if !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.recordTurns(ctx, turn+1, false)
-					return finalResult, true, nil
+					return perCallResults[i], true, nil
 				}
 			}
 

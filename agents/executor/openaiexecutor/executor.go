@@ -23,6 +23,7 @@ import (
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 // Interface is the public interface for OpenAI-compatible agent execution.
@@ -33,6 +34,14 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 
 // DefaultMaxTurns is the default maximum number of conversation turns before aborting.
 const DefaultMaxTurns = 200
+
+// DefaultToolCallConcurrency is the default bound on how many of a single
+// turn's tool calls run concurrently. Models routinely emit several
+// independent tool calls in one turn (parallel tool calls); dispatching their
+// handlers concurrently cuts wall-clock latency. Override with
+// WithToolCallConcurrency — a value of 1 restores strictly sequential
+// dispatch.
+const DefaultToolCallConcurrency = 10
 
 type executor[Request promptbuilder.Bindable, Response any] struct {
 	client             openai.Client
@@ -46,6 +55,14 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	genaiMetrics       *metrics.GenAI
 	retryConfig        retry.RetryConfig
 	resourceLabels     map[string]string
+
+	// toolCallConcurrency bounds how many of a single turn's tool calls run
+	// concurrently when the model emits more than one (parallel tool calls).
+	// Defaults to DefaultToolCallConcurrency. A value of 1 forces strictly
+	// sequential dispatch. Concurrent dispatch is only safe when the registered
+	// tool handlers are themselves safe for concurrent use (they share the
+	// trace, which is safe). Set via WithToolCallConcurrency.
+	toolCallConcurrency int
 }
 
 // New creates a new OpenAI-compatible executor.
@@ -59,14 +76,15 @@ func New[Request promptbuilder.Bindable, Response any](
 	}
 
 	e := &executor[Request, Response]{
-		client:       client,
-		modelName:    "google/gemini-2.5-flash",
-		prompt:       prompt,
-		maxTokens:    8192,
-		maxTurns:     DefaultMaxTurns,
-		temperature:  0.1,
-		genaiMetrics: metrics.NewGenAI("chainguard.ai.agents"),
-		retryConfig:  retry.DefaultRetryConfig(),
+		client:              client,
+		modelName:           "google/gemini-2.5-flash",
+		prompt:              prompt,
+		maxTokens:           8192,
+		maxTurns:            DefaultMaxTurns,
+		temperature:         0.1,
+		genaiMetrics:        metrics.NewGenAI("chainguard.ai.agents"),
+		retryConfig:         retry.DefaultRetryConfig(),
+		toolCallConcurrency: DefaultToolCallConcurrency,
 	}
 
 	for _, opt := range opts {
@@ -147,10 +165,11 @@ func (e *executor[Request, Response]) Execute(
 		Temperature:         param.NewOpt(e.temperature),
 	}
 
-	var finalResult Response
-	finalResultPtr := &finalResult
-
-	executeToolCall := func(tc openai.ChatCompletionMessageToolCall) (string, error) {
+	// executeToolCall runs a single tool call and returns its serialized result.
+	// The handler writes any terminal result into resultPtr; each tool call in a
+	// turn gets its own slot so concurrent handlers never race on the same
+	// pointer.
+	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, resultPtr *Response) (string, error) {
 		kvs := []any{"tool", tc.Function.Name, "id", tc.ID}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
@@ -163,7 +182,7 @@ func (e *executor[Request, Response]) Execute(
 		var res map[string]any
 		if meta, ok := tools[tc.Function.Name]; ok {
 			e.recordToolCall(ctx, tc.Function.Name)
-			res = meta.Handler(ctx, tc, trace, finalResultPtr)
+			res = meta.Handler(ctx, tc, trace, resultPtr)
 		} else {
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", tc.Function.Name)
 			trace.BadToolCall(tc.ID, tc.Function.Name,
@@ -250,22 +269,50 @@ func (e *executor[Request, Response]) Execute(
 			// Add assistant message with tool calls to conversation.
 			reqParams.Messages = append(reqParams.Messages, choice.Message.ToParam())
 
-			// Execute all tool calls and collect results before checking for a final
-			// result. This ensures the conversation history is always consistent —
-			// all tool result messages are appended even if submit_result fires midway.
-			for _, tc := range choice.Message.ToolCalls {
-				resJSON, err := executeToolCall(tc)
-				if err != nil {
-					return response, true, err
-				}
-				reqParams.Messages = append(reqParams.Messages, openai.ToolMessage(resJSON, tc.ID))
+			// Dispatch the turn's tool calls under a bounded pool, collecting all
+			// results before checking for a final result so the conversation
+			// history stays consistent (every tool result message is appended).
+			// The model may emit several independent tool calls in one turn
+			// (parallel tool calls); a concurrency of 1 runs them strictly in
+			// order, higher values run them concurrently. Each handler writes into
+			// its own result slot so the shared finalResultPtr is never raced, and
+			// the tool messages are appended in the model's original order. Tool
+			// handlers must be safe for concurrent use when concurrency exceeds 1.
+			toolCalls := choice.Message.ToolCalls
+			type toolOutcome struct {
+				msg openai.ChatCompletionMessageParamUnion
+				err error
 			}
+			outcomes := make([]toolOutcome, len(toolCalls))
+			perCallResults := make([]Response, len(toolCalls))
 
-			// Check if any tool set the final result.
-			if !reflect.ValueOf(finalResult).IsZero() {
-				clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
-				e.recordTurns(ctx, turn+1, false)
-				return finalResult, true, nil
+			g := new(errgroup.Group)
+			g.SetLimit(max(1, e.toolCallConcurrency))
+			for i, tc := range toolCalls {
+				g.Go(func() error {
+					resJSON, cerr := executeToolCall(tc, &perCallResults[i])
+					if cerr != nil {
+						outcomes[i] = toolOutcome{err: cerr}
+						return nil
+					}
+					outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID)}
+					return nil
+				})
+			}
+			_ = g.Wait()
+
+			for i := range toolCalls {
+				if outcomes[i].err != nil {
+					return response, true, outcomes[i].err
+				}
+				reqParams.Messages = append(reqParams.Messages, outcomes[i].msg)
+			}
+			for i := range toolCalls {
+				if !reflect.ValueOf(perCallResults[i]).IsZero() {
+					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
+					e.recordTurns(ctx, turn+1, false)
+					return perCallResults[i], true, nil
+				}
 			}
 			return response, false, nil
 		}

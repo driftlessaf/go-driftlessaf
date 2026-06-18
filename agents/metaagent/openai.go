@@ -94,6 +94,10 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, openaiexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
 	}
 
+	if config.ToolCallConcurrency > 0 {
+		executorOpts = append(executorOpts, openaiexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, openaiexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}

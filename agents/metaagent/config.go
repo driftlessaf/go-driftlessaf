@@ -29,4 +29,11 @@ type Config[Resp, CB any] struct {
 	// MaxTurns sets the maximum number of conversation turns (LLM round-trips)
 	// before the executor aborts. Zero means use the executor's default.
 	MaxTurns int
+
+	// ToolCallConcurrency bounds how many of a single turn's tool calls run
+	// concurrently when the model emits more than one (parallel tool use).
+	// Zero means use the executor's default (DefaultToolCallConcurrency). Set
+	// to 1 to force strictly sequential tool dispatch — required for agents
+	// whose tool handlers mutate shared state without their own synchronization.
+	ToolCallConcurrency int
 }

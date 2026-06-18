@@ -63,6 +63,28 @@ func WithMaxTurns[Request promptbuilder.Bindable, Response any](turns int) Optio
 	}
 }
 
+// WithToolCallConcurrency bounds how many of a single turn's tool calls run
+// concurrently when the model emits more than one in a turn (parallel tool
+// use). Defaults to DefaultToolCallConcurrency.
+//
+// Results are always consumed in the order the model emitted them, so the
+// tool_use/tool_result pairing the API requires is preserved, and the first
+// terminal result (in order) ends the run.
+//
+// A value of 1 runs the turn's tool calls strictly in order, one at a time.
+// Set it to 1 for agents whose tool handlers mutate shared state (a worktree, a
+// cache) without their own synchronization; concurrent dispatch is otherwise
+// safe because handlers share only the trace, which is concurrency-safe.
+func WithToolCallConcurrency[Request promptbuilder.Bindable, Response any](n int) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if n < 1 {
+			return fmt.Errorf("tool call concurrency must be at least 1, got %d", n)
+		}
+		e.toolCallConcurrency = n
+		return nil
+	}
+}
+
 // WithSystemInstructions sets custom system instructions
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {

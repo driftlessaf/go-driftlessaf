@@ -57,6 +57,10 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, googleexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
 	}
 
+	if config.ToolCallConcurrency > 0 {
+		executorOpts = append(executorOpts, googleexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, googleexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}

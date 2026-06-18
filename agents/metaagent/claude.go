@@ -67,6 +67,10 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
 	}
 
+	if config.ToolCallConcurrency > 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, claudeexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
