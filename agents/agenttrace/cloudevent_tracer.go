@@ -17,6 +17,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/idtoken"
+	"google.golang.org/api/option"
 )
 
 const (
@@ -156,7 +157,12 @@ func (t *ceEmittingTracer[T]) Drain() {
 // If brokerURL is empty or client construction fails, NewBrokerClient
 // returns nil with a warning log. Callers should treat a nil client as
 // "emission disabled" and skip wrapping the tracer.
-func NewBrokerClient(ctx context.Context, brokerURL string) cloudevents.Client {
+// opts are forwarded to idtoken.NewTokenSource — pass
+// option.WithCredentialsFile to mint the broker ID token as a specific
+// federated identity (e.g. a CI emit service account) instead of the ambient
+// ADC, which is how a producer that authenticates its model calls as one
+// identity emits to the broker as another in the same process.
+func NewBrokerClient(ctx context.Context, brokerURL string, opts ...option.ClientOption) cloudevents.Client {
 	if brokerURL == "" {
 		return nil
 	}
@@ -169,7 +175,7 @@ func NewBrokerClient(ctx context.Context, brokerURL string) cloudevents.Client {
 		baseTransport = &http.Transport{}
 	}
 
-	tokenSource, err := idtoken.NewTokenSource(ctx, brokerURL)
+	tokenSource, err := idtoken.NewTokenSource(ctx, brokerURL, opts...)
 	if err != nil {
 		clog.WarnContextf(ctx, "Failed to create ID token source for trace events, disabling: %v", err)
 		return nil
