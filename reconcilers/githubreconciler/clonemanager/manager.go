@@ -17,7 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec"
+	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gogit"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -264,18 +264,13 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 	if !strings.HasPrefix(ref, "refs/") {
 		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(ref)
 	}
-	var repo *git.Repository
-	err = gitexec.Observe(ctx, "clone", func() error {
-		var cloneErr error
-		repo, cloneErr = git.PlainClone(dir, false, cloneOpts)
-		return cloneErr
-	}, gitexec.WithRepoURL(remote))
+	cloned, err := gogit.PlainCloneContext(ctx, dir, false, cloneOpts)
 	if err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("cloning repository: %w", err)
 	}
 
-	return &clone{path: dir, repo: repo}, nil
+	return &clone{path: dir, repo: cloned.Repository}, nil
 }
 
 func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *githubreconciler.Resource, depth int) (string, bool, error) {
@@ -309,13 +304,8 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	// [remote "origin"] url in an earlier lease could otherwise redirect this
 	// credentialed fetch.
 	clog.InfoContextf(ctx, "Fetching ref %s", ref)
-	if err := gitexec.Observe(ctx, "fetch", func() error {
-		err := trustedRemote(repo, fetchURL).FetchContext(ctx, fetchOpts)
-		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			return nil
-		}
-		return err
-	}, gitexec.WithRepoURL(fetchURL)); err != nil {
+	if err := trustedRemote(repo, fetchURL).FetchContext(ctx, fetchOpts); err != nil &&
+		!errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return "", false, fmt.Errorf("fetching ref %s: %w", ref, err)
 	}
 
@@ -541,8 +531,8 @@ func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) erro
 // untrusted code with write access; resolving the target from repo.Config() would
 // let a rewritten [remote "origin"] url redirect the operation and leak the access
 // token (carried as the BasicAuth password) to an attacker-chosen host.
-func trustedRemote(repo *git.Repository, remoteURL string) *git.Remote {
-	return git.NewRemote(repo.Storer, &gitconfig.RemoteConfig{
+func trustedRemote(repo *git.Repository, remoteURL string) *gogit.Remote {
+	return gogit.NewRemote(repo.Storer, &gitconfig.RemoteConfig{
 		Name: "origin",
 		URLs: []string{remoteURL},
 	})
@@ -563,22 +553,20 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 
 	remote := trustedRemote(repo, remoteURL)
 
-	if err := gitexec.Observe(ctx, "push", func() error {
-		err := remote.PushContext(ctx, &git.PushOptions{
-			RemoteName: "origin",
-			Auth: &githttp.BasicAuth{
-				Username: "unused-when-using-access-tokens",
-				Password: token.AccessToken,
-			},
-			Force:    true,
-			RefSpecs: []gitconfig.RefSpec{refSpec},
-		})
-		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			clog.InfoContextf(ctx, "Branch already up to date")
-			return nil
-		}
-		return err
-	}, gitexec.WithRepoURL(remoteURL)); err != nil {
+	err = remote.PushContext(ctx, &git.PushOptions{
+		RemoteName: "origin",
+		Auth: &githttp.BasicAuth{
+			Username: "unused-when-using-access-tokens",
+			Password: token.AccessToken,
+		},
+		Force:    true,
+		RefSpecs: []gitconfig.RefSpec{refSpec},
+	})
+	if errors.Is(err, git.NoErrAlreadyUpToDate) {
+		clog.InfoContextf(ctx, "Branch already up to date")
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("force pushing: %w", err)
 	}
 
