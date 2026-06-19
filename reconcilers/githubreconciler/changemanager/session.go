@@ -292,6 +292,34 @@ func (s *Session[T]) ApplyReadyForReview(ctx context.Context) (string, error) {
 	return s.prURL, nil
 }
 
+// AddLabels adds the given labels to the existing PR.
+// This is a no-op if no PR exists or if all provided labels are already present.
+func (s *Session[T]) AddLabels(ctx context.Context, labels []string) error {
+	if s.prNumber == 0 || len(labels) == 0 {
+		return nil
+	}
+	// Filter out labels that are already present.
+	existing := make(map[string]struct{}, len(s.prLabels))
+	for _, l := range s.prLabels {
+		existing[l] = struct{}{}
+	}
+	var toAdd []string
+	for _, l := range labels {
+		if _, ok := existing[l]; !ok {
+			toAdd = append(toAdd, l)
+		}
+	}
+	if len(toAdd) == 0 {
+		return nil
+	}
+	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, toAdd); err != nil {
+		return fmt.Errorf("adding labels: %w", err)
+	}
+	// Update the cached labels so subsequent calls are accurate.
+	s.prLabels = append(s.prLabels, toAdd...)
+	return nil
+}
+
 // CloseAnyOutstanding closes the existing PR if one exists.
 // If message is non-empty, it posts the message as a comment before closing.
 // This is a no-op if no PR exists.

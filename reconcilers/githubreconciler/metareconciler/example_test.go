@@ -177,3 +177,47 @@ func Example_withRequiredLabel() {
 	// Output:
 	// Reconciler created with label filter
 }
+
+// Example_withPRLabelsFromResult demonstrates using the WithPRLabelsFromResult
+// option to stamp extra labels on the generated PR, derived from the agent
+// result. The labels are added after the PR is created or updated. A nil or
+// empty return adds nothing.
+func Example_withPRLabelsFromResult() {
+	// In practice, these would be created by the calling code
+	var cm *changemanager.CM[metareconciler.PRData[*MyRequest]]
+	var cloneMeta *clonemanager.Meta
+	var agent metaagent.Agent[*MyRequest, *MyResult, baseCallbacks]
+
+	identity := "my-bot"
+
+	// Create the reconciler that labels each PR with a result-derived value.
+	rec := metareconciler.New(
+		identity,
+		cm,
+		cloneMeta,
+		[]string{},
+		agent,
+		func(_ context.Context, issue *github.Issue, _ *changemanager.Session[metareconciler.PRData[*MyRequest]]) (*MyRequest, error) {
+			return &MyRequest{
+				Title: issue.GetTitle(),
+				Body:  issue.GetBody(),
+			}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[metareconciler.PRData[*MyRequest]], _ *clonemanager.Lease) (baseCallbacks, error) {
+			return toolcall.NewFindingTools(
+				toolcall.NewWorktreeTools(toolcall.EmptyTools{}, callbacks.WorktreeCallbacks{}),
+				callbacks.FindingCallbacks{},
+			), nil
+		},
+		// Derive PR labels from the agent result.
+		metareconciler.WithPRLabelsFromResult[*MyRequest, *MyResult, baseCallbacks](
+			func(*MyResult) []string { return []string{"team/example"} },
+		),
+	)
+
+	_ = rec
+	fmt.Println("Reconciler created with result-derived PR labels")
+
+	// Output:
+	// Reconciler created with result-derived PR labels
+}

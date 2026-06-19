@@ -176,3 +176,35 @@ func TestWithRequiredLabel(t *testing.T) {
 		t.Errorf("reconciler.requiredLabel = %q, wanted = %q", rec.requiredLabel, "test-identity/managed")
 	}
 }
+
+func TestWithPRLabelsFromResult(t *testing.T) {
+	agent := &fakeAgent{}
+	fn := func(*testResult) []string { return []string{"team/example"} }
+
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		agent,
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithPRLabelsFromResult[*testRequest, *testResult, testCallbacks](fn),
+	)
+
+	if rec == nil {
+		t.Fatal("New() returned nil with WithPRLabelsFromResult option")
+	}
+
+	if rec.prLabelsFromResult == nil {
+		t.Fatal("reconciler.prLabelsFromResult = nil, wanted the provided function")
+	}
+
+	if got := rec.prLabelsFromResult(&testResult{}); len(got) != 1 || got[0] != "team/example" {
+		t.Errorf("reconciler.prLabelsFromResult(...) = %v, wanted [team/example]", got)
+	}
+}

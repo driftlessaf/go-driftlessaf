@@ -29,6 +29,10 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// to only process issues managed by a specific identity.
 	requiredLabel string
 
+	// prLabelsFromResult derives extra labels to stamp on the generated PR from
+	// the agent result. Opt-in: nil means no extra labels are added.
+	prLabelsFromResult func(Resp) []string
+
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
 	buildRequest   func(context.Context, *github.Issue, *changemanager.Session[PRData[Req]]) (Req, error)
@@ -43,6 +47,15 @@ type Option[Req promptbuilder.Bindable, Resp Result, CB any] func(*Reconciler[Re
 func WithRequiredLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.requiredLabel = label
+	}
+}
+
+// WithPRLabelsFromResult configures the reconciler to stamp extra labels on the
+// generated PR, derived from the agent result. The labels are added after Upsert
+// succeeds, when the PR number is known. A nil or empty return adds nothing.
+func WithPRLabelsFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) []string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.prLabelsFromResult = fn
 	}
 }
 

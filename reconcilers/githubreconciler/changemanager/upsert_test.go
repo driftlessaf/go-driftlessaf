@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"text/template"
 
@@ -355,6 +356,123 @@ func TestUpsertEmbedsWrapper(t *testing.T) {
 	}
 	if ed.Meta.CommitBudgetBaseline != 9 {
 		t.Errorf("embedded baseline: got = %d, want = 9", ed.Meta.CommitBudgetBaseline)
+	}
+}
+
+// TestAddLabels verifies AddLabels posts only the missing labels, targets the
+// PR number, and updates the cached label set. A regression in the target
+// number or the dedup filter must fail here, not silently downstream.
+func TestAddLabels(t *testing.T) {
+	titleTmpl := template.Must(template.New("title").Parse("{{.PackageName}}"))
+	bodyTmpl := template.Must(template.New("body").Parse("Update {{.PackageName}}"))
+
+	tests := []struct {
+		name      string
+		noPR      bool     // build the session with prNumber == 0 (no PR yet)
+		prLabels  []string // labels already cached on the session
+		add       []string // labels passed to AddLabels
+		wantCall  bool     // whether POST /labels should be called
+		wantPath  int      // PR number the POST must target
+		wantBody  []string // labels expected in the POST body
+		wantCache []string // labels expected in s.prLabels afterwards
+	}{{
+		name:      "adds new label to existing PR",
+		prLabels:  []string{"automated-pr"},
+		add:       []string{"language/python"},
+		wantCall:  true,
+		wantPath:  99,
+		wantBody:  []string{"language/python"},
+		wantCache: []string{"automated-pr", "language/python"},
+	}, {
+		name:      "filters label already present, no API call",
+		prLabels:  []string{"automated-pr", "language/python"},
+		add:       []string{"language/python"},
+		wantCall:  false,
+		wantCache: []string{"automated-pr", "language/python"},
+	}, {
+		name:      "adds only the missing label",
+		prLabels:  []string{"language/python"},
+		add:       []string{"language/python", "language/go"},
+		wantCall:  true,
+		wantPath:  99,
+		wantBody:  []string{"language/go"},
+		wantCache: []string{"language/python", "language/go"},
+	}, {
+		name:      "no PR, no API call",
+		noPR:      true,
+		prLabels:  []string{"automated-pr"},
+		add:       []string{"language/go"},
+		wantCall:  false,
+		wantCache: []string{"automated-pr"},
+	}, {
+		name:      "empty add slice, no API call",
+		prLabels:  []string{"automated-pr"},
+		add:       nil,
+		wantCall:  false,
+		wantCache: []string{"automated-pr"},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var called bool
+			var gotPath int
+			var gotBody []string
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v3/repos/test-owner/test-repo/issues/{number}/labels", func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				gotPath, _ = strconv.Atoi(r.PathValue("number"))
+				var payload []string
+				if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+					gotBody = payload
+				}
+				writeJSON(t, w, []*github.Label{})
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+			if err != nil {
+				t.Fatalf("creating client: %v", err)
+			}
+
+			cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl)
+			if err != nil {
+				t.Fatalf("creating CM: %v", err)
+			}
+
+			prNumber := 99
+			if tt.noPR {
+				prNumber = 0
+			}
+			session := &Session[testData]{
+				manager:  cm,
+				client:   client,
+				owner:    "test-owner",
+				repo:     "test-repo",
+				prNumber: prNumber,
+				prLabels: tt.prLabels,
+			}
+
+			if err := session.AddLabels(t.Context(), tt.add); err != nil {
+				t.Fatalf("AddLabels: got error = %v, wanted nil", err)
+			}
+
+			if called != tt.wantCall {
+				t.Errorf("POST /labels called = %v, want = %v", called, tt.wantCall)
+			}
+			if tt.wantCall {
+				if gotPath != tt.wantPath {
+					t.Errorf("POST /labels target PR: got = %d, want = %d", gotPath, tt.wantPath)
+				}
+				if !slicesEqualUnordered(gotBody, tt.wantBody) {
+					t.Errorf("POST /labels payload: got = %v, want = %v", gotBody, tt.wantBody)
+				}
+			}
+			if !slicesEqualUnordered(session.prLabels, tt.wantCache) {
+				t.Errorf("session.prLabels after AddLabels: got = %v, want = %v", session.prLabels, tt.wantCache)
+			}
+		})
 	}
 }
 

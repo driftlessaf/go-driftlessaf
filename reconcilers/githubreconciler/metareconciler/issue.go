@@ -106,6 +106,13 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		return fmt.Errorf("build request: %w", err)
 	}
 
+	// Captured from the agent execution inside the Upsert closure so labels
+	// derived from the result can be applied once the PR number is known.
+	// agentRan gates that use: Upsert skips the closure when the PR is already
+	// up to date, leaving result as the zero value, so the hook must not see it.
+	var result Resp
+	var agentRan bool
+
 	// Create/update the PR with the changes
 	prURL, err := changeSession.Upsert(ctx, &PRData[Req]{
 		Identity:      r.identity,
@@ -147,10 +154,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 				return "", fmt.Errorf("build callbacks: %w", err)
 			}
 
-			result, err := r.agent.Execute(ctx, request, cbs)
+			result, err = r.agent.Execute(ctx, request, cbs)
 			if err != nil {
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
+			agentRan = true
 
 			// Check if the agent left the worktree clean (no file changes).
 			// Return ErrNoChanges so Upsert can propagate it to the caller.
@@ -177,6 +185,15 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	if creator != "" {
 		if err := changeSession.AddAssignees(ctx, []string{creator}); err != nil {
 			log.With("error", err).Warn("Failed to assign PR to issue creator")
+		}
+	}
+
+	// Stamp result-derived labels on the PR (opt-in via WithPRLabelsFromResult).
+	// Skipped when the agent did not run (PR already up to date): result is the
+	// zero value then, so deriving labels from it would be meaningless.
+	if r.prLabelsFromResult != nil && agentRan {
+		if err := changeSession.AddLabels(ctx, r.prLabelsFromResult(result)); err != nil {
+			log.With("error", err).Warn("Failed to add result-derived labels to PR")
 		}
 	}
 
