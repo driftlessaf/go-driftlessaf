@@ -214,6 +214,13 @@ func TestNewBrokerClient_EmptyURL_ReturnsNil(t *testing.T) {
 	}
 }
 
+func TestNewBrokerClientImpersonating_EmptyURL_ReturnsNil(t *testing.T) {
+	client := NewBrokerClientImpersonating(t.Context(), "", "emit@example.iam.gserviceaccount.com")
+	if client != nil {
+		t.Error("expected nil client for empty broker URL")
+	}
+}
+
 // A turn that records a payload while payloads are enabled must produce a
 // distinct per-span CloudEvent (SpanEventType) on the same broker, in
 // addition to the per-trace event emitted at trace completion.

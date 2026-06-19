@@ -17,6 +17,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/idtoken"
+	"google.golang.org/api/impersonate"
 	"google.golang.org/api/option"
 )
 
@@ -157,28 +158,68 @@ func (t *ceEmittingTracer[T]) Drain() {
 // If brokerURL is empty or client construction fails, NewBrokerClient
 // returns nil with a warning log. Callers should treat a nil client as
 // "emission disabled" and skip wrapping the tracer.
-// opts are forwarded to idtoken.NewTokenSource — pass
-// option.WithCredentialsFile to mint the broker ID token as a specific
-// federated identity (e.g. a CI emit service account) instead of the ambient
-// ADC, which is how a producer that authenticates its model calls as one
-// identity emits to the broker as another in the same process.
+//
+// The ID token is signed directly from the ambient ADC (the common case: a
+// reconciler running as its own service account). When the identity that
+// authenticates the process differs from the identity authorized to call the
+// broker — and especially when the ambient credential is a federated
+// (external_account) one that cannot mint an ID token directly — use
+// NewBrokerClientImpersonating instead.
+//
+// opts are forwarded to idtoken.NewTokenSource.
 func NewBrokerClient(ctx context.Context, brokerURL string, opts ...option.ClientOption) cloudevents.Client {
 	if brokerURL == "" {
 		return nil
-	}
-
-	innerTransport := httpmetrics.ExtractInnerTransport(http.DefaultTransport)
-	var baseTransport *http.Transport
-	if t, ok := innerTransport.(*http.Transport); ok {
-		baseTransport = t.Clone()
-	} else {
-		baseTransport = &http.Transport{}
 	}
 
 	tokenSource, err := idtoken.NewTokenSource(ctx, brokerURL, opts...)
 	if err != nil {
 		clog.WarnContextf(ctx, "Failed to create ID token source for trace events, disabling: %v", err)
 		return nil
+	}
+
+	return brokerClientFromTokenSource(ctx, brokerURL, tokenSource)
+}
+
+// NewBrokerClientImpersonating is like NewBrokerClient but mints the broker ID
+// token by impersonating targetPrincipal (a service account email) rather than
+// signing directly with the ambient ADC. The process's ADC must hold
+// roles/iam.serviceAccountTokenCreator on targetPrincipal.
+//
+// This is the path for a producer whose ambient credential is a federated
+// (external_account) WIF credential: idtoken cannot mint an ID token directly
+// from such a credential, but the ADC can obtain an access token and use it to
+// impersonate targetPrincipal, which generates the ID token. The returned
+// source refreshes automatically. brokerURL empty or source construction
+// failure returns nil (emission disabled), same as NewBrokerClient.
+func NewBrokerClientImpersonating(ctx context.Context, brokerURL, targetPrincipal string) cloudevents.Client {
+	if brokerURL == "" {
+		return nil
+	}
+
+	tokenSource, err := impersonate.IDTokenSource(ctx, impersonate.IDTokenConfig{
+		Audience:        brokerURL,
+		TargetPrincipal: targetPrincipal,
+		IncludeEmail:    true,
+	})
+	if err != nil {
+		clog.WarnContextf(ctx, "Failed to create impersonated ID token source for trace events, disabling: %v", err)
+		return nil
+	}
+
+	return brokerClientFromTokenSource(ctx, brokerURL, tokenSource)
+}
+
+// brokerClientFromTokenSource builds the CloudEvents HTTP client that targets
+// brokerURL and authenticates every request with tokenSource. Returns nil with
+// a warning log if client construction fails.
+func brokerClientFromTokenSource(ctx context.Context, brokerURL string, tokenSource oauth2.TokenSource) cloudevents.Client {
+	innerTransport := httpmetrics.ExtractInnerTransport(http.DefaultTransport)
+	var baseTransport *http.Transport
+	if t, ok := innerTransport.(*http.Transport); ok {
+		baseTransport = t.Clone()
+	} else {
+		baseTransport = &http.Transport{}
 	}
 
 	client, err := cloudevents.NewClientHTTP(
