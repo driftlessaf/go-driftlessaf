@@ -81,6 +81,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		if _, err := session.ApplyReadyForReview(ctx); err != nil {
 			return fmt.Errorf("apply ready-for-review: %w", err)
 		}
+		// The PR is green: drop any give-up comment from a prior iteration, since
+		// the PR recovered (e.g. a blocking dependency landed elsewhere) without
+		// the agent needing to push a fix. Clear is a no-op when no comment
+		// exists, so this is safe to run on every green pass.
+		r.giveUp.Clear(ctx, session)
 		return nil
 
 	case !state.HasPR():
@@ -112,6 +117,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		switch {
 		case closePR:
 			log.Info("Update already landed on the base branch, closing PR")
+			r.giveUp.Clear(ctx, session)
 			return session.CloseAnyOutstanding(ctx, "Closing this PR: the target update has already landed on the base branch.")
 		case refresh:
 			log.Info("PR is superseded by a newer update, refreshing it from the default branch")
@@ -179,6 +185,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		}
 		if len(diagnostics) == 0 {
 			log.Info("No diagnostics, closing stale PR if any")
+			r.giveUp.Clear(ctx, session)
 			return session.CloseAnyOutstanding(ctx, "All diagnostics are resolved.")
 		}
 
@@ -217,6 +224,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		labels = append(labels, r.labelFn(ctx, res, diagnostics, findings)...)
 	}
 
+	// agentResult captures the agent's output for the no-change path below, where
+	// ErrNoChanges short-circuits before Upsert returns it. agentRan guards
+	// against surfacing a zero result when the agent never ran (e.g. allFixed).
+	var agentResult Resp
+	var agentRan bool
+
 	// Upsert PR with changes (analyzer fixes, agent fixes, or both).
 	prURL, err := session.Upsert(ctx, &PRData[Req]{
 		Identity: r.identity,
@@ -239,6 +252,8 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 			if err != nil {
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
+			agentResult = result
+			agentRan = true
 
 			// Check if the agent left the worktree clean (no actual file changes).
 			status, err := wt.Status()
@@ -255,10 +270,17 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 	if err != nil {
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
+			if agentRan {
+				r.giveUp.SurfaceResult(ctx, session, agentResult)
+			}
 			return nil
 		}
 		return fmt.Errorf("upsert PR: %w", err)
 	}
+
+	// The agent pushed a fix: clear any stale give-up comment from a prior
+	// iteration where it had nothing to do.
+	r.giveUp.Clear(ctx, session)
 
 	log.With("pr_url", prURL).Info("PR created/updated")
 	return nil

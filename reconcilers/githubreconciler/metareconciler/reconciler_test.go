@@ -208,3 +208,33 @@ func TestWithPRLabelsFromResult(t *testing.T) {
 		t.Errorf("reconciler.prLabelsFromResult(...) = %v, wanted [team/example]", got)
 	}
 }
+
+func TestWithGiveUpComment(t *testing.T) {
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		&fakeAgent{},
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithGiveUpComment[*testRequest, *testResult, testCallbacks]("<!--test:no-changes-->", func(e string) string { return "body: " + e }),
+	)
+
+	if rec == nil {
+		t.Fatal("New() returned nil with WithGiveUpComment option")
+	}
+	if rec.giveUp == nil {
+		t.Fatal("reconciler.giveUp = nil, want the configured comment")
+	}
+	if rec.giveUp.Marker != "<!--test:no-changes-->" {
+		t.Errorf("reconciler.giveUp.Marker: got = %q, want = %q", rec.giveUp.Marker, "<!--test:no-changes-->")
+	}
+	if got := rec.giveUp.Render("why"); got != "body: why" {
+		t.Errorf("reconciler.giveUp.Render: got = %q, want = %q", got, "body: why")
+	}
+}

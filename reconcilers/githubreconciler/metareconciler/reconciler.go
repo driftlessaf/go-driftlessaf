@@ -33,6 +33,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
 
+	// giveUp, when set, surfaces an agent's deliberate no-op explanation on the
+	// PR as a single marker comment. Nil is a safe no-op receiver. See
+	// WithGiveUpComment.
+	giveUp *changemanager.GiveUpComment
+
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
 	buildRequest   func(context.Context, *github.Issue, *changemanager.Session[PRData[Req]]) (Req, error)
@@ -56,6 +61,18 @@ func WithRequiredLabel[Req promptbuilder.Bindable, Resp Result, CB any](label st
 func WithPRLabelsFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) []string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.prLabelsFromResult = fn
+	}
+}
+
+// WithGiveUpComment surfaces an agent's deliberate no-op on the PR. When the
+// agent runs but makes no file changes and its result implements
+// changemanager.Explainer with a non-empty explanation, the reconciler upserts
+// a single comment (identified by marker) whose body is render(explanation).
+// Repeated identical give-ups rewrite nothing, and the comment is cleared when
+// the PR recovers. Off by default.
+func WithGiveUpComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func(explanation string) string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
 	}
 }
 

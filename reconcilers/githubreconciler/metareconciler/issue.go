@@ -56,10 +56,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		clog.InfoContext(ctx, "Issue missing required label, closing any outstanding PRs", "required_label", r.requiredLabel)
+		r.giveUp.Clear(ctx, changeSession)
 		return changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue no longer has the required label.")
 
 	case issue.GetState() == "closed":
 		clog.InfoContext(ctx, "Issue is closed, closing any outstanding PRs")
+		r.giveUp.Clear(ctx, changeSession)
 		return changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue was closed.")
 
 	case state.NeedsRebase():
@@ -91,6 +93,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		if _, err := changeSession.ApplyReadyForReview(ctx); err != nil {
 			return fmt.Errorf("apply ready-for-review: %w", err)
 		}
+		// The PR is green: drop any give-up comment from a prior iteration, since
+		// the PR recovered without the agent needing to push a fix. Clear is a
+		// no-op when no comment exists, so this is safe to run on every green pass.
+		r.giveUp.Clear(ctx, changeSession)
 		return nil
 
 	case !state.HasPR():
@@ -106,10 +112,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		return fmt.Errorf("build request: %w", err)
 	}
 
-	// Captured from the agent execution inside the Upsert closure so labels
-	// derived from the result can be applied once the PR number is known.
-	// agentRan gates that use: Upsert skips the closure when the PR is already
-	// up to date, leaving result as the zero value, so the hook must not see it.
+	// Captured from the agent execution inside the Upsert closure. Used after
+	// Upsert to derive PR labels (WithPRLabelsFromResult) and to surface a
+	// give-up comment (WithGiveUpComment). agentRan gates both uses: Upsert skips
+	// the closure when the PR is already up to date, leaving result as the zero
+	// value, so neither must see it then.
 	var result Resp
 	var agentRan bool
 
@@ -176,10 +183,17 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	if err != nil {
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
+			if agentRan {
+				r.giveUp.SurfaceResult(ctx, changeSession, result)
+			}
 			return nil
 		}
 		return fmt.Errorf("upsert PR: %w", err)
 	}
+
+	// The agent pushed a fix: clear any stale give-up comment from a prior
+	// iteration where it had nothing to do.
+	r.giveUp.Clear(ctx, changeSession)
 
 	// Assign the PR to the issue creator so they can easily find it.
 	if creator != "" {

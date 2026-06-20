@@ -267,6 +267,24 @@ func TestWithLabelFuncDefault(t *testing.T) {
 	}
 }
 
+func TestWithGiveUpComment(t *testing.T) {
+	var o option
+	WithGiveUpComment("<!--test:no-changes-->", func(e string) string { return "body: " + e })(&o)
+
+	if o.giveUp == nil {
+		t.Fatal("giveUp: got = nil, want non-nil")
+	}
+	if o.giveUp.Marker != "<!--test:no-changes-->" {
+		t.Errorf("giveUp.Marker: got = %q, want = %q", o.giveUp.Marker, "<!--test:no-changes-->")
+	}
+	if o.giveUp.Render == nil {
+		t.Fatal("giveUp.Render: got = nil, want non-nil")
+	}
+	if got := o.giveUp.Render("why"); got != "body: why" {
+		t.Errorf("giveUp.Render: got = %q, want = %q", got, "body: why")
+	}
+}
+
 func TestReconcileReviewOnlySkipsPath(t *testing.T) {
 	rec := &Reconciler[*testRequest, *testResult, testCallbacks]{
 		identity: "test-identity",

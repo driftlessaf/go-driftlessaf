@@ -110,6 +110,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 
 	// labelFn optionally computes additional PR labels from diagnostics/findings.
 	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+
+	// giveUp, when set, surfaces an agent's deliberate no-op explanation on the
+	// PR as a single marker comment. Nil is a safe no-op receiver. See
+	// WithGiveUpComment.
+	giveUp *changemanager.GiveUpComment
 }
 
 // Option configures a Reconciler.
@@ -119,6 +124,7 @@ type option struct {
 	mode             Mode
 	labelFn          func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
 	baseRevalidation bool
+	giveUp           *changemanager.GiveUpComment
 }
 
 // WithMode configures the reconciler's operating mode.
@@ -150,6 +156,19 @@ func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagno
 func WithBaseRevalidation() Option {
 	return func(o *option) {
 		o.baseRevalidation = true
+	}
+}
+
+// WithGiveUpComment surfaces an agent's deliberate no-op on the PR. When the
+// agent runs but makes no file changes and its result implements
+// changemanager.Explainer with a non-empty explanation, the reconciler upserts
+// a single comment (identified by marker) whose body is render(explanation).
+// Repeated identical give-ups rewrite nothing, and the comment is cleared when
+// the PR recovers. Off by default: reconcilers that do not set this keep the
+// silent no-change behavior.
+func WithGiveUpComment(marker string, render func(explanation string) string) Option {
+	return func(o *option) {
+		o.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
 	}
 }
 
@@ -190,6 +209,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any](
 		buildRequest:     buildRequest,
 		buildCallbacks:   buildCallbacks,
 		labelFn:          o.labelFn,
+		giveUp:           o.giveUp,
 	}, nil
 }
 

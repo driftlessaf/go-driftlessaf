@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -375,6 +376,118 @@ func (s *Session[T]) AddAssignees(ctx context.Context, logins []string) error {
 	// Update the cached assignees so subsequent calls are accurate.
 	s.prAssignees = append(s.prAssignees, toAdd...)
 	return nil
+}
+
+// UpsertMarkerComment posts or updates a single PR comment identified by a
+// hidden HTML marker, so repeated calls update the same comment in place rather
+// than accumulating duplicates. The marker is prepended to body and used to
+// locate the existing comment on subsequent calls. When a comment with the
+// marker already exists and its body is unchanged, no API write is made — this
+// keeps a recurring signal (e.g. an agent reporting it has nothing to fix)
+// quiet across reconcile loops. This is a no-op if no PR exists.
+//
+// The find-then-write is not atomic; its dedup relies on reconciles being
+// serialized per resource (as the workqueue guarantees). A caller composing
+// this outside that guarantee could race two creates into duplicate comments.
+func (s *Session[T]) UpsertMarkerComment(ctx context.Context, marker, body string) error {
+	if s.prNumber == 0 {
+		return nil
+	}
+
+	want := marker + "\n" + body
+
+	existing, err := s.findMarkerComment(ctx, marker)
+	// ferr (not err) so the classified list error is what we return without
+	// shadowing the err reused by the edit/create calls below.
+	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, "listing comments", err); done {
+		return ferr
+	}
+	if existing != nil {
+		if existing.GetBody() == want {
+			clog.InfoContextf(ctx, "Marker comment already up to date on PR #%d, skipping", s.prNumber)
+			return nil
+		}
+		clog.InfoContextf(ctx, "Updating marker comment on PR #%d", s.prNumber)
+		_, _, err = s.client.Issues.EditComment(ctx, s.owner, s.repo, existing.GetID(), &github.IssueComment{
+			Body: github.Ptr(want),
+		})
+		_, err = s.skipMarkerCommentIfForbidden(ctx, "editing marker comment", err)
+		return err
+	}
+
+	clog.InfoContextf(ctx, "Posting marker comment on PR #%d", s.prNumber)
+	_, _, err = s.client.Issues.CreateComment(ctx, s.owner, s.repo, s.prNumber, &github.IssueComment{
+		Body: github.Ptr(want),
+	})
+	_, err = s.skipMarkerCommentIfForbidden(ctx, "posting marker comment", err)
+	return err
+}
+
+// DeleteMarkerComment removes the comment identified by marker, if present. It
+// is the inverse of UpsertMarkerComment: callers delete the comment once the
+// condition it described no longer holds (e.g. the agent recovered and pushed a
+// fix). This is a no-op if no PR exists or no matching comment is found.
+func (s *Session[T]) DeleteMarkerComment(ctx context.Context, marker string) error {
+	if s.prNumber == 0 {
+		return nil
+	}
+
+	existing, err := s.findMarkerComment(ctx, marker)
+	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, "listing comments", err); done {
+		return ferr
+	}
+	if existing == nil {
+		return nil
+	}
+
+	clog.InfoContextf(ctx, "Deleting stale marker comment on PR #%d", s.prNumber)
+	_, err = s.client.Issues.DeleteComment(ctx, s.owner, s.repo, existing.GetID())
+	_, err = s.skipMarkerCommentIfForbidden(ctx, "deleting marker comment", err)
+	return err
+}
+
+// findMarkerComment returns the first issue comment whose body begins with
+// marker, paging through all comments on the PR. Returns nil when none match.
+// The prefix match (rather than a substring search) avoids matching a human
+// reply that merely quotes the marker comment. The ListComments error is
+// returned unwrapped so callers can classify it (see skipMarkerCommentIfForbidden).
+func (s *Session[T]) findMarkerComment(ctx context.Context, marker string) (*github.IssueComment, error) {
+	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+	for {
+		comments, resp, err := s.client.Issues.ListComments(ctx, s.owner, s.repo, s.prNumber, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range comments {
+			if strings.HasPrefix(c.GetBody(), marker) {
+				return c, nil
+			}
+		}
+		if resp.NextPage == 0 {
+			return nil, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
+// skipMarkerCommentIfForbidden classifies an error from a marker-comment API
+// call. Marker comments are best-effort, so a missing permission (GitHub 403,
+// e.g. the installation was not granted issues:write on this repo) degrades to
+// a logged no-op rather than failing the reconcile. It returns (handled, err):
+// handled is false only when err is nil and the caller should continue (used by
+// the list path). On any non-nil error handled is true and err is nil (a
+// tolerated 403) or wrapped, so a terminal caller can discard handled and just
+// return err.
+func (s *Session[T]) skipMarkerCommentIfForbidden(ctx context.Context, op string, err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	var ge *github.ErrorResponse
+	if errors.As(err, &ge) && ge.Response != nil && ge.Response.StatusCode == http.StatusForbidden {
+		clog.WarnContext(ctx, "Skipping marker comment: insufficient permission", "pr", s.prNumber, "op", op)
+		return true, nil
+	}
+	return true, fmt.Errorf("%s: %w", op, err)
 }
 
 // StoredData returns the PRData embedded in the existing PR body, or false if
