@@ -231,12 +231,20 @@ func (o *inProgressKey) RequeueWithOptions(_ context.Context, opts workqueue.Opt
 	attempts := o.attempts
 
 	// Handle custom delay if specified
-	if opts.Delay > 0 {
+	switch {
+	case opts.BackoffDelay > 0:
+		// Failure-retry backoff: wait BackoffDelay before reprocessing WITHOUT
+		// resetting the attempt count and regardless of priority, so the
+		// dispatcher's attempts >= maxRetry dead-letter cutoff stays reachable.
+		// The caller owns the backoff curve (e.g. decorrelated exponential
+		// jitter); this only translates it into a not-before.
+		opts.NotBefore = time.Now().UTC().Add(opts.BackoffDelay)
+	case opts.Delay > 0:
 		// Reset attempts when using custom delay, as this indicates periodic revisit pattern
 		// rather than retry due to failure
 		attempts = 0
 		opts.NotBefore = time.Now().UTC().Add(opts.Delay)
-	} else if opts.Priority > 0 {
+	case opts.Priority > 0:
 		// If no custom delay and priority is set, use the standard backoff
 		backoffDelay := min(time.Duration(o.attempts*int(workqueue.BackoffPeriod)), workqueue.MaximumBackoffPeriod)
 		opts.NotBefore = time.Now().UTC().Add(backoffDelay)

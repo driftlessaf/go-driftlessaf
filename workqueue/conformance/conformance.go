@@ -943,6 +943,123 @@ func TestSemantics(t *testing.T, ctor func(int) workqueue.Interface) {
 	})
 }
 
+// TestBackoffDelay verifies the Options.BackoffDelay failure-retry primitive:
+// it defers a requeued key by the given duration, preserves the attempt count
+// (unlike Options.Delay, which resets it), and applies regardless of priority.
+func TestBackoffDelay(t *testing.T, ctor func(int) workqueue.Interface) {
+	ct := &conformanceTester{
+		t:           t,
+		ctor:        ctor,
+		concurrency: 5,
+	}
+
+	delay := workqueue.BackoffPeriod
+
+	// Cap the maximum backoff to 2x the delay, so that tests run in a
+	// reasonable amount of time.
+	workqueue.MaximumBackoffPeriod = 2 * delay
+
+	ct.scenario("backoff delay defers requeue regardless of priority", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// No priority: the standard priority backoff branch would NOT fire, so a
+		// plain requeue makes the key immediately eligible. BackoffDelay must
+		// still defer it.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{
+			WorkInProgress: []string{"foo"},
+		})
+
+		// Requeue with a backoff delay; the key must disappear until it passes.
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{BackoffDelay: delay}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		// Sleep past the offset with margin: a bare delay is borderline and the
+		// visibility check can race NotBefore under parallel-test load.
+		time.Sleep(2 * delay)
+		_, _ = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+	})
+
+	ct.scenario("backoff delay preserves attempts so dead-letter stays reachable", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// Drive the attempt count up via a plain (failure) requeue, then use a
+		// BackoffDelay requeue and confirm the count keeps climbing rather than
+		// resetting to zero. A reset would make attempts >= maxRetry unreachable
+		// and let a poison key retry forever.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{Priority: 1000}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+
+		// Attempt 1.
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if got := owned.GetAttempts(); got != 1 {
+			t.Fatalf("attempt count: got = %d, want = 1", got)
+		}
+
+		// Plain requeue (failure path): increments attempts, applies priority
+		// backoff, so wait it out with margin (2*delay is the MaximumBackoffPeriod
+		// ceiling; a bare period is borderline and flakes under parallel-test load).
+		if err := owned.Requeue(ctx); err != nil {
+			t.Fatalf("Requeue failed: %v", err)
+		}
+		time.Sleep(2 * delay)
+		_, qd = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+
+		// Attempt 2.
+		owned, err = qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if got := owned.GetAttempts(); got != 2 {
+			t.Fatalf("attempt count: got = %d, want = 2", got)
+		}
+
+		// BackoffDelay requeue: MUST preserve the attempt count (unlike Delay).
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{BackoffDelay: delay}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+		time.Sleep(2 * delay)
+		_, qd = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+
+		// Attempt 3: count climbed through the BackoffDelay requeue.
+		owned, err = qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if got := owned.GetAttempts(); got != 3 {
+			t.Fatalf("attempt count after backoff requeue: got = %d, want = 3 (attempts must not reset)", got)
+		}
+
+		// Clean up: dead-letter the key (proves the cutoff path is usable).
+		if err := owned.Deadletter(ctx); err != nil {
+			t.Fatalf("Deadletter failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+	})
+}
+
 func drain(t *testing.T, wq workqueue.Interface) error {
 	t.Helper()
 	// Match checkQueue: derive from t.Context() but drop cancellation, so drain

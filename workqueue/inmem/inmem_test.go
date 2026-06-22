@@ -26,6 +26,8 @@ func TestWorkQueue(t *testing.T) {
 	conformance.TestConcurrency(t, NewWorkQueue)
 
 	conformance.TestMaxRetry(t, NewWorkQueue)
+
+	conformance.TestBackoffDelay(t, NewWorkQueue)
 }
 
 func Test_Get_KeyNotFound(t *testing.T) {

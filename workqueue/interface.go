@@ -61,6 +61,18 @@ type Options struct {
 	// This is used when requeueing with a custom delay.
 	Delay time.Duration
 
+	// BackoffDelay is an optional duration to wait before reprocessing a key
+	// on a failure retry. Unlike Delay it does NOT reset the attempt count,
+	// so the dispatcher's attempts >= maxRetry dead-letter cutoff keeps
+	// firing, and it is applied regardless of priority. When zero (the
+	// default) the requeue path is unchanged: callers that never set it get
+	// the existing linear/priority backoff behavior. A caller that wants
+	// custom failure-retry backoff (e.g. decorrelated exponential jitter)
+	// computes the delay itself and passes it here, leaving the attempt
+	// counter intact. Takes precedence over Delay and the priority backoff
+	// when set.
+	BackoffDelay time.Duration
+
 	// NotBeforeFloor, when true, marks NotBefore as a floor that a non-floor
 	// enqueue of the same key cannot dedup to an earlier time. Merge rules for a
 	// queued entry:

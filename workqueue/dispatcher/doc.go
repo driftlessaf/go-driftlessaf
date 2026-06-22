@@ -22,4 +22,22 @@ SPDX-License-Identifier: Apache-2.0
 //
 // When the ingress URL is empty the option is a no-op, making the feature
 // entirely opt-in.
+//
+// # Failure-Retry Backoff
+//
+// By default a failed-and-requeued key reuses the workqueue's existing
+// backoff. To install a custom failure-retry backoff (for example decorrelated
+// exponential jitter), pass [WithBackoff]:
+//
+//	handler := dispatcher.Handler(wq, 10, 5, callback, 3,
+//	    dispatcher.WithBackoff(func(attempts int) time.Duration {
+//	        return backoff(attempts)
+//	    }),
+//	)
+//
+// The hook is called with the key's current attempt count on each requeued
+// failure. A positive return value defers the retry by that duration while
+// preserving the attempt count, so the dead-letter cutoff stays reachable. A
+// nil hook or a non-positive return falls back to the default bare requeue,
+// making the option entirely opt-in.
 package dispatcher

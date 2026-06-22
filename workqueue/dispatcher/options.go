@@ -5,7 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 package dispatcher
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ErrorAction describes the disposition of a key after a dispatch error.
 type ErrorAction int
@@ -68,11 +71,28 @@ type nopErrorEmitter struct{}
 func (nopErrorEmitter) emit(context.Context, ErrorContext) {}
 func (nopErrorEmitter) drain()                             {}
 
-// Option configures optional dispatcher behaviour.
+// Option configures optional dispatcher behavior.
 type Option func(*config)
 
 type config struct {
-	errors errorEmitter
+	errors  errorEmitter
+	backoff func(attempts int) time.Duration
+}
+
+// WithBackoff sets the failure-retry backoff for the dispatcher. On each
+// callback failure that is requeued (not dead-lettered, not dropped as
+// non-retriable), the dispatcher calls fn with the key's current attempt count
+// and, when fn returns a positive duration, requeues the key with that
+// not-before delay while preserving the attempt count (so the dead-letter
+// cutoff stays reachable).
+//
+// When fn is nil or returns a non-positive duration, the dispatcher falls back
+// to a bare requeue, identical to the behavior with this option unset. This
+// makes the option entirely opt-in: an unconfigured dispatcher keeps the
+// existing requeue behavior bit-for-bit. Use it to install decorrelated
+// exponential jitter or any other attempt-driven backoff curve.
+func WithBackoff(fn func(attempts int) time.Duration) Option {
+	return func(c *config) { c.backoff = fn }
 }
 
 func applyOptions(opts []Option) config {

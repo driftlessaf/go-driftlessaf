@@ -59,4 +59,8 @@ func TestWorkQueue(t *testing.T) {
 	conformance.TestMaxRetry(t, func(u int) workqueue.Interface {
 		return NewWorkQueue(client.Bucket(bucket), u)
 	})
+
+	conformance.TestBackoffDelay(t, func(u int) workqueue.Interface {
+		return NewWorkQueue(client.Bucket(bucket), u)
+	})
 }

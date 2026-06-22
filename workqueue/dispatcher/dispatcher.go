@@ -84,7 +84,7 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	eg := errgroup.Group{}
 
 	// Remove any orphaned work by returning it to the queue.
-	// Use context.WithoutCancel to ensure requeue completes even if parent context is cancelled.
+	// Use context.WithoutCancel to ensure requeue completes even if parent context is canceled.
 	activeKeys := make(map[string]struct{}, len(wip))
 	for _, x := range wip {
 		if !x.IsOrphaned() {
@@ -141,7 +141,7 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			})
 
 			// Use context.WithoutCancel for all cleanup operations to ensure they
-			// complete even if the parent context is cancelled (e.g., SIGTERM).
+			// complete even if the parent context is canceled (e.g., SIGTERM).
 			// This prevents work items from getting stuck in "in-progress" state
 			// when the worker is terminated.
 			cleanupCtx := context.WithoutCancel(ctx)
@@ -224,8 +224,24 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 						NonRetriableReason: d.GetMessage(),
 					})
 				} else {
-					if err := oip.Requeue(cleanupCtx); err != nil {
-						return fmt.Errorf("requeue(after failed callback) = %w", err)
+					// Apply the optional failure-retry backoff. A nil hook or a
+					// non-positive duration falls back to a bare requeue, keeping
+					// the default behavior bit-for-bit identical when WithBackoff
+					// is unused. A positive duration requeues with a not-before
+					// delay that preserves the attempt count, so the dead-letter
+					// cutoff above stays reachable.
+					var requeueErr error
+					if cfg.backoff != nil {
+						if delay := cfg.backoff(attempts); delay > 0 {
+							requeueErr = oip.RequeueWithOptions(cleanupCtx, workqueue.Options{BackoffDelay: delay})
+						} else {
+							requeueErr = oip.Requeue(cleanupCtx)
+						}
+					} else {
+						requeueErr = oip.Requeue(cleanupCtx)
+					}
+					if requeueErr != nil {
+						return fmt.Errorf("requeue(after failed callback) = %w", requeueErr)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{
 						Key:      oip.Name(),
@@ -238,7 +254,7 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			}
 
 			// Delete the in-progress key (stops heartbeat).
-			// Use context.WithoutCancel to ensure completion even if context is cancelled.
+			// Use context.WithoutCancel to ensure completion even if context is canceled.
 			if err := oip.Complete(cleanupCtx); err != nil {
 				return fmt.Errorf("complete() = %w", err)
 			}

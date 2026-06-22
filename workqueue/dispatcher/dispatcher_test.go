@@ -29,7 +29,13 @@ type mockKey struct {
 	requeue  int
 	dead     int
 	complete int
-	mu       sync.Mutex
+	// bareRequeue counts calls to Requeue (no options). requeueOpts counts
+	// calls to RequeueWithOptions and captures the last options passed, so a
+	// test can assert which requeue path the dispatcher took.
+	bareRequeue int
+	requeueOpts int
+	lastReqOpts workqueue.Options
+	mu          sync.Mutex
 }
 
 // Implement Priority() to satisfy workqueue.QueuedKey.
@@ -51,13 +57,16 @@ func (m *mockKey) Requeue(context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requeue++
+	m.bareRequeue++
 	return nil
 }
 
-func (m *mockKey) RequeueWithOptions(context.Context, workqueue.Options) error {
+func (m *mockKey) RequeueWithOptions(_ context.Context, opts workqueue.Options) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requeue++
+	m.requeueOpts++
+	m.lastReqOpts = opts
 	return nil
 }
 
@@ -208,6 +217,96 @@ func TestHandleAsync_CallbackFails_Requeue(t *testing.T) {
 	}
 }
 
+// TestHandleAsync_NoBackoff_UsesBareRequeue proves the default-off equivalence:
+// with no WithBackoff option, a failed callback is requeued via the bare
+// Requeue path (no BackoffDelay), bit-for-bit identical to the prior behavior.
+func TestHandleAsync_NoBackoff_UsesBareRequeue(t *testing.T) {
+	next := &mockKey{name: "fail"}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return errors.New("fail")
+	}, 0)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.bareRequeue != 1 {
+		t.Errorf("bare Requeue: got = %d, want = 1", next.bareRequeue)
+	}
+	if next.requeueOpts != 0 {
+		t.Errorf("RequeueWithOptions calls: got = %d, want = 0 (must not be used when unconfigured)", next.requeueOpts)
+	}
+	if next.lastReqOpts.BackoffDelay != 0 {
+		t.Errorf("BackoffDelay: got = %v, want = 0", next.lastReqOpts.BackoffDelay)
+	}
+}
+
+// TestHandleAsync_WithBackoff verifies the WithBackoff hook drives the
+// requeue path: a positive return requeues with that BackoffDelay (preserving
+// attempts), while a nil hook or non-positive return falls back to a bare
+// requeue.
+func TestHandleAsync_WithBackoff(t *testing.T) {
+	tests := []struct {
+		name            string
+		backoff         func(attempts int) time.Duration
+		attempts        int
+		wantBare        int
+		wantOpts        int
+		wantBackoffWait time.Duration
+	}{{
+		name:     "nil hook falls back to bare requeue",
+		backoff:  nil,
+		attempts: 2,
+		wantBare: 1,
+		wantOpts: 0,
+	}, {
+		name:     "non-positive return falls back to bare requeue",
+		backoff:  func(int) time.Duration { return 0 },
+		attempts: 2,
+		wantBare: 1,
+		wantOpts: 0,
+	}, {
+		name:            "positive return requeues with backoff delay",
+		backoff:         func(attempts int) time.Duration { return time.Duration(attempts) * time.Second },
+		attempts:        3,
+		wantBare:        0,
+		wantOpts:        1,
+		wantBackoffWait: 3 * time.Second,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			next := &mockKey{name: "fail", attempts: tt.attempts}
+			q := &mockQueue{next: []workqueue.QueuedKey{next}}
+			opts := []Option{}
+			if tt.backoff != nil {
+				opts = append(opts, WithBackoff(tt.backoff))
+			} else {
+				// Explicitly install a nil hook to exercise that branch too.
+				opts = append(opts, WithBackoff(nil))
+			}
+			future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+				return errors.New("fail")
+			}, 0, opts...)
+			if err := future(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if next.bareRequeue != tt.wantBare {
+				t.Errorf("bare Requeue: got = %d, want = %d", next.bareRequeue, tt.wantBare)
+			}
+			if next.requeueOpts != tt.wantOpts {
+				t.Errorf("RequeueWithOptions calls: got = %d, want = %d", next.requeueOpts, tt.wantOpts)
+			}
+			if next.lastReqOpts.BackoffDelay != tt.wantBackoffWait {
+				t.Errorf("BackoffDelay: got = %v, want = %v", next.lastReqOpts.BackoffDelay, tt.wantBackoffWait)
+			}
+			// The backoff path must never reset the attempt count via Delay.
+			if next.lastReqOpts.Delay != 0 {
+				t.Errorf("Delay: got = %v, want = 0 (backoff must not reset attempts)", next.lastReqOpts.Delay)
+			}
+		})
+	}
+}
+
 func TestHandleAsync_CallbackFails_DeadletterOnMaxRetry(t *testing.T) {
 	next := &mockKey{name: "fail", attempts: 3}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
@@ -272,11 +371,11 @@ func TestHandleAsync_RespectsBatchSize(t *testing.T) {
 	}
 }
 
-// TestHandleAsync_RequeueSucceedsWithCancelledContext tests that cleanup operations
-// (Requeue, Complete, Deadletter) succeed even when the parent context is cancelled.
+// TestHandleAsync_RequeueSucceedsWithCanceledContext tests that cleanup operations
+// (Requeue, Complete, Deadletter) succeed even when the parent context is canceled.
 // This is critical for graceful shutdown - when Cloud Run sends SIGTERM, we need to
 // ensure work items are properly requeued rather than left stuck in "in-progress" state.
-func TestHandleAsync_RequeueSucceedsWithCancelledContext(t *testing.T) {
+func TestHandleAsync_RequeueSucceedsWithCanceledContext(t *testing.T) {
 	next := &mockKey{name: "will-fail"}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 
@@ -297,13 +396,13 @@ func TestHandleAsync_RequeueSucceedsWithCancelledContext(t *testing.T) {
 
 	// Critical: Requeue should have been called despite context cancellation
 	if next.requeue != 1 {
-		t.Errorf("expected Requeue to be called even with cancelled context, got requeue=%d", next.requeue)
+		t.Errorf("expected Requeue to be called even with canceled context, got requeue=%d", next.requeue)
 	}
 }
 
-// TestHandleAsync_CompleteSucceedsWithCancelledContext tests that Complete succeeds
-// even when the parent context is cancelled during successful work completion.
-func TestHandleAsync_CompleteSucceedsWithCancelledContext(t *testing.T) {
+// TestHandleAsync_CompleteSucceedsWithCanceledContext tests that Complete succeeds
+// even when the parent context is canceled during successful work completion.
+func TestHandleAsync_CompleteSucceedsWithCanceledContext(t *testing.T) {
 	next := &mockKey{name: "will-succeed"}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 
@@ -321,13 +420,13 @@ func TestHandleAsync_CompleteSucceedsWithCancelledContext(t *testing.T) {
 
 	// Critical: Complete should have been called despite context cancellation
 	if next.complete != 1 {
-		t.Errorf("expected Complete to be called even with cancelled context, got complete=%d", next.complete)
+		t.Errorf("expected Complete to be called even with canceled context, got complete=%d", next.complete)
 	}
 }
 
-// TestHandleAsync_OrphanRequeueSucceedsWithCancelledContext tests that orphaned work
-// requeue succeeds even when the context is cancelled.
-func TestHandleAsync_OrphanRequeueSucceedsWithCancelledContext(t *testing.T) {
+// TestHandleAsync_OrphanRequeueSucceedsWithCanceledContext tests that orphaned work
+// requeue succeeds even when the context is canceled.
+func TestHandleAsync_OrphanRequeueSucceedsWithCanceledContext(t *testing.T) {
 	orphan := &mockKey{name: "orphan", orphaned: true}
 	q := &mockQueue{wip: []workqueue.ObservedInProgressKey{&mockInProgressKey{mockKey: orphan}}}
 
@@ -344,9 +443,9 @@ func TestHandleAsync_OrphanRequeueSucceedsWithCancelledContext(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Critical: Orphan requeue should succeed despite cancelled context
+	// Critical: Orphan requeue should succeed despite canceled context
 	if orphan.requeue != 1 {
-		t.Errorf("expected orphaned key requeue even with cancelled context, got requeue=%d", orphan.requeue)
+		t.Errorf("expected orphaned key requeue even with canceled context, got requeue=%d", orphan.requeue)
 	}
 }
 

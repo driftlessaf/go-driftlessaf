@@ -552,7 +552,15 @@ func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.O
 	copier.Metadata[lastAttemptedKey] = strconv.FormatInt(time.Now().UTC().Unix(), 10)
 
 	// Handle custom delay if specified
-	if opts.Delay > 0 {
+	if opts.BackoffDelay > 0 {
+		// Failure-retry backoff: wait BackoffDelay before reprocessing WITHOUT
+		// resetting the attempt count and regardless of priority, so the
+		// dispatcher's attempts >= maxRetry dead-letter cutoff stays reachable.
+		// The caller owns the backoff curve (e.g. decorrelated exponential
+		// jitter); this only translates it into a not-before.
+		notBefore := time.Now().UTC().Add(opts.BackoffDelay)
+		copier.Metadata[notBeforeMetadataKey] = notBefore.Format(time.RFC3339)
+	} else if opts.Delay > 0 {
 		// Reset attempts when using custom delay, as this indicates periodic revisit pattern
 		// rather than retry due to failure
 		copier.Metadata[attemptsMetadataKey] = "0"
