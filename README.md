@@ -41,6 +41,38 @@ go get chainguard.dev/driftlessaf@latest
 
 See the package documentation for examples and the API reference.
 
+## Examples
+
+- [github-pr-validator](./examples/github-pr-validator/)
+- [github-pr-autofix](./examples/github-pr-autofix/)
+- [github-issue-materializer](./examples/github-issue-materializer/)
+- [github-path-modernizer](./examples/github-path-modernizer/)
+
+See the [examples README](./examples/README.md) for more information.
+
+## Build
+
+This repository contains two Go modules — the root `chainguard.dev/driftlessaf`
+library and the `chainguard.dev/driftlessaf/examples` module. Build and test each
+from its own directory.
+
+Go 1.25.8 or newer is required, as specified in both `go.mod` files.
+
+Root library:
+
+```bash
+go build ./...
+go test ./...
+```
+
+Examples:
+
+```bash
+cd examples
+go build ./...
+go test ./...
+```
+
 ## License
 
 [Apache-2.0](./LICENSE)

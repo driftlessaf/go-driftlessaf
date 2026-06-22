@@ -1,172 +1,51 @@
-# DriftlessAF Examples
+# DriftlessAF examples
 
 Examples demonstrating the DriftlessAF reconciler pattern for GitHub automation.
 
 ## Examples
 
-### 1. PR Validator (`github-pr-validator/`)
+- **[github-pr-validator/](./github-pr-validator/)** — Reconciler that checks PR titles
+  for conformance with the [conventional commits](https://www.conventionalcommits.org/)
+  specification and validates descriptions, reporting results via GitHub Check Runs.
+- **[github-pr-autofix/](./github-pr-autofix/)** — The validator extended with an AI agent
+  running on Vertex AI, using either Gemini or Claude models, that fixes the PR title and
+  description when the `driftlessaf/autofix` label is present.
+- **[github-issue-materializer/](./github-issue-materializer/)** — Issue-based agent, built
+  on `metareconciler`, that turns problem statements in GitHub issues into PRs using
+  AI-generated code.
+- **[github-path-modernizer/](./github-path-modernizer/)** — Path-based agent, built on
+  `metapathreconciler`, that runs the Go modernize analysis suite and produces PRs with
+  AI-applied fixes.
 
-**Reconciler pattern** that validates GitHub pull requests and creates Check Runs with the validation results.
+Shared library:
 
-**What it does:**
-- Validates PR title follows [conventional commit](https://www.conventionalcommits.org/) format
-- Validates PR description is not empty or too short
-- Creates a GitHub Check Run showing pass/fail status
-- Uses `statusmanager` for idempotent check run management
+- **[prvalidation/](./prvalidation/)** — Conventional-commit and description validation,
+  the `Details` payload, and `ComputeGeneration` idempotency key used by both PR examples.
 
-### 2. PR Autofix (`github-pr-autofix/`)
-
-**Reconciler + agentic pattern** that extends the validator with AI-powered auto-fixing using the metaagent framework.
-
-**What it does:**
-- Same validation as PR Validator
-- When the `driftlessaf/autofix` label is present, uses an AI agent (via Vertex AI) to automatically fix issues
-- Supports both **Gemini** and **Claude** models via the `AGENT_MODEL` env var (defaults to `gemini-2.5-flash`)
-- Updates PR title to conventional commit format
-- Generates meaningful descriptions from context
-- Shows model used and reasoning in check run output
-- Max 2 fix attempts per PR state to prevent loops
-
-**Switching to Claude Sonnet:**
-```bash
-AGENT_MODEL=claude-sonnet-4-5@20250929
-```
-
-**Agent tools:**
-- `update_pr_title` - Updates title with validation
-- `update_pr_description` - Updates description with validation
-
-### Shared Validation (`prvalidation/`)
-
-Common validation logic used by both examples:
-- Conventional commit regex matching
-- Description length validation
-- `Details` struct with `Markdown()` for check run output
-
-**Valid title formats:**
-```
-feat: add new feature
-fix(auth): resolve login bug
-docs: update README
-refactor(api): simplify handlers
-```
-
-## Architecture
-
-### PR Validator
-
-```
- ┌──────────┐                              GCP
- │  GitHub  │    ┌────────────────────────────────────────────────────────────────┐
- │          │    │                                                                │
- │  PR open │    │  ┌─────────────┐   ┌──────────────────────┐                    │
- │  PR edit ├────┼─►│github-events├──►│  CloudEvents Broker  │                    │
- │          │    │  │  (webhook)  │   │  (filter + enqueue)  │                    │
- │          │    │  └─────────────┘   └──────────┬───────────┘                    │
- └────▲─────┘    │                               │                                │
-      │          │                               ▼                                │
-      │          │                    ┌──────────────────────┐                    │
-      │          │                    │     Workqueue        │                    │
-      │          │                    │  (rcv + dispatcher)  │                    │
-      │          │                    └──────────┬───────────┘                    │
-      │          │                               │                                │
-      │          │                               ▼                                │
-      │          │  ┌──────────────┐  ┌──────────────────────┐                    │
-      │          │  │   OctoSTS    │◄─│     Reconciler       │                    │
-      │          │  │ (get token)  │  │    (validator)       │                    │
-      │          │  └──────────────┘  └──────────┬───────────┘                    │
-      │          │                               │                                │
-      └──────────┼───────────────────────────────┘                                │
-    Check Run    │         Create/Update Check Run via GitHub API                 │
-                 └────────────────────────────────────────────────────────────────┘
-```
-
-**Flow:**
-1. GitHub sends webhook when PR is opened/edited
-2. `github-events` converts webhook to CloudEvent
-3. CloudEvents Broker routes to Workqueue
-4. Reconciler validates title/description
-5. Creates Check Run with pass/fail status
-
-### PR Autofix
-
-```
- ┌──────────┐                              GCP
- │  GitHub  │    ┌────────────────────────────────────────────────────────────────┐
- │          │    │                                                                │
- │  PR open │    │  ┌─────────────┐   ┌──────────────────────┐                    │
- │  PR edit ├────┼─►│github-events├──►│  CloudEvents Broker  │                    │
- │          │    │  │  (webhook)  │   │  (filter + enqueue)  │                    │
- │          │    │  └─────────────┘   └──────────┬───────────┘                    │
- └────▲─────┘    │                               │                                │
-      │          │                               ▼                                │
-      │          │                    ┌──────────────────────┐                    │
-      │          │                    │     Workqueue        │                    │
-      │          │                    │  (rcv + dispatcher)  │                    │
-      │          │                    └──────────┬───────────┘                    │
-      │          │                               │                                │
-      │          │                               ▼                                │
-      │          │  ┌──────────────┐  ┌──────────────────────┐  ┌──────────────┐  │
-      │          │  │   OctoSTS    │◄─│     Reconciler       │─►│  Metaagent   │  │
-      │          │  │ (get token)  │  │ (validator + agent)  │  │  (Vertex AI) │  │
-      │          │  └──────────────┘  └──────────┬───────────┘  └──────────────┘  │
-      │          │                               │                                │
-      └──────────┼───────────────────────────────┘                                │
-  Check Run +    │    Create/Update Check Run + Update PR via GitHub API          │
-  PR Updates     └────────────────────────────────────────────────────────────────┘
-```
-
-**Flow:**
-1. GitHub sends webhook when PR is opened/edited
-2. `github-events` converts webhook to CloudEvent
-3. CloudEvents Broker routes to Workqueue
-4. Reconciler validates title/description
-5. If `driftlessaf/autofix` label present and issues found:
-   - Calls AI agent via Vertex AI (Gemini or Claude, configurable via `AGENT_MODEL`)
-   - Agent uses tools to fix PR title/description
-   - Re-validates after fixes
-6. Creates Check Run with results (including model used and reasoning)
-
-## Project Structure
-
-```
-driftlessaf/examples/
-├── github-pr-validator/
-│   └── cmd/reconciler/
-│       ├── main.go           # Validator reconciler
-│       └── main_test.go      # Unit tests
-├── github-pr-autofix/
-│   └── cmd/reconciler/
-│       ├── main.go           # Autofix reconciler with label gating
-│       ├── agent.go          # Metaagent setup (Gemini/Claude via Vertex AI)
-│       ├── prtools.go        # PR tool definitions and handlers (Claude + Google)
-│       ├── prompts.go        # System and user prompts
-│       ├── types.go          # PRContext and PRFixResult types
-│       └── main_test.go      # Unit tests
-├── prvalidation/
-│   ├── validation.go         # Shared validation logic and Details struct
-│   └── validation_test.go    # Validation tests
-├── go.mod
-└── go.sum
-```
-
-## Running Tests
+## Running tests
 
 The tests don't require GitHub credentials or any external services.
 
 ```bash
-cd driftlessaf/examples
+cd examples
 go test -v ./...
 ```
 
-## Key Concepts
+## Key concepts (validator and autofix)
+
+The patterns below apply to the `github-pr-validator` and `github-pr-autofix` examples,
+which build directly on `githubreconciler` + `statusmanager`. The `github-issue-materializer`
+and `github-path-modernizer` examples use the higher-level `metareconciler` and
+`metapathreconciler` abstractions respectively, and have their own architectural docs in
+their READMEs.
 
 ### StatusManager
 
 The reconciler uses `statusmanager` to manage GitHub Check Runs. This provides:
-- **Idempotency**: Checks `ObservedState()` before processing to skip already-processed states
-- **State persistence**: Stores validation details in the check run for future reference
-- **Cloud Logging URL**: Automatically links check runs to Cloud Logging for debugging
+
+- **Idempotency**: checks `ObservedState()` before processing to skip already-processed states.
+- **State persistence**: stores validation details in the check run for future reference.
+- **Cloud Logging URL**: automatically links check runs to Cloud Logging for debugging.
 
 ```go
 // Create status manager at startup
@@ -201,12 +80,15 @@ return session.SetActualState(ctx, "All checks passed!", status)
 ```
 
 > **Note**: The `ObservedGeneration` field in `statusmanager.Status` is always set to the
-> commit SHA by the statusmanager. For custom idempotency keys (like title+body hash),
-> store them in your `Details` struct. This pattern is used by production bots like qackage.
+> commit SHA by the statusmanager. For custom idempotency keys, such as a hash of the
+> title and body, store them in your `Details` struct. This pattern is used by production
+> bots like qackage.
 
-### Details Struct
+### Details struct
 
-Define a `Details` struct to hold reconciler-specific state. Implement `Markdown()` to render the check run output:
+Define a `Details` struct to hold reconciler-specific state. Implement `Markdown()` to render
+the check run output. The shared [`prvalidation`](./prvalidation/) package defines the
+`Details` type used by both PR examples:
 
 ```go
 type Details struct {
@@ -232,7 +114,7 @@ func computeGeneration(sha, title, body string) string {
 }
 ```
 
-### Reconciler Pattern
+### Reconciler pattern
 
 The reconciler receives work items from a workqueue and processes them idempotently:
 
@@ -257,7 +139,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 }
 ```
 
-### Workqueue Integration
+### Workqueue integration
 
 The reconciler implements `WorkqueueServiceServer.Process()`:
 
@@ -268,12 +150,13 @@ workqueue.RegisterWorkqueueServiceServer(server, githubreconciler.NewReconciler(
 ))
 ```
 
-### Error Handling
+### Error handling
 
-- **Retriable errors**: Return standard error → workqueue retries with backoff
-- **Non-retriable errors**: Use `workqueue.NonRetriableError()` → skip retries
-- **Delayed requeue**: Use `workqueue.RequeueAfter(duration)` → retry after delay
+- **Retriable errors**: return a standard error → workqueue retries with backoff.
+- **Non-retriable errors**: use `workqueue.NonRetriableError()` → skip retries.
+- **Delayed requeue**: use `workqueue.RequeueAfter(duration)` → retry after delay.
 
 ## Deployment
 
-Deploy reconcilers to GCP using the Terraform modules from [driftlessaf/terraform-infra-reconcilers](https://github.com/driftlessaf/terraform-infra-reconcilers).
+Deploy reconcilers to GCP using the Terraform modules from
+[driftlessaf/terraform-infra-reconcilers](https://github.com/driftlessaf/terraform-infra-reconcilers).
