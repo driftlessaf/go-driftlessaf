@@ -13,7 +13,7 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 const testMarker = "<!--test-bot:no-changes-->"
@@ -62,7 +62,7 @@ func newMarkerCommentServer(t *testing.T, existing ...*github.IssueComment) (*gi
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}
@@ -252,7 +252,7 @@ func forbiddenServer(t *testing.T, mux *http.ServeMux) *github.Client {
 	t.Helper()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestApplyReadyForReview(t *testing.T) {
 			})
 			srv := httptest.NewServer(mux)
 			t.Cleanup(srv.Close)
-			client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 			if err != nil {
 				t.Fatalf("creating client: %v", err)
 			}
@@ -341,7 +341,7 @@ func TestFindMarkerCommentPaginates(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}

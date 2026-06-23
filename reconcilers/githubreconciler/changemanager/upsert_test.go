@@ -18,7 +18,7 @@ import (
 	"text/template"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 func TestUpsert(t *testing.T) {
@@ -192,7 +192,7 @@ func TestUpsert(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 
-			client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 			if err != nil {
 				t.Fatalf("creating client: %v", err)
 			}
@@ -318,7 +318,7 @@ func TestUpsertEmbedsWrapper(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestAddLabels(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 
-			client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 			if err != nil {
 				t.Fatalf("creating client: %v", err)
 			}

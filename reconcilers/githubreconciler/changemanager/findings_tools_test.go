@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 func TestRerunCICheck(t *testing.T) {
@@ -51,7 +51,7 @@ func TestRerunCICheck(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 			if err != nil {
 				t.Fatalf("creating client: %v", err)
 			}
@@ -81,7 +81,7 @@ func TestRerunCICheckJobIDRouting(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := github.NewClient(nil).WithEnterpriseURLs(srv.URL, srv.URL)
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}

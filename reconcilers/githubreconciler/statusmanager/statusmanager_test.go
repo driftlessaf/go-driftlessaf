@@ -12,12 +12,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
@@ -891,8 +890,13 @@ func TestResetForRerun(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := github.NewClient(server.Client())
-	client.BaseURL, _ = url.Parse(server.URL + "/")
+	client, err := github.NewClient(
+		github.WithHTTPClient(server.Client()),
+		github.WithEnterpriseURLs(server.URL, server.URL),
+	)
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
 
 	if err := ResetForRerun(t.Context(), client, owner, repo, identity, headSHA); err != nil {
 		t.Fatalf("ResetForRerun() error = %v", err)
@@ -901,7 +905,7 @@ func TestResetForRerun(t *testing.T) {
 	if gotMethod != http.MethodPost {
 		t.Errorf("method: got = %s, want = POST", gotMethod)
 	}
-	if want := fmt.Sprintf("/repos/%s/%s/check-runs", owner, repo); gotPath != want {
+	if want := fmt.Sprintf("/api/v3/repos/%s/%s/check-runs", owner, repo); gotPath != want {
 		t.Errorf("path: got = %q, want = %q", gotPath, want)
 	}
 	if gotOpts.Name != identity {

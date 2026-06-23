@@ -14,7 +14,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 // reconcilePullRequest handles PR events with a three-way branch:

@@ -13,7 +13,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 	"chainguard.dev/driftlessaf/workqueue"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 func mustTemplateExecutor(t *testing.T) *internaltemplate.Template[embeddedData[testData]] {

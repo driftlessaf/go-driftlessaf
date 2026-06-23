@@ -18,7 +18,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
 	"github.com/chainguard-dev/clog"
 	_ "github.com/chainguard-dev/clog/gcp/init"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 type config struct{}

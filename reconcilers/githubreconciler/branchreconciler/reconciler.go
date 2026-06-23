@@ -16,7 +16,7 @@ import (
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"github.com/go-git/go-git/v5"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 // Reconciler orchestrates branch-based reconciliation with agent iteration.

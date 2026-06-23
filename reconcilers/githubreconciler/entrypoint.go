@@ -19,7 +19,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/profiler"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"github.com/sethvargo/go-envconfig"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -281,7 +281,10 @@ func CLIMain[T any](ctx context.Context, f Functor[T], cfg T, keys []string, opt
 	if err != nil {
 		return fmt.Errorf("create token source: %w", err)
 	}
-	gh := github.NewClient(oauth2.NewClient(ctx, ts))
+	gh, err := github.NewClient(github.WithHTTPClient(oauth2.NewClient(ctx, ts)))
+	if err != nil {
+		return fmt.Errorf("create github client: %w", err)
+	}
 
 	clog.InfoContext(ctx, "Starting reconciler loop", "identity", mo.identity, "keys", len(keys))
 

@@ -14,7 +14,7 @@ import (
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/octo-sts/app/pkg/gcpkms"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/singleflight"
@@ -37,9 +37,13 @@ func NewApp(ctx context.Context, appID int64, keyURI string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	client, err := github.NewClient(github.WithTransport(atr))
+	if err != nil {
+		return nil, fmt.Errorf("create github client: %w", err)
+	}
 	return &App{
 		atr:    atr,
-		client: github.NewClient(&http.Client{Transport: atr}),
+		client: client,
 		cache:  make(map[string]int64),
 	}, nil
 }

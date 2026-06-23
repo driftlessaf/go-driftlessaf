@@ -12,7 +12,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/shurcooL/githubv4"
@@ -25,7 +25,10 @@ func newTestClient(t *testing.T, handler http.Handler) *GraphQLClient {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	gh := github.NewClient(nil).WithAuthToken("fake")
+	gh, err := github.NewClient(github.WithAuthToken("fake"))
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
 	return newGraphQLClient(gh, srv.URL)
 }
 
@@ -184,11 +187,14 @@ func TestQuery_RecordsHTTPStatusCodeOnConnectionError(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	gh := github.NewClient(nil).WithAuthToken("fake")
+	gh, err := github.NewClient(github.WithAuthToken("fake"))
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
 	client := newGraphQLClient(gh, url)
 
 	var q struct{}
-	err := client.Query(context.Background(), "ConnFailOp", &q, nil)
+	err = client.Query(context.Background(), "ConnFailOp", &q, nil)
 	if err == nil {
 		t.Fatal("expected error for connection failure")
 	}

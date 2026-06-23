@@ -15,7 +15,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"chainguard.dev/driftlessaf/examples/prvalidation"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 // PRTools contains callback functions for PR operations.

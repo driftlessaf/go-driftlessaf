@@ -12,7 +12,7 @@ import (
 
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/modules/github-bots/sdk"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"golang.org/x/oauth2"
 )
 

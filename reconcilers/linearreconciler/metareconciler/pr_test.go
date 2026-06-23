@@ -23,7 +23,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"golang.org/x/oauth2"
 )
 
@@ -37,6 +37,11 @@ type testResp struct{}
 func (testResp) GetCommitMessage() string { return "" }
 
 type testCB struct{}
+
+// roundTripperFunc adapts a function to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // linearStateFixture is a small mock of the bits of Linear's GraphQL API +
 // asset CDN that the state-mutation helpers exercise: fetch issue, load
@@ -376,12 +381,25 @@ func TestHandlePREvent_RoutingOnlyDoesNotWriteState(t *testing.T) {
 			cc := githubreconciler.NewClientCache(func(_ context.Context, _, _ string) (oauth2.TokenSource, error) {
 				return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test"}), nil
 			})
-			ghClient, err := cc.Get(t.Context(), "o", "r")
+			// go-github v88 made Client.BaseURL read-only, so the old approach
+			// of overriding it on the cached client no longer compiles. Instead,
+			// pre-warm the cache with a context carrying an HTTP client whose
+			// transport rewrites every request to the mock server; the cache
+			// builds its oauth2 client on top of that base, and the reconciler's
+			// own cc.Get returns the same cached, redirected client.
+			mockURL, err := url.Parse(ghServer.URL)
 			if err != nil {
+				t.Fatalf("parse mock URL: %v", err)
+			}
+			redirect := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				req.URL.Scheme = mockURL.Scheme
+				req.URL.Host = mockURL.Host
+				return http.DefaultTransport.RoundTrip(req)
+			})}
+			warmCtx := context.WithValue(t.Context(), oauth2.HTTPClient, redirect)
+			if _, err := cc.Get(warmCtx, "o", "r"); err != nil {
 				t.Fatalf("ClientCache.Get: %v", err)
 			}
-			baseURL, _ := url.Parse(ghServer.URL + "/")
-			ghClient.BaseURL = baseURL
 
 			titleTmpl, err := template.New("title").Parse("test title")
 			if err != nil {

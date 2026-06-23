@@ -9,13 +9,13 @@ import (
 	"fmt"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 // ExampleNewGraphQLClient demonstrates creating a GraphQL client from a
 // github.Client.
 func ExampleNewGraphQLClient() {
-	gh := github.NewClient(nil)
+	gh, _ := github.NewClient()
 	client := graphqlclient.NewGraphQLClient(gh)
 	fmt.Printf("client type: %T\n", client)
 	// Output: client type: *graphqlclient.GraphQLClient
