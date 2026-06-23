@@ -26,6 +26,10 @@ const (
 	// maxIdentityLength is the maximum allowed length for an identity.
 	// Ensures the label (identity:path/hash) stays within GitHub's limit.
 	maxIdentityLength = 20
+
+	// defaultMaxExistingIssues floors the pagination guard so small
+	// maxDesiredIssues values still tolerate a few skip-labeled/manual issues.
+	defaultMaxExistingIssues = 100
 )
 
 // Comparable is the interface that types must implement to be used with IssueManager.
@@ -82,6 +86,25 @@ func WithRepo[T Comparable[T]](repo string) Option[T] {
 func WithMaxDesiredIssuesPerPath[T Comparable[T]](limit int) Option[T] {
 	return func(im *IM[T]) {
 		im.maxDesiredIssues = limit
+	}
+}
+
+// sessionConfig holds per-session overrides applied in NewSession.
+type sessionConfig struct {
+	maxDesiredIssues int
+}
+
+// SessionOption overrides one NewSession without affecting other sessions.
+type SessionOption func(*sessionConfig)
+
+// WithSessionMaxDesiredIssues overrides maxDesiredIssues for this session only —
+// for sweep-style scopes (e.g. a sentinel key) that own many issues under one
+// label. Non-positive values are ignored.
+func WithSessionMaxDesiredIssues(limit int) SessionOption {
+	return func(c *sessionConfig) {
+		if limit > 0 {
+			c.maxDesiredIssues = limit
+		}
 	}
 }
 
@@ -149,9 +172,16 @@ func (im *IM[T]) NewSession(
 	ctx context.Context,
 	client *github.Client,
 	res *githubreconciler.Resource,
+	sessionOpts ...SessionOption,
 ) (*IssueSession[T], error) {
 	if res.Type != githubreconciler.ResourceTypePath {
 		return nil, fmt.Errorf("issue manager only supports Path resources, got: %v", res.Type)
+	}
+
+	// Per-session config defaults to the manager limit, overridable per call.
+	cfg := sessionConfig{maxDesiredIssues: im.maxDesiredIssues}
+	for _, opt := range sessionOpts {
+		opt(&cfg)
 	}
 
 	// Determine which owner/repo to use
@@ -166,9 +196,11 @@ func (im *IM[T]) NewSession(
 
 	pathLabel := constructPathLabel(im.identity, res.Path)
 
-	// Query for existing issues with this label
-	// Set a reasonable upper limit to prevent quota issues
-	maxExistingIssues := 100
+	// Guard must exceed maxDesiredIssues (else NewSession rejects the set the
+	// reconciler is allowed to own); scale with it, floored at the default.
+	maxExisting := max(2*cfg.maxDesiredIssues, defaultMaxExistingIssues)
+
+	// Query existing issues with this label, bounded by maxExisting.
 	var allIssues []*github.Issue
 	opts := &github.IssueListByRepoOptions{
 		State:  "open",
@@ -187,8 +219,8 @@ func (im *IM[T]) NewSession(
 		allIssues = append(allIssues, issues...)
 
 		// Check if we've exceeded the limit
-		if len(allIssues) >= maxExistingIssues {
-			return nil, fmt.Errorf("found %d or more issues with label %q, exceeding safety limit of %d", len(allIssues), pathLabel, maxExistingIssues)
+		if len(allIssues) >= maxExisting {
+			return nil, fmt.Errorf("found %d or more issues with label %q, exceeding safety limit of %d", len(allIssues), pathLabel, maxExisting)
 		}
 
 		if resp.NextPage == 0 {
@@ -216,12 +248,13 @@ func (im *IM[T]) NewSession(
 	}
 
 	return &IssueSession[T]{
-		manager:        im,
-		client:         client,
-		resource:       res,
-		owner:          owner,
-		repo:           repo,
-		pathLabel:      pathLabel,
-		existingIssues: existingIssues,
+		manager:          im,
+		client:           client,
+		resource:         res,
+		owner:            owner,
+		repo:             repo,
+		pathLabel:        pathLabel,
+		existingIssues:   existingIssues,
+		maxDesiredIssues: cfg.maxDesiredIssues,
 	}, nil
 }

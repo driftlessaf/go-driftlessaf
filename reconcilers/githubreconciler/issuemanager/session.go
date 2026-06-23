@@ -28,13 +28,14 @@ type existingIssue[T Comparable[T]] struct {
 // Unlike Session in changemanager which handles a single PR, IssueSession manages multiple issues.
 // T must implement the Comparable interface to enable matching between existing and desired issues.
 type IssueSession[T Comparable[T]] struct {
-	manager        *IM[T]
-	client         *github.Client
-	resource       *githubreconciler.Resource
-	owner          string
-	repo           string
-	pathLabel      string
-	existingIssues []existingIssue[T]
+	manager          *IM[T]
+	client           *github.Client
+	resource         *githubreconciler.Resource
+	owner            string
+	repo             string
+	pathLabel        string
+	existingIssues   []existingIssue[T]
+	maxDesiredIssues int
 }
 
 // hasSkipLabel checks if a specific issue has the skip label.
@@ -75,8 +76,8 @@ func (s *IssueSession[T]) Reconcile(
 	}
 
 	// Check if desired issues exceed the limit
-	if len(desired) > s.manager.maxDesiredIssues {
-		return nil, fmt.Errorf("desired issues (%d) exceeds limit (%d) for path %s", len(desired), s.manager.maxDesiredIssues, s.resource.Path)
+	if len(desired) > s.maxDesiredIssues {
+		return nil, fmt.Errorf("desired issues (%d) exceeds limit (%d) for path %s", len(desired), s.maxDesiredIssues, s.resource.Path)
 	}
 
 	issueURLs := make([]string, len(desired))
