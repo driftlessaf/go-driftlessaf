@@ -171,6 +171,56 @@ func TestOnlyToolCalls(t *testing.T) {
 	}
 }
 
+func TestOnlyToolCallsAllowsValidateResult(t *testing.T) {
+	// validate_result is the non-terminal companion to submit_result. Allow-lists
+	// that list submit_result should implicitly permit validate_result too, so a
+	// correct validate-before-submit trace is not scored as an unexpected tool call.
+	obs := &mockObserver{}
+	trace := &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_logs"},
+			{Name: "validate_result"},
+			{Name: "submit_result"},
+		},
+	}
+
+	// validate_result is allowed implicitly because submit_result is listed.
+	callback := evals.OnlyToolCalls[string]("read_logs", "submit_result")
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure: validate_result should be allowed alongside submit_result: %v", obs.failures)
+	}
+
+	// A genuinely unlisted tool still fails, even when submit_result is allowed.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "submit_result"},
+			{Name: "rm_rf"},
+		},
+	}
+	callback = evals.OnlyToolCalls[string]("read_logs", "submit_result")
+	callback(obs, trace)
+	if len(obs.failures) == 0 {
+		t.Errorf("expected failure for disallowed tool rm_rf")
+	} else if !strings.Contains(obs.failures[0], "rm_rf") {
+		t.Errorf("failure message: got = %q, wanted = contains 'rm_rf'", obs.failures[0])
+	}
+
+	// validate_result is NOT implicitly allowed when submit_result is absent.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "validate_result"},
+		},
+	}
+	callback = evals.OnlyToolCalls[string]("read_logs")
+	callback(obs, trace)
+	if len(obs.failures) == 0 {
+		t.Errorf("expected failure: validate_result should not be allowed without submit_result")
+	}
+}
+
 func TestRequiredToolCalls(t *testing.T) {
 	obs := &mockObserver{}
 	trace := &agenttrace.Trace[string]{
