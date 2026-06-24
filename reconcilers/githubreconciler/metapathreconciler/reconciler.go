@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -103,6 +104,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// the newest update. See WithBaseRevalidation.
 	baseRevalidation bool
 
+	// unknownMergeabilityRequeueAfter, when > 0, requeues a PR whose mergeability
+	// GitHub has not yet computed instead of resetting it from the default
+	// branch. Zero keeps the historical behavior. See
+	// WithRequeueOnUnknownMergeability.
+	unknownMergeabilityRequeueAfter time.Duration
+
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
 	buildRequest   func(context.Context, *changemanager.Session[PRData[Req]], *gogit.Worktree, []callbacks.Finding) (Req, error)
@@ -121,10 +128,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 type Option func(*option)
 
 type option struct {
-	mode             Mode
-	labelFn          func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
-	baseRevalidation bool
-	giveUp           *changemanager.GiveUpComment
+	mode                            Mode
+	labelFn                         func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+	baseRevalidation                bool
+	unknownMergeabilityRequeueAfter time.Duration
+	giveUp                          *changemanager.GiveUpComment
 }
 
 // WithMode configures the reconciler's operating mode.
@@ -156,6 +164,16 @@ func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagno
 func WithBaseRevalidation() Option {
 	return func(o *option) {
 		o.baseRevalidation = true
+	}
+}
+
+// WithRequeueOnUnknownMergeability requeues after the given delay when GitHub
+// has not yet computed a PR's mergeability and there is nothing else to act on
+// (no findings, no pending checks), instead of resetting the PR from the
+// default branch. A non-positive delay disables it (the default).
+func WithRequeueOnUnknownMergeability(after time.Duration) Option {
+	return func(o *option) {
+		o.unknownMergeabilityRequeueAfter = after
 	}
 }
 
@@ -197,19 +215,20 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any](
 		return nil, fmt.Errorf("create status manager: %w", err)
 	}
 	return &Reconciler[Req, Resp, CB]{
-		identity:         identity,
-		analyzer:         analyzer,
-		statusManager:    sm,
-		changeManager:    changeManager,
-		cloneMeta:        cloneMeta,
-		prLabels:         prLabels,
-		mode:             o.mode,
-		baseRevalidation: o.baseRevalidation,
-		agent:            agent,
-		buildRequest:     buildRequest,
-		buildCallbacks:   buildCallbacks,
-		labelFn:          o.labelFn,
-		giveUp:           o.giveUp,
+		identity:                        identity,
+		analyzer:                        analyzer,
+		statusManager:                   sm,
+		changeManager:                   changeManager,
+		cloneMeta:                       cloneMeta,
+		prLabels:                        prLabels,
+		mode:                            o.mode,
+		baseRevalidation:                o.baseRevalidation,
+		unknownMergeabilityRequeueAfter: o.unknownMergeabilityRequeueAfter,
+		agent:                           agent,
+		buildRequest:                    buildRequest,
+		buildCallbacks:                  buildCallbacks,
+		labelFn:                         o.labelFn,
+		giveUp:                          o.giveUp,
 	}, nil
 }
 
