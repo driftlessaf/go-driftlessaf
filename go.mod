@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	chainguard.dev/apko v1.2.18
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.83
+	chainguard.dev/sdk v0.1.57
 	cloud.google.com/go/aiplatform v1.122.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.31.0
@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.48.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v1.6.10
+	github.com/chainguard-dev/terraform-infra-common v1.0.12
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.7
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.18.0
@@ -49,7 +49,7 @@ require (
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.21.0
 	google.golang.org/api v0.283.0
-	google.golang.org/genai v1.36.0
+	google.golang.org/genai v1.62.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
 	gopkg.in/yaml.v3 v3.0.1
@@ -300,3 +300,7 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
