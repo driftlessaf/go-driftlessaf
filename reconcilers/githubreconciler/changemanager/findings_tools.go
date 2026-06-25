@@ -94,26 +94,30 @@ func cleanLogs(logs string) string {
 	return logs
 }
 
-// rerunCICheck triggers a rerun of a GitHub Actions job identified by its details URL.
-func rerunCICheck(ctx context.Context, gh *github.Client, owner, repo, detailsURL string) error {
-	if detailsURL == "" {
-		return fmt.Errorf("finding has no details URL")
+// rerunCICheck reruns a failed check run. Actions check runs (details URL points
+// at a job) are rerun job-by-job; others (e.g. a reconciler's status check) are
+// re-requested by check run ID, as the GitHub UI "Re-run" button does.
+func rerunCICheck(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) error {
+	// GitHub Actions: rerun just the failed job parsed from the details URL.
+	if matches := actionsURLRegex.FindStringSubmatch(f.DetailsURL); len(matches) >= 3 {
+		jobID, err := strconv.ParseInt(matches[2], 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse job ID from URL %q: %w", f.DetailsURL, err)
+		}
+		if _, err := gh.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
+			return fmt.Errorf("rerun job %d: %w", jobID, err)
+		}
+		return nil
 	}
 
-	matches := actionsURLRegex.FindStringSubmatch(detailsURL)
-	if len(matches) < 3 {
-		return fmt.Errorf("details URL %q does not match GitHub Actions URL pattern", detailsURL)
-	}
-
-	jobID, err := strconv.ParseInt(matches[2], 10, 64)
+	// Other check runs: re-request by check run ID (the finding's Identifier).
+	checkRunID, err := strconv.ParseInt(f.Identifier, 10, 64)
 	if err != nil {
-		return fmt.Errorf("parse job ID from URL %q: %w", detailsURL, err)
+		return fmt.Errorf("parse check run ID from identifier %q: %w", f.Identifier, err)
 	}
-
-	if _, err := gh.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
-		return fmt.Errorf("rerun job %d: %w", jobID, err)
+	if _, err := gh.Checks.ReRequestCheckRun(ctx, owner, repo, checkRunID); err != nil {
+		return fmt.Errorf("re-request check run %d: %w", checkRunID, err)
 	}
-
 	return nil
 }
 

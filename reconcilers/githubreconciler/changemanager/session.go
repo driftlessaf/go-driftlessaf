@@ -553,7 +553,7 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			}
 			for _, f := range s.findings {
 				if f.Kind == kind && f.Identifier == identifier {
-					return rerunCICheck(ctx, s.client, s.owner, s.repo, f.DetailsURL)
+					return rerunCICheck(ctx, s.client, s.owner, s.repo, f)
 				}
 			}
 			return fmt.Errorf("finding not found: %s/%s", kind, identifier)
