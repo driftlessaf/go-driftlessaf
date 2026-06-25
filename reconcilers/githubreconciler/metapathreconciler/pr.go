@@ -148,54 +148,35 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 		return fmt.Errorf("get worktree: %w", err)
 	}
 
-	// filesToAnalyze starts as all changed files; config mode may narrow it,
-	// and all review modes apply exclude_patterns filtering.
-	filesToAnalyze := pd.files
-
+	// filesToAnalyze starts as all changed files; selectReviewFiles narrows
+	// it based on mode and exclude_patterns, and returns a terminal status
+	// if the PR should be short-circuited (e.g. config says not to review,
+	// or all files are excluded).
+	var cfg *fullRepoConfig
 	if r.mode.IsConfig() {
-		cfg, err := loadFullRepoConfig(wt, r.identity)
+		loaded, err := loadFullRepoConfig(wt, r.identity)
 		if err != nil {
 			return fmt.Errorf("load repo config: %w", err)
 		}
-		if !cfg.Mode.ShouldReview() {
-			// currentStatus was already read at the gate above and, having
-			// passed the already-processed check, is never a completed status
-			// at this SHA — so post directly rather than re-reading via
-			// reportNeutral.
-			return session.SetActualState(ctx, "Skipped (config)", &statusmanager.Status[CheckDetails]{
-				Status:     "completed",
-				Conclusion: "neutral",
-			})
-		}
-		// Filter out files that match exclude_patterns (e.g. testdata
-		// fixtures). We intentionally do NOT apply path_patterns here:
-		// path_patterns are trigger keys for the fix/resync path (e.g.
-		// "go.mod" represents a module root whose entire tree is analyzed),
-		// not a scope restriction for PR review. Applying them would silently
-		// drop review feedback for any changed file that does not literally
-		// match a trigger key.
-		filesToAnalyze = applyExcludeFilter(filesToAnalyze, cfg)
+		cfg = loaded
 	} else if r.mode.ShouldReview() {
-		// Non-config review modes (ModeReview, ModeAll) also apply
-		// exclude_patterns from the repo config file so that deliberately-
-		// broken fixtures under testdata/ (and other excluded paths) are not
-		// flagged in PR review, matching the behaviour of the fix/resync paths.
-		cfg, err := loadFullRepoConfig(wt, r.identity)
+		loaded, err := loadFullRepoConfig(wt, r.identity)
 		if err != nil {
 			// If the config file is missing or unreadable, proceed without
 			// filtering rather than failing the check entirely.
 			clog.WarnContext(ctx, "Failed to load repo config for exclude filtering, proceeding without it", "error", err)
 		} else {
-			filesToAnalyze = applyExcludeFilter(filesToAnalyze, cfg)
+			cfg = loaded
 		}
 	}
 
-	if len(filesToAnalyze) == 0 {
-		clog.DebugContext(ctx, "No files to analyze after path filtering")
-		return session.SetActualState(ctx, "No files to analyze", &statusmanager.Status[CheckDetails]{
-			Status:     "completed",
-			Conclusion: "success",
-		})
+	filesToAnalyze, termTitle, term := selectReviewFiles(r.mode, cfg, pd.files)
+	if term != nil {
+		// currentStatus was already read at the gate above and, having
+		// passed the already-processed check, is never a completed status
+		// at this SHA — so post directly rather than re-reading via
+		// reportNeutral.
+		return session.SetActualState(ctx, termTitle, term)
 	}
 
 	// Run analyzer on the changed files, then filter diagnostics to only
@@ -218,4 +199,52 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 		Conclusion: "failure",
 		Details:    CheckDetails{Diagnostics: diagnostics, Identity: r.identity},
 	})
+}
+
+// selectReviewFiles decides which files to analyze for a PR review and whether
+// to short-circuit with a terminal status. It is a pure function with no I/O,
+// extracted from reconcilePullRequest so it can be unit-tested without the full
+// reconcile harness (worktree, GitHub client, etc.).
+//
+// Parameters:
+//   - mode: the reconciler's operating mode.
+//   - cfg: the repo config loaded from .{identity}.yaml, or nil if the file
+//     could not be loaded (treated as fail-open in ShouldReview mode, and as
+//     "not configured for review" in IsConfig mode).
+//   - files: the changed files in the PR diff.
+//
+// Returns:
+//   - keep: the files to pass to the analyzer (subset of files after filtering).
+//   - title: the check-run title to use when term != nil.
+//   - term: if non-nil, the caller should short-circuit with this status instead
+//     of running the analyzer.
+func selectReviewFiles(mode Mode, cfg *fullRepoConfig, files []string) (keep []string, title string, term *statusmanager.Status[CheckDetails]) {
+	if mode.IsConfig() {
+		// In config mode the repo's .{identity}.yaml determines whether to
+		// review. A missing or unconfigured file (cfg == nil or
+		// cfg.Mode.ShouldReview() == false) means "not configured for review".
+		if cfg == nil || !cfg.Mode.ShouldReview() {
+			return nil, "Skipped (config)", &statusmanager.Status[CheckDetails]{
+				Status:     "completed",
+				Conclusion: "neutral",
+			}
+		}
+		// Config says to review: apply exclude_patterns filtering.
+		files = applyExcludeFilter(files, cfg)
+	} else if mode.ShouldReview() {
+		// Non-config review modes (ModeReview, ModeAll): apply
+		// exclude_patterns if a config was loaded. A nil cfg means the load
+		// failed; fail-open by proceeding without filtering.
+		if cfg != nil {
+			files = applyExcludeFilter(files, cfg)
+		}
+	}
+
+	if len(files) == 0 {
+		return nil, "No files to analyze", &statusmanager.Status[CheckDetails]{
+			Status:     "completed",
+			Conclusion: "neutral",
+		}
+	}
+	return files, "", nil
 }

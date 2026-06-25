@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1113,5 +1114,155 @@ func TestFullRepoConfigIsExcluded(t *testing.T) {
 				t.Errorf("isExcluded(%q): got = %v, wanted = %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+// mustCompilePatterns is a test helper that compiles anchored patterns or fails.
+func mustCompilePatterns(t *testing.T, patterns []string) []*regexp.Regexp {
+	t.Helper()
+	compiled, err := compileAnchoredPatterns(patterns)
+	if err != nil {
+		t.Fatalf("compileAnchoredPatterns: %v", err)
+	}
+	return compiled
+}
+
+func TestSelectReviewFiles(t *testing.T) {
+	testdataPat := ".*/testdata/.*"
+	thirdPartyPat := ".*/third_party/.*"
+
+	tests := []struct {
+		name           string
+		mode           Mode
+		cfg            *fullRepoConfig
+		files          []string
+		wantKeep       []string
+		wantTitle      string
+		wantConclusion string // empty means term == nil (no short-circuit)
+	}{{
+		// P1: IsConfig mode → excludes applied, non-excluded files kept.
+		name: "IsConfig mode: excludes applied",
+		mode: ModeConfig,
+		cfg: &fullRepoConfig{
+			Mode:            ModeAll,
+			excludePatterns: mustCompilePatterns(t, []string{testdataPat}),
+		},
+		files:    []string{"pkg/foo.go", "bots/skillup/testdata/fixture.yaml", "cmd/main.go"},
+		wantKeep: []string{"pkg/foo.go", "cmd/main.go"},
+	}, {
+		// P1: IsConfig mode, config not review → neutral "Skipped (config)".
+		name: "IsConfig mode: config not review → neutral",
+		mode: ModeConfig,
+		cfg: &fullRepoConfig{
+			Mode: ModeFix,
+		},
+		files:          []string{"pkg/foo.go"},
+		wantTitle:      "Skipped (config)",
+		wantConclusion: "neutral",
+	}, {
+		// P1: IsConfig mode, nil cfg → neutral "Skipped (config)".
+		name:           "IsConfig mode: nil cfg → neutral",
+		mode:           ModeConfig,
+		cfg:            nil,
+		files:          []string{"pkg/foo.go"},
+		wantTitle:      "Skipped (config)",
+		wantConclusion: "neutral",
+	}, {
+		// P1: fixed ShouldReview mode (else if branch) → excludes applied.
+		name: "ShouldReview mode: excludes applied",
+		mode: ModeReview,
+		cfg: &fullRepoConfig{
+			Mode:            ModeReview,
+			excludePatterns: mustCompilePatterns(t, []string{testdataPat}),
+		},
+		files:    []string{"pkg/foo.go", "bots/skillup/testdata/fixture.yaml"},
+		wantKeep: []string{"pkg/foo.go"},
+	}, {
+		// P1: fixed mode + config-load error → fail-open (nil cfg, proceed without filtering).
+		name:     "ShouldReview mode: nil cfg (load error) → fail-open",
+		mode:     ModeReview,
+		cfg:      nil,
+		files:    []string{"pkg/foo.go", "bots/skillup/testdata/fixture.yaml"},
+		wantKeep: []string{"pkg/foo.go", "bots/skillup/testdata/fixture.yaml"},
+	}, {
+		// P1+P2: all files excluded → short-circuit with neutral (not success).
+		name: "all files excluded → neutral short-circuit",
+		mode: ModeConfig,
+		cfg: &fullRepoConfig{
+			Mode:            ModeAll,
+			excludePatterns: mustCompilePatterns(t, []string{testdataPat}),
+		},
+		files:          []string{"a/testdata/b.yaml", "c/testdata/d.yaml"},
+		wantTitle:      "No files to analyze",
+		wantConclusion: "neutral",
+	}, {
+		// P3: multiple patterns — file matching the second pattern is excluded.
+		name: "multiple patterns: file matching second pattern excluded",
+		mode: ModeReview,
+		cfg: &fullRepoConfig{
+			Mode:            ModeAll,
+			excludePatterns: mustCompilePatterns(t, []string{testdataPat, thirdPartyPat}),
+		},
+		files:    []string{"pkg/foo.go", "vendor/third_party/lib/x.go", "cmd/main.go"},
+		wantKeep: []string{"pkg/foo.go", "cmd/main.go"},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keep, title, term := selectReviewFiles(tt.mode, tt.cfg, tt.files)
+
+			if tt.wantConclusion != "" {
+				// Expect a terminal short-circuit.
+				if term == nil {
+					t.Fatalf("selectReviewFiles: term = nil, wanted non-nil (conclusion %q)", tt.wantConclusion)
+				}
+				if term.Conclusion != tt.wantConclusion {
+					t.Errorf("term.Conclusion: got = %q, wanted = %q", term.Conclusion, tt.wantConclusion)
+				}
+				if title != tt.wantTitle {
+					t.Errorf("title: got = %q, wanted = %q", title, tt.wantTitle)
+				}
+				if term.Status != "completed" {
+					t.Errorf("term.Status: got = %q, wanted = %q", term.Status, "completed")
+				}
+				return
+			}
+
+			// Expect no short-circuit.
+			if term != nil {
+				t.Fatalf("selectReviewFiles: term = %+v, wanted nil", term)
+			}
+			if title != "" {
+				t.Errorf("title: got = %q, wanted empty", title)
+			}
+			if len(keep) != len(tt.wantKeep) {
+				t.Fatalf("keep: got = %v, wanted = %v", keep, tt.wantKeep)
+			}
+			for i := range tt.wantKeep {
+				if keep[i] != tt.wantKeep[i] {
+					t.Errorf("keep[%d]: got = %q, wanted = %q", i, keep[i], tt.wantKeep[i])
+				}
+			}
+		})
+	}
+}
+
+// TestCompileAnchoredPatternsAnchoring verifies that patterns are anchored so
+// a bare directory name does not match a deeper path (P3 hardening).
+func TestCompileAnchoredPatternsAnchoring(t *testing.T) {
+	// "foo" should match "foo" exactly but NOT "foo/bar".
+	pats, err := compileAnchoredPatterns([]string{"foo"})
+	if err != nil {
+		t.Fatalf("compileAnchoredPatterns: %v", err)
+	}
+	if len(pats) != 1 {
+		t.Fatalf("len(pats): got = %d, wanted = 1", len(pats))
+	}
+	re := pats[0]
+	if !re.MatchString("foo") {
+		t.Error("pattern 'foo' should match exact string 'foo'")
+	}
+	if re.MatchString("foo/bar") {
+		t.Error("anchored pattern 'foo' must NOT match 'foo/bar' (dropped anchor would allow this)")
 	}
 }
