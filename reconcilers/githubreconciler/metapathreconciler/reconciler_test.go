@@ -950,3 +950,168 @@ func newPRWithLabels(names []string) *github.PullRequest {
 	}
 	return &github.PullRequest{Labels: labels}
 }
+
+func TestLoadFullRepoConfig(t *testing.T) {
+	const identity = "test-bot"
+	configPath := "." + identity + ".yaml"
+
+	tests := []struct {
+		name            string
+		content         string // empty means no file
+		wantMode        Mode
+		wantExcludePats int
+		wantErr         bool
+	}{{
+		name:     "no file",
+		content:  "",
+		wantMode: ModeNone,
+	}, {
+		name:     "mode only",
+		content:  "mode: all\n",
+		wantMode: ModeAll,
+	}, {
+		name: "with exclude patterns",
+		content: "mode: all\n" +
+			"exclude_patterns:\n" +
+			"  - '.*/testdata/.*'\n",
+		wantMode:        ModeAll,
+		wantExcludePats: 1,
+	}, {
+		name:    "invalid exclude pattern",
+		content: "exclude_patterns:\n  - '[invalid'\n",
+		wantErr: true,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wt := newTestWorktree(t)
+
+			if tt.content != "" {
+				f, err := wt.Filesystem.Create(configPath)
+				if err != nil {
+					t.Fatalf("create config: %v", err)
+				}
+				if _, err := fmt.Fprint(f, tt.content); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+				f.Close()
+			}
+
+			cfg, err := loadFullRepoConfig(wt, identity)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("loadFullRepoConfig: got = nil, wanted error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadFullRepoConfig: got = %v, wanted = nil", err)
+			}
+			if cfg.Mode != tt.wantMode {
+				t.Errorf("mode: got = %q, wanted = %q", cfg.Mode, tt.wantMode)
+			}
+			if len(cfg.excludePatterns) != tt.wantExcludePats {
+				t.Errorf("len(excludePatterns): got = %d, wanted = %d", len(cfg.excludePatterns), tt.wantExcludePats)
+			}
+		})
+	}
+}
+
+func TestApplyExcludeFilter(t *testing.T) {
+	tests := []struct {
+		name            string
+		excludePatterns []string
+		files           []string
+		want            []string
+	}{{
+		name:  "no exclude patterns: all files pass through",
+		files: []string{"pkg/foo.go", "bots/skillup/internal/agents/reviewer/testdata/files/myapp.yaml"},
+		want:  []string{"pkg/foo.go", "bots/skillup/internal/agents/reviewer/testdata/files/myapp.yaml"},
+	}, {
+		name:            "testdata excluded: fixture filtered out",
+		excludePatterns: []string{".*/testdata/.*"},
+		files: []string{
+			"pkg/foo.go",
+			"bots/skillup/internal/agents/reviewer/testdata/files/myapp.yaml",
+			"cmd/main.go",
+		},
+		want: []string{"pkg/foo.go", "cmd/main.go"},
+	}, {
+		name:            "all files excluded: empty result",
+		excludePatterns: []string{".*/testdata/.*"},
+		files:           []string{"a/testdata/b.yaml", "c/testdata/d.yaml"},
+		want:            []string{},
+	}, {
+		name:            "no files: empty result",
+		excludePatterns: []string{".*/testdata/.*"},
+		files:           []string{},
+		want:            []string{},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			excludePats, err := compileAnchoredPatterns(tt.excludePatterns)
+			if err != nil {
+				t.Fatalf("compileAnchoredPatterns: %v", err)
+			}
+			cfg := &fullRepoConfig{excludePatterns: excludePats}
+			got := applyExcludeFilter(tt.files, cfg)
+			if len(got) != len(tt.want) {
+				t.Fatalf("applyExcludeFilter: got = %v, wanted = %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("applyExcludeFilter[%d]: got = %q, wanted = %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestFullRepoConfigIsExcluded(t *testing.T) {
+	tests := []struct {
+		name            string
+		excludePatterns []string
+		path            string
+		want            bool
+	}{{
+		name: "no exclude patterns: nothing excluded",
+		path: "bots/skillup/internal/agents/reviewer/testdata/files/myapp.yaml",
+		want: false,
+	}, {
+		name:            "testdata path is excluded",
+		excludePatterns: []string{".*/testdata/.*"},
+		path:            "bots/skillup/internal/agents/reviewer/testdata/files/myapp.yaml",
+		want:            true,
+	}, {
+		name:            "non-testdata path is not excluded",
+		excludePatterns: []string{".*/testdata/.*"},
+		path:            "bots/skillup/pkg/reconciler/reconciler.go",
+		want:            false,
+	}, {
+		name:            "go.mod not excluded by testdata pattern",
+		excludePatterns: []string{".*/testdata/.*"},
+		path:            "some/module/go.mod",
+		want:            false,
+	}, {
+		name:            "non-go.mod file not excluded (path_patterns not applied)",
+		excludePatterns: []string{".*/testdata/.*"},
+		path:            "some/module/main.go",
+		want:            false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			excludePats, err := compileAnchoredPatterns(tt.excludePatterns)
+			if err != nil {
+				t.Fatalf("compileAnchoredPatterns(excludePatterns): %v", err)
+			}
+			cfg := &fullRepoConfig{
+				excludePatterns: excludePats,
+			}
+			if got := cfg.isExcluded(tt.path); got != tt.want {
+				t.Errorf("isExcluded(%q): got = %v, wanted = %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

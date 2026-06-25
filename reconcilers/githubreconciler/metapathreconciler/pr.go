@@ -148,12 +148,16 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 		return fmt.Errorf("get worktree: %w", err)
 	}
 
+	// filesToAnalyze starts as all changed files; config mode may narrow it,
+	// and all review modes apply exclude_patterns filtering.
+	filesToAnalyze := pd.files
+
 	if r.mode.IsConfig() {
-		m, err := loadRepoConfig(wt, r.identity)
+		cfg, err := loadFullRepoConfig(wt, r.identity)
 		if err != nil {
 			return fmt.Errorf("load repo config: %w", err)
 		}
-		if !m.ShouldReview() {
+		if !cfg.Mode.ShouldReview() {
 			// currentStatus was already read at the gate above and, having
 			// passed the already-processed check, is never a completed status
 			// at this SHA — so post directly rather than re-reading via
@@ -163,11 +167,40 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 				Conclusion: "neutral",
 			})
 		}
+		// Filter out files that match exclude_patterns (e.g. testdata
+		// fixtures). We intentionally do NOT apply path_patterns here:
+		// path_patterns are trigger keys for the fix/resync path (e.g.
+		// "go.mod" represents a module root whose entire tree is analyzed),
+		// not a scope restriction for PR review. Applying them would silently
+		// drop review feedback for any changed file that does not literally
+		// match a trigger key.
+		filesToAnalyze = applyExcludeFilter(filesToAnalyze, cfg)
+	} else if r.mode.ShouldReview() {
+		// Non-config review modes (ModeReview, ModeAll) also apply
+		// exclude_patterns from the repo config file so that deliberately-
+		// broken fixtures under testdata/ (and other excluded paths) are not
+		// flagged in PR review, matching the behaviour of the fix/resync paths.
+		cfg, err := loadFullRepoConfig(wt, r.identity)
+		if err != nil {
+			// If the config file is missing or unreadable, proceed without
+			// filtering rather than failing the check entirely.
+			clog.WarnContext(ctx, "Failed to load repo config for exclude filtering, proceeding without it", "error", err)
+		} else {
+			filesToAnalyze = applyExcludeFilter(filesToAnalyze, cfg)
+		}
+	}
+
+	if len(filesToAnalyze) == 0 {
+		clog.DebugContext(ctx, "No files to analyze after path filtering")
+		return session.SetActualState(ctx, "No files to analyze", &statusmanager.Status[CheckDetails]{
+			Status:     "completed",
+			Conclusion: "success",
+		})
 	}
 
 	// Run analyzer on the changed files, then filter diagnostics to only
 	// lines touched in the diff.
-	diagnostics, err := r.analyzer.Analyze(ctx, wt, pd.files...)
+	diagnostics, err := r.analyzer.Analyze(ctx, wt, filesToAnalyze...)
 	if err != nil {
 		return fmt.Errorf("run analyzer: %w", err)
 	}
