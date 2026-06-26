@@ -33,6 +33,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
 
+	// copyIssueLabels, when true, copies every label from the source issue onto
+	// the generated PR. Opt-in: false means no issue labels are carried over.
+	// Unlike prLabels (a fixed set always stamped), this lets labels be applied
+	// to the PR situationally, by labeling the issue.
+	copyIssueLabels bool
+
 	// giveUp, when set, surfaces an agent's deliberate no-op explanation on the
 	// PR as a single marker comment. Nil is a safe no-op receiver. See
 	// WithGiveUpComment.
@@ -61,6 +67,18 @@ func WithRequiredLabel[Req promptbuilder.Bindable, Resp Result, CB any](label st
 func WithPRLabelsFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) []string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.prLabelsFromResult = fn
+	}
+}
+
+// WithCopyIssueLabels configures the reconciler to copy every label from the
+// source issue onto the generated PR. This lets labels be applied to PRs
+// situationally — by labeling the issue — rather than always (which is what
+// passing them in prLabels does). The issue labels are merged with prLabels on
+// every Upsert, so adding a label to an issue propagates it to an already-open
+// PR on the next reconcile. Off by default.
+func WithCopyIssueLabels[Req promptbuilder.Bindable, Resp Result, CB any]() Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.copyIssueLabels = true
 	}
 }
 

@@ -8,6 +8,7 @@ package metareconciler
 import (
 	"context"
 	"crypto/sha256"
+	"slices"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -236,5 +237,89 @@ func TestWithGiveUpComment(t *testing.T) {
 	}
 	if got := rec.giveUp.Render("why"); got != "body: why" {
 		t.Errorf("reconciler.giveUp.Render: got = %q, want = %q", got, "body: why")
+	}
+}
+
+func TestWithCopyIssueLabels(t *testing.T) {
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		&fakeAgent{},
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithCopyIssueLabels[*testRequest, *testResult, testCallbacks](),
+	)
+
+	if rec == nil {
+		t.Fatal("New() returned nil with WithCopyIssueLabels option")
+	}
+	if !rec.copyIssueLabels {
+		t.Error("reconciler.copyIssueLabels = false, want true")
+	}
+}
+
+func TestPRLabelsForIssue(t *testing.T) {
+	issue := func(labels ...string) *github.Issue {
+		i := &github.Issue{}
+		for _, l := range labels {
+			i.Labels = append(i.Labels, &github.Label{Name: github.Ptr(l)})
+		}
+		return i
+	}
+
+	tests := []struct {
+		name     string
+		prLabels []string
+		copy     bool
+		issue    *github.Issue
+		want     []string
+	}{
+		{
+			name:     "copy off returns fixed labels only",
+			prLabels: []string{"test-identity/managed"},
+			copy:     false,
+			issue:    issue("ai-review", "area/bots"),
+			want:     []string{"test-identity/managed"},
+		},
+		{
+			name:     "copy on merges issue labels",
+			prLabels: []string{"test-identity/managed"},
+			copy:     true,
+			issue:    issue("ai-review", "area/bots"),
+			want:     []string{"test-identity/managed", "ai-review", "area/bots"},
+		},
+		{
+			name:     "copy on dedupes labels present in both",
+			prLabels: []string{"test-identity/managed"},
+			copy:     true,
+			issue:    issue("test-identity/managed", "ai-review"),
+			want:     []string{"test-identity/managed", "ai-review"},
+		},
+		{
+			name:     "copy on with no issue labels returns fixed labels",
+			prLabels: []string{"test-identity/managed"},
+			copy:     true,
+			issue:    issue(),
+			want:     []string{"test-identity/managed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Reconciler[*testRequest, *testResult, testCallbacks]{
+				prLabels:        tt.prLabels,
+				copyIssueLabels: tt.copy,
+			}
+			got := r.prLabelsForIssue(tt.issue)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("prLabelsForIssue() = %v, want = %v", got, tt.want)
+			}
+		})
 	}
 }

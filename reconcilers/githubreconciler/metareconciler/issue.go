@@ -120,6 +120,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	var result Resp
 	var agentRan bool
 
+	// Carry the issue's labels onto the PR when configured, so labels added to
+	// the issue (e.g. to enable optional review) propagate situationally rather
+	// than always. Merged with the fixed prLabels; deduped so a label present in
+	// both is stamped once.
+	prLabels := r.prLabelsForIssue(issue)
+
 	// Create/update the PR with the changes
 	prURL, err := changeSession.Upsert(ctx, &PRData[Req]{
 		Identity:      r.identity,
@@ -127,7 +133,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		IssueNumber:   issue.GetNumber(),
 		IssueBodyHash: sha256.Sum256([]byte(issue.GetBody())),
 		Request:       request,
-	}, false, r.prLabels, func(ctx context.Context, branchName string) error {
+	}, false, prLabels, func(ctx context.Context, branchName string) error {
 		cloneMgr, err := r.cloneMeta.Get(res.Owner, res.Repo)
 		if err != nil {
 			return fmt.Errorf("get clone manager: %w", err)
@@ -213,6 +219,35 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 
 	log.With("pr_url", prURL).Info("PR created/updated")
 	return nil
+}
+
+// prLabelsForIssue returns the labels to stamp on the PR for this issue: the
+// fixed prLabels, plus every label on the issue when copyIssueLabels is set.
+// Duplicates are collapsed so a label present in both is returned once. When
+// copyIssueLabels is off it returns the fixed prLabels unchanged.
+func (r *Reconciler[Req, Resp, CB]) prLabelsForIssue(issue *github.Issue) []string {
+	if !r.copyIssueLabels {
+		return r.prLabels
+	}
+	seen := make(map[string]struct{}, len(r.prLabels)+len(issue.Labels))
+	labels := make([]string, 0, len(r.prLabels)+len(issue.Labels))
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		labels = append(labels, name)
+	}
+	for _, l := range r.prLabels {
+		add(l)
+	}
+	for _, l := range issue.Labels {
+		add(l.GetName())
+	}
+	return labels
 }
 
 // hasLabel checks if an issue has a specific label.
