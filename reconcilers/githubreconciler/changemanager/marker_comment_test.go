@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 	"text/template"
@@ -16,7 +17,10 @@ import (
 	"github.com/google/go-github/v88/github"
 )
 
-const testMarker = "<!--test-bot:no-changes-->"
+const (
+	testMarker      = "<!--test-bot:no-changes-->"
+	testGaveUpLabel = "test-bot/too-hard-need-human"
+)
 
 // markerCommentServer wires an httptest server that mimics the GitHub issue
 // comment endpoints used by the marker-comment helpers, recording the calls so
@@ -313,6 +317,162 @@ func TestApplyReadyForReview(t *testing.T) {
 			}
 			if apiCalled != tt.wantAPICall {
 				t.Errorf("label API called: got = %v, want = %v", apiCalled, tt.wantAPICall)
+			}
+		})
+	}
+}
+
+// TestApplyGaveUp verifies the too-hard-need-human label is added only when
+// absent: the API is called on the first give-up and is a no-op once the
+// label is present or no PR exists.
+func TestApplyGaveUp(t *testing.T) {
+	titleTmpl := template.Must(template.New("title").Parse("{{.PackageName}}"))
+	bodyTmpl := template.Must(template.New("body").Parse("{{.PackageName}}"))
+	cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl)
+	if err != nil {
+		t.Fatalf("creating CM: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		prNumber    int
+		labels      []string
+		wantAPICall bool
+	}{{
+		name:        "newly applied",
+		prNumber:    7,
+		labels:      nil,
+		wantAPICall: true,
+	}, {
+		name:        "already labeled",
+		prNumber:    7,
+		labels:      []string{testGaveUpLabel},
+		wantAPICall: false,
+	}, {
+		name:        "no PR",
+		prNumber:    0,
+		wantAPICall: false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var apiCalled bool
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v3/repos/test-owner/test-repo/issues/{number}/labels", func(w http.ResponseWriter, _ *http.Request) {
+				apiCalled = true
+				writeJSON(t, w, []*github.Label{})
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+			if err != nil {
+				t.Fatalf("creating client: %v", err)
+			}
+
+			prURL := ""
+			if tt.prNumber != 0 {
+				prURL = "https://example.test/pull/7"
+			}
+			s := &Session[testData]{
+				manager:  cm,
+				client:   client,
+				owner:    "test-owner",
+				repo:     "test-repo",
+				prNumber: tt.prNumber,
+				prURL:    prURL,
+				prLabels: tt.labels,
+			}
+
+			url, err := s.ApplyGaveUp(t.Context())
+			if err != nil {
+				t.Fatalf("ApplyGaveUp: got error = %v, want = nil", err)
+			}
+			if url != prURL {
+				t.Errorf("url: got = %q, want = %q", url, prURL)
+			}
+			if apiCalled != tt.wantAPICall {
+				t.Errorf("label API called: got = %v, want = %v", apiCalled, tt.wantAPICall)
+			}
+			if tt.wantAPICall && !slices.Contains(s.prLabels, testGaveUpLabel) {
+				t.Errorf("prLabels after ApplyGaveUp: got = %v, want to contain %q", s.prLabels, testGaveUpLabel)
+			}
+		})
+	}
+}
+
+// TestClearGaveUp verifies the too-hard-need-human label is removed only when
+// present: the API is called when the label exists and is a no-op when it
+// is absent or no PR exists.
+func TestClearGaveUp(t *testing.T) {
+	titleTmpl := template.Must(template.New("title").Parse("{{.PackageName}}"))
+	bodyTmpl := template.Must(template.New("body").Parse("{{.PackageName}}"))
+	cm, err := New[testData]("test-bot", titleTmpl, bodyTmpl)
+	if err != nil {
+		t.Fatalf("creating CM: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		prNumber    int
+		labels      []string
+		wantAPICall bool
+	}{{
+		name:        "label present",
+		prNumber:    7,
+		labels:      []string{testGaveUpLabel, "other"},
+		wantAPICall: true,
+	}, {
+		name:        "label absent",
+		prNumber:    7,
+		labels:      []string{"other"},
+		wantAPICall: false,
+	}, {
+		name:        "no PR",
+		prNumber:    0,
+		wantAPICall: false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var apiCalled bool
+			mux := http.NewServeMux()
+			mux.HandleFunc("DELETE /api/v3/repos/test-owner/test-repo/issues/{number}/labels/{label...}", func(w http.ResponseWriter, _ *http.Request) {
+				apiCalled = true
+				writeJSON(t, w, []*github.Label{})
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+			if err != nil {
+				t.Fatalf("creating client: %v", err)
+			}
+
+			prURL := ""
+			if tt.prNumber != 0 {
+				prURL = "https://example.test/pull/7"
+			}
+			s := &Session[testData]{
+				manager:  cm,
+				client:   client,
+				owner:    "test-owner",
+				repo:     "test-repo",
+				prNumber: tt.prNumber,
+				prURL:    prURL,
+				prLabels: tt.labels,
+			}
+
+			url, err := s.ClearGaveUp(t.Context())
+			if err != nil {
+				t.Fatalf("ClearGaveUp: got error = %v, want = nil", err)
+			}
+			if url != prURL {
+				t.Errorf("url: got = %q, want = %q", url, prURL)
+			}
+			if apiCalled != tt.wantAPICall {
+				t.Errorf("label API called: got = %v, want = %v", apiCalled, tt.wantAPICall)
+			}
+			if tt.wantAPICall && slices.Contains(s.prLabels, testGaveUpLabel) {
+				t.Errorf("prLabels after ClearGaveUp: got = %v, want to omit %q", s.prLabels, testGaveUpLabel)
 			}
 		})
 	}

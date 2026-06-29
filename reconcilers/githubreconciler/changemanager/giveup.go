@@ -21,10 +21,13 @@ type Explainer interface {
 
 // markerCommenter is the subset of Session that GiveUpComment needs. It is an
 // interface so the helper is testable without a full session and so callers in
-// any package can compose it against their own change session.
+// any package can compose it against their own change session. ApplyGaveUp and
+// ClearGaveUp keep a give-up label in lockstep with the give-up comment.
 type markerCommenter interface {
 	UpsertMarkerComment(ctx context.Context, marker, body string) error
 	DeleteMarkerComment(ctx context.Context, marker string) error
+	ApplyGaveUp(ctx context.Context) (string, error)
+	ClearGaveUp(ctx context.Context) (string, error)
 }
 
 // GiveUpComment surfaces an agent's deliberate no-op explanation on a PR as a
@@ -68,22 +71,33 @@ func (g *GiveUpComment) SurfaceResult(ctx context.Context, pr markerCommenter, r
 	g.Surface(ctx, pr, ex.GetNoChangeExplanation())
 }
 
-// Surface posts or updates the give-up comment with the given explanation. An
-// empty explanation is a no-op. Failures are logged and swallowed.
+// Surface posts or updates the give-up comment with the given explanation and
+// applies the give-up label. An empty explanation is a no-op. Failures are
+// logged and swallowed. The label is only applied after the comment is
+// posted, so a labeled PR always has a matching give-up comment.
 func (g *GiveUpComment) Surface(ctx context.Context, pr markerCommenter, explanation string) {
 	if g == nil || g.Render == nil || explanation == "" {
 		return
 	}
 	if err := pr.UpsertMarkerComment(ctx, g.Marker, g.Render(explanation)); err != nil {
 		clog.WarnContext(ctx, "Failed to post give-up comment", "error", err)
+		return
+	}
+	if _, err := pr.ApplyGaveUp(ctx); err != nil {
+		clog.WarnContext(ctx, "Failed to apply give-up label", "error", err)
 	}
 }
 
-// Clear removes the give-up comment left by a prior iteration once the agent
-// recovers (pushes a fix, or the PR otherwise resolves). No-op when no matching
-// comment exists. Failures are logged and swallowed.
+// Clear removes the give-up label and comment when the agent recovers.
+// Label first, comment second: a failed label-clear leaves both in place,
+// preserving Surface's invariant that a labeled PR has a matching comment.
+// Failures are logged and swallowed.
 func (g *GiveUpComment) Clear(ctx context.Context, pr markerCommenter) {
 	if g == nil {
+		return
+	}
+	if _, err := pr.ClearGaveUp(ctx); err != nil {
+		clog.WarnContext(ctx, "Failed to clear give-up label", "error", err)
 		return
 	}
 	if err := pr.DeleteMarkerComment(ctx, g.Marker); err != nil {

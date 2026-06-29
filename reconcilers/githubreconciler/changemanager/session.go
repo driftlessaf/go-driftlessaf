@@ -252,6 +252,8 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, []string{turnLimitLabel}); err != nil {
 		return "", fmt.Errorf("adding turn-limit label: %w", err)
 	}
+	// Cache the label so a same-session caller sees it.
+	s.prLabels = append(s.prLabels, turnLimitLabel)
 	return s.prURL, nil
 }
 
@@ -290,6 +292,55 @@ func (s *Session[T]) ApplyReadyForReview(ctx context.Context) (string, error) {
 	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, []string{label}); err != nil {
 		return "", fmt.Errorf("adding ready-for-review label: %w", err)
 	}
+	// Cache the label so a same-session caller sees it.
+	s.prLabels = append(s.prLabels, label)
+	return s.prURL, nil
+}
+
+// gaveUpLabelSuffix is defined once so ApplyGaveUp and ClearGaveUp cannot
+// drift apart on a rename.
+const gaveUpLabelSuffix = "/too-hard-need-human"
+
+// ApplyGaveUp adds an <identity>/too-hard-need-human label to the PR,
+// signaling that the agent has posted a give-up explanation and is handing
+// the PR off for human review. Idempotent: re-running when the label is
+// already present is a no-op. This is a no-op if no PR exists. Returns the
+// PR URL.
+func (s *Session[T]) ApplyGaveUp(ctx context.Context) (string, error) {
+	if s.prNumber == 0 {
+		return "", nil
+	}
+	label := s.manager.identity + gaveUpLabelSuffix
+	if slices.Contains(s.prLabels, label) {
+		return s.prURL, nil
+	}
+	clog.InfoContext(ctx, "Agent gave up, adding too-hard-need-human label", "pr", s.prNumber, "label", label)
+	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, []string{label}); err != nil {
+		return "", fmt.Errorf("adding too-hard-need-human label: %w", err)
+	}
+	// Cache the label so a same-session caller sees it.
+	s.prLabels = append(s.prLabels, label)
+	return s.prURL, nil
+}
+
+// ClearGaveUp removes the <identity>/too-hard-need-human label, signaling
+// that the agent has recovered (pushed a fix, or the PR otherwise resolved).
+// Pairs with ApplyGaveUp so the label tracks the give-up comment lifecycle.
+// No-op if the label is not present on the PR or no PR exists. Returns the
+// PR URL.
+func (s *Session[T]) ClearGaveUp(ctx context.Context) (string, error) {
+	if s.prNumber == 0 {
+		return "", nil
+	}
+	label := s.manager.identity + gaveUpLabelSuffix
+	if !slices.Contains(s.prLabels, label) {
+		return s.prURL, nil
+	}
+	clog.InfoContext(ctx, "Agent recovered, removing too-hard-need-human label", "pr", s.prNumber, "label", label)
+	if _, err := s.client.Issues.RemoveLabelForIssue(ctx, s.owner, s.repo, s.prNumber, label); err != nil {
+		return "", fmt.Errorf("removing too-hard-need-human label: %w", err)
+	}
+	s.prLabels = slices.DeleteFunc(s.prLabels, func(l string) bool { return l == label })
 	return s.prURL, nil
 }
 

@@ -7,13 +7,18 @@ package changemanager
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
 // fakeMarkerCommenter records GiveUpComment's calls into the marker primitives.
 type fakeMarkerCommenter struct {
-	upserted map[string]string
-	deleted  []string
+	upserted   map[string]string
+	deleted    []string
+	applyCalls int
+	clearCalls int
+	upsertErr  error
+	clearErr   error
 }
 
 func newFakeMarkerCommenter() *fakeMarkerCommenter {
@@ -21,6 +26,9 @@ func newFakeMarkerCommenter() *fakeMarkerCommenter {
 }
 
 func (c *fakeMarkerCommenter) UpsertMarkerComment(_ context.Context, marker, body string) error {
+	if c.upsertErr != nil {
+		return c.upsertErr
+	}
 	c.upserted[marker] = body
 	return nil
 }
@@ -28,6 +36,19 @@ func (c *fakeMarkerCommenter) UpsertMarkerComment(_ context.Context, marker, bod
 func (c *fakeMarkerCommenter) DeleteMarkerComment(_ context.Context, marker string) error {
 	c.deleted = append(c.deleted, marker)
 	return nil
+}
+
+func (c *fakeMarkerCommenter) ApplyGaveUp(_ context.Context) (string, error) {
+	c.applyCalls++
+	return "", nil
+}
+
+func (c *fakeMarkerCommenter) ClearGaveUp(_ context.Context) (string, error) {
+	c.clearCalls++
+	if c.clearErr != nil {
+		return "", c.clearErr
+	}
+	return "", nil
 }
 
 // explainable implements Explainer.
@@ -82,6 +103,14 @@ func TestGiveUpCommentSurfaceResult(t *testing.T) {
 			c := newFakeMarkerCommenter()
 			testGiveUp().SurfaceResult(t.Context(), c, tt.result)
 
+			wantApplyCalls := 0
+			if tt.want != "" {
+				wantApplyCalls = 1
+			}
+			if c.applyCalls != wantApplyCalls {
+				t.Errorf("applyCalls: got = %d, want = %d", c.applyCalls, wantApplyCalls)
+			}
+
 			if tt.want == "" {
 				if len(c.upserted) != 0 {
 					t.Errorf("upserted: got = %v, want none", c.upserted)
@@ -95,12 +124,41 @@ func TestGiveUpCommentSurfaceResult(t *testing.T) {
 	}
 }
 
+// TestSurfaceSkipsLabelOnUpsertError verifies the give-up label is not
+// applied when the underlying comment upsert fails, so a labeled PR always
+// has a matching give-up comment.
+func TestSurfaceSkipsLabelOnUpsertError(t *testing.T) {
+	c := newFakeMarkerCommenter()
+	c.upsertErr = errors.New("upsert failed")
+	testGiveUp().Surface(t.Context(), c, "blocked on foo")
+
+	if c.applyCalls != 0 {
+		t.Errorf("applyCalls after upsert error: got = %d, want = 0", c.applyCalls)
+	}
+}
+
 func TestGiveUpCommentClear(t *testing.T) {
 	c := newFakeMarkerCommenter()
 	testGiveUp().Clear(t.Context(), c)
 
 	if len(c.deleted) != 1 || c.deleted[0] != giveUpMarker {
 		t.Errorf("deleted: got = %v, want = [%q]", c.deleted, giveUpMarker)
+	}
+	if c.clearCalls != 1 {
+		t.Errorf("clearCalls: got = %d, want = 1", c.clearCalls)
+	}
+}
+
+// TestClearSkipsCommentOnLabelClearError verifies the comment is not deleted
+// when label-clear fails, preserving the labeled-PR-has-matching-comment
+// invariant. Mirror of TestSurfaceSkipsLabelOnUpsertError.
+func TestClearSkipsCommentOnLabelClearError(t *testing.T) {
+	c := newFakeMarkerCommenter()
+	c.clearErr = errors.New("clear failed")
+	testGiveUp().Clear(t.Context(), c)
+
+	if len(c.deleted) != 0 {
+		t.Errorf("deleted after clear error: got = %v, want = none", c.deleted)
 	}
 }
 
@@ -113,6 +171,9 @@ func TestGiveUpCommentNilRender(t *testing.T) {
 
 	if len(c.upserted) != 0 {
 		t.Errorf("upserted: got = %v, want none when Render is nil", c.upserted)
+	}
+	if c.applyCalls != 0 {
+		t.Errorf("applyCalls: got = %d, want 0 when Render is nil", c.applyCalls)
 	}
 }
 
@@ -128,5 +189,8 @@ func TestGiveUpCommentNilReceiver(t *testing.T) {
 
 	if len(c.upserted) != 0 || len(c.deleted) != 0 {
 		t.Errorf("nil receiver mutated state: upserted = %v, deleted = %v", c.upserted, c.deleted)
+	}
+	if c.applyCalls != 0 || c.clearCalls != 0 {
+		t.Errorf("nil receiver touched labels: applyCalls = %d, clearCalls = %d", c.applyCalls, c.clearCalls)
 	}
 }
