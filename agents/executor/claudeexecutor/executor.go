@@ -901,6 +901,7 @@ var samplingParamsRemovedPrefixes = []string{
 	"claude-opus-4-7",
 	"claude-opus-4-8",
 	"claude-fable-5",
+	"claude-sonnet-5",
 }
 
 // supportsSamplingParams reports whether the Anthropic API accepts the
