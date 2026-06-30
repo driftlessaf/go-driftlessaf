@@ -68,7 +68,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "workqueue_process_latency_seconds",
 			Help:    "The duration taken to process a key.",
-			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600, 7200},
+			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600 /* 1h */, 7200 /* 2h */, 14400 /* 4h */, 28800 /* 8h */, 43200 /* 12h */, 86400 /* 24h */},
 		},
 		[]string{"service_name", "revision_name", "queue_name", "priority_class"},
 	)
@@ -76,7 +76,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "workqueue_wait_latency_seconds",
 			Help:    "The duration the key waited to start.",
-			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600, 7200},
+			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600 /* 1h */, 7200 /* 2h */, 14400 /* 4h */, 28800 /* 8h */, 43200 /* 12h */, 86400 /* 24h */},
 		},
 		[]string{"service_name", "revision_name", "queue_name", "priority_class"},
 	)
@@ -84,7 +84,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "workqueue_wait_latency_from_scheduled_seconds",
 			Help:    "The duration the key waited to start from its scheduled time.",
-			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600, 7200},
+			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600 /* 1h */, 7200 /* 2h */, 14400 /* 4h */, 28800 /* 8h */, 43200 /* 12h */, 86400 /* 24h */},
 		},
 		[]string{"service_name", "revision_name", "queue_name", "priority_class"},
 	)
@@ -129,7 +129,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "workqueue_lease_age_seconds",
 			Help:    "The age of active (non-expired) leases for in-progress keys. Measured as time since the key moved to in-progress state.",
-			Buckets: []float64{30, 60, 120, 180, 240, 300 /* 5min */, 600 /* 10min */, 900 /* 15min */, 1200 /* 20min */, 1800 /* 30min */, 3600 /* 1h */, 7200 /* 2h */},
+			Buckets: []float64{30, 60, 120, 180, 240, 300 /* 5min */, 600 /* 10min */, 900 /* 15min */, 1200 /* 20min */, 1800 /* 30min */, 3600 /* 1h */, 7200 /* 2h */, 14400 /* 4h */, 28800 /* 8h */, 43200 /* 12h */, 86400 /* 24h */},
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)
