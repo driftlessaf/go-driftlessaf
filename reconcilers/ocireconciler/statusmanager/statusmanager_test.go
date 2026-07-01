@@ -25,7 +25,7 @@ import (
 func setupTestRegistry(t *testing.T) string {
 	t.Helper()
 
-	srv := httptest.NewServer(crregistry.New())
+	srv := httptest.NewServer(crregistry.New(crregistry.WithReferrersSupport(true)))
 	t.Cleanup(srv.Close)
 
 	// Extract the host from the server URL (strip http:// prefix)
@@ -206,43 +206,60 @@ func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
 	t.Log("Verified that same digest hash in different repository has no shared status")
 }
 
-// TestStatusManagerSizeLimit tests that oversized status payloads are rejected.
-func TestStatusManagerSizeLimit(t *testing.T) {
+// TestStatusManagerLargePayload demonstrates that a large status payload now
+// signs and round-trips successfully through Rekor.
+//
+// The previous Rekor v1 hashedrekord path uploaded the entire DSSE payload to
+// Rekor, whose reverse proxy caps requests at ~150 MB. To avoid 502s the manager
+// rejected any status over StatusJSONSizeLimit (~88 MB) up front, and a now-deleted
+// TestStatusManagerSizeLimit asserted that rejection on a 100 MB payload.
+//
+// Rekor v2 hashedrekord bundles upload only the artifact hash to Rekor; the full
+// bundle lives in the OCI registry only. So a 200 MB payload, well past anything
+// the v1 path could carry, now signs, stores, and reads back intact.
+func TestStatusManagerLargePayload(t *testing.T) {
 	ctx := context.Background()
 
 	registryHost := setupTestRegistry(t)
+	t.Logf("Using test registry: %s", registryHost)
 
-	manager, err := statusmanagertesting.New[LargeTestStatus](ctx, t, "size-test",
-		statusmanager.WithRepositoryOverride(registryHost+"/size-test-repo"),
+	manager, err := statusmanagertesting.New[LargeTestStatus](ctx, t, "large-payload-test",
+		statusmanager.WithRepositoryOverride(registryHost+"/large-payload-repo"),
 	)
-	require.NoError(t, err)
+	require.NoError(t, err, "failed to create manager")
 
 	digest, err := name.NewDigest("example.com/foo@sha256:3333333333333333333333333333333333333333333333333333333333333333")
-	require.NoError(t, err)
+	require.NoError(t, err, "failed to create digest")
 
 	session := manager.NewSession(digest)
 
-	// Create a status that exceeds the size limit
-	// StatusJSONSizeLimit is ~88 MB, so create something larger
-	largeData := make([]byte, 100*1024*1024) // 100 MB
-	for i := range largeData {
-		largeData[i] = 'x'
-	}
-
+	// 200 MB is well past both the old StatusJSONSizeLimit (~88 MB) and the ~150 MB
+	// Rekor v1 proxy cap (which 502'd once base64/DSSE-wrapped), so it exercises
+	// exactly the case the fix targets.
+	largeData := strings.Repeat("x", 200*1024*1024)
 	status := &statusmanager.Status[LargeTestStatus]{
-		Details: LargeTestStatus{
-			Data: string(largeData),
-		},
+		Details: LargeTestStatus{Data: largeData},
 	}
 
 	err = session.SetActualState(ctx, status)
-	require.Error(t, err, "expected oversized status to fail")
-	require.Contains(t, err.Error(), "exceeds limit")
+	require.NoError(t, err, "failed to write large status")
 
-	t.Logf("Size limit check passed: %v", err)
+	t.Logf("Successfully wrote a %d MB status", len(largeData)/(1024*1024))
+
+	observed, err := session.ObservedState(ctx)
+	require.NoError(t, err, "failed to read back large status")
+	require.NotNil(t, observed, "expected large status to be present after write")
+
+	// Compare lengths and identity directly rather than via require.Equal on the strings,
+	// which would render a multi-hundred-MB diff on mismatch.
+	require.Equal(t, len(largeData), len(observed.Details.Data), "round-tripped payload size mismatch")
+	require.True(t, observed.Details.Data == largeData, "round-tripped payload contents mismatch")
+	require.Equal(t, digest.DigestStr(), observed.ObservedGeneration)
+
+	t.Log("Successfully read back the large status intact")
 }
 
-// LargeTestStatus is used for testing size limits.
+// LargeTestStatus carries a large payload to exercise the Rekor v2 bundle path.
 type LargeTestStatus struct {
 	Data string `json:"data"`
 }

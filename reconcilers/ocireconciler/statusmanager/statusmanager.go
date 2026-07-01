@@ -8,11 +8,11 @@ package statusmanager
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -20,52 +20,21 @@ import (
 	"chainguard.dev/sdk/auth"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant"
-	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant/fulcio"
-	rclient "github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant/rekor/client"
 	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant/types"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
-	"github.com/in-toto/in-toto-golang/in_toto"
-	"github.com/secure-systems-lab/go-securesystemslib/dsse"
+	crtypes "github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/sigstore/cosign/v3/pkg/cosign"
-	"github.com/sigstore/cosign/v3/pkg/oci"
 	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
-	"github.com/sigstore/fulcio/pkg/api"
-	"github.com/sigstore/rekor/pkg/generated/client"
-	"github.com/sigstore/sigstore/pkg/fulcioroots"
+	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
+	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore-go/pkg/verify"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
-const (
-	sigstoreAudience = "sigstore"
-
-	// RekorHTTPLimit is the maximum HTTP request size accepted by Rekor's reverse proxy.
-	//
-	// This limit was determined empirically (2025-12-29) by generating realistic SBOM-like
-	// payloads at varying sizes and measuring the actual HTTP request sizes after base64
-	// encoding and DSSE envelope wrapping. Testing showed:
-	//   - 75 MB payload → 127.6 MB HTTP request ✅ SUCCESS
-	//   - 100 MB payload → 170.3 MB HTTP request ❌ FAILED (502 Bad Gateway)
-	//
-	// The limit (~150 MB) is imposed by Rekor's reverse proxy (nginx/load balancer),
-	// not the Rekor application itself.
-	//
-	// For production use with airflow APK (14.3 MB SBOM, 63 vuln matches):
-	//   - BEFORE metadata stripping: 116.52 MB status → 198 MB HTTP ❌ 502 Bad Gateway
-	//   - AFTER metadata stripping: 13.95 MB status → 23.72 MB HTTP ✅ 201 Created
-	RekorHTTPLimit = 150 * 1024 * 1024 // 150 MB
-
-	// StatusJSONSizeLimit is the maximum serialized JSON status size before base64/DSSE overhead.
-	//
-	// Calculation: RekorHTTPLimit / 1.7 (empirically measured overhead factor)
-	//   - Base64 encoding adds ~33% overhead (4/3 ratio)
-	//   - DSSE envelope wrapping adds additional ~28% overhead
-	//   - Combined overhead factor: ~1.7x
-	//
-	// This gives us: 150 MB / 1.7 ≈ 88 MB for the raw JSON status
-	StatusJSONSizeLimit = RekorHTTPLimit * 10 / 17 // ~88 MB
-)
+const sigstoreAudience = "sigstore"
 
 // Status captures serialized reconciliation progress for a digest.
 type Status[T any] struct {
@@ -80,8 +49,8 @@ type Manager[T any] struct {
 	predicateType   string
 	readOnly        bool
 
-	signer types.CosignerSignerVerifier
-	rekor  *client.Rekor
+	signer          *secant.BundleSigner
+	trustedMaterial root.TrustedMaterial
 
 	remoteOpts   []remote.Option
 	repoOverride *name.Repository
@@ -112,31 +81,45 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	if cfg.oidcProvider == nil {
+	if cfg.oidcProvider == nil && !readOnly {
 		p, err := newGSAOIDCProvider(ctx, sigstoreAudience)
 		if err != nil {
 			return nil, fmt.Errorf("creating OIDC provider: %w", err)
 		}
 		cfg.oidcProvider = p
 	}
-	if cfg.signer == nil {
-		furl, err := url.Parse(cfg.fulcioURL)
+
+	trustedMaterial := cfg.trustedMaterial
+	if trustedMaterial == nil {
+		tr, err := cosign.TrustedRoot()
 		if err != nil {
-			return nil, fmt.Errorf("parsing fulcio url: %w", err)
+			return nil, fmt.Errorf("loading trusted root from TUF: %w", err)
 		}
-		client := api.NewClient(furl, api.WithUserAgent(cfg.userAgent))
-		signer, err := fulcio.NewSigner(cfg.oidcProvider, client)
-		if err != nil {
-			return nil, fmt.Errorf("creating fulcio signer: %w", err)
-		}
-		cfg.signer = signer
+		trustedMaterial = tr
 	}
-	if cfg.rekor == nil {
-		rekorClient, err := rclient.GetRekorClient(cfg.rekorURL, rclient.WithUserAgent(cfg.userAgent))
-		if err != nil {
-			return nil, fmt.Errorf("creating rekor client: %w", err)
+
+	var signer *secant.BundleSigner
+	if !readOnly {
+		if cfg.signer != nil {
+			signer = cfg.signer
+		} else {
+			signingConfig := cfg.signingConfig
+			if signingConfig == nil {
+				sc, err := cosign.SigningConfigRekorV2()
+				if err != nil {
+					return nil, fmt.Errorf("loading Rekor v2 signing config: %w", err)
+				}
+				signingConfig = sc
+			}
+			bs, err := secant.NewBundleSigner(cfg.oidcProvider,
+				secant.WithSigningConfig(signingConfig),
+				secant.WithTrustedMaterial(trustedMaterial),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("creating bundle signer: %w", err)
+			}
+			signer = bs
 		}
-		cfg.rekor = rekorClient
 	}
 
 	// Determine the signing identity to use for verification.
@@ -178,8 +161,8 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 		signingIdentity: signingIdentity,
 		predicateType:   predicateType,
 		readOnly:        readOnly,
-		signer:          cfg.signer,
-		rekor:           cfg.rekor,
+		signer:          signer,
+		trustedMaterial: trustedMaterial,
 		remoteOpts:      slices.Clone(cfg.remoteOpts),
 		repoOverride:    cfg.repoOverride,
 	}, nil
@@ -214,21 +197,25 @@ func (s *Session[T]) SetActualState(ctx context.Context, status *Status[T]) erro
 		return fmt.Errorf("marshaling status: %w", err)
 	}
 
-	// Check if the serialized status exceeds Rekor's limit
-	payloadSize := len(payload)
-	if payloadSize > StatusJSONSizeLimit {
-		return fmt.Errorf("status size %.2f MB exceeds limit of %.2f MB",
-			float64(payloadSize)/(1024*1024),
-			float64(StatusJSONSizeLimit)/(1024*1024))
-	}
-
 	stmt, err := secant.NewStatement(s.subject, bytes.NewReader(payload), s.manager.predicateType)
 	if err != nil {
 		return fmt.Errorf("creating statement: %w", err)
 	}
 
-	if err := secant.Attest(ctx, secant.Replace, []*types.Statement{stmt}, s.manager.signer, s.manager.rekor, s.manager.remoteOptions(ctx)); err != nil {
-		return fmt.Errorf("writing attestation: %w", err)
+	// Status subjects are synthetic digests that may exist in no registry, so
+	// supply the subject descriptor rather than letting AttestBundle resolve it
+	// via HEAD.
+	h, err := v1.NewHash(s.subject.DigestStr())
+	if err != nil {
+		return fmt.Errorf("parsing subject digest %q: %w", s.subject.DigestStr(), err)
+	}
+	stmt.SubjectDescriptor = &v1.Descriptor{
+		MediaType: crtypes.OCIManifestSchema1,
+		Digest:    h,
+	}
+
+	if err := secant.AttestBundle(ctx, secant.Replace, []*types.Statement{stmt}, s.manager.signer, s.manager.remoteOptions(ctx)); err != nil {
+		return fmt.Errorf("writing attestation bundle: %w", err)
 	}
 	return nil
 }
@@ -241,69 +228,30 @@ func (m *Manager[T]) subjectDigest(d name.Digest) name.Digest {
 }
 
 func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest) (*Status[T], error) {
-	// Compute the attestation tag directly rather than going through SignedEntity,
-	// which requires the subject image to exist. This allows COSIGN_REPOSITORY-style
-	// workflows where attestations are stored separately from the subject.
-	attTag, err := ociremote.AttestationTag(subject, m.ociremoteOptions(ctx)...)
+	bundles, subjectHash, err := cosign.GetBundles(ctx, subject, m.ociremoteOptions(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("computing attestation tag: %w", err)
-	}
-	// Fetch attestations directly from the computed tag.
-	attestations, err := ociremote.Signatures(attTag, m.ociremoteOptions(ctx)...)
-	if err != nil {
-		if notFound(err) {
+		if isMissing(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("fetching attestations: %w", err)
+		return nil, fmt.Errorf("fetching bundles: %w", err)
 	}
 
-	// Create CheckOpts for verification.
-	co, err := m.createCheckOpts(ctx)
+	subjectHashBytes, err := hex.DecodeString(subjectHash.Hex)
 	if err != nil {
-		return nil, fmt.Errorf("creating check opts: %w", err)
+		return nil, fmt.Errorf("decoding subject digest hex: %w", err)
 	}
 
-	// Parse the subject digest for verification.
-	h, err := v1.NewHash(subject.DigestStr())
-	if err != nil {
-		return nil, fmt.Errorf("parsing subject hash: %w", err)
-	}
-
-	// Verify attestations using cosign.
-	verifiedAtts, bundleVerified, err := cosign.VerifyImageAttestation(ctx, attestations, h, co)
-	if err != nil {
-		// If verification fails entirely, treat as no attestations.
-		clog.WarnContextf(ctx, "Attestation verification failed: %v", err)
-		return nil, nil
-	}
-	if !bundleVerified {
-		clog.WarnContext(ctx, "Attestation bundle not verified")
-		return nil, nil
-	}
+	checkOpts := m.newCheckOpts(ctx)
+	policyOpt := verify.WithArtifactDigest(subjectHash.Algorithm, subjectHashBytes)
 
 	var latest *statusCandidate[T]
-	for _, att := range verifiedAtts {
-		ann, err := att.Annotations()
-		if err != nil {
-			clog.WarnContextf(ctx, "Skipping attestation: %v", err)
-			continue
-		}
-		pt, ok := ann["predicateType"]
+	for _, b := range bundles {
+		status, ts, ok := m.verifyAndExtract(ctx, b, checkOpts, policyOpt)
 		if !ok {
-			clog.WarnContext(ctx, "Skipping attestation without predicateType annotation")
 			continue
 		}
-		if pt != m.predicateType {
-			continue
-		}
-		status, err := extractStatus[T](att)
-		if err != nil {
-			clog.WarnContextf(ctx, "Failed to parse status attestation: %v", err)
-			continue
-		}
-		candidate := &statusCandidate[T]{status: status, timestamp: integratedTime(att)}
-		if latest == nil || candidate.timestamp.After(latest.timestamp) {
-			latest = candidate
+		if latest == nil || ts.After(latest.timestamp) {
+			latest = &statusCandidate[T]{status: status, timestamp: ts}
 		}
 	}
 	if latest == nil {
@@ -312,34 +260,43 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 	return latest.status, nil
 }
 
-func (m *Manager[T]) createCheckOpts(ctx context.Context) (*cosign.CheckOpts, error) {
-	fulcioRoots, err := fulcioroots.Get()
+// verifyAndExtract verifies the bundle, then filters out any whose verified
+// in-toto statement predicate type doesn't match this manager's, returning the
+// parsed Status[T] alongside the verified timestamp. VerifyNewBundle already
+// decodes the DSSE envelope and returns the verified statement, so we read the
+// predicate from there rather than re-parsing the envelope ourselves.
+func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, co *cosign.CheckOpts, policyOpt verify.ArtifactPolicyOption) (*Status[T], time.Time, bool) {
+	result, err := cosign.VerifyNewBundle(ctx, co, policyOpt, b)
 	if err != nil {
-		return nil, fmt.Errorf("getting Fulcio roots: %w", err)
+		clog.WarnContextf(ctx, "Bundle verification failed: %v", err)
+		return nil, time.Time{}, false
 	}
-	fulcioIntermediates, err := fulcioroots.GetIntermediates()
-	if err != nil {
-		return nil, fmt.Errorf("getting Fulcio intermediates: %w", err)
-	}
-	ctlogKeys, err := cosign.GetCTLogPubs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting CTLog public keys: %w", err)
-	}
-	rekorPubKeys, err := cosign.GetRekorPubs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting Rekor public keys: %w", err)
+	if result.Statement == nil || result.Statement.PredicateType != m.predicateType {
+		return nil, time.Time{}, false
 	}
 
+	predicateBytes, err := protojson.Marshal(result.Statement.Predicate)
+	if err != nil {
+		clog.WarnContextf(ctx, "Skipping bundle with unmarshalable predicate: %v", err)
+		return nil, time.Time{}, false
+	}
+	var status Status[T]
+	if err := json.Unmarshal(predicateBytes, &status); err != nil {
+		clog.WarnContextf(ctx, "Skipping bundle with unparseable status predicate: %v", err)
+		return nil, time.Time{}, false
+	}
+
+	return &status, bundleTimestamp(result), true
+}
+
+func (m *Manager[T]) newCheckOpts(ctx context.Context) *cosign.CheckOpts {
 	return &cosign.CheckOpts{
-		RegistryClientOpts: m.ociremoteOptions(ctx),
-		ClaimVerifier:      cosign.IntotoSubjectClaimVerifier,
-		Identities:         []cosign.Identity{m.signingIdentity},
-		RootCerts:          fulcioRoots,
-		IntermediateCerts:  fulcioIntermediates,
-		CTLogPubKeys:       ctlogKeys,
-		RekorClient:        m.rekor,
-		RekorPubKeys:       rekorPubKeys,
-	}, nil
+		RegistryClientOpts:  m.ociremoteOptions(ctx),
+		Identities:          []cosign.Identity{m.signingIdentity},
+		TrustedMaterial:     m.trustedMaterial,
+		NewBundleFormat:     true,
+		UseSignedTimestamps: true,
+	}
 }
 
 type statusCandidate[T any] struct {
@@ -347,44 +304,17 @@ type statusCandidate[T any] struct {
 	timestamp time.Time
 }
 
-func integratedTime(sig oci.Signature) time.Time {
-	bundle, err := sig.Bundle()
-	if err != nil || bundle == nil {
+func bundleTimestamp(result *verify.VerificationResult) time.Time {
+	if result == nil {
 		return time.Time{}
 	}
-	if bundle.Payload.IntegratedTime == 0 {
-		return time.Time{}
+	var latest time.Time
+	for _, t := range result.VerifiedTimestamps {
+		if t.Timestamp.After(latest) {
+			latest = t.Timestamp
+		}
 	}
-	return time.Unix(bundle.Payload.IntegratedTime, 0)
-}
-
-func extractStatus[T any](sig oci.Signature) (*Status[T], error) {
-	payload, err := sig.Payload()
-	if err != nil {
-		return nil, fmt.Errorf("reading payload: %w", err)
-	}
-	var env dsse.Envelope
-	if err := json.Unmarshal(payload, &env); err != nil {
-		return nil, fmt.Errorf("unmarshaling envelope: %w", err)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(env.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("decoding payload: %w", err)
-	}
-	//nolint:staticcheck // SA1019 TODO port later
-	var stmt in_toto.Statement
-	if err := json.Unmarshal(decoded, &stmt); err != nil {
-		return nil, fmt.Errorf("unmarshaling statement: %w", err)
-	}
-	predicateBytes, err := json.Marshal(stmt.Predicate)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling predicate: %w", err)
-	}
-	var status Status[T]
-	if err := json.Unmarshal(predicateBytes, &status); err != nil {
-		return nil, fmt.Errorf("unmarshaling status predicate: %w", err)
-	}
-	return &status, nil
+	return latest
 }
 
 func (m *Manager[T]) remoteOptions(ctx context.Context) []remote.Option {
@@ -399,11 +329,18 @@ func (m *Manager[T]) ociremoteOptions(ctx context.Context) []ociremote.Option {
 	return opts
 }
 
-// notFound returns true if err indicates a 404 response from the registry.
-func notFound(err error) bool {
+// isMissing returns true for the errors that indicate "no status attestation
+// has been written yet": a 404 on the subject lookup, or no matching bundle
+// referrers.
+func isMissing(err error) bool {
 	var terr *transport.Error
-	if errors.As(err, &terr) {
-		return terr.StatusCode == 404
+	if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+		return true
 	}
-	return false
+	var tagNotFound *cosign.ErrImageTagNotFound
+	if errors.As(err, &tagNotFound) {
+		return true
+	}
+	var noAtts *cosign.ErrNoMatchingAttestations
+	return errors.As(err, &noAtts)
 }

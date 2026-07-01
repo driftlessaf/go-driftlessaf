@@ -89,7 +89,7 @@ func TestReconcileNameOptionsApplied(t *testing.T) {
 
 // TestReconcileWithRegistryFixture verifies reconciliation with a real registry server.
 func TestReconcileWithRegistryFixture(t *testing.T) {
-	srv := httptest.NewServer(crregistry.New())
+	srv := httptest.NewServer(crregistry.New(crregistry.WithReferrersSupport(true)))
 	t.Cleanup(srv.Close)
 
 	called := false
@@ -149,7 +149,7 @@ func TestProcessNoReconcilerConfigured(t *testing.T) {
 
 // TestProcessHappyPathWithRegistry verifies end-to-end processing with a registry fixture.
 func TestProcessHappyPathWithRegistry(t *testing.T) {
-	srv := httptest.NewServer(crregistry.New())
+	srv := httptest.NewServer(crregistry.New(crregistry.WithReferrersSupport(true)))
 	t.Cleanup(srv.Close)
 
 	var received name.Digest

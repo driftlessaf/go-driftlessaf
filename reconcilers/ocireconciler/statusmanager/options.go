@@ -8,41 +8,29 @@ package statusmanager
 import (
 	"fmt"
 
+	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant"
 	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant/fulcio"
-	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant/types"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/sigstore/cosign/v3/pkg/cosign"
-	"github.com/sigstore/rekor/pkg/generated/client"
-)
-
-const (
-	defaultFulcioURL = "https://fulcio.sigstore.dev"
-	defaultRekorURL  = "https://rekor.sigstore.dev"
-	defaultUserAgent = "ocireconciler-statusmanager"
+	"github.com/sigstore/sigstore-go/pkg/root"
 )
 
 // Option customizes the Manager.
 type Option func(*config)
 
 type config struct {
-	fulcioURL        string
-	rekorURL         string
 	remoteOpts       []remote.Option
 	repoOverride     *name.Repository
-	signer           types.CosignerSignerVerifier
-	rekor            *client.Rekor
+	signer           *secant.BundleSigner
+	signingConfig    *root.SigningConfig
+	trustedMaterial  root.TrustedMaterial
 	oidcProvider     fulcio.OIDCProvider
-	userAgent        string
 	expectedIdentity *cosign.Identity
 }
 
 func defaultConfig() *config {
-	return &config{
-		fulcioURL: defaultFulcioURL,
-		rekorURL:  defaultRekorURL,
-		userAgent: defaultUserAgent,
-	}
+	return &config{}
 }
 
 // WithRemoteOptions appends remote.Options applied when reading/writing attestations.
@@ -65,19 +53,29 @@ func WithRepositoryOverride(repo string) Option {
 	}
 }
 
-// WithSigner injects a preconfigured signer (useful for tests).
-func WithSigner(s types.CosignerSignerVerifier) Option {
-	return func(c *config) { c.signer = s }
+// WithBundleSigner injects a preconfigured bundle signer (useful for tests).
+// When provided, the manager skips its default signer construction.
+func WithBundleSigner(bs *secant.BundleSigner) Option {
+	return func(c *config) { c.signer = bs }
+}
+
+// WithSigningConfig overrides the SigningConfig used to construct the default
+// bundle signer. Ignored if WithBundleSigner is also provided. Use this to
+// point at a different Fulcio/Rekor topology than the embedded Rekor v2 config.
+func WithSigningConfig(sc *root.SigningConfig) Option {
+	return func(c *config) { c.signingConfig = sc }
+}
+
+// WithTrustedMaterial overrides the TrustedRoot used for both signing and
+// verification. By default the manager loads the trusted root from the public
+// Sigstore TUF mirror via cosign.TrustedRoot().
+func WithTrustedMaterial(tm root.TrustedMaterial) Option {
+	return func(c *config) { c.trustedMaterial = tm }
 }
 
 // WithOIDCProvider overrides the OIDC provider used for Fulcio keyless signing.
 func WithOIDCProvider(p fulcio.OIDCProvider) Option {
 	return func(c *config) { c.oidcProvider = p }
-}
-
-// WithUserAgent customizes the user-agent attached to Fulcio/Rekor requests.
-func WithUserAgent(ua string) Option {
-	return func(c *config) { c.userAgent = ua }
 }
 
 // WithExpectedIdentity specifies the sigstore identity to verify when reading
