@@ -5,15 +5,15 @@ go 1.26.2
 require (
 	chainguard.dev/apko v1.2.18
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.99
+	chainguard.dev/sdk v0.1.57
 	cloud.google.com/go/aiplatform v1.125.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.31.0
 	cloud.google.com/go/storage v1.62.3
-	github.com/anthropics/anthropic-sdk-go v1.50.2
+	github.com/anthropics/anthropic-sdk-go v1.51.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v1.9.0
+	github.com/chainguard-dev/terraform-infra-common v1.0.12
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.8
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.19.0
@@ -45,7 +45,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.21.0
-	google.golang.org/api v0.285.0
+	google.golang.org/api v0.286.0
 	google.golang.org/genai v1.62.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
@@ -229,7 +229,7 @@ require (
 	github.com/secure-systems-lab/go-securesystemslib v0.11.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
-	github.com/shirou/gopsutil/v4 v4.26.5 // indirect
+	github.com/shirou/gopsutil/v4 v4.26.6 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
 	github.com/sigstore/fulcio v1.8.7 // indirect
 	github.com/sigstore/protobuf-specs v0.5.1 // indirect
@@ -300,3 +300,7 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
