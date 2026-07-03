@@ -36,4 +36,14 @@ type Config[Resp, CB any] struct {
 	// to 1 to force strictly sequential tool dispatch — required for agents
 	// whose tool handlers mutate shared state without their own synchronization.
 	ToolCallConcurrency int
+
+	// ThinkingBudget enables Claude extended thinking with the given token
+	// budget when running on the Claude backend. Zero (the default) leaves
+	// thinking disabled. Must be at least 1024 and less than the executor's
+	// max tokens (32000 for meta-agents); see claudeexecutor.WithThinking.
+	// On models where the Anthropic API has removed the explicit budget
+	// parameter (Opus 4.7 and later), the executor automatically maps this to
+	// adaptive thinking and the budget value is advisory only. No effect on
+	// the Gemini backend.
+	ThinkingBudget int64
 }

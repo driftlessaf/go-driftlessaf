@@ -75,6 +75,10 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
 
+	if config.ThinkingBudget > 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithThinking[Req, Resp](config.ThinkingBudget))
+	}
+
 	executor, err := claudeexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude executor: %w", err)
