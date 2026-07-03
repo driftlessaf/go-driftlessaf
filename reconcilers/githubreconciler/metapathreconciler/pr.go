@@ -21,7 +21,7 @@ import (
 //  1. Skip label present → report neutral/skipped status
 //  2. Our identity prefix on branch → report neutral status + re-queue path
 //  3. Other PRs → run analyzer on changed files, report findings as check annotations
-func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
+func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
 	log := clog.FromContext(ctx)
 
 	// Fetch the PR to get the head branch name and SHA.
@@ -181,7 +181,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 
 	// Run analyzer on the changed files, then filter diagnostics to only
 	// lines touched in the diff.
-	diagnostics, err := r.analyzer.Analyze(ctx, wt, filesToAnalyze...)
+	diagnostics, err := r.analyzer.Analyze(ctx, wt, filesToAnalyze)
 	if err != nil {
 		return fmt.Errorf("run analyzer: %w", err)
 	}

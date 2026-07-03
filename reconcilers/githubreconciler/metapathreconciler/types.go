@@ -25,7 +25,13 @@ type Result interface {
 type Analyzer interface {
 	// Analyze runs the tool scoped to the given paths within the worktree
 	// and returns diagnostics. An empty slice means the paths are clean.
-	Analyze(ctx context.Context, wt *gogit.Worktree, paths ...string) ([]Diagnostic, error)
+	//
+	// prior carries findings from a previous pass so analyzers with
+	// nondeterministic output (e.g. agent-based audits) can re-confirm
+	// tracked findings under stable identities rather than re-discovering
+	// them under new ones. Deterministic analyzers ignore it, and callers
+	// with no prior state pass none.
+	Analyze(ctx context.Context, wt *gogit.Worktree, paths []string, prior ...Diagnostic) ([]Diagnostic, error)
 }
 
 // Diagnostic represents a single issue discovered by an Analyzer.

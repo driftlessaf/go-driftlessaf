@@ -29,7 +29,7 @@ const (
 )
 
 // reconciler is a type alias for the composed metapathreconciler.
-type reconciler[CB any] = metapathreconciler.Reconciler[*Request, *Result, CB]
+type reconciler[CB any] = metapathreconciler.PRReconciler[*Request, *Result, CB]
 
 // newReconciler constructs a reconciler from configuration.
 func newReconciler[CB any](
@@ -67,10 +67,11 @@ func newReconciler[CB any](
 		return nil, fmt.Errorf("create change manager: %w", err)
 	}
 
-	return metapathreconciler.New(ctx, identity, &goModernize{}, cm, cloneMeta, prLabels, agent,
+	return metapathreconciler.NewPR(ctx, identity, &goModernize{}, cm, cloneMeta, agent,
 		func(_ context.Context, _ *changemanager.Session[metapathreconciler.PRData[*Request]], _ *gogit.Worktree, findings []callbacks.Finding) (*Request, error) {
 			return &Request{Findings: findings}, nil
 		},
 		buildCallbacks,
+		metapathreconciler.WithLabels(prLabels...),
 	)
 }

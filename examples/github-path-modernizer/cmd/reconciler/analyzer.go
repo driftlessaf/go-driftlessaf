@@ -25,7 +25,7 @@ type goModernize struct{}
 
 // Analyze runs the modernize analysis suite on the packages at the given
 // directory paths and returns structured diagnostics.
-func (a *goModernize) Analyze(ctx context.Context, wt *gogit.Worktree, paths ...string) ([]metapathreconciler.Diagnostic, error) {
+func (a *goModernize) Analyze(ctx context.Context, wt *gogit.Worktree, paths []string, _ ...metapathreconciler.Diagnostic) ([]metapathreconciler.Diagnostic, error) {
 	root := wt.Filesystem.Root()
 
 	var diagnostics []metapathreconciler.Diagnostic

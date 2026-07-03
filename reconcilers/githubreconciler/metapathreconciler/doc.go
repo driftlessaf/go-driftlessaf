@@ -30,13 +30,12 @@ SPDX-License-Identifier: Apache-2.0
 //	cm, err := changemanager.New[metapathreconciler.PRData[*MyRequest]](identity, titleTmpl, bodyTmpl)
 //
 //	// Create the reconciler
-//	rec, err := metapathreconciler.New(
+//	rec, err := metapathreconciler.NewPR(
 //	    ctx,
 //	    identity,
 //	    analyzer,
 //	    cm,
 //	    cloneMeta,
-//	    prLabels,
 //	    agent,
 //	    func(ctx context.Context, session *changemanager.Session[metapathreconciler.PRData[*MyRequest]], wt *gogit.Worktree, findings []callbacks.Finding) (*MyRequest, error) {
 //	        return &MyRequest{Findings: findings}, nil
@@ -54,5 +53,6 @@ SPDX-License-Identifier: Apache-2.0
 //	            clonemanager.HistoryCallbacks(lease.Repo(), lease.BaseCommit()),
 //	        ), nil
 //	    },
+//	    metapathreconciler.WithLabels("automated"),
 //	)
 package metapathreconciler

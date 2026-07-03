@@ -61,7 +61,7 @@ type fakeAnalyzer struct {
 	err         error
 }
 
-func (a *fakeAnalyzer) Analyze(_ context.Context, _ *gogit.Worktree, _ ...string) ([]Diagnostic, error) {
+func (a *fakeAnalyzer) Analyze(_ context.Context, _ *gogit.Worktree, _ []string, _ ...Diagnostic) ([]Diagnostic, error) {
 	return a.diagnostics, a.err
 }
 
@@ -194,8 +194,8 @@ func TestWithMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var o option
-			WithMode(tt.mode)(&o)
+			var o prOptions
+			WithMode(tt.mode).applyPR(&o)
 			if o.mode != tt.want {
 				t.Errorf("mode: got = %d, wanted = %d", o.mode, tt.want)
 			}
@@ -218,8 +218,8 @@ func TestWithLabelFunc(t *testing.T) {
 		return labels
 	}
 
-	var o option
-	WithLabelFunc(fn)(&o)
+	var o prOptions
+	WithLabelFunc(fn).applyPR(&o)
 
 	if o.labelFn == nil {
 		t.Fatal("labelFn: got = nil, wanted non-nil")
@@ -248,7 +248,7 @@ func TestWithLabelFunc(t *testing.T) {
 	}
 	got = o.labelFn(t.Context(), nil, nil, findings)
 	if callCount != 2 {
-		t.Fatalf("callCount: got = %d, wanted = 2", callCount)
+		t.Fatalf("callCount: got = %d, want = 2", callCount)
 	}
 	want = []string{"finding:ciCheck", "finding:review"}
 	if len(got) != len(want) {
@@ -262,15 +262,15 @@ func TestWithLabelFunc(t *testing.T) {
 }
 
 func TestWithLabelFuncDefault(t *testing.T) {
-	var o option
+	var o prOptions
 	if o.labelFn != nil {
 		t.Error("default labelFn: got = non-nil, wanted = nil")
 	}
 }
 
 func TestWithGiveUpComment(t *testing.T) {
-	var o option
-	WithGiveUpComment("<!--test:no-changes-->", func(e string) string { return "body: " + e })(&o)
+	var o prOptions
+	WithGiveUpComment("<!--test:no-changes-->", func(e string) string { return "body: " + e }).applyPR(&o)
 
 	if o.giveUp == nil {
 		t.Fatal("giveUp: got = nil, want non-nil")
@@ -287,9 +287,11 @@ func TestWithGiveUpComment(t *testing.T) {
 }
 
 func TestReconcileReviewOnlySkipsPath(t *testing.T) {
-	rec := &Reconciler[*testRequest, *testResult, testCallbacks]{
-		identity: "test-identity",
-		mode:     ModeReview,
+	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
+		core: core{
+			identity: "test-identity",
+			mode:     ModeReview,
+		},
 	}
 
 	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{
@@ -303,9 +305,11 @@ func TestReconcileReviewOnlySkipsPath(t *testing.T) {
 }
 
 func TestReconcileNoneModeSkipsPath(t *testing.T) {
-	rec := &Reconciler[*testRequest, *testResult, testCallbacks]{
-		identity: "test-identity",
-		mode:     ModeNone,
+	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
+		core: core{
+			identity: "test-identity",
+			mode:     ModeNone,
+		},
 	}
 
 	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{
@@ -434,11 +438,13 @@ func TestLoadRepoConfig(t *testing.T) {
 
 func TestReconcilerFields(t *testing.T) {
 	// Construct directly to avoid GCP metadata dependency in tests.
-	rec := &Reconciler[*testRequest, *testResult, testCallbacks]{
-		identity: "test-identity",
-		analyzer: &fakeAnalyzer{},
-		prLabels: []string{"label1", "label2"},
-		agent:    &fakeAgent{},
+	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
+		core: core{
+			identity: "test-identity",
+			analyzer: &fakeAnalyzer{},
+			labels:   []string{"label1", "label2"},
+		},
+		agent: &fakeAgent{},
 		buildRequest: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *gogit.Worktree, findings []callbacks.Finding) (*testRequest, error) {
 			return &testRequest{Findings: findings}, nil
 		},
@@ -451,20 +457,22 @@ func TestReconcilerFields(t *testing.T) {
 		t.Errorf("identity: got = %q, wanted = %q", rec.identity, "test-identity")
 	}
 
-	if len(rec.prLabels) != 2 {
-		t.Errorf("len(prLabels): got = %d, wanted = 2", len(rec.prLabels))
+	if len(rec.labels) != 2 {
+		t.Errorf("len(labels): got = %d, want = 2", len(rec.labels))
 	}
 
-	if rec.prLabels[0] != "label1" {
-		t.Errorf("prLabels[0]: got = %q, wanted = %q", rec.prLabels[0], "label1")
+	if rec.labels[0] != "label1" {
+		t.Errorf("labels[0]: got = %q, want = %q", rec.labels[0], "label1")
 	}
 }
 
 func TestReconcilerWithEmptyLabels(t *testing.T) {
-	rec := &Reconciler[*testRequest, *testResult, testCallbacks]{
-		identity: "test-identity",
-		analyzer: &fakeAnalyzer{},
-		agent:    &fakeAgent{},
+	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
+		core: core{
+			identity: "test-identity",
+			analyzer: &fakeAnalyzer{},
+		},
+		agent: &fakeAgent{},
 		buildRequest: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *gogit.Worktree, _ []callbacks.Finding) (*testRequest, error) {
 			return &testRequest{}, nil
 		},
@@ -473,8 +481,8 @@ func TestReconcilerWithEmptyLabels(t *testing.T) {
 		},
 	}
 
-	if len(rec.prLabels) != 0 {
-		t.Errorf("prLabels: got = %v, wanted = empty", rec.prLabels)
+	if len(rec.labels) != 0 {
+		t.Errorf("labels: got = %v, want = empty", rec.labels)
 	}
 }
 
@@ -802,7 +810,7 @@ index abc..def 100644
 		t.Fatalf("parseDiff: %v", err)
 	}
 	if len(pd.ranges["file.go"]) != 2 {
-		t.Fatalf("len(ranges[file.go]): got = %d, wanted = 2", len(pd.ranges["file.go"]))
+		t.Fatalf("len(ranges[file.go]): got = %d, want = 2", len(pd.ranges["file.go"]))
 	}
 	if r := pd.ranges["file.go"][0]; r.start != 10 || r.end != 10 {
 		t.Errorf("ranges[file.go][0]: got = {%d, %d}, wanted = {10, 10}", r.start, r.end)
@@ -845,7 +853,7 @@ index abc..def 100644
 
 	// Should include line 12 (in range) and line 0 (whole file).
 	if len(filtered) != 2 {
-		t.Fatalf("len(filtered): got = %d, wanted = 2", len(filtered))
+		t.Fatalf("len(filtered): got = %d, want = 2", len(filtered))
 	}
 	if filtered[0].Line != 12 {
 		t.Errorf("filtered[0].Line: got = %d, wanted = 12", filtered[0].Line)

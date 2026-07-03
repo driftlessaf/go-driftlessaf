@@ -22,7 +22,7 @@ import (
 )
 
 // reconcilePath handles path resources by running the analyzer and agent.
-func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
+func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
 	log := clog.FromContext(ctx)
 
 	// Create a change session for the PR
@@ -180,7 +180,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 		// the worktree to fix some diagnostics, marking them as Fixed.
 		// Those modifications persist through createFreshBranch (same-SHA
 		// checkout) and are included in the eventual commit.
-		diagnostics, err = r.analyzer.Analyze(ctx, wt, res.Path)
+		diagnostics, err = r.analyzer.Analyze(ctx, wt, []string{res.Path})
 		if err != nil {
 			return fmt.Errorf("run analyzer: %w", err)
 		}
@@ -220,7 +220,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 	}
 
 	// Compute PR labels: static labels + dynamic labels from labelFn.
-	labels := slices.Clone(r.prLabels)
+	labels := slices.Clone(r.labels)
 	if r.labelFn != nil {
 		labels = append(labels, r.labelFn(ctx, res, diagnostics, findings)...)
 	}
@@ -293,7 +293,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gith
 //   - base wants it but the PR branch does not → the PR is on-target; iterate.
 //   - both still want it → the PR is stale (a newer version exists); refresh
 //     the existing PR with the newest update from the default branch.
-func (r *Reconciler[Req, Resp, CB]) needsRefresh(ctx context.Context, cloneMgr *clonemanager.Manager, session *changemanager.Session[PRData[Req]], res *githubreconciler.Resource, branchName string) (closePR bool, refresh bool, err error) {
+func (r *PRReconciler[Req, Resp, CB]) needsRefresh(ctx context.Context, cloneMgr *clonemanager.Manager, session *changemanager.Session[PRData[Req]], res *githubreconciler.Resource, branchName string) (closePR bool, refresh bool, err error) {
 	depth := session.CommitCount() + 1
 
 	wantsBase, err := r.revalidate(ctx, cloneMgr, res, res.Ref, depth)
@@ -318,7 +318,7 @@ func (r *Reconciler[Req, Resp, CB]) needsRefresh(ctx context.Context, cloneMgr *
 // the checker agent returns unfixed diagnostics without mutating it. An
 // informational Fixed diagnostic that changes nothing (e.g. image-main-package)
 // correctly counts as no change wanted.
-func (r *Reconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *clonemanager.Manager, res *githubreconciler.Resource, ref string, depth int) (bool, error) {
+func (r *PRReconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *clonemanager.Manager, res *githubreconciler.Resource, ref string, depth int) (bool, error) {
 	lease, err := cloneMgr.LeaseRef(ctx, res, ref, clonemanager.WithCommitDepth(depth))
 	if err != nil {
 		return false, fmt.Errorf("acquire lease for %s: %w", ref, err)
@@ -333,7 +333,7 @@ func (r *Reconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *cl
 	if err != nil {
 		return false, fmt.Errorf("get worktree: %w", err)
 	}
-	diags, err := r.analyzer.Analyze(ctx, wt, res.Path)
+	diags, err := r.analyzer.Analyze(ctx, wt, []string{res.Path})
 	if err != nil {
 		return false, fmt.Errorf("run analyzer: %w", err)
 	}
