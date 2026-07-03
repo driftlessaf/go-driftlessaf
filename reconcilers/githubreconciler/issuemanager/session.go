@@ -38,6 +38,28 @@ type IssueSession[T Comparable[T]] struct {
 	maxDesiredIssues int
 }
 
+// Existing returns the decoded data of the issues currently open for this
+// session's path — the same set Reconcile matches the desired state against
+// (by Comparable.Equal). Callers can feed it into their desired-state
+// computation so a re-derivation re-confirms, updates, or resolves each tracked
+// item rather than failing to re-discover it and closing it. Issues whose
+// embedded data could not be decoded are omitted.
+func (s *IssueSession[T]) Existing() []T {
+	out := make([]T, 0, len(s.existingIssues))
+	for _, e := range s.existingIssues {
+		if e.data != nil {
+			out = append(out, *e.data)
+		}
+	}
+	return out
+}
+
+// MaxDesired returns the maximum number of desired issues this session
+// accepts in Reconcile — the manager's per-path limit unless overridden by
+// WithSessionMaxDesiredIssues. Callers deriving an unbounded desired set can
+// truncate it to this limit instead of tripping Reconcile's size error.
+func (s *IssueSession[T]) MaxDesired() int { return s.maxDesiredIssues }
+
 // hasSkipLabel checks if a specific issue has the skip label.
 // Returns true if the issue has a label matching "skip:{identity}".
 func (s *IssueSession[T]) hasSkipLabel(issue *github.Issue) bool {

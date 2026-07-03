@@ -114,6 +114,12 @@ SPDX-License-Identifier: Apache-2.0
 //	    return err
 //	}
 //
+// The session exposes the discovered state: Existing returns the decoded
+// data of the open issues (seed a re-derivation with it so tracked items are
+// re-confirmed rather than closed) and MaxDesired returns the session's
+// desired-issue cap (truncate to it rather than tripping Reconcile's size
+// error).
+//
 // Reconcile to desired state with a single call.
 // This performs create, update, and close operations atomically.
 // Issues with skip labels are automatically preserved:
