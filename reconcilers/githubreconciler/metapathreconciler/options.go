@@ -18,11 +18,17 @@ import (
 // package. It is accepted anywhere a constructor-specific option is.
 type Option interface {
 	PROption
+	IssuesOption
 }
 
 // PROption configures a reconciler built with NewPR.
 type PROption interface {
 	applyPR(*prOptions)
+}
+
+// IssuesOption configures a reconciler built with NewIssues.
+type IssuesOption interface {
+	applyIssues(*issuesOptions)
 }
 
 // commonOptions holds the configuration shared by every reconciler variant.
@@ -40,15 +46,28 @@ type prOptions struct {
 	giveUp                          *changemanager.GiveUpComment
 }
 
+// issuesOptions holds the configuration for a reconciler built with NewIssues.
+type issuesOptions struct {
+	commonOptions
+	closeMessage string
+	grouping     Grouping
+}
+
 // option implements Option by mutating the common configuration.
 type option func(*commonOptions)
 
-func (f option) applyPR(o *prOptions) { f(&o.commonOptions) }
+func (f option) applyPR(o *prOptions)         { f(&o.commonOptions) }
+func (f option) applyIssues(o *issuesOptions) { f(&o.commonOptions) }
 
 // prOption implements PROption.
 type prOption func(*prOptions)
 
 func (f prOption) applyPR(o *prOptions) { f(o) }
+
+// issuesOption implements IssuesOption.
+type issuesOption func(*issuesOptions)
+
+func (f issuesOption) applyIssues(o *issuesOptions) { f(o) }
 
 // WithMode configures the reconciler's operating mode.
 func WithMode(m Mode) Option {
@@ -57,9 +76,10 @@ func WithMode(m Mode) Option {
 	})
 }
 
-// WithLabels appends static labels applied by the reconciler's path leg
-// (for NewPR, the labels on the pull requests it creates). Labels
-// accumulate across repeated uses.
+// WithLabels appends static labels applied by the reconciler's path leg:
+// for NewPR the labels on the pull requests it creates, for NewIssues the
+// labels on the issues it files — including any downstream trigger label
+// (e.g. the materializer's). Labels accumulate across repeated uses.
 func WithLabels(labels ...string) Option {
 	return option(func(o *commonOptions) {
 		o.labels = append(o.labels, labels...)
@@ -70,10 +90,20 @@ func WithLabels(labels ...string) Option {
 // based on analyzer diagnostics and/or CI findings. The returned labels
 // are merged with the static labels configured via WithLabels.
 //
-// On the first pass (analyzer runs), diagnostics is populated and findings
-// contains unfixed diagnostics converted to findings.
-// On iteration passes (PR has CI failures), diagnostics is nil and findings
-// contains the session's CI/review findings.
+// For NewPR: on the first pass (analyzer runs), diagnostics is populated and
+// findings contains unfixed diagnostics converted to findings; on iteration
+// passes (PR has CI failures), diagnostics is nil and findings contains the
+// session's CI/review findings.
+//
+// For NewIssues: the function is called once per path reconcile with the
+// diagnostics the producer reported (nil for producers without
+// Diagnostic-shaped findings) and nil findings, and its labels apply to
+// every issue in the path's desired set — making it the policy hook for
+// deciding per repo/path whether to arm a downstream remediation trigger.
+// Note that issue labels are applied when an issue is created or when its
+// embedded data changes; issuemanager does not relabel otherwise-unchanged
+// issues and never removes labels it applied earlier, so a policy flip only
+// affects issues created (or updated) after it.
 func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string) Option {
 	return option(func(o *commonOptions) {
 		o.labelFn = fn
@@ -98,6 +128,22 @@ func WithBaseRevalidation() PROption {
 func WithRequeueOnUnknownMergeability(after time.Duration) PROption {
 	return prOption(func(o *prOptions) {
 		o.unknownMergeabilityRequeueAfter = after
+	})
+}
+
+// WithCloseMessage overrides the comment posted on issues that are closed
+// because their findings are no longer reported.
+func WithCloseMessage(msg string) IssuesOption {
+	return issuesOption(func(o *issuesOptions) {
+		o.closeMessage = msg
+	})
+}
+
+// WithGrouping overrides how the analyzer's diagnostics are grouped into
+// issues. The default is GroupByRule.
+func WithGrouping(g Grouping) IssuesOption {
+	return issuesOption(func(o *issuesOptions) {
+		o.grouping = g
 	})
 }
 
