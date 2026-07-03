@@ -96,6 +96,26 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		log.With("state", state).Warn("Unexpected state combination")
 	}
 
+	// Record the branch strategy and starting SHAs before any git work. When
+	// usePRBranch is false the agent runs on top of the current default branch
+	// and the result is force-pushed over the PR branch; on a long-lived PR this
+	// is what lets the branch absorb the default branch's history while the PR's
+	// base pointer stays frozen at creation. Capturing the decision and the PR
+	// head SHA here makes that observable per reconcile instead of only via the
+	// GitHub API after the fact.
+	branchStrategy := "fresh-from-default-branch"
+	if usePRBranch {
+		branchStrategy = "iterate-on-pr-branch"
+	}
+	clog.InfoContext(ctx, "Reconciling PR: leasing clone and running agent",
+		"pr", session.PRNumber(),
+		"branch_strategy", branchStrategy,
+		"pr_head_sha", session.HeadSHA(),
+		"commit_count", session.CommitCount(),
+		"needs_rebase", state.NeedsRebase(),
+		"has_findings", state.HasFindings(),
+	)
+
 	// Acquire clone manager for this repo
 	cloneMgr, err := r.cloneMeta.Get(res.Owner, res.Repo)
 	if err != nil {

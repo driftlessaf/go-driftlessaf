@@ -313,6 +313,7 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	if err != nil {
 		return "", false, fmt.Errorf("getting remote ref %s: %w", ref, err)
 	}
+	clog.InfoContext(ctx, "Fetched ref", "ref", ref, "sha", remoteRef.Hash().String())
 
 	headRef, err := repo.Head()
 	if err != nil {
@@ -460,6 +461,24 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 		return fmt.Errorf("committing changes: %w", err)
 	}
 
+	// Record where the pushed branch sits relative to its merge-base, so a
+	// runaway reconcile (a branch that keeps accumulating commits, or that has
+	// absorbed a fast-moving base while the PR's base pointer stays frozen at
+	// creation) is visible per push rather than having to be reconstructed from
+	// the GitHub compare API after the fact. commits_ahead_of_base counts the
+	// commits the pushed branch carries above the merge-base resolved at lease
+	// time; for a fresh-from-default-branch lease this is the single fix commit,
+	// for a PR-branch iteration it is the running PR commit total.
+	commitsAheadOfBase := -1
+	if commits, cerr := collectCommits(l.clone.repo, l.baseCommit); cerr == nil {
+		commitsAheadOfBase = len(commits)
+	}
+	clog.InfoContext(ctx, "Pushing agent changes",
+		"branch", branchName,
+		"leased_base_sha", l.sha,
+		"merge_base_sha", l.baseCommit.String(),
+		"commits_ahead_of_base", commitsAheadOfBase)
+
 	if err := l.manager.forcePushBranch(ctx, l.clone.repo, ref, l.remoteURL); err != nil {
 		return fmt.Errorf("force pushing branch: %w", err)
 	}
@@ -549,7 +568,11 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 	}
 
 	refSpec := gitconfig.RefSpec(fmt.Sprintf("%s:%s", ref.String(), ref.String()))
-	clog.InfoContextf(ctx, "Force pushing %s to %s", refSpec, remoteURL)
+	pushHeadSHA := ""
+	if headRef, herr := repo.Reference(ref, true); herr == nil {
+		pushHeadSHA = headRef.Hash().String()
+	}
+	clog.InfoContext(ctx, "Force pushing branch", "ref", ref.String(), "head_sha", pushHeadSHA, "remote", remoteURL)
 
 	remote := trustedRemote(repo, remoteURL)
 
