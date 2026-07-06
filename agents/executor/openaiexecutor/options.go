@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package openaiexecutor
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -14,6 +15,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
+	"chainguard.dev/driftlessaf/internal/cloudrun"
 )
 
 // Option is a functional option for configuring the executor.
@@ -128,15 +130,12 @@ func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.Ret
 
 // WithResourceLabels sets labels for observability attribution.
 // Automatically includes default labels from environment variables:
-//   - service_name: from K_SERVICE (defaults to "unknown")
+//   - service_name: from K_SERVICE, falling back to CLOUD_RUN_JOB (defaults to "unknown")
 //   - product: from CHAINGUARD_PRODUCT (defaults to "unknown")
 //   - team: from CHAINGUARD_TEAM (defaults to "unknown")
 func WithResourceLabels[Request promptbuilder.Bindable, Response any](labels map[string]string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
-		serviceName := os.Getenv("K_SERVICE")
-		if serviceName == "" {
-			serviceName = "unknown"
-		}
+		serviceName := cmp.Or(cloudrun.ServiceName(), "unknown")
 		productName := os.Getenv("CHAINGUARD_PRODUCT")
 		if productName == "" {
 			productName = "unknown"

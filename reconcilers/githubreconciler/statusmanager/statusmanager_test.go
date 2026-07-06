@@ -699,6 +699,28 @@ func TestBuildDetailsURL(t *testing.T) {
 			"resource.labels.service_name%3D%22service_with_underscore%22",
 			"jsonPayload.sha%3D%22sha%2Bwith%2Bplus%22",
 		},
+	}, {
+		name: "cloud run job session",
+		session: &Session[TestDetails]{
+			manager: &StatusManager[TestDetails]{
+				identity:         "test-reconciler",
+				projectID:        "my-project",
+				serviceName:      "autofix-job",
+				isJob:            true,
+				templateExecutor: templateExecutor,
+			},
+			resource: &githubreconciler.Resource{
+				Owner: "chainguard-dev",
+				Repo:  "mono",
+				URL:   "https://github.com/chainguard-dev/mono/pull/123",
+			},
+			sha: "def456ghi789",
+		},
+		wantContains: []string{
+			"resource.type%3D%22cloud_run_job%22",
+			"resource.labels.job_name%3D%22autofix-job%22",
+			"jsonPayload.sha%3D%22def456ghi789%22",
+		},
 	}}
 
 	for _, tt := range tests {

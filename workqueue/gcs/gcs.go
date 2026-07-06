@@ -68,8 +68,8 @@ type wq struct {
 // every workqueue metric carries.
 func (w *wq) baseLabels() prometheus.Labels {
 	return prometheus.Labels{
-		"service_name":  env.KnativeServiceName,
-		"revision_name": env.KnativeRevisionName,
+		"service_name":  baseServiceName,
+		"revision_name": baseRevisionName,
 		"queue_name":    w.name,
 	}
 }
@@ -513,8 +513,8 @@ type inProgressKey struct {
 // baseLabels returns the labels every metric emitted from this key carries.
 func (o *inProgressKey) baseLabels() prometheus.Labels {
 	return prometheus.Labels{
-		"service_name":  env.KnativeServiceName,
-		"revision_name": env.KnativeRevisionName,
+		"service_name":  baseServiceName,
+		"revision_name": baseRevisionName,
 		"queue_name":    o.queueName,
 	}
 }
@@ -1043,8 +1043,8 @@ type queuedKey struct {
 // baseLabels returns the labels every metric emitted from this key carries.
 func (q *queuedKey) baseLabels() prometheus.Labels {
 	return prometheus.Labels{
-		"service_name":  env.KnativeServiceName,
-		"revision_name": env.KnativeRevisionName,
+		"service_name":  baseServiceName,
+		"revision_name": baseRevisionName,
 		"queue_name":    q.queueName,
 	}
 }

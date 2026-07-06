@@ -10,13 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"sync"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v88/github"
 
+	"chainguard.dev/driftlessaf/internal/cloudrun"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 )
@@ -44,6 +44,7 @@ type StatusManager[T any] struct {
 	identity         string
 	projectID        string
 	serviceName      string
+	isJob            bool
 	readOnly         bool
 	detailsURLFunc   DetailsURLFunc
 	templateExecutor *internaltemplate.Template[Status[T]]
@@ -94,10 +95,11 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 		clog.InfoContextf(ctx, "Unable to detect project-id: %v", err)
 	}
 
-	// Get service name once at startup
-	serviceName, ok := os.LookupEnv("K_SERVICE")
-	if !ok {
-		clog.InfoContextf(ctx, "Unable to detect reconciler service: %v", err)
+	// Resolve the running resource's identity once at startup. Prefers the
+	// Cloud Run service variables and falls back to the job variables.
+	serviceName := cloudrun.ServiceName()
+	if serviceName == "" {
+		clog.InfoContext(ctx, "Unable to detect reconciler service: neither K_SERVICE nor CLOUD_RUN_JOB is set")
 	}
 
 	templateExecutor, err := internaltemplate.New[Status[T]](identity, "-status", "status")
@@ -114,6 +116,7 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 		identity:         identity,
 		projectID:        projectID,
 		serviceName:      serviceName,
+		isJob:            cloudrun.IsJob(),
 		readOnly:         readOnly,
 		detailsURLFunc:   cfg.detailsURL,
 		templateExecutor: templateExecutor,
@@ -167,16 +170,21 @@ func (s *Session[T]) buildDetailsURL() string {
 		return s.manager.detailsURLFunc(s.resource, s.sha)
 	}
 
-	// Build the Cloud Logging URL with both key and SHA filters
-	// The query filters for:
-	// - Cloud Run revision logs
-	// - Specific service name
+	// Build the Cloud Logging URL with both key and SHA filters. The query
+	// filters for:
+	// - Cloud Run logs for this resource (revision for services, job for jobs)
 	// - The resource key (PR URL) in jsonPayload.key
 	// - The SHA in jsonPayload.sha
-	query := fmt.Sprintf(`resource.type="cloud_run_revision"
-resource.labels.service_name=%q
+	resourceType, nameLabel := "cloud_run_revision", "service_name"
+	if s.manager.isJob {
+		resourceType, nameLabel = "cloud_run_job", "job_name"
+	}
+	query := fmt.Sprintf(`resource.type=%q
+resource.labels.%s=%q
 jsonPayload.key=%q
 jsonPayload.sha=%q`,
+		resourceType,
+		nameLabel,
 		s.manager.serviceName,
 		s.resource.URL,
 		s.sha,

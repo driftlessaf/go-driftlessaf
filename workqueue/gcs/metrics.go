@@ -6,19 +6,23 @@ SPDX-License-Identifier: Apache-2.0
 package gcs
 
 import (
-	"context"
+	"cmp"
 	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/sethvargo/go-envconfig"
+
+	"chainguard.dev/driftlessaf/internal/cloudrun"
 )
 
-var env = envconfig.MustProcess(context.Background(), &struct {
-	// https://cloud.google.com/run/docs/container-contract#services-env-vars
-	KnativeServiceName  string `env:"K_SERVICE, default=unknown"`
-	KnativeRevisionName string `env:"K_REVISION, default=unknown"`
-}{})
+// baseServiceName and baseRevisionName label every workqueue metric with the
+// running Cloud Run resource's identity. They prefer the service variables
+// (K_SERVICE/K_REVISION) and fall back to the job variables
+// (CLOUD_RUN_JOB/CLOUD_RUN_EXECUTION), defaulting to "unknown".
+var (
+	baseServiceName  = cmp.Or(cloudrun.ServiceName(), "unknown")
+	baseRevisionName = cmp.Or(cloudrun.RevisionName(), "unknown")
+)
 
 // queue_name labels every workqueue metric so consumers can distinguish
 // multiple workqueues running inside the same Cloud Run service. It is set
