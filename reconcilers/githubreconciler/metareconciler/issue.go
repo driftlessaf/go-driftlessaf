@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
@@ -126,14 +127,21 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	// both is stamped once.
 	prLabels := r.prLabelsForIssue(issue)
 
-	// Create/update the PR with the changes
-	prURL, err := changeSession.Upsert(ctx, &PRData[Req]{
+	// Create/update the PR with the changes. prData is passed by pointer and
+	// the body template renders only after the closure below runs, so fields
+	// set post-execution (ReasoningSummary) are visible to the template.
+	prData := &PRData[Req]{
 		Identity:      r.identity,
 		IssueURL:      issue.GetHTMLURL(),
 		IssueNumber:   issue.GetNumber(),
 		IssueBodyHash: sha256.Sum256([]byte(issue.GetBody())),
 		Request:       request,
-	}, false, prLabels, func(ctx context.Context, branchName string) error {
+	}
+	prURL, err := changeSession.Upsert(ctx, prData, false, prLabels, func(ctx context.Context, branchName string) error {
+		// Tee the agent's extended-thinking blocks off the trace so the PR
+		// body template can render them via {{.ReasoningSummary}} (see
+		// ReasoningSummarySnippet). No-op when the agent emits no reasoning.
+		ctx, reasoning := agenttrace.CaptureReasoning[Resp](ctx)
 		cloneMgr, err := r.cloneMeta.Get(res.Owner, res.Repo)
 		if err != nil {
 			return fmt.Errorf("get clone manager: %w", err)
@@ -172,6 +180,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
 			agentRan = true
+			prData.ReasoningSummary = agenttrace.SummarizeReasoning(reasoning(), reasoningSummaryMaxChars)
 
 			// Check if the agent left the worktree clean (no file changes).
 			// Return ErrNoChanges so Upsert can propagate it to the caller.

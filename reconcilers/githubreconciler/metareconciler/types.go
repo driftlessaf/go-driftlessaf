@@ -37,4 +37,12 @@ type PRData[Req any] struct {
 	IssueNumber   int      `json:"issue_number"`
 	IssueBodyHash [32]byte `json:"issue_body_hash"`
 	Request       Req      `json:"-"`
+
+	// ReasoningSummary is a truncated summary of the agent's extended-thinking
+	// output for the run that produced this PR, populated by the reconciler
+	// after the agent executes and empty when the run carried no reasoning.
+	// Excluded from JSON so it never participates in change detection (it
+	// varies run to run). Render it by appending [ReasoningSummarySnippet] to
+	// the PR body template.
+	ReasoningSummary string `json:"-"`
 }

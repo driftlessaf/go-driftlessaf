@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
@@ -251,12 +252,20 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	var agentResult Resp
 	var agentRan bool
 
-	// Upsert PR with changes (analyzer fixes, agent fixes, or both).
-	prURL, err := session.Upsert(ctx, &PRData[Req]{
+	// Upsert PR with changes (analyzer fixes, agent fixes, or both). prData is
+	// passed by pointer and the body template renders only after the closure
+	// below runs, so fields set post-execution (ReasoningSummary) are visible
+	// to the template.
+	prData := &PRData[Req]{
 		Identity: r.identity,
 		Path:     res.Path,
 		Request:  request,
-	}, false, labels, func(ctx context.Context, branchName string) error {
+	}
+	prURL, err := session.Upsert(ctx, prData, false, labels, func(ctx context.Context, branchName string) error {
+		// Tee the agent's extended-thinking blocks off the trace so the PR
+		// body template can render them via {{.ReasoningSummary}} (see
+		// ReasoningSummarySnippet). No-op when the agent emits no reasoning.
+		ctx, reasoning := agenttrace.CaptureReasoning[Resp](ctx)
 		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
 			// If the analyzer already fixed everything, commit its
 			// changes directly without invoking the agent.
@@ -275,6 +284,7 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			}
 			agentResult = result
 			agentRan = true
+			prData.ReasoningSummary = agenttrace.SummarizeReasoning(reasoning(), reasoningSummaryMaxChars)
 
 			// Check if the agent left the worktree clean (no actual file changes).
 			status, err := wt.Status()

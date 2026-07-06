@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
@@ -357,14 +358,21 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 	// sees the agent's rationale rather than a bare failure pill.
 	var agentNoDiffNote string
 
-	// Create/update the PR with the changes.
-	prURL, err := changeSession.Upsert(ctx, &PRData[Req]{
+	// Create/update the PR with the changes. prData is passed by pointer and
+	// the body template renders only after the closure below runs, so fields
+	// set post-execution (ReasoningSummary) are visible to the template.
+	prData := &PRData[Req]{
 		Identity:         r.identity,
 		LinearIssueID:    issue.ID,
 		LinearIdentifier: issue.Identifier,
 		DescriptionHash:  sha256.Sum256([]byte(issue.Description)),
 		Request:          request,
-	}, false, r.prLabels, func(ctx context.Context, branchName string) error {
+	}
+	prURL, err := changeSession.Upsert(ctx, prData, false, r.prLabels, func(ctx context.Context, branchName string) error {
+		// Tee the agent's extended-thinking blocks off the trace so the PR
+		// body template can render them via {{.ReasoningSummary}} (see
+		// ReasoningSummarySnippet). No-op when the agent emits no reasoning.
+		ctx, reasoning := agenttrace.CaptureReasoning[Resp](ctx)
 		cloneMgr, err := r.cloneMeta.Get(res.Owner, res.Repo)
 		if err != nil {
 			return fmt.Errorf("get clone manager: %w", err)
@@ -434,6 +442,7 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 			if err != nil {
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
+			prData.ReasoningSummary = agenttrace.SummarizeReasoning(reasoning(), reasoningSummaryMaxChars)
 
 			// No-diff detection: if the agent left the worktree clean, the
 			// underlying worktree.Commit would return git.ErrEmptyCommit
