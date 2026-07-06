@@ -84,6 +84,11 @@ var _ workqueue.Interface = (*wq)(nil)
 // TODO(mattmoor): What's the right balance here?
 var RefreshInterval = 5 * time.Minute
 
+// heartbeatRetryInterval is the period on which the lease heartbeat retries
+// after a transient storage error, until the lease would expire. It is a
+// variable so tests can shorten it.
+var heartbeatRetryInterval = 30 * time.Second
+
 // The minimum number of attempts before tracking work attempts.
 // This is to minimize the cardinality of the metric.
 var TrackWorkAttemptMinThreshold = 20
@@ -202,6 +207,32 @@ func updateMetadata(ctx context.Context, client ClientInterface, key string, met
 		}
 	}
 	return nil
+}
+
+// isNotFound reports whether err indicates the object (or the pinned
+// generation of it) does not exist.
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return true
+	}
+	var gerr *googleapi.Error
+	return errors.As(err, &gerr) && gerr.Code == http.StatusNotFound
+}
+
+// lostOwnership reports whether err indicates that the in-progress object no
+// longer matches the generation this process leased: either a precondition
+// failed (the object was replaced or modified by another actor) or the object
+// is gone entirely. Transient errors (rate limiting, server errors, network
+// blips) are NOT ownership loss — the object still carries our lease.
+func lostOwnership(err error) bool {
+	if isNotFound(err) {
+		return true
+	}
+	var gerr *googleapi.Error
+	return errors.As(err, &gerr) && gerr.Code == http.StatusPreconditionFailed
 }
 
 func checkPreconditionFailedOk(err error) (bool, error) {
@@ -464,6 +495,10 @@ type inProgressKey struct {
 	ownerCtx    context.Context
 	ownerCancel context.CancelFunc
 
+	// heartbeatStopped is closed when the heartbeat goroutine exits; it is nil
+	// for keys observed via Enumerate, which do not heartbeat.
+	heartbeatStopped chan struct{}
+
 	priority int64
 	// queueName is the queue_name label value applied to all metrics emitted
 	// from this key's lifecycle (Requeue, Complete, Deadletter).
@@ -503,17 +538,38 @@ func (o *inProgressKey) Priority() int64 {
 func (o *inProgressKey) GetAttempts() int {
 	o.rw.RLock()
 	defer o.rw.RUnlock()
+	return o.attemptsLocked()
+}
 
+// attemptsLocked returns the attempt count recorded on the object's metadata.
+// Callers must hold o.rw; it must not acquire the lock itself (sync.RWMutex
+// blocks new readers once a writer is pending, so a nested RLock can deadlock
+// against the heartbeat's write lock).
+func (o *inProgressKey) attemptsLocked() int {
 	if o.attrs == nil || o.attrs.Metadata == nil {
 		return 0
 	}
 
 	attempts, err := strconv.Atoi(o.attrs.Metadata[attemptsMetadataKey])
 	if err != nil {
-		clog.WarnContextf(o.ownerCtx, "Malformed attempts on %s: %v", o.Name(), err)
+		clog.WarnContextf(o.ownerCtx, "Malformed attempts on %s: %v",
+			strings.TrimPrefix(o.attrs.Name, inProgressPrefix), err)
 		return 0
 	}
 	return attempts
+}
+
+// stopHeartbeat cancels the lease heartbeat and waits for its goroutine to
+// exit, so cleanup paths observe a stable attrs and can never race an
+// in-flight refresh. It is a no-op for keys observed via Enumerate, which do
+// not heartbeat.
+func (o *inProgressKey) stopHeartbeat() {
+	if o.ownerCancel != nil {
+		o.ownerCancel()
+	}
+	if o.heartbeatStopped != nil {
+		<-o.heartbeatStopped
+	}
 }
 
 // Requeue implements workqueue.InProgressKey.
@@ -528,17 +584,60 @@ func (o *inProgressKey) Requeue(ctx context.Context) error {
 
 // RequeueWithOptions implements workqueue.InProgressKey.
 func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.Options) error {
-	if o.ownerCancel != nil {
-		o.ownerCancel()
+	o.stopHeartbeat()
+
+	// The delete of the in-progress object is pinned to the generation we
+	// leased so we can never remove an object another attempt owns.
+	conds := storage.Conditions{GenerationMatch: o.attrs.Generation}
+
+	// A key observed via Enumerate has no heartbeat keeping its view of the
+	// lease current: the owner may have refreshed it (which bumps only the
+	// metageneration, not the generation) since we listed it. Re-read the
+	// object and skip the requeue unless it still carries exactly the lease we
+	// observed; pin the delete to that metageneration so a refresh landing
+	// after this check is still caught. Owner-held keys deliberately do NOT
+	// pin the metageneration: a refresh aborted client-side by cancellation
+	// can still land server-side, leaving our recorded metageneration stale
+	// for an object we do own.
+	if o.ownerCancel == nil {
+		attrs, err := o.client.Object(o.attrs.Name).Attrs(ctx)
+		switch {
+		case isNotFound(err):
+			clog.WarnContextf(ctx, "RequeueWithOptions: lost ownership of key %q, skipping requeue: %v", o.Name(), err)
+			return nil
+		case err != nil:
+			return fmt.Errorf("Attrs() = %w", err)
+		case attrs.Generation != o.attrs.Generation || attrs.Metageneration != o.attrs.Metageneration:
+			clog.WarnContextf(ctx, "RequeueWithOptions: lease on key %q changed since observation, skipping requeue", o.Name())
+			return nil
+		}
+		conds.MetagenerationMatch = attrs.Metageneration
 	}
+
+	for {
+		retry, err := o.requeueOnce(ctx, opts, conds)
+		if !retry {
+			return err
+		}
+	}
+}
+
+// requeueOnce performs a single requeue attempt: copy the in-progress object
+// back to the queued prefix (or merge into an existing queued twin) and delete
+// the in-progress object under deleteConds. It reports retry=true when the
+// queued twin vanished mid-merge and the whole sequence should be re-run.
+func (o *inProgressKey) requeueOnce(ctx context.Context, opts workqueue.Options, deleteConds storage.Conditions) (bool, error) {
 	o.rw.RLock()
 	defer o.rw.RUnlock()
 
-	// We'll move from the in-progress to the queued prefix.
+	// We'll move from the in-progress to the queued prefix. The copy source is
+	// pinned to the generation we leased: if the in-progress object has been
+	// replaced by another attempt, we must not copy (or later delete) the new
+	// owner's object.
 	key := strings.TrimPrefix(o.attrs.Name, inProgressPrefix)
 	copier := o.client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).If(storage.Conditions{
 		DoesNotExist: true,
-	}).CopierFrom(o.client.Object(o.attrs.Name))
+	}).CopierFrom(o.client.Object(o.attrs.Name).Generation(o.attrs.Generation))
 
 	// Preserve metadata
 	copier.Metadata = o.attrs.Metadata
@@ -589,23 +688,44 @@ func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.O
 	}
 
 	_, err := copier.Run(ctx)
+	if isNotFound(err) {
+		// The source is pinned to the generation we leased, so not-found means
+		// that generation is gone: another attempt owns the key now, and
+		// requeueing is its responsibility, not ours. Touch nothing.
+		clog.WarnContextf(ctx, "RequeueWithOptions: lost ownership of key %q, skipping requeue: %v", key, err)
+		return false, nil
+	}
 	if exists, err := checkPreconditionFailedOk(err); err != nil {
 		clog.WarnContextf(ctx, "RequeueWithOptions: copy to queued failed for key %q: %v", key, err)
-		return fmt.Errorf("Run() = %w", err)
+		return false, fmt.Errorf("Run() = %w", err)
 	} else if exists {
 		if err := updateMetadata(ctx, o.client, key, copier.Metadata); err != nil {
 			if errors.Is(err, storage.ErrObjectNotExist) {
 				clog.InfoContextf(ctx, "Key %q was deleted before we could fetch the duplicate, recursing.", key)
-				return o.RequeueWithOptions(ctx, opts)
+				return true, nil
 			}
-			return fmt.Errorf("updateMetadata() = %w", err)
+			return false, fmt.Errorf("updateMetadata() = %w", err)
 		}
 	}
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name)); err != nil {
+	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name).If(deleteConds)); err != nil {
+		if lostOwnership(err) {
+			// The owner refreshed the lease (or another attempt replaced the
+			// object, or it is already gone) between our copy and this pinned
+			// delete, so leave the queued twin in place. We must NOT delete it: a
+			// concurrent enqueue may have deduplicated into the twin without
+			// bumping its metageneration (dedups are deliberately cheap no-ops),
+			// so a pristine twin is indistinguishable from one now carrying a real
+			// queued event, and deleting it could drop that event. A spurious
+			// re-execution (the twin runs once the live attempt completes) is the
+			// safe bias: workqueue receivers are idempotent, so at-least-once
+			// reprocessing is acceptable where dropping a key is not.
+			clog.WarnContextf(ctx, "RequeueWithOptions: lost ownership of key %q, leaving requeue twin intact: %v", key, err)
+			return false, nil
+		}
 		clog.WarnContextf(ctx, "RequeueWithOptions: failed to delete in-progress object for key %q: %v", key, err)
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
 // IsOrphaned implements workqueue.ObservedInProgressKey.
@@ -672,7 +792,7 @@ func deleteWithRetry(ctx context.Context, obj *storage.ObjectHandle) error {
 
 // Complete implements workqueue.OwnedInProgressKey.
 func (o *inProgressKey) Complete(ctx context.Context) error {
-	o.ownerCancel()
+	o.stopHeartbeat()
 	o.rw.RLock()
 	defer o.rw.RUnlock()
 
@@ -681,7 +801,7 @@ func (o *inProgressKey) Complete(ctx context.Context) error {
 	mWorkLatency.With(workLabels).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
 
 	// Record the number of attempts for this successful completion
-	attempts := o.GetAttempts()
+	attempts := o.attemptsLocked()
 	mCompletionAttempts.With(o.baseLabels()).Observe(float64(attempts))
 
 	// Record time to completion
@@ -698,7 +818,16 @@ func (o *inProgressKey) Complete(ctx context.Context) error {
 		}
 	}
 
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name)); err != nil {
+	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name).If(storage.Conditions{
+		GenerationMatch: o.attrs.Generation,
+	})); err != nil {
+		if lostOwnership(err) {
+			// The work completed, but another attempt owns the key now; its
+			// lease object must be left intact.
+			clog.WarnContextf(ctx, "Complete: lost ownership of key %q, skipping delete: %v",
+				strings.TrimPrefix(o.attrs.Name, inProgressPrefix), err)
+			return nil
+		}
 		clog.ErrorContextf(ctx, "Complete: failed to delete in-progress object for key %q: %v",
 			strings.TrimPrefix(o.attrs.Name, inProgressPrefix), err)
 		return err
@@ -708,9 +837,7 @@ func (o *inProgressKey) Complete(ctx context.Context) error {
 
 // Deadletter implements workqueue.OwnedInProgressKey.
 func (o *inProgressKey) Deadletter(ctx context.Context) error {
-	if o.ownerCancel != nil {
-		o.ownerCancel()
-	}
+	o.stopHeartbeat()
 	o.rw.RLock()
 	defer o.rw.RUnlock()
 
@@ -719,8 +846,11 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 
 	clog.InfoContextf(ctx, "Moving key %q to dead letter queue as %q", key, deadLetterKey)
 
-	// Copy the in-progress task to the dead letter queue
-	copier := o.client.Object(deadLetterKey).CopierFrom(o.client.Object(o.attrs.Name))
+	// Copy the in-progress task to the dead letter queue. The copy source is
+	// pinned to the generation we leased so that a replacement by another
+	// attempt is observed as loss of ownership rather than dead-lettering the
+	// new owner's object.
+	copier := o.client.Object(deadLetterKey).CopierFrom(o.client.Object(o.attrs.Name).Generation(o.attrs.Generation))
 
 	// Preserve metadata
 	copier.Metadata = o.attrs.Metadata
@@ -742,13 +872,28 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 
 	// Create the dead letter entry
 	_, err := copier.Run(ctx)
+	if isNotFound(err) {
+		// The source is pinned to the generation we leased, so not-found means
+		// that generation is gone: another attempt owns the key now. Leave its
+		// state alone rather than dead-lettering it.
+		clog.WarnContextf(ctx, "Deadletter: lost ownership of key %q, skipping dead-letter: %v", key, err)
+		return nil
+	}
 	if err != nil {
 		clog.WarnContextf(ctx, "Deadletter: copy to dead-letter failed for key %q: %v", key, err)
 		return fmt.Errorf("failed to create dead letter entry: %w", err)
 	}
 
 	// Delete the in-progress task
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name)); err != nil {
+	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name).If(storage.Conditions{
+		GenerationMatch: o.attrs.Generation,
+	})); err != nil {
+		if lostOwnership(err) {
+			// Another attempt replaced the object between our copy and delete;
+			// the new owner's lease object must be left intact.
+			clog.WarnContextf(ctx, "Deadletter: lost ownership of key %q, skipping delete: %v", key, err)
+			return nil
+		}
 		clog.WarnContextf(ctx, "Deadletter: failed to delete in-progress object for key %q: %v", key, err)
 		return err
 	}
@@ -764,11 +909,22 @@ func (o *inProgressKey) startHeartbeat(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	o.ownerCtx = ctx
 	o.ownerCancel = cancel
+	o.heartbeatStopped = make(chan struct{})
 
 	go func() {
+		defer close(o.heartbeatStopped)
 		ticker := time.NewTicker(RefreshInterval)
 		defer ticker.Stop()
 		defer cancel()
+
+		// Start stamped the object with a lease that expires 3x the refresh
+		// interval from creation; each successful refresh pushes it out again.
+		// Prefer the stamped expiration over recomputing it, so we never
+		// believe the lease outlives what other dispatchers can observe.
+		expiry := time.Now().UTC().Add(3 * RefreshInterval)
+		if exp, err := time.Parse(time.RFC3339, o.attrs.Metadata[expirationMetadataKey]); err == nil {
+			expiry = exp
+		}
 
 		for {
 			select {
@@ -776,35 +932,103 @@ func (o *inProgressKey) startHeartbeat(ctx context.Context) {
 				return
 
 			case <-ticker.C:
-				// The function invocation is to scope the defer
-				if err := func() error {
-					o.rw.Lock()
-					defer o.rw.Unlock()
-
-					attrs, err := o.client.Object(o.attrs.Name).If(storage.Conditions{
-						// We are the only ones that should be updating the object,
-						// so if we see anything manipulate the object, then assume
-						// that we've lost ownership and cancel the context to
-						// terminate the in-progress work.
-						MetagenerationMatch: o.attrs.Metageneration,
-					}).Update(ctx, storage.ObjectAttrsToUpdate{
-						Metadata: map[string]string{
-							expirationMetadataKey: time.Now().UTC().Add(3 * RefreshInterval).Format(time.RFC3339),
-						},
-					})
-					if err != nil {
-						return err
-					}
-					// This is what we're guarding with the write lock.
-					o.attrs = attrs
-					return nil
-				}(); err != nil {
-					clog.ErrorContextf(ctx, "Failed to update expiration: %v", err)
+				newExpiry, ok := o.refreshLease(ctx, expiry)
+				if !ok {
 					return
 				}
+				expiry = newExpiry
 			}
 		}
 	}()
+}
+
+// refreshLease extends the lease on the in-progress object, retrying transient
+// errors until the current lease expires. It returns the new expiration and
+// whether ownership is retained; on a definitive loss of ownership (the object
+// was replaced or deleted out from under us) or once the lease can no longer
+// be extended before it lapses, it returns false so the caller cancels the
+// in-progress work.
+func (o *inProgressKey) refreshLease(ctx context.Context, expiry time.Time) (time.Time, bool) {
+	// Clamp the retry pacing to the refresh interval so that shortening
+	// RefreshInterval (a public knob) cannot leave the lease with no retry
+	// budget before it lapses.
+	retryInterval := min(heartbeatRetryInterval, RefreshInterval)
+
+	for {
+		// A canceled owner (cleanup underway) must not contend for the write
+		// lock or log lease errors that are byproducts of shutdown.
+		if ctx.Err() != nil {
+			return time.Time{}, false
+		}
+
+		newExpiry := time.Now().UTC().Add(3 * RefreshInterval)
+
+		// The function invocation is to scope the defers, and the lock is
+		// released between retries so cleanup paths are not blocked while
+		// we wait out a transient storage error. The per-attempt timeout
+		// bounds the storage client's internal retrying so that a persistent
+		// outage cannot pin a single attempt past the lease expiry.
+		err := func() error {
+			uctx, ucancel := context.WithTimeout(ctx, retryInterval)
+			defer ucancel()
+
+			o.rw.Lock()
+			defer o.rw.Unlock()
+
+			attrs, err := o.client.Object(o.attrs.Name).If(storage.Conditions{
+				// Pin the generation we leased: if the object is replaced by
+				// another attempt it gets a NEW generation, so the refresh can
+				// never adopt someone else's lease (a metageneration-only pin
+				// could: fresh generations restart the metageneration counter).
+				// The metageneration is deliberately NOT pinned. Only the owner
+				// ever updates an in-progress generation's metadata, and one of
+				// our own refreshes can land server-side while failing
+				// client-side (timeout, lost response), leaving our recorded
+				// metageneration stale; pinning it would 412 against our own
+				// write and cancel healthy work.
+				GenerationMatch: o.attrs.Generation,
+			}).Update(uctx, storage.ObjectAttrsToUpdate{
+				Metadata: map[string]string{
+					expirationMetadataKey: newExpiry.Format(time.RFC3339),
+				},
+			})
+			if err != nil {
+				return err
+			}
+			// This is what we're guarding with the write lock.
+			o.attrs = attrs
+			return nil
+		}()
+		switch {
+		case err == nil:
+			return newExpiry, true
+
+		case ctx.Err() != nil:
+			// Shutting down: the failure is a byproduct of cancellation, not
+			// a lease problem.
+			return time.Time{}, false
+
+		case lostOwnership(err):
+			clog.ErrorContextf(ctx, "refreshLease: lost ownership of %q, terminating in-progress work: %v", o.Name(), err)
+			return time.Time{}, false
+		}
+
+		// A transient error (rate limiting, server error, network blip) does
+		// not mean we lost ownership: the object still carries our lease. Keep
+		// retrying until the lease would lapse and others may treat the key as
+		// orphaned; only then give up.
+		if !time.Now().UTC().Add(retryInterval).Before(expiry) {
+			clog.ErrorContextf(ctx, "refreshLease: failed to update expiration for %q before lease expiry, terminating in-progress work: %v", o.Name(), err)
+			return time.Time{}, false
+		}
+		clog.WarnContextf(ctx, "refreshLease: failed to update expiration for %q (will retry): %v", o.Name(), err)
+
+		select {
+		case <-ctx.Done():
+			return time.Time{}, false
+		case <-time.After(retryInterval):
+		}
+	}
 }
 
 type queuedKey struct {
