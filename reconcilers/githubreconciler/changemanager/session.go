@@ -709,7 +709,7 @@ func (s *Session[T]) Upsert(
 
 	// Append trace ID so developers can map this PR back to the agent trace.
 	if spanCtx := trace.SpanFromContext(ctx).SpanContext(); spanCtx.IsValid() {
-		body += fmt.Sprintf("\n\nTrace-ID: %s", spanCtx.TraceID().String())
+		body += s.manager.traceFooter(ctx, spanCtx.TraceID().String())
 	}
 
 	// Persist the caller's data and changemanager metadata in one block; carrying

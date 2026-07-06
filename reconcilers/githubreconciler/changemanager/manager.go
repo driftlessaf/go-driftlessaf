@@ -72,6 +72,19 @@ func WithDynamicCommitBudget[T any]() Option[T] {
 	}
 }
 
+// WithTraceDashboard sets the base URL of the agent-traces dashboard (e.g.
+// "https://host/agent-traces/"). When set, the Trace-ID footer appended to PR
+// bodies links the trace ID to the dashboard's trace view ("?trace=<id>") and,
+// when the reconcile's agenttrace.ExecutionContext carries a reconciler key,
+// adds a second link listing every agent run for this PR ("?reconcile=<key>").
+// Query parameters already present on the base URL (e.g. "?env=staging") are
+// preserved. Unset (default) keeps the plain-text Trace-ID footer.
+func WithTraceDashboard[T any](baseURL string) Option[T] {
+	return func(cm *CM[T]) {
+		cm.traceDashboardURL = baseURL
+	}
+}
+
 // metadata is changemanager state persisted in the PR body alongside the
 // caller's data (see embeddedData).
 type metadata struct {
@@ -139,6 +152,7 @@ type CM[T any] struct {
 	dynamicCommitBudget bool
 	closeOnEmptyDiff    bool
 	managedLabels       []string
+	traceDashboardURL   string
 }
 
 // GraphQL types for querying check runs
