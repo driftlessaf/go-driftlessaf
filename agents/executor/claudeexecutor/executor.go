@@ -465,6 +465,20 @@ func (e *executor[Request, Response]) Execute(
 			}
 		}
 
+		// Strip degenerate empty text blocks (streamed with zero text_delta
+		// events during provider anomaly windows) before the response is
+		// consumed. Left in place, message.ToParam() would replay the empty
+		// block on the next request — at either the tool-call append or the
+		// text-redirect append below — and the API rejects it with a
+		// non-retryable 400 ("messages: text content blocks must be
+		// non-empty") that kills the conversation on its final turn. Applied
+		// after RecordResponse so the trace payload preserves the raw anomaly.
+		// A response stripped to zero content falls through to the "no
+		// content" error below and is never appended to params.Messages.
+		if normalizeEmptyTextBlocks(&message) {
+			clog.WarnContext(ctx, "Stripped empty text block(s) from Claude response before replay")
+		}
+
 		// Process response
 		var toolUseBlocks []anthropic.ToolUseBlock
 		var textContent string

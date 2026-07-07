@@ -241,6 +241,155 @@ func TestNormalizeEmptyToolInputs(t *testing.T) {
 	}
 }
 
+// TestNormalizeEmptyTextBlocks verifies the helper removes only empty or
+// whitespace-only text blocks and preserves all other content.
+func TestNormalizeEmptyTextBlocks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content []anthropic.ContentBlockUnion
+		want    []anthropic.ContentBlockUnion
+		wantMod bool
+	}{
+		{
+			name: "empty text alongside tool_use is stripped",
+			content: []anthropic.ContentBlockUnion{
+				{Type: "text", Text: ""},
+				{Type: "tool_use", ID: "toolu_01", Name: "read_file", Input: json.RawMessage("{}")},
+			},
+			want: []anthropic.ContentBlockUnion{
+				{Type: "tool_use", ID: "toolu_01", Name: "read_file", Input: json.RawMessage("{}")},
+			},
+			wantMod: true,
+		},
+		{
+			name: "whitespace-only text is stripped",
+			content: []anthropic.ContentBlockUnion{
+				{Type: "text", Text: " \n\t"},
+				{Type: "text", Text: "real answer"},
+			},
+			want: []anthropic.ContentBlockUnion{
+				{Type: "text", Text: "real answer"},
+			},
+			wantMod: true,
+		},
+		{
+			name: "non-empty text is preserved",
+			content: []anthropic.ContentBlockUnion{
+				{Type: "text", Text: "hello"},
+			},
+			want: []anthropic.ContentBlockUnion{
+				{Type: "text", Text: "hello"},
+			},
+			wantMod: false,
+		},
+		{
+			name: "thinking block with empty text field is preserved",
+			content: []anthropic.ContentBlockUnion{
+				{Type: "thinking", Thinking: "reasoning..."},
+				{Type: "text", Text: ""},
+			},
+			want: []anthropic.ContentBlockUnion{
+				{Type: "thinking", Thinking: "reasoning..."},
+			},
+			wantMod: true,
+		},
+		{
+			name: "only empty text leaves zero content",
+			content: []anthropic.ContentBlockUnion{
+				{Type: "text", Text: ""},
+			},
+			want:    []anthropic.ContentBlockUnion{},
+			wantMod: true,
+		},
+		{
+			name: "no text blocks is a no-op",
+			content: []anthropic.ContentBlockUnion{
+				{Type: "tool_use", ID: "toolu_02", Name: "list_dir", Input: json.RawMessage("{}")},
+			},
+			want: []anthropic.ContentBlockUnion{
+				{Type: "tool_use", ID: "toolu_02", Name: "list_dir", Input: json.RawMessage("{}")},
+			},
+			wantMod: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			msg := anthropic.Message{Content: tt.content}
+			if got := normalizeEmptyTextBlocks(&msg); got != tt.wantMod {
+				t.Errorf("normalizeEmptyTextBlocks() = %v, want %v", got, tt.wantMod)
+			}
+			if got, want := len(msg.Content), len(tt.want); got != want {
+				t.Fatalf("content length after normalize: got = %d, want = %d", got, want)
+			}
+			for i, cb := range msg.Content {
+				if cb.Type != tt.want[i].Type || cb.Text != tt.want[i].Text || cb.ID != tt.want[i].ID {
+					t.Errorf("content[%d]: got = {%s %q %s}, want = {%s %q %s}",
+						i, cb.Type, cb.Text, cb.ID, tt.want[i].Type, tt.want[i].Text, tt.want[i].ID)
+				}
+			}
+		})
+	}
+}
+
+// TestAccumulateEmptyTextBlockAlongsideToolUse replays the exact degenerate
+// stream shape observed during provider anomaly windows: a text block opened
+// and closed with zero text_delta events alongside a real tool_use block.
+// Accumulation succeeds (nothing to repair), so the empty block survives into
+// the Message; normalizeEmptyTextBlocks must strip it while preserving the
+// tool_use block, keeping the subsequent replay of the message valid.
+func TestAccumulateEmptyTextBlockAlongsideToolUse(t *testing.T) {
+	t.Parallel()
+
+	rawEvents := []string{
+		`{"type":"message_start","message":{"id":"msg_05","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_05","name":"read_file","input":{}}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/etc/os-release\"}"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	}
+
+	var msg anthropic.Message
+	for _, raw := range rawEvents {
+		if err := msg.Accumulate(unmarshalEvent(t, raw)); err != nil {
+			if isEmptyRawMessageMarshalErr(err) && normalizeEmptyToolInputs(&msg) {
+				continue
+			}
+			t.Fatalf("Accumulate: %v", err)
+		}
+	}
+
+	// The degenerate empty text block accumulates without error.
+	if got, want := len(msg.Content), 2; got != want {
+		t.Fatalf("accumulated content length: got = %d, want = %d", got, want)
+	}
+	if msg.Content[0].Type != "text" || msg.Content[0].Text != "" {
+		t.Fatalf("content[0]: got = {%s %q}, want empty text block", msg.Content[0].Type, msg.Content[0].Text)
+	}
+
+	if !normalizeEmptyTextBlocks(&msg) {
+		t.Fatal("normalizeEmptyTextBlocks should have stripped the empty text block")
+	}
+
+	if got, want := len(msg.Content), 1; got != want {
+		t.Fatalf("content length after normalize: got = %d, want = %d", got, want)
+	}
+	cb := msg.Content[0]
+	if cb.Type != "tool_use" || cb.Name != "read_file" {
+		t.Errorf("surviving block: got = {%s %s}, want tool_use read_file", cb.Type, cb.Name)
+	}
+	if got, want := string(cb.Input), `{"path":"/etc/os-release"}`; got != want {
+		t.Errorf("tool input: got = %q, want = %q", got, want)
+	}
+}
+
 // TestIsEmptyRawMessageMarshalErr verifies error matching is precise.
 func TestIsEmptyRawMessageMarshalErr(t *testing.T) {
 	t.Parallel()

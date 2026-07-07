@@ -7,6 +7,7 @@ package claudeexecutor
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -39,6 +40,29 @@ func normalizeEmptyToolInputs(msg *anthropic.Message) bool {
 		changed = true
 	}
 	return changed
+}
+
+// normalizeEmptyTextBlocks removes text blocks whose Text is empty or
+// whitespace-only from a Message's content. Returns true if any block was
+// removed.
+//
+// During short provider-side anomaly windows the model can stream a
+// degenerate text block with no text_delta events (a content_block_start
+// carrying {"type":"text","text":""} immediately followed by
+// content_block_stop). Message.ToParam copies the accumulated Text verbatim,
+// and replaying the empty block on the next request makes the API reject it
+// with a non-retryable 400 ("messages: text content blocks must be
+// non-empty") that kills the conversation on what would otherwise be a
+// successful turn. Stripping the degenerate blocks before the response is
+// consumed keeps the replayed assistant message valid without altering real
+// content (tool_use and thinking blocks are preserved). If stripping leaves
+// the message with no content at all, callers must not send it.
+func normalizeEmptyTextBlocks(msg *anthropic.Message) bool {
+	before := len(msg.Content)
+	msg.Content = slices.DeleteFunc(msg.Content, func(cb anthropic.ContentBlockUnion) bool {
+		return cb.Type == "text" && strings.TrimSpace(cb.Text) == ""
+	})
+	return len(msg.Content) != before
 }
 
 // isInputEmpty reports whether a json.RawMessage is nil, zero-length, or
