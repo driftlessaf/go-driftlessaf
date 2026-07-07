@@ -183,6 +183,11 @@ func (e *executor[Request, Response]) Execute(
 		if meta, ok := tools[tc.Function.Name]; ok {
 			e.recordToolCall(ctx, tc.Function.Name)
 			res = meta.Handler(ctx, tc, trace, resultPtr)
+			// Preserve the model's universal `reasoning` argument on the
+			// recorded call (handlers record curated param maps that drop it).
+			if r, ok := args["reasoning"].(string); ok {
+				trace.AttachToolCallReasoning(tc.ID, r)
+			}
 		} else {
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", tc.Function.Name)
 			trace.BadToolCall(tc.ID, tc.Function.Name,

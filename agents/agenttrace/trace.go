@@ -627,6 +627,39 @@ func (tc *ToolCall[T]) Complete(result any, err error) {
 	trace.ToolCalls = append(trace.ToolCalls, tc)
 }
 
+// AttachToolCallReasoning merges the model-supplied reasoning for the tool
+// call with the given id into that call's recorded params. Executors call
+// this after dispatching a tool: the model passes a universal `reasoning`
+// argument on every call (auto-injected into each tool schema by the
+// executor bridges), but handlers record curated param maps that drop it.
+// Attaching it here preserves the per-action rationale on the trace record —
+// and, since params serialize verbatim, in BigQuery's tool_calls[].params
+// JSON. A no-op when no completed call matches id (e.g. the handler bailed
+// on a parameter error before recording) or when the handler already
+// recorded a reasoning value.
+func (t *Trace[T]) AttachToolCallReasoning(id, reasoning string) {
+	if reasoning == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := len(t.ToolCalls) - 1; i >= 0; i-- {
+		tc := t.ToolCalls[i]
+		if tc.ID != id {
+			continue
+		}
+		tc.mu.Lock()
+		if tc.Params == nil {
+			tc.Params = map[string]any{}
+		}
+		if _, exists := tc.Params["reasoning"]; !exists {
+			tc.Params["reasoning"] = reasoning
+		}
+		tc.mu.Unlock()
+		return
+	}
+}
+
 // Duration returns the duration of the tool call
 func (tc *ToolCall[T]) Duration() time.Duration {
 	tc.mu.Lock()

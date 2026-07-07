@@ -300,6 +300,14 @@ func (e *executor[Request, Response]) Execute(
 		if meta, ok := tools[toolUse.Name]; ok {
 			// Execute registered handler with result pointer
 			result = meta.Handler(ctx, toolUse, trace, resultPtr)
+			// The model supplies a universal `reasoning` argument on every
+			// call (auto-injected into each tool schema), but handlers record
+			// curated param maps that drop it. Merge it back onto the
+			// recorded call so the per-action rationale survives into the
+			// trace and BigQuery.
+			if r, ok := args["reasoning"].(string); ok {
+				trace.AttachToolCallReasoning(toolUse.ID, r)
+			}
 		} else {
 			// Unknown tool
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)

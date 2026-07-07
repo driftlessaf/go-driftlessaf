@@ -7,6 +7,7 @@ package agenttrace
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -94,4 +95,63 @@ func moreReasoningBlocksNote(n int) string {
 		return fmt.Sprintf("\n+%d more reasoning block", n)
 	}
 	return fmt.Sprintf("\n+%d more reasoning blocks", n)
+}
+
+// DefaultRationaleToolNames lists the mutating tools whose per-call
+// `reasoning` argument reads as a change rationale ("why I made this edit").
+// Read-only exploration tools (read_file, search_codebase, ...) and
+// result-submission tools are deliberately excluded: their rationales are
+// procedural noise in a change summary.
+var DefaultRationaleToolNames = []string{
+	"edit_file", "write_file", "delete_file", "move_file", "copy_file",
+	"chmod", "symlink",
+}
+
+// SummarizeTraceReasoning renders a concise, human-readable rationale for a
+// completed trace, suitable for a PR body. It prefers the per-action
+// reasoning recorded on mutating tool calls (see [DefaultRationaleToolNames]
+// and [Trace.AttachToolCallReasoning]) — one bullet per distinct rationale,
+// in call order — because those explain individual changes. When the trace
+// carries no tool-call rationales it falls back to the extended-thinking
+// blocks via [SummarizeReasoning]. Returns "" for a nil trace or when
+// neither source has content.
+func SummarizeTraceReasoning[T any](t *Trace[T], maxChars int) string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	calls := make([]*ToolCall[T], len(t.ToolCalls))
+	copy(calls, t.ToolCalls)
+	reasoningBlocks := t.Reasoning
+	t.mu.Unlock()
+
+	lines := make([]string, 0, len(calls))
+	seen := make(map[string]struct{}, len(calls))
+	for _, tc := range calls {
+		if !slices.Contains(DefaultRationaleToolNames, tc.Name) {
+			continue
+		}
+		tc.mu.Lock()
+		r, _ := tc.Params["reasoning"].(string)
+		tc.mu.Unlock()
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		lines = append(lines, "- "+r)
+	}
+	if len(lines) > 0 {
+		return JoinStringsWithLimit(lines, maxChars, "\n", moreRationalesNote)
+	}
+	return SummarizeReasoning(reasoningBlocks, maxChars)
+}
+
+// moreRationalesNote formats the "+N more" suffix SummarizeTraceReasoning
+// appends when truncation drops trailing rationales.
+func moreRationalesNote(n int) string {
+	return fmt.Sprintf("\n+%d more", n)
 }

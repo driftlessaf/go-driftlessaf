@@ -294,6 +294,11 @@ func (e *executor[Request, Response]) Execute(
 		var result *genai.FunctionResponse
 		if meta, ok := tools[call.Name]; ok {
 			result = meta.Handler(ctx, call, trace, finalResultPtr)
+			// Preserve the model's universal `reasoning` argument on the
+			// recorded call (handlers record curated param maps that drop it).
+			if r, ok := call.Args["reasoning"].(string); ok {
+				trace.AttachToolCallReasoning(call.ID, r)
+			}
 		} else {
 			clog.ErrorContext(ctx, "Unknown seed tool requested", "tool", call.Name)
 			trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown tool: %q", call.Name))
@@ -576,6 +581,12 @@ func (e *executor[Request, Response]) Execute(
 				} else {
 					// Execute the tool handler
 					toolResponse = toolMeta.Handler(ctx, call, trace, resultPtr)
+					// Preserve the model's universal `reasoning` argument on
+					// the recorded call (handlers record curated param maps
+					// that drop it).
+					if r, ok := call.Args["reasoning"].(string); ok {
+						trace.AttachToolCallReasoning(call.ID, r)
+					}
 				}
 
 				return &genai.Part{FunctionResponse: toolResponse}

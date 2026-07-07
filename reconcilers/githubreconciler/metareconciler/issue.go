@@ -138,10 +138,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		Request:       request,
 	}
 	prURL, err := changeSession.Upsert(ctx, prData, false, prLabels, func(ctx context.Context, branchName string) error {
-		// Tee the agent's extended-thinking blocks off the trace so the PR
-		// body template can render them via {{.ReasoningSummary}} (see
-		// ReasoningSummarySnippet). No-op when the agent emits no reasoning.
-		ctx, reasoning := agenttrace.CaptureReasoning[Resp](ctx)
+		// Tee the agent's completed trace so the PR body template can render
+		// a rationale summary via {{.ReasoningSummary}} (see
+		// ReasoningSummarySnippet): per-action tool-call reasoning when
+		// present, falling back to extended-thinking blocks. No-op when the
+		// run produced neither.
+		ctx, captured := agenttrace.CaptureTrace[Resp](ctx)
 		cloneMgr, err := r.cloneMeta.Get(res.Owner, res.Repo)
 		if err != nil {
 			return fmt.Errorf("get clone manager: %w", err)
@@ -180,7 +182,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
 			agentRan = true
-			prData.ReasoningSummary = agenttrace.SummarizeReasoning(reasoning(), reasoningSummaryMaxChars)
+			prData.ReasoningSummary = agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars)
 
 			// Check if the agent left the worktree clean (no file changes).
 			// Return ErrNoChanges so Upsert can propagate it to the caller.
