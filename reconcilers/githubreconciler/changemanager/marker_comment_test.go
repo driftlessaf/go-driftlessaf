@@ -14,6 +14,7 @@ import (
 	"testing"
 	"text/template"
 
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/google/go-github/v88/github"
 )
 
@@ -153,6 +154,84 @@ func TestUpsertMarkerComment(t *testing.T) {
 		}
 		if len(rec.created) != 0 || len(rec.edited) != 0 {
 			t.Errorf("API mutated without a PR: created = %v, edited = %v", rec.created, rec.edited)
+		}
+	})
+}
+
+func newIssueMarkerSession(client *github.Client, issueNumber int) *Session[testData] {
+	return &Session[testData]{
+		client: client,
+		owner:  "test-owner",
+		repo:   "test-repo",
+		resource: &githubreconciler.Resource{
+			Owner:  "test-owner",
+			Repo:   "test-repo",
+			Number: issueNumber,
+			Type:   githubreconciler.ResourceTypeIssue,
+		},
+	}
+}
+
+func TestUpsertIssueMarkerComment(t *testing.T) {
+	t.Run("posts once and dedups on repeat", func(t *testing.T) {
+		client, rec := newMarkerCommentServer(t)
+		s := newIssueMarkerSession(client, 11)
+
+		if err := s.UpsertIssueMarkerComment(t.Context(), testMarker, "starting work"); err != nil {
+			t.Fatalf("UpsertIssueMarkerComment: got error = %v, want = nil", err)
+		}
+		want := testMarker + "\nstarting work"
+		if len(rec.created) != 1 || rec.created[0] != want {
+			t.Fatalf("created comments: got = %v, want = [%q]", rec.created, want)
+		}
+
+		// A second reconcile finds the existing marker comment and rewrites
+		// nothing, so the announcement stays a single comment.
+		rec.existing = append(rec.existing, &github.IssueComment{ID: github.Ptr(int64(1)), Body: github.Ptr(want)})
+		if err := s.UpsertIssueMarkerComment(t.Context(), testMarker, "starting work"); err != nil {
+			t.Fatalf("UpsertIssueMarkerComment (repeat): got error = %v, want = nil", err)
+		}
+		if len(rec.created) != 1 {
+			t.Errorf("created comments after repeat: got = %v, want one (dedup on marker)", rec.created)
+		}
+		if len(rec.edited) != 0 {
+			t.Errorf("edited comments: got = %v, want none (identical body must not be rewritten)", rec.edited)
+		}
+	})
+
+	t.Run("posts when no PR exists", func(t *testing.T) {
+		client, rec := newMarkerCommentServer(t)
+		// prNumber is 0: unlike UpsertMarkerComment, the issue variant must still
+		// post, since announcing before the first PR is the whole point.
+		s := newIssueMarkerSession(client, 11)
+
+		if err := s.UpsertIssueMarkerComment(t.Context(), testMarker, "starting work"); err != nil {
+			t.Fatalf("UpsertIssueMarkerComment: got error = %v, want = nil", err)
+		}
+		if len(rec.created) != 1 {
+			t.Errorf("created comments: got = %v, want one", rec.created)
+		}
+	})
+
+	t.Run("no-op on non-issue resource", func(t *testing.T) {
+		client, rec := newMarkerCommentServer(t)
+		s := &Session[testData]{
+			client: client,
+			owner:  "test-owner",
+			repo:   "test-repo",
+			resource: &githubreconciler.Resource{
+				Owner: "test-owner",
+				Repo:  "test-repo",
+				Path:  "some/path",
+				Type:  githubreconciler.ResourceTypePath,
+			},
+		}
+
+		if err := s.UpsertIssueMarkerComment(t.Context(), testMarker, "starting work"); err != nil {
+			t.Fatalf("UpsertIssueMarkerComment: got error = %v, want = nil", err)
+		}
+		if len(rec.created) != 0 || len(rec.edited) != 0 {
+			t.Errorf("API mutated on a non-issue resource: created = %v, edited = %v", rec.created, rec.edited)
 		}
 	})
 }

@@ -44,6 +44,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// WithGiveUpComment.
 	giveUp *changemanager.GiveUpComment
 
+	// startComment, when set, posts a single marker comment on the source issue
+	// the first time the bot reconciles it with no PR yet, announcing that work
+	// has started. Nil means disabled. See WithStartComment.
+	startComment *startComment
+
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
 	buildRequest   func(context.Context, *github.Issue, *changemanager.Session[PRData[Req]]) (Req, error)
@@ -91,6 +96,43 @@ func WithCopyIssueLabels[Req promptbuilder.Bindable, Resp Result, CB any]() Opti
 func WithGiveUpComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func(explanation string) string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
+	}
+}
+
+// issueMarkerCommenter is the subset of Session that startComment needs. It is
+// an interface so surface is testable without a full session.
+type issueMarkerCommenter interface {
+	UpsertIssueMarkerComment(ctx context.Context, marker, body string) error
+}
+
+// startComment holds the configuration for the opt-in issue start comment: a
+// hidden HTML marker that dedups the comment across reconciles, and a render
+// func producing its body.
+type startComment struct {
+	marker string
+	render func() string
+}
+
+// surface posts or updates the start comment on the issue. Failures are logged
+// and swallowed: announcing work has started must never fail the reconcile.
+func (c *startComment) surface(ctx context.Context, issue issueMarkerCommenter) {
+	if c == nil {
+		return
+	}
+	if err := issue.UpsertIssueMarkerComment(ctx, c.marker, c.render()); err != nil {
+		clog.WarnContext(ctx, "Failed to post start comment", "error", err)
+	}
+}
+
+// WithStartComment posts a single comment on the source issue when the bot
+// first reconciles it and no PR exists yet, announcing that work has started.
+// The comment body is render(), prefixed with the hidden HTML marker so
+// repeated no-PR reconciles dedup to one comment rather than posting again.
+// Once a PR exists the comment is never posted, so new commits on an open PR do
+// not retrigger it. Off by default.
+func WithStartComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func() string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.startComment = &startComment{marker: marker, render: render}
 	}
 }
 

@@ -445,32 +445,52 @@ func (s *Session[T]) UpsertMarkerComment(ctx context.Context, marker, body strin
 		return nil
 	}
 
+	return s.upsertMarkerCommentOn(ctx, s.prNumber, marker, body)
+}
+
+// UpsertIssueMarkerComment posts or updates a single comment on the source
+// issue, identified by a hidden HTML marker, so repeated calls update the same
+// comment in place rather than accumulating duplicates. Unlike
+// UpsertMarkerComment it targets the issue (s.resource.Number) and is not gated
+// on a PR existing, so a reconciler can announce work on the issue before the
+// first PR appears. It is a no-op on non-issue resources.
+func (s *Session[T]) UpsertIssueMarkerComment(ctx context.Context, marker, body string) error {
+	if s.resource == nil || s.resource.Type != githubreconciler.ResourceTypeIssue {
+		return nil
+	}
+	return s.upsertMarkerCommentOn(ctx, s.resource.Number, marker, body)
+}
+
+// upsertMarkerCommentOn is the find-or-create body shared by UpsertMarkerComment
+// (targeting the PR) and UpsertIssueMarkerComment (targeting the issue). The
+// number is the issue/PR number to comment on.
+func (s *Session[T]) upsertMarkerCommentOn(ctx context.Context, number int, marker, body string) error {
 	want := marker + "\n" + body
 
-	existing, err := s.findMarkerComment(ctx, marker)
+	existing, err := s.findMarkerComment(ctx, number, marker)
 	// ferr (not err) so the classified list error is what we return without
 	// shadowing the err reused by the edit/create calls below.
-	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, "listing comments", err); done {
+	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, number, "listing comments", err); done {
 		return ferr
 	}
 	if existing != nil {
 		if existing.GetBody() == want {
-			clog.InfoContextf(ctx, "Marker comment already up to date on PR #%d, skipping", s.prNumber)
+			clog.InfoContextf(ctx, "Marker comment already up to date on #%d, skipping", number)
 			return nil
 		}
-		clog.InfoContextf(ctx, "Updating marker comment on PR #%d", s.prNumber)
+		clog.InfoContextf(ctx, "Updating marker comment on #%d", number)
 		_, _, err = s.client.Issues.EditComment(ctx, s.owner, s.repo, existing.GetID(), &github.IssueComment{
 			Body: github.Ptr(want),
 		})
-		_, err = s.skipMarkerCommentIfForbidden(ctx, "editing marker comment", err)
+		_, err = s.skipMarkerCommentIfForbidden(ctx, number, "editing marker comment", err)
 		return err
 	}
 
-	clog.InfoContextf(ctx, "Posting marker comment on PR #%d", s.prNumber)
-	_, _, err = s.client.Issues.CreateComment(ctx, s.owner, s.repo, s.prNumber, &github.IssueComment{
+	clog.InfoContextf(ctx, "Posting marker comment on #%d", number)
+	_, _, err = s.client.Issues.CreateComment(ctx, s.owner, s.repo, number, &github.IssueComment{
 		Body: github.Ptr(want),
 	})
-	_, err = s.skipMarkerCommentIfForbidden(ctx, "posting marker comment", err)
+	_, err = s.skipMarkerCommentIfForbidden(ctx, number, "posting marker comment", err)
 	return err
 }
 
@@ -483,8 +503,8 @@ func (s *Session[T]) DeleteMarkerComment(ctx context.Context, marker string) err
 		return nil
 	}
 
-	existing, err := s.findMarkerComment(ctx, marker)
-	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, "listing comments", err); done {
+	existing, err := s.findMarkerComment(ctx, s.prNumber, marker)
+	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, s.prNumber, "listing comments", err); done {
 		return ferr
 	}
 	if existing == nil {
@@ -493,19 +513,19 @@ func (s *Session[T]) DeleteMarkerComment(ctx context.Context, marker string) err
 
 	clog.InfoContextf(ctx, "Deleting stale marker comment on PR #%d", s.prNumber)
 	_, err = s.client.Issues.DeleteComment(ctx, s.owner, s.repo, existing.GetID())
-	_, err = s.skipMarkerCommentIfForbidden(ctx, "deleting marker comment", err)
+	_, err = s.skipMarkerCommentIfForbidden(ctx, s.prNumber, "deleting marker comment", err)
 	return err
 }
 
-// findMarkerComment returns the first issue comment whose body begins with
-// marker, paging through all comments on the PR. Returns nil when none match.
-// The prefix match (rather than a substring search) avoids matching a human
-// reply that merely quotes the marker comment. The ListComments error is
+// findMarkerComment returns the first comment on the given issue/PR number
+// whose body begins with marker, paging through all comments. Returns nil when
+// none match. The prefix match (rather than a substring search) avoids matching
+// a human reply that merely quotes the marker comment. The ListComments error is
 // returned unwrapped so callers can classify it (see skipMarkerCommentIfForbidden).
-func (s *Session[T]) findMarkerComment(ctx context.Context, marker string) (*github.IssueComment, error) {
+func (s *Session[T]) findMarkerComment(ctx context.Context, number int, marker string) (*github.IssueComment, error) {
 	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
 	for {
-		comments, resp, err := s.client.Issues.ListComments(ctx, s.owner, s.repo, s.prNumber, opts)
+		comments, resp, err := s.client.Issues.ListComments(ctx, s.owner, s.repo, number, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -529,13 +549,13 @@ func (s *Session[T]) findMarkerComment(ctx context.Context, marker string) (*git
 // the list path). On any non-nil error handled is true and err is nil (a
 // tolerated 403) or wrapped, so a terminal caller can discard handled and just
 // return err.
-func (s *Session[T]) skipMarkerCommentIfForbidden(ctx context.Context, op string, err error) (bool, error) {
+func (s *Session[T]) skipMarkerCommentIfForbidden(ctx context.Context, number int, op string, err error) (bool, error) {
 	if err == nil {
 		return false, nil
 	}
 	var ge *github.ErrorResponse
 	if errors.As(err, &ge) && ge.Response != nil && ge.Response.StatusCode == http.StatusForbidden {
-		clog.WarnContext(ctx, "Skipping marker comment: insufficient permission", "pr", s.prNumber, "op", op)
+		clog.WarnContext(ctx, "Skipping marker comment: insufficient permission", "number", number, "op", op)
 		return true, nil
 	}
 	return true, fmt.Errorf("%s: %w", op, err)

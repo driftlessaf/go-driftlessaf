@@ -107,6 +107,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		log.With("state", state).Warn("Unexpected state combination")
 	}
 
+	// Announce work has started on the issue before the first PR appears. Only
+	// when no PR exists yet, so new commits on an open PR never retrigger it; the
+	// marker dedup keeps it to one comment across repeated no-PR reconciles (a
+	// first attempt may end in ErrNoChanges or a transient agent error).
+	if !state.HasPR() {
+		r.startComment.surface(ctx, changeSession)
+	}
+
 	// Build the request before Upsert so it can be stored in PRData.
 	request, err := r.buildRequest(ctx, issue, changeSession)
 	if err != nil {

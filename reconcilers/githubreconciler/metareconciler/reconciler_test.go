@@ -240,6 +240,74 @@ func TestWithGiveUpComment(t *testing.T) {
 	}
 }
 
+func TestWithStartComment(t *testing.T) {
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		&fakeAgent{},
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithStartComment[*testRequest, *testResult, testCallbacks]("<!--test:start-->", func() string { return "started" }),
+	)
+
+	if rec.startComment == nil {
+		t.Fatal("reconciler.startComment = nil, want the configured comment")
+	}
+	if rec.startComment.marker != "<!--test:start-->" {
+		t.Errorf("reconciler.startComment.marker: got = %q, want = %q", rec.startComment.marker, "<!--test:start-->")
+	}
+	if got := rec.startComment.render(); got != "started" {
+		t.Errorf("reconciler.startComment.render: got = %q, want = %q", got, "started")
+	}
+}
+
+// fakeIssueCommenter records the body upserted to the issue, standing in for a
+// change Session so the start-comment gate is testable without a reconcile loop.
+type fakeIssueCommenter struct {
+	upserts []string
+}
+
+func (c *fakeIssueCommenter) UpsertIssueMarkerComment(_ context.Context, marker, body string) error {
+	c.upserts = append(c.upserts, marker+"\n"+body)
+	return nil
+}
+
+// TestStartCommentSurface verifies surface posts the marker comment when the
+// option is set and no-ops on a nil receiver (the option left unset, as for
+// materializer and image-gen). The !state.HasPR() gate that decides whether
+// surface is called lives in reconcileIssue.
+func TestStartCommentSurface(t *testing.T) {
+	tests := []struct {
+		name      string
+		sc        *startComment
+		wantPosts int
+	}{{
+		name:      "set posts once",
+		sc:        &startComment{marker: "<!--test:start-->", render: func() string { return "started" }},
+		wantPosts: 1,
+	}, {
+		name:      "nil receiver no-ops",
+		sc:        nil,
+		wantPosts: 0,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &fakeIssueCommenter{}
+			tt.sc.surface(t.Context(), c)
+			if len(c.upserts) != tt.wantPosts {
+				t.Errorf("upserts: got = %v, want %d", c.upserts, tt.wantPosts)
+			}
+		})
+	}
+}
+
 func TestWithCopyIssueLabels(t *testing.T) {
 	rec := New[*testRequest, *testResult, testCallbacks](
 		"test-identity",
