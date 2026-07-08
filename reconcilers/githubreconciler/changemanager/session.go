@@ -276,6 +276,43 @@ func (s *Session[T]) ResetCommitBudget(ctx context.Context) {
 	s.meta.CommitBudgetBaseline = s.commitCount
 }
 
+// maxReasoningEntries caps the reasoning log persisted in the PR body so the
+// body stays bounded; AppendReasoning drops the oldest entries beyond it.
+// Generous relative to commit budgets (WithMaxCommits deployments run around
+// 10), so in practice nothing is dropped.
+const maxReasoningEntries = 20
+
+// AppendReasoning records the agent's reasoning summary for the commit
+// identified by commitHeadline (the commit message's first line). The entry
+// joins the reasoning log persisted in the PR body by the next Upsert, so the
+// log accumulates one entry per commit across iterations. A no-op when
+// summary is empty (a run that carried no reasoning contributes no entry).
+// Once the log holds maxReasoningEntries entries, the oldest are dropped.
+//
+// Call this only when a commit is actually being created (not on the
+// ErrNoChanges path): only then does Upsert regenerate the body that
+// persists the log.
+func (s *Session[T]) AppendReasoning(commitHeadline, summary string) {
+	if summary == "" {
+		return
+	}
+	s.meta.ReasoningLog = append(s.meta.ReasoningLog, ReasoningEntry{
+		CommitHeadline: commitHeadline,
+		Summary:        summary,
+	})
+	if len(s.meta.ReasoningLog) > maxReasoningEntries {
+		s.meta.ReasoningLog = s.meta.ReasoningLog[len(s.meta.ReasoningLog)-maxReasoningEntries:]
+	}
+}
+
+// ReasoningLog returns the per-commit reasoning entries recovered from the PR
+// body plus any appended in this session, oldest first. Callers render it
+// into PR-body fields (e.g. a per-commit "Agent reasoning" section). The
+// returned slice is the session's own; treat it as read-only.
+func (s *Session[T]) ReasoningLog() []ReasoningEntry {
+	return s.meta.ReasoningLog
+}
+
 // ApplyReadyForReview adds a ready-for-review label to the PR, signaling
 // that the bot has stopped iterating because CI is green and human review
 // is needed. Idempotent: re-running when the label is already present is
@@ -733,7 +770,8 @@ func (s *Session[T]) Upsert(
 	}
 
 	// Persist the caller's data and changemanager metadata in one block; carrying
-	// findingsMeta keeps the commit-budget baseline across body regenerations.
+	// the metadata keeps the commit-budget baseline and the reasoning log across
+	// body regenerations.
 	body, err = s.manager.templateExecutor.Embed(body, &embeddedData[T]{Data: *data, Meta: s.meta})
 	if err != nil {
 		return "", fmt.Errorf("embedding data: %w", err)
@@ -854,7 +892,8 @@ func (s *Session[T]) needsRefresh(ctx context.Context, expected *T, desiredLabel
 		return true, nil
 	}
 
-	// Compare only the caller's data; a budget-baseline change must not force a refresh.
+	// Compare only the caller's data; metadata changes (budget baseline,
+	// reasoning log) must not force a refresh.
 	existingJSON, err := json.Marshal(existing.Data)
 	if err != nil {
 		clog.WarnContextf(ctx, "Failed to marshal existing data: %v", err)

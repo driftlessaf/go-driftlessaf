@@ -8,6 +8,7 @@ package changemanager
 import (
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -210,6 +211,72 @@ func TestResetCommitBudget(t *testing.T) {
 				t.Errorf("baseline: got = %d, want = %d", s.meta.CommitBudgetBaseline, tt.want)
 			}
 		})
+	}
+}
+
+func TestAppendReasoning(t *testing.T) {
+	entry := func(i int) ReasoningEntry {
+		return ReasoningEntry{
+			CommitHeadline: fmt.Sprintf("fix: change %d", i),
+			Summary:        fmt.Sprintf("- rationale %d", i),
+		}
+	}
+
+	tests := []struct {
+		name     string
+		initial  []ReasoningEntry
+		headline string
+		summary  string
+		want     []ReasoningEntry
+	}{{
+		name:     "appends to empty log",
+		headline: "fix: change 1",
+		summary:  "- rationale 1",
+		want:     []ReasoningEntry{entry(1)},
+	}, {
+		name:     "appends after existing entries",
+		initial:  []ReasoningEntry{entry(1)},
+		headline: "fix: change 2",
+		summary:  "- rationale 2",
+		want:     []ReasoningEntry{entry(1), entry(2)},
+	}, {
+		name:     "empty summary is a no-op",
+		initial:  []ReasoningEntry{entry(1)},
+		headline: "fix: change 2",
+		summary:  "",
+		want:     []ReasoningEntry{entry(1)},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session[testData]{meta: metadata{ReasoningLog: tt.initial}}
+			s.AppendReasoning(tt.headline, tt.summary)
+			if got := s.ReasoningLog(); !slices.Equal(got, tt.want) {
+				t.Errorf("ReasoningLog(): got = %v, want = %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAppendReasoningCap verifies the log is bounded: once it holds
+// maxReasoningEntries entries, appending drops the oldest so the PR body
+// cannot grow without limit.
+func TestAppendReasoningCap(t *testing.T) {
+	s := &Session[testData]{}
+	total := maxReasoningEntries + 3
+	for i := range total {
+		s.AppendReasoning(fmt.Sprintf("fix: change %d", i), fmt.Sprintf("- rationale %d", i))
+	}
+
+	got := s.ReasoningLog()
+	if len(got) != maxReasoningEntries {
+		t.Fatalf("log length: got = %d, want = %d", len(got), maxReasoningEntries)
+	}
+	if want := fmt.Sprintf("fix: change %d", total-maxReasoningEntries); got[0].CommitHeadline != want {
+		t.Errorf("oldest retained headline: got = %q, want = %q", got[0].CommitHeadline, want)
+	}
+	if want := fmt.Sprintf("fix: change %d", total-1); got[len(got)-1].CommitHeadline != want {
+		t.Errorf("newest headline: got = %q, want = %q", got[len(got)-1].CommitHeadline, want)
 	}
 }
 

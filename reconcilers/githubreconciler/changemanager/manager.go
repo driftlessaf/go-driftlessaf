@@ -91,6 +91,26 @@ type metadata struct {
 	// CommitBudgetBaseline is the total commit count at the last
 	// ResetCommitBudget call; see WithDynamicCommitBudget.
 	CommitBudgetBaseline int `json:"commit_budget_baseline"`
+
+	// ReasoningLog accumulates one agent-reasoning entry per commit the bot
+	// created, oldest first; see Session.AppendReasoning. omitempty keeps
+	// bodies embedded before the log existed parseable and byte-identical
+	// when no entries exist.
+	ReasoningLog []ReasoningEntry `json:"reasoning_log,omitempty"`
+}
+
+// ReasoningEntry is one iteration's agent-reasoning record, keyed by the
+// headline of the commit that iteration produced. Entries are persisted in
+// the PR body (see metadata) so per-commit reasoning survives body
+// regenerations across iterations, letting callers render one reasoning
+// block per commit rather than only the latest run's.
+type ReasoningEntry struct {
+	// CommitHeadline is the first line of the message of the commit this
+	// reasoning explains.
+	CommitHeadline string `json:"commit_headline"`
+	// Summary is the truncated reasoning summary for the run that produced
+	// the commit.
+	Summary string `json:"summary"`
 }
 
 // embeddedData is the single JSON block changemanager stores in a PR body,

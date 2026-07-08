@@ -108,11 +108,14 @@ type PRData[Req any] struct {
 	Path     string `json:"path"`
 	Request  Req    `json:"request"`
 
-	// ReasoningSummary is a truncated summary of the agent's extended-thinking
-	// output for the run that produced this PR, populated by the reconciler
-	// after the agent executes and empty when the run carried no reasoning.
-	// Excluded from JSON so it never participates in change detection (it
-	// varies run to run). Render it by appending [ReasoningSummarySnippet] to
-	// the PR body template.
+	// ReasoningSummary is the rendered per-commit reasoning log for this PR:
+	// one markdown block per bot commit — the commit headline in bold over
+	// that iteration's truncated reasoning summary — accumulated across
+	// iterations via the reasoning log the session persists in the PR body
+	// (see changemanager.Session.AppendReasoning). Populated by the
+	// reconciler when a commit is created and empty when no iteration
+	// recorded reasoning. Excluded from JSON so it never participates in
+	// change detection (it varies run to run). Render it by appending
+	// [ReasoningSummarySnippet] to the PR body template.
 	ReasoningSummary string `json:"-"`
 }

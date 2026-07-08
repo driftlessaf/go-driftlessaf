@@ -8,6 +8,7 @@ package changemanager_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"text/template"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -71,4 +72,25 @@ func Example() {
 		// handle error
 		return
 	}
+}
+
+// ExampleSession_AppendReasoning demonstrates accumulating a per-commit
+// reasoning log across iterations. Inside the Upsert makeChanges callback,
+// once a commit is certain, record the run's reasoning against the commit's
+// headline; the log persists in the PR body, so ReasoningLog returns entries
+// from prior iterations too, ready to render one reasoning block per commit.
+func ExampleSession_AppendReasoning() {
+	var session changemanager.Session[UpdateData]
+
+	session.AppendReasoning("fix(foo): correct frobnication", "- adjusted the frobnicator")
+	session.AppendReasoning("ci(e2e): retry flaky step", "- reran the check with backoff")
+	session.AppendReasoning("chore: run without reasoning", "") // empty summary: no entry
+
+	for _, e := range session.ReasoningLog() {
+		fmt.Printf("%s -> %s\n", e.CommitHeadline, e.Summary)
+	}
+
+	// Output:
+	// fix(foo): correct frobnication -> - adjusted the frobnicator
+	// ci(e2e): retry flaky step -> - reran the check with backoff
 }

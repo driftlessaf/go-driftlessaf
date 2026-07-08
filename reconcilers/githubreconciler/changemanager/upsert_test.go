@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 	"text/template"
@@ -298,8 +299,9 @@ func TestUpsert(t *testing.T) {
 	}
 }
 
-// TestUpsertEmbedsWrapper verifies Upsert persists one block with both the
-// caller's data and the budget metadata, so an in-memory reset round-trips.
+// TestUpsertEmbedsWrapper verifies Upsert persists one block with the
+// caller's data and the changemanager metadata (budget baseline and
+// reasoning log), so in-memory mutations round-trip through the PR body.
 func TestUpsertEmbedsWrapper(t *testing.T) {
 	titleTmpl := template.Must(template.New("title").Parse("{{.PackageName}}"))
 	bodyTmpl := template.Must(template.New("body").Parse("Update {{.PackageName}}"))
@@ -329,7 +331,12 @@ func TestUpsertEmbedsWrapper(t *testing.T) {
 		t.Fatalf("creating CM: %v", err)
 	}
 
-	// findingsMeta mimics a prior in-memory ResetCommitBudget; Upsert must carry it.
+	// The metadata mimics a prior in-memory ResetCommitBudget and
+	// AppendReasoning; Upsert must carry both.
+	wantLog := []ReasoningEntry{
+		{CommitHeadline: "fix: first pass", Summary: "- adjusted the frobnicator"},
+		{CommitHeadline: "ci: second pass", Summary: "- retried the flaky check"},
+	}
 	session := &Session[testData]{
 		manager:    cm,
 		client:     client,
@@ -337,7 +344,7 @@ func TestUpsertEmbedsWrapper(t *testing.T) {
 		repo:       "test-repo",
 		branchName: "test-bot/pkg",
 		ref:        "main",
-		meta:       metadata{CommitBudgetBaseline: 9},
+		meta:       metadata{CommitBudgetBaseline: 9, ReasoningLog: wantLog},
 	}
 
 	data := &testData{PackageName: "pkg"}
@@ -356,6 +363,9 @@ func TestUpsertEmbedsWrapper(t *testing.T) {
 	}
 	if ed.Meta.CommitBudgetBaseline != 9 {
 		t.Errorf("embedded baseline: got = %d, want = 9", ed.Meta.CommitBudgetBaseline)
+	}
+	if !slices.Equal(ed.Meta.ReasoningLog, wantLog) {
+		t.Errorf("embedded reasoning log: got = %v, want = %v", ed.Meta.ReasoningLog, wantLog)
 	}
 }
 

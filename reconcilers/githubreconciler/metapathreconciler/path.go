@@ -263,15 +263,18 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	}
 	prURL, err := session.Upsert(ctx, prData, false, labels, func(ctx context.Context, branchName string) error {
 		// Tee the agent's completed trace so the PR body template can render
-		// a rationale summary via {{.ReasoningSummary}} (see
+		// a per-commit rationale log via {{.ReasoningSummary}} (see
 		// ReasoningSummarySnippet): per-action tool-call reasoning when
 		// present, falling back to extended-thinking blocks. No-op when the
 		// run produced neither.
 		ctx, captured := agenttrace.CaptureTrace[Resp](ctx)
 		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
-			// If the analyzer already fixed everything, commit its
-			// changes directly without invoking the agent.
+			// If the analyzer already fixed everything, commit its changes
+			// directly without invoking the agent. The commit contributes no
+			// reasoning entry, but the log persisted from prior iterations
+			// must still render rather than drop from the regenerated body.
 			if allFixed {
+				prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
 				return commitMessage(diagnostics), nil
 			}
 
@@ -286,7 +289,6 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			}
 			agentResult = result
 			agentRan = true
-			prData.ReasoningSummary = agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars)
 
 			// Check if the agent left the worktree clean (no actual file changes).
 			status, err := wt.Status()
@@ -297,7 +299,14 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 				return "", changemanager.ErrNoChanges
 			}
 
-			return result.GetCommitMessage(), nil
+			// A commit is certain: log this run's reasoning under the
+			// commit's headline and render the accumulated log — prior
+			// iterations' entries plus this one — for the PR body.
+			msg := result.GetCommitMessage()
+			session.AppendReasoning(commitHeadline(msg), agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars))
+			prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
+
+			return msg, nil
 		})
 	})
 	if err != nil {

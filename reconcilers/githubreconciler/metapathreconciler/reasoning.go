@@ -5,6 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 package metapathreconciler
 
+import (
+	"fmt"
+	"strings"
+
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
+)
+
 // ReasoningSummarySnippet is a ready-made PR-body template fragment rendering
 // the agent's extended-thinking summary as a collapsed details block. It
 // renders nothing when the run produced no reasoning (extended thinking
@@ -22,7 +29,27 @@ package metapathreconciler
 // linearreconciler/metareconciler.
 const ReasoningSummarySnippet = "{{if .ReasoningSummary}}\n\n---\n<details>\n<summary>Agent reasoning</summary>\n\n{{.ReasoningSummary}}\n</details>{{end}}"
 
-// reasoningSummaryMaxChars caps the combined size of the reasoning summary
-// stored on PRData. Kept small so the summary reads as a quick orientation
-// aid rather than a full transcript dump.
+// reasoningSummaryMaxChars caps each per-commit reasoning summary appended
+// to the session's reasoning log. Kept small so each entry reads as a quick
+// orientation aid rather than a full transcript dump.
 const reasoningSummaryMaxChars = 400
+
+// renderReasoningLog renders the session's persisted per-commit reasoning
+// log as the markdown behind {{.ReasoningSummary}}: each entry's commit
+// headline in bold followed by that iteration's (already bulleted) summary,
+// entries separated by blank lines. Returns "" for an empty log so
+// ReasoningSummarySnippet omits the section entirely.
+func renderReasoningLog(entries []changemanager.ReasoningEntry) string {
+	blocks := make([]string, 0, len(entries))
+	for _, e := range entries {
+		blocks = append(blocks, fmt.Sprintf("**%s**\n%s", e.CommitHeadline, e.Summary))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+// commitHeadline returns the first line of a commit message, trimmed; it
+// keys the reasoning-log entry for the commit the message describes.
+func commitHeadline(msg string) string {
+	headline, _, _ := strings.Cut(msg, "\n")
+	return strings.TrimSpace(headline)
+}
