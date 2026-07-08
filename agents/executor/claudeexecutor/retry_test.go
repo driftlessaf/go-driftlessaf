@@ -6,12 +6,34 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// newAPIError builds an *anthropic.Error with a populated body error type the
+// way the SDK does: the errorType field is unexported and only set by
+// UnmarshalJSON, so the {"error":{"type":...}} envelope is unmarshalled first
+// and StatusCode is stamped afterwards, mirroring how the SDK copies it from
+// the HTTP response. Request/Response are populated because Error()
+// dereferences both.
+func newAPIError(t *testing.T, statusCode int, errType string) *anthropic.Error {
+	t.Helper()
+	apiErr := &anthropic.Error{}
+	body := fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":"boom"}}`, errType)
+	if err := json.Unmarshal([]byte(body), apiErr); err != nil {
+		t.Fatalf("json.Unmarshal(%s) = %v", body, err)
+	}
+	apiErr.StatusCode = statusCode
+	apiErr.Request = &http.Request{Method: http.MethodPost, URL: &url.URL{Scheme: "https", Host: "api.anthropic.com", Path: "/v1/messages"}}
+	apiErr.Response = &http.Response{StatusCode: statusCode}
+	return apiErr
+}
 
 func TestIsRetryableClaudeError(t *testing.T) {
 	t.Parallel()
@@ -33,6 +55,18 @@ func TestIsRetryableClaudeError(t *testing.T) {
 		{name: "403 forbidden", err: &anthropic.Error{StatusCode: 403}, want: false},
 		{name: "404 not found", err: &anthropic.Error{StatusCode: 404}, want: false},
 		{name: "500 internal error", err: &anthropic.Error{StatusCode: 500}, want: false},
+		// In-stream errors: *anthropic.Error from an SSE error event on an
+		// already-open stream, so StatusCode carries the 200 of the stream
+		// open and the failure lives in the body error type.
+		{name: "in-stream overloaded_error", err: newAPIError(t, 200, "overloaded_error"), want: true},
+		{name: "in-stream rate_limit_error", err: newAPIError(t, 200, "rate_limit_error"), want: true},
+		{name: "in-stream api_error", err: newAPIError(t, 200, "api_error"), want: true},
+		{name: "unset status with overloaded_error body", err: newAPIError(t, 0, "overloaded_error"), want: true},
+		{name: "in-stream invalid_request_error", err: newAPIError(t, 200, "invalid_request_error"), want: false},
+		{name: "200 with empty error type", err: &anthropic.Error{StatusCode: 200}, want: false},
+		// A real (non-200) HTTP status stays authoritative: the body type
+		// must not make a transport-level 500 retryable.
+		{name: "500 with api_error body", err: newAPIError(t, 500, "api_error"), want: false},
 		// SSE streaming errors (plain fmt.Errorf with raw JSON from ssestream package)
 		{name: "streaming overloaded_error", err: fmt.Errorf(`received error while streaming: {"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_vrtx_011CYejFMV3t43MQ1E377Xn9"}`), want: true},
 		{name: "streaming rate_limit_error", err: fmt.Errorf(`received error while streaming: {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}`), want: true},
@@ -64,6 +98,20 @@ func TestResponseCodeFromError(t *testing.T) {
 		{name: "500 anthropic.Error", err: &anthropic.Error{StatusCode: 500}, want: 500},
 		{name: "529 anthropic.Error", err: &anthropic.Error{StatusCode: 529}, want: 529},
 		{name: "wrapped 429", err: fmt.Errorf("stream: %w", &anthropic.Error{StatusCode: 429}), want: 429},
+		// In-stream errors (StatusCode 200 from the successful stream open)
+		// recover the code from the body error type instead of the transport
+		// status, so metrics no longer label them response_code="200".
+		{name: "in-stream overloaded_error", err: newAPIError(t, 200, "overloaded_error"), want: 529},
+		{name: "in-stream rate_limit_error", err: newAPIError(t, 200, "rate_limit_error"), want: 429},
+		{name: "in-stream api_error", err: newAPIError(t, 200, "api_error"), want: 500},
+		{name: "wrapped in-stream overloaded_error", err: fmt.Errorf("stream: %w", newAPIError(t, 200, "overloaded_error")), want: 529},
+		{name: "unset status with overloaded_error body", err: newAPIError(t, 0, "overloaded_error"), want: 529},
+		// Unrecognised or empty body types keep the StatusCode verbatim
+		// rather than inventing a code.
+		{name: "in-stream invalid_request_error", err: newAPIError(t, 200, "invalid_request_error"), want: 200},
+		{name: "200 with empty error type", err: &anthropic.Error{StatusCode: 200}, want: 200},
+		// A real (non-200) HTTP status is authoritative over the body type.
+		{name: "500 with api_error body", err: newAPIError(t, 500, "api_error"), want: 500},
 		// SSE streaming errors recover the code from the error_type string.
 		{name: "streaming rate_limit_error", err: errors.New(`received error while streaming: {"type":"error","error":{"type":"rate_limit_error"}}`), want: 429},
 		{name: "streaming overloaded_error", err: errors.New(`received error while streaming: {"type":"error","error":{"type":"overloaded_error"}}`), want: 529},
@@ -113,6 +161,7 @@ func TestResponseCodeAttr(t *testing.T) {
 	}{
 		{name: "0 is success", code: 0, want: "200"},
 		{name: "negative is unknown", code: -1, want: "unknown"},
+		{name: "200 in-stream error with unrecognised body type", code: 200, want: "200"},
 		{name: "429", code: 429, want: "429"},
 		{name: "500", code: 500, want: "500"},
 		{name: "529", code: 529, want: "529"},
