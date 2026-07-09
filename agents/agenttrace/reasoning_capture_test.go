@@ -113,6 +113,35 @@ func TestAttachToolCallReasoning(t *testing.T) {
 	}
 }
 
+// TestAppendReasoning_GatedOnPayloadOptIn confirms that raw model reasoning is
+// only captured when the WithPayloadsEnabled opt-in is set on the trace
+// context — thinking blocks are confidential completion content and must not
+// be recorded by default. Empty content is always dropped.
+func TestAppendReasoning_GatedOnPayloadOptIn(t *testing.T) {
+	// Default context: payloads off — AppendReasoning is a no-op.
+	ctx, _ := CaptureTrace[captureResult](t.Context())
+	trace, done := StartTrace[captureResult](ctx, "prompt")
+	trace.AppendReasoning(ReasoningContent{Thinking: "secret plan"})
+	done(captureResult{}, nil)
+	if len(trace.Reasoning) != 0 {
+		t.Errorf("Reasoning = %d blocks, want 0 when payloads are disabled", len(trace.Reasoning))
+	}
+
+	// Opt-in context: payloads on — non-empty reasoning is captured, empty is dropped.
+	onCtx, _ := CaptureTrace[captureResult](t.Context())
+	onCtx = WithPayloadsEnabled(onCtx, true)
+	traceOn, doneOn := StartTrace[captureResult](onCtx, "prompt")
+	traceOn.AppendReasoning(ReasoningContent{Thinking: ""})
+	traceOn.AppendReasoning(ReasoningContent{Thinking: "recorded plan"})
+	doneOn(captureResult{}, nil)
+	if len(traceOn.Reasoning) != 1 {
+		t.Fatalf("Reasoning = %d blocks, want 1 when payloads are enabled", len(traceOn.Reasoning))
+	}
+	if got := traceOn.Reasoning[0].Thinking; got != "recorded plan" {
+		t.Errorf("Reasoning[0].Thinking = %q, want %q", got, "recorded plan")
+	}
+}
+
 // TestSummarizeTraceReasoning_PrefersToolRationales confirms mutating tools'
 // per-call reasoning wins over thinking blocks, renders in call order, and
 // dedupes repeated rationales; read-only tools are excluded.

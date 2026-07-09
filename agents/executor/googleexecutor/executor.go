@@ -528,7 +528,10 @@ func (e *executor[Request, Response]) Execute(
 		for i, part := range candidate.Content.Parts {
 			switch {
 			case part.Thought:
-				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
+				// Gated on the WithPayloadsEnabled opt-in inside AppendReasoning:
+				// raw thinking is confidential completion content, not structural
+				// metadata, so it is only captured when payloads are enabled.
+				trace.AppendReasoning(agenttrace.ReasoningContent{
 					Thinking: part.Text,
 				})
 				clog.InfoContext(ctx, "Found thought part",

@@ -157,6 +157,9 @@ Please solve this problem and provide your answer in JSON format:
 	tracer := evals.BuildTracer(obs, map[string]evals.ObservableTraceCallback[*simpleResponse]{
 		"reasoning_validator": reasoningValidator,
 	})
+	// Reasoning capture is gated behind the payload opt-in, so enable it here —
+	// otherwise trace.Reasoning stays empty and the validator fails.
+	ctx = agenttrace.WithPayloadsEnabled(ctx, true)
 	ctx = agenttrace.WithTracer(ctx, tracer)
 
 	// Execute with a simple math problem that should trigger thinking

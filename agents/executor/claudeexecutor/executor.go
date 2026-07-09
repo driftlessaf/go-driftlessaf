@@ -502,7 +502,10 @@ func (e *executor[Request, Response]) Execute(
 					Input: normalizeToolUseInput(content.Input),
 				})
 			case "thinking", "redacted_thinking":
-				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
+				// Gated on the WithPayloadsEnabled opt-in inside AppendReasoning:
+				// raw thinking is confidential completion content, not structural
+				// metadata, so it is only captured when payloads are enabled.
+				trace.AppendReasoning(agenttrace.ReasoningContent{
 					Thinking: content.Thinking,
 				})
 			}

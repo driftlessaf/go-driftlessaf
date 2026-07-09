@@ -660,6 +660,26 @@ func (t *Trace[T]) AttachToolCallReasoning(id, reasoning string) {
 	}
 }
 
+// AppendReasoning records a block of raw model reasoning (Claude
+// thinking / redacted_thinking blocks, Gemini thought parts) on the trace,
+// but only when the WithPayloadsEnabled opt-in is set on the trace context.
+// Model reasoning is unredacted completion content: under the Derivative
+// Sensitivity Inheritance invariant it inherits the parent submission's
+// confidentiality tier, so it is gated behind the same payload opt-in as
+// raw prompt and completion emission rather than being captured
+// unconditionally. A no-op when the content is empty or the opt-in is off.
+func (t *Trace[T]) AppendReasoning(content ReasoningContent) {
+	if content.Thinking == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !payloadsEnabledFrom(t.ctx) {
+		return
+	}
+	t.Reasoning = append(t.Reasoning, content)
+}
+
 // Duration returns the duration of the tool call
 func (tc *ToolCall[T]) Duration() time.Duration {
 	tc.mu.Lock()

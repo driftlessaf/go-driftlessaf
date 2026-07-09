@@ -263,7 +263,10 @@ func (e *executor[Request, Response]) Execute(
 		if f, ok := choice.Message.JSON.ExtraFields["reasoning_content"]; ok {
 			var thinking string
 			if json.Unmarshal([]byte(f.Raw()), &thinking) == nil && thinking != "" {
-				trace.Reasoning = append(trace.Reasoning, agenttrace.ReasoningContent{
+				// Gated on the WithPayloadsEnabled opt-in inside AppendReasoning:
+				// raw thinking is confidential completion content, not structural
+				// metadata, so it is only captured when payloads are enabled.
+				trace.AppendReasoning(agenttrace.ReasoningContent{
 					Thinking: thinking,
 				})
 			}

@@ -159,6 +159,10 @@ Please solve this problem and provide your answer in JSON format:
 				tracer := evals.BuildTracer(obs, map[string]evals.ObservableTraceCallback[*simpleResponse]{
 					"reasoning_validator": reasoningValidator,
 				})
+				// Reasoning capture is gated behind the payload opt-in, so enable
+				// it here — otherwise trace.Reasoning stays empty and the validator
+				// fails.
+				testCtx = agenttrace.WithPayloadsEnabled(testCtx, true)
 				testCtx = agenttrace.WithTracer(testCtx, tracer)
 
 				t.Cleanup(func() {
