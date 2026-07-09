@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"chainguard.dev/driftlessaf/breaker"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 )
@@ -194,6 +195,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 			delay := addJitter(grpcRateLimitRetryDuration)
 			clog.WarnContext(ctx, "gRPC ResourceExhausted detected, requeueing after retry period", "retry_after", delay)
 			return workqueue.RequeueAfter(delay)
+		}
+
+		// Check if it's a transient host failure from breaker.Transport; its
+		// delay is already jittered, and the floor keeps re-enqueues from
+		// undercutting it.
+		var breakerErr *breaker.Error
+		if errors.As(err, &breakerErr) {
+			clog.WarnContext(ctx, "Transient host failure, requeueing", "retry_after", breakerErr.RetryAfter)
+			return workqueue.RequeueNotBefore(breakerErr.RetryAfter)
 		}
 	}
 	return err
