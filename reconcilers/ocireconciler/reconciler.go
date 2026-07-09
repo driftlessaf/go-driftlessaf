@@ -9,11 +9,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"chainguard.dev/driftlessaf/breaker"
+	"chainguard.dev/driftlessaf/reconcilers/transient"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-containerregistry/pkg/name"
+)
+
+// Transient failures are requeued with jitter so keys that failed together
+// don't come back in lockstep.
+const (
+	transientRequeueDelay  = 10 * time.Second
+	transientRequeueJitter = 50 * time.Second
 )
 
 // Reconciler provides a workqueue processor for OCI digests.
@@ -46,14 +55,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 	if err != nil {
 		return workqueue.NonRetriableError(fmt.Errorf("parsing digest %q: %w", key, err), "invalid digest key")
 	}
-
 	var berr *breaker.Error
-	switch err := r.reconcileFunc(ctx, digest); {
-	case errors.As(err, &berr):
-		clog.WarnContextf(ctx, "Transient failure reconciling %s, requeueing after %s: %v", key, berr.RetryAfter, err)
+	rerr := r.reconcileFunc(ctx, digest)
+	switch {
+	case rerr == nil:
+		return nil
+	case errors.As(rerr, &berr):
+		clog.WarnContextf(ctx, "Transient failure reconciling %s, requeueing after %s: %v", key, berr.RetryAfter, rerr)
 		return workqueue.RequeueNotBefore(berr.RetryAfter)
+	case transient.Is(rerr):
+		clog.WarnContextf(ctx, "Transient failure, requeueing with jitter: %v", rerr)
+		return workqueue.RequeueAfterWithJitter(transientRequeueDelay, transientRequeueJitter)
 	default:
-		return err
+		return rerr
 	}
 }
 

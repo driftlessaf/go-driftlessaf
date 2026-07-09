@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"chainguard.dev/driftlessaf/breaker"
+	"chainguard.dev/driftlessaf/reconcilers/transient"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 )
@@ -69,6 +70,11 @@ const (
 	// grpcRateLimitRetryDuration is the base duration to wait before retrying
 	// when a gRPC ResourceExhausted error is encountered.
 	grpcRateLimitRetryDuration = 2 * time.Minute
+
+	// Transient failures are requeued with jitter so keys that failed
+	// together don't come back in lockstep.
+	transientRequeueDelay  = 10 * time.Second
+	transientRequeueJitter = 50 * time.Second
 )
 
 // String returns the string representation of the resource.
@@ -204,6 +210,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 		if errors.As(err, &breakerErr) {
 			clog.WarnContext(ctx, "Transient host failure, requeueing", "retry_after", breakerErr.RetryAfter)
 			return workqueue.RequeueNotBefore(breakerErr.RetryAfter)
+		}
+
+		// Check if it's a transient failure (e.g. a temporary registry error
+		// or one marked by transient.Retry)
+		if transient.Is(err) {
+			clog.WarnContextf(ctx, "Transient failure, requeueing with jitter: %v", err)
+			return workqueue.RequeueAfterWithJitter(transientRequeueDelay, transientRequeueJitter)
 		}
 	}
 	return err

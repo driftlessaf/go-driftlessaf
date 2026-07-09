@@ -8,6 +8,7 @@ package workqueue
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"google.golang.org/grpc/status"
@@ -77,6 +78,15 @@ func (e *requeueError) Error() string {
 // where promptly reacting to new events is desirable.
 func RequeueAfter(delay time.Duration) error {
 	return &requeueError{delay: delay}
+}
+
+// RequeueAfterWithJitter is like RequeueAfter, but adds a random extra delay
+// in [0, jitter) so keys that failed together don't all come back at once.
+func RequeueAfterWithJitter(delay, jitter time.Duration) error {
+	if jitter > 0 {
+		delay += rand.N(jitter) //nolint:gosec // G404: jitter, not security-sensitive
+	}
+	return RequeueAfter(delay)
 }
 
 // RequeueNotBefore is like RequeueAfter, but the resulting NotBefore is a floor:

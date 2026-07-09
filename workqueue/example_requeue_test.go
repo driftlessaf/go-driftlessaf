@@ -75,6 +75,15 @@ func ExampleRequeueAfter() {
 	// Output: Requeue requested: true, delay: 30s
 }
 
+// ExampleRequeueAfterWithJitter demonstrates spreading out retries of keys
+// that failed together.
+func ExampleRequeueAfterWithJitter() {
+	err := workqueue.RequeueAfterWithJitter(10*time.Second, 50*time.Second)
+	delay, ok := workqueue.GetRequeueDelay(err)
+	fmt.Printf("Requeue requested: %v, delay in [10s, 60s): %v\n", ok, delay >= 10*time.Second && delay < 60*time.Second)
+	// Output: Requeue requested: true, delay in [10s, 60s): true
+}
+
 func getRetryCount(_ string) int {
 	// This is a placeholder for demonstration
 	return 1

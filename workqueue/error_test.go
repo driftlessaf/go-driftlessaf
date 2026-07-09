@@ -296,3 +296,21 @@ func TestQueueKeysErrorMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestRequeueAfterWithJitter(t *testing.T) {
+	for range 100 {
+		err := RequeueAfterWithJitter(10*time.Second, 50*time.Second)
+		got, floor, ok := GetRequeueOptions(err)
+		if !ok || floor {
+			t.Fatalf("GetRequeueOptions(%v): got = (%v, %t, %t), want floor = false, ok = true", err, got, floor, ok)
+		}
+		if got < 10*time.Second || got >= 60*time.Second {
+			t.Errorf("delay: got = %v, want in [10s, 60s)", got)
+		}
+	}
+
+	// Zero jitter must not panic and adds no delay.
+	if got, _ := GetRequeueDelay(RequeueAfterWithJitter(10*time.Second, 0)); got != 10*time.Second {
+		t.Errorf("delay: got = %v, want = 10s", got)
+	}
+}

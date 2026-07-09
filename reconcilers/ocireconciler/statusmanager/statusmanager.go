@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"chainguard.dev/driftlessaf/reconcilers/transient"
 	"chainguard.dev/sdk/auth"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-provider-cosign/pkg/private/secant"
@@ -35,6 +36,16 @@ import (
 )
 
 const sigstoreAudience = "sigstore"
+
+// transientRekorErrors are the Rekor failure modes known to be transient.
+// The rekor-tiles client returns untyped errors, flattening the HTTP status
+// into the message ("unexpected response: <code> <body>"), so string
+// matching is the only way to recognize them.
+var transientRekorErrors = []string{
+	"adding rekor v2 entry: unexpected response: 499",
+	"adding rekor v2 entry: unexpected response: 502",
+	"adding rekor v2 entry: unexpected response: 503 upstream connect error",
+}
 
 // Status captures serialized reconciliation progress for a digest.
 type Status[T any] struct {
@@ -182,7 +193,9 @@ func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 	return s.manager.fetchLatestStatus(ctx, s.subject)
 }
 
-// SetActualState persists the provided status as an attestation.
+// SetActualState persists the provided status as an attestation. Transient
+// write failures are retried in-process; if they persist, the returned error
+// satisfies transient.Is.
 func (s *Session[T]) SetActualState(ctx context.Context, status *Status[T]) error {
 	if s.manager.readOnly {
 		return errors.New("status manager is read-only")
@@ -214,7 +227,23 @@ func (s *Session[T]) SetActualState(ctx context.Context, status *Status[T]) erro
 		Digest:    h,
 	}
 
-	if err := secant.AttestBundle(ctx, secant.Replace, []*types.Statement{stmt}, s.manager.signer, s.manager.remoteOptions(ctx)); err != nil {
+	// Retry temporary registry errors and, since Rekor errors are untyped,
+	// the Rekor failure modes known to be transient.
+	retryable := func(err error) bool {
+		if transient.Is(err) {
+			return true
+		}
+		msg := err.Error()
+		for _, s := range transientRekorErrors {
+			if strings.Contains(msg, s) {
+				return true
+			}
+		}
+		return false
+	}
+	if err := transient.Retry(ctx, "writing attestation bundle", retryable, func(ctx context.Context) error {
+		return secant.AttestBundle(ctx, secant.Replace, []*types.Statement{stmt}, s.manager.signer, s.manager.remoteOptions(ctx))
+	}); err != nil {
 		return fmt.Errorf("writing attestation bundle: %w", err)
 	}
 	return nil
