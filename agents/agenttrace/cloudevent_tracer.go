@@ -7,9 +7,11 @@ package agenttrace
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace/payloadcrypt"
 	"github.com/chainguard-dev/clog"
 	httpmetrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
@@ -39,7 +41,33 @@ type ceEmittingTracer[T any] struct {
 	inner  Tracer[T]
 	client cloudevents.Client
 	source string
-	eg     errgroup.Group
+	// enc, when non-nil, seals the sensitive free-text payload fields of every
+	// emitted trace/span event before it leaves the process, so the CloudEvent
+	// (and the BigQuery row derived from it) carries ciphertext. Nil means the
+	// events are emitted as-is (structure + payloads in plaintext, gated by
+	// WithPayloadsEnabled upstream).
+	enc *payloadcrypt.Encryptor
+	eg  errgroup.Group
+}
+
+// CEOption configures a ceEmittingTracer built by WithCloudEventEmission.
+type CEOption[T any] func(*ceEmittingTracer[T])
+
+// WithPayloadEncryptor seals the sensitive payload fields (input_prompt, result,
+// tool_calls[].params/result, reasoning[].thinking, and per-span
+// prompt_messages/completion) of every emitted event under enc before it is
+// sent. Only structural fields (ids, model, agent_name, source, token counts,
+// timings, exec_context, errors, prompt_hash, and the provider identifier) stay
+// plaintext, so cost views keep working; the payload fields surface as opaque
+// sealed envelopes to every downstream consumer — the agent-trace MCP, UI, and
+// trace replayers — until a reader/break-glass Open path is deployed. Enabling
+// this on a producer before that reader path ships means those consumers serve
+// ciphertext, so order the rollout accordingly.
+//
+// Emission is fail-closed: if sealing errors (e.g. KMS is unreachable), the
+// event is dropped rather than sent in the clear.
+func WithPayloadEncryptor[T any](enc *payloadcrypt.Encryptor) CEOption[T] {
+	return func(t *ceEmittingTracer[T]) { t.enc = enc }
 }
 
 // WithCloudEventEmission wraps inner so that each call to RecordTrace also
@@ -50,11 +78,14 @@ type ceEmittingTracer[T any] struct {
 //
 // Call Drain on the returned tracer (via type assertion) before process
 // exit to flush in-flight events.
-func WithCloudEventEmission[T any](inner Tracer[T], client cloudevents.Client, source string) Tracer[T] {
+func WithCloudEventEmission[T any](inner Tracer[T], client cloudevents.Client, source string, opts ...CEOption[T]) Tracer[T] {
 	t := &ceEmittingTracer[T]{
 		inner:  inner,
 		client: client,
 		source: source,
+	}
+	for _, opt := range opts {
+		opt(t)
 	}
 	t.eg.SetLimit(ceMaxInflight)
 	return t
@@ -84,7 +115,9 @@ func (t *ceEmittingTracer[T]) emitSpan(ctx context.Context, span RecordedSpan) e
 	ce.SetSubject(span.TraceID)
 	ce.SetTime(span.RecordedAt)
 
-	if err := ce.SetData(cloudevents.ApplicationJSON, span); err != nil {
+	if err := t.setEventData(ctx, &ce, span, sealSensitiveSpanFields); err != nil {
+		// Fail closed: on a seal error the payload would otherwise leak, so the
+		// span event is dropped rather than sent in the clear.
 		clog.ErrorContext(ctx, "Failed to set span CloudEvent data",
 			"trace_id", span.TraceID,
 			"span_id", span.SpanID,
@@ -123,7 +156,9 @@ func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
 	ce.SetSubject(trace.ExecContext.ReconcilerKey)
 	ce.SetTime(trace.StartTime)
 
-	if err := ce.SetData(cloudevents.ApplicationJSON, trace); err != nil {
+	if err := t.setEventData(ctx, &ce, trace, sealSensitiveTraceFields); err != nil {
+		// Fail closed: on a seal error the payload would otherwise leak, so the
+		// trace event is dropped rather than sent in the clear.
 		clog.ErrorContext(ctx, "Failed to set CloudEvent data",
 			"trace_id", trace.ID,
 			"error", err,
@@ -144,6 +179,31 @@ func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
 		}
 		return nil
 	})
+}
+
+// setEventData sets ce's data to obj as JSON. When a payload encryptor is
+// configured it first marshals obj, seals its sensitive fields via sealFn, and
+// sets the resulting ciphertext JSON — so the event on the wire never carries
+// plaintext payloads. Any marshal/seal error is returned so the caller can drop
+// the event (fail closed) rather than emit in the clear.
+func (t *ceEmittingTracer[T]) setEventData(
+	ctx context.Context,
+	ce *cloudevents.Event,
+	obj any,
+	sealFn func(ctx context.Context, enc *payloadcrypt.Encryptor, raw []byte) ([]byte, error),
+) error {
+	if t.enc == nil {
+		return ce.SetData(cloudevents.ApplicationJSON, obj)
+	}
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+	sealed, err := sealFn(ctx, t.enc, raw)
+	if err != nil {
+		return err
+	}
+	return ce.SetData(cloudevents.ApplicationJSON, sealed)
 }
 
 // Drain flushes all in-flight CloudEvent sends. Call before process exit.
