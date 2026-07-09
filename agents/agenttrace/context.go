@@ -7,6 +7,8 @@ package agenttrace
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -20,6 +22,27 @@ type ExecutionContext struct {
 	ReconcilerType string `json:"reconciler_type,omitempty"` // Type of reconciler: "pr" or "path"
 	CommitSHA      string `json:"commit_sha,omitempty"`      // Git commit SHA (optional, for git-based reconcilers)
 	TurnNumber     int    `json:"turn_number,omitempty"`     // Turn number for multi-turn agents (optional, 1, 2, 3, ...)
+
+	// RequestID identifies the individual work item / request being handled
+	// (e.g. an analyzer vuln-event request ID, or a comma-joined set for a
+	// forge series). Like ReconcilerKey/CommitSHA it is HIGH-CARDINALITY and is
+	// therefore deliberately kept OFF metrics (not emitted by EnrichAttributes)
+	// to avoid minting a new time series per request. It rides on the trace
+	// record's exec_context and is emitted as a request_id span attribute, so
+	// per-request GenAI usage stays sliceable via traces without inflating
+	// metric cardinality. Do NOT move this into Labels.
+	RequestID string `json:"request_id,omitempty"`
+
+	// Labels holds additional bounded custom labels that a consumer wants
+	// stamped on every GenAI metric emitted while this context is in scope
+	// (see EnrichAttributes). Unlike ReconcilerKey/CommitSHA — which are
+	// deliberately kept off metrics to avoid unbounded cardinality — these are
+	// intended for low-cardinality dimensions the consumer controls, e.g.
+	// {"genai_component": "analyzer", "purl_type": "npm"}. Use this for
+	// per-request labels that cannot be set at agent-construction time (where
+	// metaagent.Config.ResourceLabels is the better fit). Keep the value set
+	// bounded — every distinct value creates a new metric time series.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // Repository extracts the repository from the reconciler key.
@@ -59,8 +82,8 @@ func (e ExecutionContext) Repository() string {
 // the ExecutionContext for traces where cardinality is not a concern. Use trace exemplars
 // to link from aggregated metrics to detailed per-PR traces.
 func (e ExecutionContext) EnrichAttributes(baseAttrs []attribute.KeyValue) []attribute.KeyValue {
-	// Pre-allocate for base + up to 3 additional attributes
-	attrs := make([]attribute.KeyValue, len(baseAttrs), len(baseAttrs)+3)
+	// Pre-allocate for base + up to 3 built-in attributes + any custom labels
+	attrs := make([]attribute.KeyValue, len(baseAttrs), len(baseAttrs)+3+len(e.Labels))
 	copy(attrs, baseAttrs)
 
 	// Add reconciler type (bounded: "pr" or "path")
@@ -77,6 +100,13 @@ func (e ExecutionContext) EnrichAttributes(baseAttrs []attribute.KeyValue) []att
 	// Add turn number (bounded: typically 0-10 for multi-turn agents)
 	if e.TurnNumber > 0 {
 		attrs = append(attrs, attribute.Int("turn", e.TurnNumber))
+	}
+
+	// Add consumer-supplied custom labels. Iterate in sorted key order so the
+	// attribute set is deterministic (attribute order can affect how some
+	// backends key a time series, and it keeps tests stable).
+	for _, k := range slices.Sorted(maps.Keys(e.Labels)) {
+		attrs = append(attrs, attribute.String(k, e.Labels[k]))
 	}
 
 	return attrs
@@ -108,8 +138,22 @@ func WithExecutionContext(ctx context.Context, execCtx ExecutionContext) context
 	if execCtx.CommitSHA != "" {
 		merged.CommitSHA = execCtx.CommitSHA
 	}
+	if execCtx.RequestID != "" {
+		merged.RequestID = execCtx.RequestID
+	}
 	if execCtx.TurnNumber != 0 {
 		merged.TurnNumber = execCtx.TurnNumber
+	}
+	// Layer custom labels: copy the existing set (so we never mutate the caller's
+	// map) and overlay the incoming keys. A deep call site adding one label thus
+	// keeps labels set by an enclosing reconciler.
+	if len(execCtx.Labels) > 0 {
+		labels := maps.Clone(merged.Labels)
+		if labels == nil {
+			labels = make(map[string]string, len(execCtx.Labels))
+		}
+		maps.Copy(labels, execCtx.Labels)
+		merged.Labels = labels
 	}
 	return context.WithValue(ctx, executionContextKey, merged)
 }

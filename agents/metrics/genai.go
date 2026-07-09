@@ -137,6 +137,20 @@ func NewGenAI(meterName string) *GenAI {
 	}
 }
 
+// enrich merges attributes carried on ctx onto base: the reconciler
+// ExecutionContext (via EnrichAttributes) plus the agent name set by
+// WithExecutionContext-adjacent WithDefaultAgentName / agentkit.WithAgentName.
+// The agent name is emitted as the bounded agent_name dimension so every GenAI
+// metric is filterable per agent without each agent wiring its own label. It is
+// omitted when no name was set on ctx.
+func enrich(ctx context.Context, base []attribute.KeyValue) []attribute.KeyValue {
+	base = agenttrace.GetExecutionContext(ctx).EnrichAttributes(base)
+	if name := agenttrace.GetDefaultAgentName(ctx); name != "" {
+		base = append(base, attribute.String("agent_name", name))
+	}
+	return base
+}
+
 // RecordTokens records prompt and completion token usage.
 // Enriches attributes from the execution context propagated via context.Context.
 func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, completionTokens int64, attrs ...attribute.KeyValue) {
@@ -144,7 +158,7 @@ func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, co
 		attribute.String("model", model),
 		attribute.String("gen_ai.request.model", model),
 	}
-	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = enrich(ctx, baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
 	// Custom metrics (existing)
@@ -176,7 +190,7 @@ func (m *GenAI) RecordCacheTokens(ctx context.Context, model string, cacheRead, 
 	baseAttrs := []attribute.KeyValue{
 		attribute.String("model", model),
 	}
-	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = enrich(ctx, baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
 	semconvBase := append(append([]attribute.KeyValue{}, baseAttrs...),
@@ -204,7 +218,7 @@ func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attr
 		attribute.String("gen_ai.request.model", model),
 		attribute.String("tool", toolName),
 	}
-	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = enrich(ctx, baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
 	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
@@ -222,7 +236,7 @@ func (m *GenAI) RecordAPIRequest(ctx context.Context, model, responseCode string
 		attribute.String("gen_ai.request.model", model),
 		attribute.String("response_code", responseCode),
 	}
-	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = enrich(ctx, baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
 	m.apiRequests.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
@@ -237,7 +251,7 @@ func (m *GenAI) RecordTurns(ctx context.Context, model string, turns int, limitE
 		attribute.String("model", model),
 		attribute.String("gen_ai.request.model", model),
 	}
-	baseAttrs = agenttrace.GetExecutionContext(ctx).EnrichAttributes(baseAttrs)
+	baseAttrs = enrich(ctx, baseAttrs)
 	baseAttrs = append(baseAttrs, attrs...)
 
 	m.agentTurns.Record(ctx, int64(turns), metric.WithAttributes(baseAttrs...))

@@ -7,6 +7,8 @@ package agenttrace
 
 import (
 	"testing"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestWithExecutionContext_preservesUpstreamFields(t *testing.T) {
@@ -59,6 +61,90 @@ func TestWithExecutionContext_overridesOnNonZero(t *testing.T) {
 	}
 	if got.TurnNumber != 2 {
 		t.Errorf("TurnNumber should be overridden: %d", got.TurnNumber)
+	}
+}
+
+func TestWithExecutionContext_mergesLabels(t *testing.T) {
+	// A deep call site adding one label must not drop labels set by the
+	// enclosing reconciler, and overlapping keys take the newest value.
+	ctx := WithExecutionContext(t.Context(), ExecutionContext{
+		Labels: map[string]string{"genai_component": "analyzer", "purl_type": "npm"},
+	})
+	ctx = WithExecutionContext(ctx, ExecutionContext{
+		Labels: map[string]string{"purl_type": "pypi", "turn_tag": "x"},
+	})
+
+	got := GetExecutionContext(ctx)
+	want := map[string]string{"genai_component": "analyzer", "purl_type": "pypi", "turn_tag": "x"}
+	if len(got.Labels) != len(want) {
+		t.Fatalf("Labels = %v, want %v", got.Labels, want)
+	}
+	for k, v := range want {
+		if got.Labels[k] != v {
+			t.Errorf("Labels[%q] = %q, want %q", k, got.Labels[k], v)
+		}
+	}
+}
+
+func TestWithExecutionContext_doesNotMutateCallerLabels(t *testing.T) {
+	// The caller's map must never be mutated by a downstream merge.
+	base := map[string]string{"genai_component": "analyzer"}
+	ctx := WithExecutionContext(t.Context(), ExecutionContext{Labels: base})
+	_ = WithExecutionContext(ctx, ExecutionContext{Labels: map[string]string{"purl_type": "npm"}})
+
+	if _, mutated := base["purl_type"]; mutated {
+		t.Errorf("caller's Labels map was mutated: %v", base)
+	}
+}
+
+func TestEnrichAttributes_customLabels(t *testing.T) {
+	e := ExecutionContext{
+		ReconcilerType: "pr",
+		Labels:         map[string]string{"genai_component": "analyzer", "purl_type": "npm"},
+	}
+	got := map[string]string{}
+	for _, kv := range e.EnrichAttributes([]attribute.KeyValue{attribute.String("model", "claude")}) {
+		got[string(kv.Key)] = kv.Value.AsString()
+	}
+
+	for k, want := range map[string]string{
+		"model":           "claude",
+		"reconciler_type": "pr",
+		"genai_component": "analyzer",
+		"purl_type":       "npm",
+	} {
+		if got[k] != want {
+			t.Errorf("attribute %q = %q, want %q", k, got[k], want)
+		}
+	}
+}
+
+func TestEnrichAttributes_excludesRequestID(t *testing.T) {
+	// RequestID is high-cardinality and must never reach metrics: EnrichAttributes
+	// must not emit it, even though it rides on the trace's exec_context.
+	e := ExecutionContext{
+		RequestID: "req-9f3a",
+		Labels:    map[string]string{"genai_component": "analyzer"},
+	}
+	for _, kv := range e.EnrichAttributes(nil) {
+		if string(kv.Key) == "request_id" || kv.Value.AsString() == "req-9f3a" {
+			t.Errorf("EnrichAttributes leaked request_id onto metrics: %v", kv)
+		}
+	}
+}
+
+func TestWithExecutionContext_mergesRequestID(t *testing.T) {
+	// A deep call site setting RequestID must not clobber the enclosing
+	// reconciler's other fields, and a later non-empty RequestID overrides.
+	ctx := WithExecutionContext(t.Context(), ExecutionContext{ReconcilerType: "pr"})
+	ctx = WithExecutionContext(ctx, ExecutionContext{RequestID: "req-1"})
+	if got := GetExecutionContext(ctx); got.RequestID != "req-1" || got.ReconcilerType != "pr" {
+		t.Fatalf("got %+v, want RequestID=req-1 ReconcilerType=pr", got)
+	}
+
+	ctx = WithExecutionContext(ctx, ExecutionContext{RequestID: "req-2"})
+	if got := GetExecutionContext(ctx); got.RequestID != "req-2" {
+		t.Errorf("RequestID = %q, want req-2", got.RequestID)
 	}
 }
 

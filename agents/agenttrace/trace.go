@@ -259,6 +259,9 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 	if execCtx.CommitSHA != "" {
 		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("commit_sha", execCtx.CommitSHA)))
 	}
+	if execCtx.RequestID != "" {
+		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("request_id", execCtx.RequestID)))
+	}
 
 	// Payload emission (gen_ai.prompt + gen_ai.input.messages) is gated on
 	// the WithPayloadsEnabled ctx opt-in. Staging can opt in; prod stays off

@@ -30,6 +30,9 @@ Set execution context for trace enrichment:
 		ReconcilerType: "pr",
 		CommitSHA:      "abc123",
 		TurnNumber:     1,
+		// Optional bounded custom labels stamped on every GenAI metric emitted
+		// while this context is in scope (see ExecutionContext.EnrichAttributes).
+		Labels: map[string]string{"genai_component": "analyzer", "purl_type": "npm"},
 	})
 
 Create and use traces:
