@@ -272,9 +272,12 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			// If the analyzer already fixed everything, commit its changes
 			// directly without invoking the agent. The commit contributes no
 			// reasoning entry, but the log persisted from prior iterations
-			// must still render rather than drop from the regenerated body.
+			// must still render rather than drop from the regenerated body,
+			// and the title headline must keep anchoring to the PR's primary
+			// change rather than reset to the fallback title.
 			if allFixed {
 				prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
+				prData.Headline = prHeadline(session.ReasoningLog(), "")
 				return commitMessage(diagnostics), nil
 			}
 
@@ -301,10 +304,13 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 
 			// A commit is certain: log this run's reasoning under the
 			// commit's headline and render the accumulated log — prior
-			// iterations' entries plus this one — for the PR body.
+			// iterations' entries plus this one — for the PR body. The
+			// title headline anchors to the log's first entry so the PR
+			// title describes the primary change, not the latest fix-up.
 			msg := result.GetCommitMessage()
 			session.AppendReasoning(commitHeadline(msg), agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars))
 			prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
+			prData.Headline = prHeadline(session.ReasoningLog(), commitHeadline(msg))
 
 			return msg, nil
 		})

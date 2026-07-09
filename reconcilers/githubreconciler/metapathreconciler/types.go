@@ -118,4 +118,15 @@ type PRData[Req any] struct {
 	// change detection (it varies run to run). Render it by appending
 	// [ReasoningSummarySnippet] to the PR body template.
 	ReasoningSummary string `json:"-"`
+
+	// Headline is the commit headline anchoring the PR title: the first
+	// reasoning-log entry's headline (the PR's primary change, stable across
+	// follow-up iterations), falling back to the current run's commit
+	// headline when the log is empty. Populated by the reconciler when an
+	// agent commit is created; empty for analyzer-only commits, so title
+	// templates using it need an {{else}} branch. Unlike Path — the
+	// reconciled resource that triggered the run — it describes what the
+	// agent actually changed, which may be entirely different files.
+	// Excluded from JSON so it never participates in change detection.
+	Headline string `json:"-"`
 }
