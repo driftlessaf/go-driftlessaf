@@ -47,9 +47,15 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("resolving anthropic auth config: %w", err)
 	}
 	client := anthropicauth.NewClient(ctx, projectID, region, authCfg)
+	// Stamp the true serving backend on metrics + traces: the same Claude
+	// model bills to GCP on Vertex and to the Anthropic workspace on the
+	// first-party API, so stored telemetry must not infer the backend from
+	// model-ID shape.
+	provider := claudeexecutor.ProviderVertex
 	if authCfg.Configured() {
 		// The first-party API rejects Vertex-style "name@version" model IDs.
 		model = anthropicauth.ModelID(model)
+		provider = claudeexecutor.ProviderAnthropic
 	}
 
 	// Build the terminal submit_result tool and its non-terminal validate
@@ -62,6 +68,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
 		claudeexecutor.WithModel[Req, Resp](model),
+		claudeexecutor.WithProvider[Req, Resp](provider),
 		claudeexecutor.WithTemperature[Req, Resp](0.2),
 		claudeexecutor.WithMaxTokens[Req, Resp](32000),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.Metadata[Resp], error) { return submitTool, nil }),

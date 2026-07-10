@@ -168,3 +168,86 @@ func (t *testBindable) Bind(p *promptbuilder.Prompt) (*promptbuilder.Prompt, err
 type testResponse struct {
 	Result string `json:"result"`
 }
+
+func TestWithProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		opts            []Option[*testBindable, *testResponse]
+		wantProvider    Provider
+		wantMetricName  string
+		wantTraceSystem string
+		wantErr         bool
+	}{{
+		name:            "anthropic first-party",
+		opts:            []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](ProviderAnthropic)},
+		wantProvider:    ProviderAnthropic,
+		wantMetricName:  "anthropic",
+		wantTraceSystem: "anthropic",
+	}, {
+		name:            "explicit vertex",
+		opts:            []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](ProviderVertex)},
+		wantProvider:    ProviderVertex,
+		wantMetricName:  "gcp.vertex_ai",
+		wantTraceSystem: "google.vertex",
+	}, {
+		name:    "unknown provider errors",
+		opts:    []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](Provider("bedrock"))},
+		wantErr: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := &executor[*testBindable, *testResponse]{provider: ProviderVertex}
+			var err error
+			for _, opt := range tc.opts {
+				if applyErr := opt(e); applyErr != nil {
+					err = applyErr
+				}
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("WithProvider: got nil error, want validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applying options: %v", err)
+			}
+			if e.provider != tc.wantProvider {
+				t.Errorf("provider: got = %q, want = %q", e.provider, tc.wantProvider)
+			}
+			if got := e.provider.metricName(); got != tc.wantMetricName {
+				t.Errorf("metricName: got = %q, want = %q", got, tc.wantMetricName)
+			}
+			if got := e.provider.traceSystem(); got != tc.wantTraceSystem {
+				t.Errorf("traceSystem: got = %q, want = %q", got, tc.wantTraceSystem)
+			}
+		})
+	}
+}
+
+// TestDefaultProvider verifies New's contract directly: an executor built
+// without WithProvider defaults to Vertex, matching anthropicauth.NewClient's
+// fallback when no federation config is present.
+func TestDefaultProvider(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := promptbuilder.NewPrompt("test prompt")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+	got, err := New[*testBindable, *testResponse](anthropic.Client{}, prompt)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	e, ok := got.(*executor[*testBindable, *testResponse])
+	if !ok {
+		t.Fatalf("New() returned %T, want *executor", got)
+	}
+	if e.provider != ProviderVertex {
+		t.Errorf("default provider: got = %q, want = %q", e.provider, ProviderVertex)
+	}
+}

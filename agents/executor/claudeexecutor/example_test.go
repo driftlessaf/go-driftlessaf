@@ -27,3 +27,13 @@ func ExampleWithMaxTokens() {
 	fmt.Printf("option is nil: %v\n", opt == nil)
 	// Output: option is nil: false
 }
+
+// ExampleWithProvider demonstrates declaring the serving backend so metrics
+// (gen_ai.provider.name) and trace turns carry the true provider. Callers
+// that build a federation client via anthropicauth pass ProviderAnthropic;
+// the default is ProviderVertex, matching the Vertex fallback.
+func ExampleWithProvider() {
+	opt := claudeexecutor.WithProvider[promptbuilder.Noop, *struct{}](claudeexecutor.ProviderAnthropic)
+	fmt.Printf("option is nil: %v\n", opt == nil)
+	// Output: option is nil: false
+}

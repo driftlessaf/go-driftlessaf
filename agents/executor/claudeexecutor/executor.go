@@ -64,6 +64,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	genaiMetrics         *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
 	retryConfig          retry.RetryConfig             // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string             // resource labels for GCP billing attribution
+	provider             Provider                      // serving backend: Vertex AI or the Anthropic first-party API
 
 	// cacheControl enables Anthropic prompt caching. When true, the executor places
 	// cache breakpoints on tool definitions and the system prompt so the API can skip
@@ -162,6 +163,7 @@ func New[Request promptbuilder.Bindable, Response any](
 	e := &executor[Request, Response]{
 		client:              client,
 		modelName:           "claude-sonnet-4@20250514", // Default to Sonnet 4
+		provider:            ProviderVertex,             // matches NewClient's Vertex fallback; anthropicauth callers override
 		prompt:              prompt,
 		maxTokens:           8192,            // Default max tokens
 		maxTurns:            DefaultMaxTurns, // Default max conversation turns
@@ -402,7 +404,7 @@ func (e *executor[Request, Response]) Execute(
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
-		llmTurn := trace.BeginTurn(turn, agenttrace.SystemAnthropic, e.modelName)
+		llmTurn := trace.BeginTurn(turn, e.provider.traceSystem(), e.modelName)
 		defer func() {
 			if err != nil {
 				llmTurn.Fail(err)
@@ -907,21 +909,21 @@ func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.K
 // recordTokenMetrics records token usage with optional enrichment
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, inputTokens, outputTokens int64) {
 	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
 	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens, attrs...)
 }
 
 // recordCacheMetrics records prompt cache token usage with optional enrichment
 func (e *executor[Request, Response]) recordCacheMetrics(ctx context.Context, cacheRead, cacheCreation int64) {
 	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
 	e.genaiMetrics.RecordCacheTokens(ctx, e.modelName, cacheRead, cacheCreation, attrs...)
 }
 
 // recordToolCall records a tool call metric with optional enrichment
 func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
 	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
 	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
 }
 
@@ -929,7 +931,7 @@ func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolNa
 // increments the turn_limit_exceeded counter.
 func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
 	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
 	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
 }
 
@@ -939,7 +941,7 @@ func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int
 // the counter sees one increment per HTTP attempt.
 func (e *executor[Request, Response]) recordAPIRequest(ctx context.Context, err error) {
 	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "anthropic"))
+	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
 	e.genaiMetrics.RecordAPIRequest(ctx, e.modelName, responseCodeAttr(responseCodeFromError(err)), attrs...)
 }
 

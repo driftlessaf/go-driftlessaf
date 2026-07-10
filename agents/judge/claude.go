@@ -40,9 +40,14 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 		return nil, fmt.Errorf("resolving anthropic auth config: %w", err)
 	}
 	client := anthropicauth.NewClient(ctx, projectID, region, authCfg)
+	// Stamp the true serving backend on metrics + traces (see
+	// claudeexecutor.Provider): Vertex and the first-party API bill
+	// differently for the same model.
+	provider := claudeexecutor.ProviderVertex
 	if authCfg.Configured() {
 		// The first-party API rejects Vertex-style "name@version" model IDs.
 		model = anthropicauth.ModelID(model)
+		provider = claudeexecutor.ProviderAnthropic
 	}
 
 	// Use pre-parsed templates from prompts.go
@@ -50,6 +55,7 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	// Create golden executor
 	goldenOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithModel[*Request, *Judgement](model),
+		claudeexecutor.WithProvider[*Request, *Judgement](provider),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
 	}
@@ -66,6 +72,7 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	// Create benchmark executor
 	benchmarkOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithModel[*Request, *Judgement](model),
+		claudeexecutor.WithProvider[*Request, *Judgement](provider),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
 	}
@@ -82,6 +89,7 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	// Create standalone executor
 	standaloneOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithModel[*Request, *Judgement](model),
+		claudeexecutor.WithProvider[*Request, *Judgement](provider),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
 	}

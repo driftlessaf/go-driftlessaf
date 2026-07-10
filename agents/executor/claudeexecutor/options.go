@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
@@ -255,6 +256,57 @@ func WithForceSubmitToolChoice[Request promptbuilder.Bindable, Response any](def
 		e.forceSubmitToolChoice = true
 		e.forceSubmitDeferUntilTool = deferUntilToolName
 		return nil
+	}
+}
+
+// Provider identifies the serving backend a Claude request goes to. The same
+// Claude model can be served by two different providers with two different
+// bills: Google Vertex AI (GCP billing) or the Anthropic first-party API via
+// Workload Identity Federation (Anthropic workspace billing). The provider is
+// stamped on every metric (gen_ai.provider.name) and trace turn (system), so
+// stored telemetry distinguishes the backends explicitly instead of inferring
+// them from model-ID shape (the Vertex-only "@version" suffix).
+type Provider string
+
+const (
+	// ProviderVertex is Claude served by Google Vertex AI.
+	ProviderVertex Provider = "vertex"
+	// ProviderAnthropic is Claude served by the Anthropic first-party API.
+	ProviderAnthropic Provider = "anthropic"
+)
+
+// metricName is the OTel gen_ai.provider.name value for the backend, aligned
+// with the semconv well-known values the sibling executors use
+// (googleexecutor: "gcp.vertex_ai", openaiexecutor: "openai-compat").
+func (p Provider) metricName() string {
+	if p == ProviderAnthropic {
+		return "anthropic"
+	}
+	return "gcp.vertex_ai"
+}
+
+// traceSystem is the agenttrace system value for the backend.
+func (p Provider) traceSystem() string {
+	if p == ProviderAnthropic {
+		return agenttrace.SystemAnthropic
+	}
+	return agenttrace.SystemGoogleVertex
+}
+
+// WithProvider declares which backend serves this executor's requests, so
+// metrics and traces carry the true serving provider. Defaults to
+// ProviderVertex, which matches anthropicauth.NewClient's fallback when no
+// federation config is present; callers that construct a federation client
+// must pass ProviderAnthropic.
+func WithProvider[Request promptbuilder.Bindable, Response any](p Provider) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		switch p {
+		case ProviderVertex, ProviderAnthropic:
+			e.provider = p
+			return nil
+		default:
+			return fmt.Errorf("unknown provider %q", p)
+		}
 	}
 }
 
