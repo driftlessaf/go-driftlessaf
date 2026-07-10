@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/config"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"github.com/chainguard-dev/clog"
@@ -59,6 +60,22 @@ const (
 	// SourceGoogle. Leave unset to auto-detect (GitHub Actions, then file, then
 	// Google — the Cloud Run / GCP default).
 	EnvIdentityTokenSource = "ANTHROPIC_IDENTITY_TOKEN_SOURCE" //nolint:gosec // G101: env var name, not a credential
+
+	// EnvProfile names an SDK config profile (configs/<name>.json under the
+	// config dir) that carries the stable federation IDs — organization,
+	// workspace, service account, federation rule — so a deployment ships one
+	// baked, non-secret profile instead of four opaque-ID env vars. When set,
+	// ConfigFromEnv loads the profile first, then overlays any ANTHROPIC_* env
+	// vars on top; naming a profile commits the deployment to the
+	// Anthropic-direct backend (see ConfigFromEnv). This reuses the SDK's own
+	// ANTHROPIC_PROFILE name; the SDK's auto-load is bypassed (the federation
+	// client passes option.WithoutEnvironmentDefaults), so anthropicauth owns
+	// resolution.
+	EnvProfile = "ANTHROPIC_PROFILE" //nolint:gosec // G101: env var name, not a credential
+	// EnvConfigDir is the directory holding configs/<profile>.json. Empty falls
+	// back to the SDK default (~/.config/anthropic). On Cloud Run, set it to
+	// the ko KO_DATA_PATH so the profile ships inside the image's kodata.
+	EnvConfigDir = "ANTHROPIC_CONFIG_DIR" //nolint:gosec // G101: env var name, not a credential
 
 	// identityTokenAudience is the `aud` requested on minted identity tokens;
 	// the federation rule's expected-audience matcher must equal it.
@@ -163,20 +180,101 @@ func (c Config) fingerprint() string {
 	return hex.EncodeToString(h[:6])
 }
 
+// ConfigFromProfile maps an SDK config profile's federation fields into a
+// Config. The profile (configs/<name>.json under dir; empty dir falls back to
+// the SDK default config directory) carries the stable opaque IDs once —
+// organization, workspace, service account, federation rule. The
+// identity-token source is deliberately NOT read from the profile: the SDK
+// profile schema models only a file source, whereas anthropicauth also mints
+// github-actions and google tokens, so the source is resolved per environment
+// by ResolveSource (override via EnvIdentityTokenSource). A file path, if the
+// profile sets one, is carried through for SourceFile deployments.
+//
+// Note that the SDK's loader itself back-fills fields the profile OMITS from
+// the ANTHROPIC_ORGANIZATION_ID / ANTHROPIC_WORKSPACE_ID /
+// ANTHROPIC_FEDERATION_RULE_ID / ANTHROPIC_SERVICE_ACCOUNT_ID /
+// ANTHROPIC_IDENTITY_TOKEN_FILE env vars, per the cross-SDK
+// credential-precedence contract; fields present in the profile always win
+// over the environment here. (ConfigFromEnv then overlays non-empty env vars
+// on top, so through that entrypoint the environment wins either way.)
+func ConfigFromProfile(dir, name string) (Config, error) {
+	if dir == "" {
+		dir = config.DefaultDir()
+	}
+	p, err := config.LoadProfile(dir, name)
+	if err != nil {
+		return Config{}, fmt.Errorf("loading anthropic profile %q from %q: %w", name, dir, err)
+	}
+	cfg := Config{
+		OrganizationID: p.OrganizationID,
+		WorkspaceID:    p.WorkspaceID,
+	}
+	if a := p.AuthenticationInfo; a != nil && a.OIDCFederation != nil {
+		cfg.FederationRuleID = a.OIDCFederation.FederationRuleID
+		cfg.ServiceAccountID = a.OIDCFederation.ServiceAccountID
+		if it := a.OIDCFederation.IdentityToken; it != nil {
+			cfg.IdentityTokenFile = it.Path
+		}
+	}
+	return cfg, nil
+}
+
 // ConfigFromEnv builds a Config from the process environment (see the Env*
 // constants). It is the binding adapter for binaries/entrypoints; the library
 // constructor (NewClient) takes Config by value so it stays configurable and
 // testable rather than reading the environment itself.
-func ConfigFromEnv() Config {
-	return Config{
-		IdentityTokenFile:          os.Getenv(EnvIdentityTokenFile),
-		FederationRuleID:           os.Getenv(EnvFederationRuleID),
-		OrganizationID:             os.Getenv(EnvOrganizationID),
-		ServiceAccountID:           os.Getenv(EnvServiceAccountID),
-		WorkspaceID:                os.Getenv(EnvWorkspaceID),
-		ActionsIDTokenRequestURL:   os.Getenv(EnvActionsIDTokenRequestURL),
-		ActionsIDTokenRequestToken: os.Getenv(EnvActionsIDTokenRequestToken),
-		Source:                     IdentityTokenSource(os.Getenv(EnvIdentityTokenSource)),
+//
+// When EnvProfile is set, the named profile supplies the stable federation IDs
+// and the ANTHROPIC_* env vars overlay it, so a single value (typically the
+// rule ID) can vary per deployment without a per-service profile. A named
+// profile that fails to load — or that, after the env overlay, still lacks
+// the federation rule ID or organization ID — is a hard error: falling
+// through to the pure-env path would silently select the Vertex zero-value
+// backend on a deployment that explicitly asked for a profile, and nothing
+// downstream would flag the downgrade. Naming a profile therefore commits the
+// deployment to the Anthropic-direct backend; the rollout lever is setting or
+// unsetting EnvProfile itself, not shipping a partial profile. With no
+// profile set, every field comes from its env var and the returned error is
+// always nil.
+func ConfigFromEnv() (Config, error) {
+	var cfg Config
+	name := os.Getenv(EnvProfile)
+	if name != "" {
+		loaded, err := ConfigFromProfile(os.Getenv(EnvConfigDir), name)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg = loaded
+	}
+	overlayEnv(&cfg)
+	if name != "" && !cfg.Configured() {
+		return Config{}, fmt.Errorf("anthropic profile %q resolved without a federation rule ID and/or organization ID (after env overlay); a named profile must select the Anthropic-direct backend — unset %s to use Vertex", name, EnvProfile)
+	}
+	return cfg, nil
+}
+
+// overlayEnv applies ANTHROPIC_* env vars on top of cfg, overriding only the
+// fields whose env var is non-empty so an unset var can't blank a profile
+// value. ACTIONS_* are always read from the ambient CI environment (never
+// carried in a profile).
+func overlayEnv(cfg *Config) {
+	setStringFromEnv(&cfg.IdentityTokenFile, EnvIdentityTokenFile)
+	setStringFromEnv(&cfg.FederationRuleID, EnvFederationRuleID)
+	setStringFromEnv(&cfg.OrganizationID, EnvOrganizationID)
+	setStringFromEnv(&cfg.ServiceAccountID, EnvServiceAccountID)
+	setStringFromEnv(&cfg.WorkspaceID, EnvWorkspaceID)
+	if v := os.Getenv(EnvIdentityTokenSource); v != "" {
+		cfg.Source = IdentityTokenSource(v)
+	}
+	cfg.ActionsIDTokenRequestURL = os.Getenv(EnvActionsIDTokenRequestURL)
+	cfg.ActionsIDTokenRequestToken = os.Getenv(EnvActionsIDTokenRequestToken)
+}
+
+// setStringFromEnv overwrites *dst with the env var's value only when that
+// value is non-empty.
+func setStringFromEnv(dst *string, env string) {
+	if v := os.Getenv(env); v != "" {
+		*dst = v
 	}
 }
 

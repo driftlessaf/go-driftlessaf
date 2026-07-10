@@ -34,7 +34,12 @@ func ExampleConfig_Configured() {
 func ExampleNewClient() {
 	ctx := context.Background()
 
-	client := anthropicauth.NewClient(ctx, "my-project", "us-central1", anthropicauth.ConfigFromEnv())
+	cfg, err := anthropicauth.ConfigFromEnv()
+	if err != nil {
+		// Fail fast: a named-but-broken ANTHROPIC_PROFILE is a deploy error.
+		return
+	}
+	client := anthropicauth.NewClient(ctx, "my-project", "us-central1", cfg)
 	_ = client
 }
 
@@ -50,6 +55,20 @@ func ExampleConfig_ResolveSource() {
 	// google
 	// file
 	// github-actions
+}
+
+// ExampleConfigFromProfile demonstrates loading the stable federation IDs from
+// a baked, non-secret SDK config profile (configs/<name>.json under dir), so a
+// deployment ships one profile instead of four opaque-ID env vars. On Cloud
+// Run, dir is the ko KO_DATA_PATH; an empty dir falls back to the SDK default
+// config directory.
+func ExampleConfigFromProfile() {
+	cfg, err := anthropicauth.ConfigFromProfile("/var/run/ko", "skillup")
+	if err != nil {
+		// Fail fast: a named-but-missing profile is a deploy error.
+		return
+	}
+	_ = anthropicauth.NewClient(context.Background(), "my-project", "us-central1", cfg)
 }
 
 // ExampleModelID demonstrates mapping Vertex-style model identifiers to their
