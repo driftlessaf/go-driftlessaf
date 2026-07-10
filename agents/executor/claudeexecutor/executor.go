@@ -67,9 +67,12 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 
 	// cacheControl enables Anthropic prompt caching. When true, the executor places
 	// cache breakpoints on tool definitions and the system prompt so the API can skip
-	// re-processing them on subsequent turns and executions. Cached tokens are read at
-	// 10% of the base input token price (5-min TTL, shared across all requests with
-	// the same prefix within the same org).
+	// re-processing them on subsequent turns and executions, and advances a moving
+	// breakpoint along the conversation tail each turn so the accumulated message
+	// history (the rendered prompt and every prior tool result) is cached
+	// incrementally rather than re-billed at full input price on every turn — see
+	// tailBreakpoints. Cached tokens are read at 10% of the base input token price
+	// (5-min TTL, shared across all requests with the same prefix within the same org).
 	// Enabled by default — disable with WithoutCacheControl() if needed.
 	// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 	cacheControl bool
@@ -83,6 +86,12 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// for agents whose first user message is large and whose loop spans several turns.
 	// The breakpoint is only placed when doing so keeps the request within the API's
 	// limit of four cache breakpoints.
+	//
+	// The moving tail breakpoint (see tailBreakpoints) marks the same block on the
+	// first turn and subsumes this option's effect; the option is retained for
+	// callers that disable it independently and as the seed position for the tail
+	// rotation. When set, the marker it places is treated as the initial tail
+	// marker and is cleared by the rotation once the conversation outgrows it.
 	cacheFirstUserBlock bool
 
 	// maxToolCallsBeforeFinalize, when greater than zero, bounds the agentic loop by
@@ -123,11 +132,15 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
 // cache_control breakpoints permitted in a single request. The executor
-// places at most one breakpoint each on the last tool definition, the system
-// block, and the first user block, so it never approaches the limit — the
-// guard exists so a future caller-supplied breakpoint or an additional
-// executor breakpoint cannot silently push a request over the limit and cause
-// the API to reject it.
+// places at most one breakpoint each on the last tool definition and the
+// system block, plus up to tailBreakpointLimit moving markers on the
+// conversation tail (the first-user-block marker, when opted in, is seeded as
+// the initial tail marker), for a worst case of exactly four. The limit is
+// enforced at runtime: assembleParams counts caller-supplied markers on tool
+// definitions before placing its own, and the tail tracker's budget is
+// derived from whatever the static prefix left over (see newTailBreakpoints)
+// — over-budget placements are skipped rather than letting the API reject the
+// request with a non-retryable 400.
 // See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 const maxCacheBreakpoints = 4
 
@@ -258,6 +271,18 @@ func (e *executor[Request, Response]) Execute(
 		}
 	}
 
+	// tail tracks the moving cache breakpoints on the conversation tail so the
+	// message history accumulated across turns is cached incrementally instead
+	// of re-billed at full input price every turn. Its marker budget is derived
+	// from the assembled request so the total across tools, system, and
+	// messages never exceeds maxCacheBreakpoints — even when a caller placed
+	// its own markers on tool definitions. When WithCacheFirstUserBlock placed
+	// a marker on the first user block during assembly, that marker is seeded
+	// as the initial tail so the rotation accounts for it and eventually
+	// reclaims its slot. See tailBreakpoints for the mechanics.
+	tail := newTailBreakpoints(params)
+	tail.positions = seedFirstUserTail(e.cacheControl, e.cacheFirstUserBlock, params)
+
 	// finalResult stores the result if a tool sets it
 	var finalResult Response
 	finalResultPtr := &finalResult
@@ -384,6 +409,14 @@ func (e *executor[Request, Response]) Execute(
 			}
 			llmTurn.End()
 		}()
+
+		// Move the tail cache breakpoint onto the newest message so everything
+		// appended since the last turn (tool results, redirects) is written to
+		// the prompt cache once and read cheaply on subsequent turns, instead
+		// of re-billing the whole conversation at full input price every turn.
+		if e.cacheControl {
+			tail.advance(params.Messages)
+		}
 
 		// Per-turn retry config wires transient API errors that the retry
 		// recovers from into the turn's Errors list. Without this, retries
@@ -702,9 +735,18 @@ func (e *executor[Request, Response]) assembleParams(prompt string, tools map[st
 	})
 
 	// breakpoints counts the cache_control markers placed so far so the
-	// running total stays within maxCacheBreakpoints. The first-user-block
-	// breakpoint is only placed when room remains.
+	// running total stays within maxCacheBreakpoints. It starts from any
+	// markers the caller placed on its own tool definitions — those consume
+	// API budget just the same — so the executor's own placements degrade
+	// (skip) rather than push the request past the limit and draw a
+	// non-retryable 400. The first-user-block breakpoint is only placed when
+	// room remains.
 	breakpoints := 0
+	for i := range toolDefs {
+		if hasBreakpoint(toolDefs[i].OfTool.CacheControl) {
+			breakpoints++
+		}
+	}
 
 	// Place a cache breakpoint on the last tool definition.
 	//
@@ -717,7 +759,8 @@ func (e *executor[Request, Response]) assembleParams(prompt string, tools map[st
 	// a breakpoint here caches all tool definitions. This benefits both multi-turn
 	// conversations (same tools every turn) and separate executions that share the
 	// same tool set (cache is keyed by content hash, not by session).
-	if e.cacheControl && len(toolDefs) > 0 {
+	if e.cacheControl && len(toolDefs) > 0 && breakpoints < maxCacheBreakpoints &&
+		!hasBreakpoint(toolDefs[len(toolDefs)-1].OfTool.CacheControl) {
 		toolDefs[len(toolDefs)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
 		breakpoints++
 	}
@@ -765,7 +808,7 @@ func (e *executor[Request, Response]) assembleParams(prompt string, tools map[st
 		// order is tools → system → messages, this breakpoint caches both the tool
 		// definitions AND the system prompt together. On subsequent turns, the API
 		// reads both from cache instead of re-processing them as fresh input tokens.
-		if e.cacheControl {
+		if e.cacheControl && breakpoints < maxCacheBreakpoints {
 			systemBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
 			breakpoints++
 		}

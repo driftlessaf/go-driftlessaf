@@ -71,6 +71,21 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //
+// # Prompt Caching
+//
+// Anthropic prompt caching is enabled by default (disable with
+// WithoutCacheControl). The executor places cache breakpoints on the static
+// request prefix — the last tool definition and the system prompt — and
+// advances a moving breakpoint along the conversation tail each turn. The
+// tail breakpoint means the accumulated message history (the rendered prompt
+// and every prior tool result) is written to the cache once and read at the
+// cached-token price on subsequent turns, instead of being re-billed at the
+// full input price on every turn of the loop. Two tail markers are retained
+// (current and previous) so a turn that appends many blocks — for example
+// several parallel tool calls — still resumes from the prior turn's cache
+// entry. Cache reads and writes are reported per turn via the
+// gen_ai.usage.cache_* metrics and on the trace.
+//
 // # Extended Thinking
 //
 // Extended thinking allows Claude to show its internal reasoning process before
