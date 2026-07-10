@@ -58,13 +58,19 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxOutputTokens    int32
 	maxTurns           int // maximum conversation turns before aborting
 	systemInstructions *promptbuilder.Prompt
-	responseMIMEType   string
-	responseSchema     *genai.Schema
-	thinkingBudget     *int32                        // nil = disabled, non-nil = enabled with budget
-	submitTool         googletool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics       *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
-	retryConfig        retry.RetryConfig             // retry configuration for transient Vertex AI errors
-	resourceLabels     map[string]string             // resource labels for GCP billing attribution
+
+	// userPromptSuffix, when non-nil, is a static operator-authored prompt
+	// appended to the built user prompt with a blank-line separator. See
+	// WithUserPromptSuffix; the request is never bound into it.
+	userPromptSuffix *promptbuilder.Prompt
+
+	responseMIMEType string
+	responseSchema   *genai.Schema
+	thinkingBudget   *int32                        // nil = disabled, non-nil = enabled with budget
+	submitTool       googletool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics     *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
+	retryConfig      retry.RetryConfig             // retry configuration for transient Vertex AI errors
+	resourceLabels   map[string]string             // resource labels for GCP billing attribution
 
 	// cacheControl enables Vertex AI context caching. When true, the executor
 	// creates a CachedContent resource containing system instructions and tool
@@ -160,6 +166,15 @@ func (e *executor[Request, Response]) Execute(
 	prompt, err := boundPrompt.Build()
 	if err != nil {
 		return resp, fmt.Errorf("failed to build prompt: %w", err)
+	}
+
+	// Append the static user prompt suffix, when configured. Gemini has no
+	// per-block prompt-cache semantics (context caching covers system
+	// instructions and tools via CachedContent), so plain concatenation
+	// preserves the prompt content without any block layout.
+	prompt, err = appendUserPromptSuffix(prompt, e.userPromptSuffix)
+	if err != nil {
+		return resp, err
 	}
 
 	// Start a trace for this execution — done completes and records
@@ -772,6 +787,21 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	)
 
 	return cached.Name, nil
+}
+
+// appendUserPromptSuffix appends the built suffix to the prompt with a
+// blank-line separator. A nil suffix returns the prompt unchanged. The suffix
+// must be fully bound; a Build failure (for example an unbound placeholder)
+// is returned wrapped.
+func appendUserPromptSuffix(prompt string, suffix *promptbuilder.Prompt) (string, error) {
+	if suffix == nil {
+		return prompt, nil
+	}
+	built, err := suffix.Build()
+	if err != nil {
+		return "", fmt.Errorf("failed to build user prompt suffix: %w", err)
+	}
+	return prompt + "\n\n" + built, nil
 }
 
 // ptr is a helper function to create a pointer to a value

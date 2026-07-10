@@ -79,7 +79,7 @@ func TestForceSubmitToolChoiceRequiresSubmitTool(t *testing.T) {
 	exec := newTestExecutor(t,
 		WithForceSubmitToolChoice[*testBindable, *testResponse](""),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestForceSubmitToolChoiceForcesTurnOneNoDeferral(t *testing.T) {
 		WithSubmitResultProvider[*testBindable, *testResponse](submitProvider()),
 		WithForceSubmitToolChoice[*testBindable, *testResponse](""),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestForceSubmitToolChoiceDefersWhenGateToolRegistered(t *testing.T) {
 		WithSubmitResultProvider[*testBindable, *testResponse](submitProvider()),
 		WithForceSubmitToolChoice[*testBindable, *testResponse]("fetch_deferred_evidence"),
 	)
-	params, _, err := exec.assembleParams("payload", tools)
+	params, _, err := exec.assembleParams("payload", "", tools)
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestForceSubmitToolChoiceForcesTurnOneWhenGateToolAbsent(t *testing.T) {
 		WithSubmitResultProvider[*testBindable, *testResponse](submitProvider()),
 		WithForceSubmitToolChoice[*testBindable, *testResponse]("fetch_deferred_evidence"),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestForceSubmitToolChoiceOffByDefault(t *testing.T) {
 	exec := newTestExecutor(t,
 		WithSubmitResultProvider[*testBindable, *testResponse](submitProvider()),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}

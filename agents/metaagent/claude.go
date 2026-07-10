@@ -87,6 +87,10 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
 
+	if config.UserPromptSuffix != nil {
+		executorOpts = append(executorOpts, claudeexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
+	}
+
 	if config.ThinkingBudget > 0 {
 		executorOpts = append(executorOpts, claudeexecutor.WithThinking[Req, Resp](config.ThinkingBudget))
 	}

@@ -125,6 +125,90 @@ func TestCacheControlDefault(t *testing.T) {
 	}
 }
 
+func TestWithUserPromptSuffix(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := promptbuilder.NewPrompt("test prompt")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+	suffix, err := promptbuilder.NewPrompt("lens suffix body")
+	if err != nil {
+		t.Fatalf("NewPrompt(suffix) error = %v", err)
+	}
+
+	// Nil suffix: option must fail at construction.
+	if _, err := New[*testBindable, *testResponse](nil, prompt,
+		WithUserPromptSuffix[*testBindable, *testResponse](nil),
+	); err == nil {
+		t.Error("New(WithUserPromptSuffix(nil)): got = nil, want error")
+	}
+
+	// Valid suffix: stored on the executor for concatenation at Execute time.
+	exec, err := New[*testBindable, *testResponse](nil, prompt,
+		WithUserPromptSuffix[*testBindable, *testResponse](suffix),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	e := exec.(*executor[*testBindable, *testResponse])
+	if got, want := e.userPromptSuffix, suffix; got != want {
+		t.Errorf("userPromptSuffix: got = %p, want = %p", got, want)
+	}
+
+	// Default: no suffix.
+	execDefault, err := New[*testBindable, *testResponse](nil, prompt)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := execDefault.(*executor[*testBindable, *testResponse]).userPromptSuffix; got != nil {
+		t.Errorf("default userPromptSuffix: got = %p, want = nil", got)
+	}
+}
+
+// TestAppendUserPromptSuffix asserts the exact concatenation Execute performs
+// on the built user prompt: nil suffix passes the prompt through unchanged, a
+// bound suffix is appended with a blank-line separator, and an unbuildable
+// suffix (unbound placeholder) surfaces as an error.
+func TestAppendUserPromptSuffix(t *testing.T) {
+	t.Parallel()
+
+	suffix, err := promptbuilder.NewPrompt("lens suffix body")
+	if err != nil {
+		t.Fatalf("NewPrompt(suffix) error = %v", err)
+	}
+	unbuildable, err := promptbuilder.NewPrompt("{{unbound}}")
+	if err != nil {
+		t.Fatalf("NewPrompt(unbuildable) error = %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		suffix  *promptbuilder.Prompt
+		want    string
+		wantErr bool
+	}{
+		{name: "nil suffix passes prompt through", suffix: nil, want: "changeset payload"},
+		{name: "suffix appended with blank-line separator", suffix: suffix, want: "changeset payload\n\nlens suffix body"},
+		{name: "unbuildable suffix returns error", suffix: unbuildable, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := appendUserPromptSuffix("changeset payload", tt.suffix)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("appendUserPromptSuffix() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if got != tt.want {
+				t.Errorf("appendUserPromptSuffix(): got = %q, want = %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWithCacheTTL(t *testing.T) {
 	t.Parallel()
 

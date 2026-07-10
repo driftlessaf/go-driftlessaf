@@ -65,6 +65,12 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, googleexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
 
+	// Gemini has no per-block prompt-cache semantics, so the suffix is simply
+	// appended to the built user prompt (see googleexecutor.WithUserPromptSuffix).
+	if config.UserPromptSuffix != nil {
+		executorOpts = append(executorOpts, googleexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
+	}
+
 	executor, err := googleexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Google executor: %w", err)

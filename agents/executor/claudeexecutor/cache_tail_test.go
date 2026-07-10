@@ -213,7 +213,7 @@ func TestTailBreakpointsSeededFromFirstUserBlock(t *testing.T) {
 		WithSystemInstructions[*testBindable, *testResponse](systemInstructions(t)),
 		WithCacheFirstUserBlock[*testBindable, *testResponse](),
 	)
-	params, _, err := exec.assembleParams("large payload", twoTools())
+	params, _, err := exec.assembleParams("large payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestTailBreakpointsTotalWithinLimit(t *testing.T) {
 		WithSystemInstructions[*testBindable, *testResponse](systemInstructions(t)),
 		WithCacheFirstUserBlock[*testBindable, *testResponse](),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestTailBudgetRespectsCallerMarkers(t *testing.T) {
 			t.Parallel()
 
 			exec := newTestExecutor(t, WithSystemInstructions[*testBindable, *testResponse](systemInstructions(t)))
-			params, _, err := exec.assembleParams("payload", callerMarkedTools(tt.callerMarkers))
+			params, _, err := exec.assembleParams("payload", "", callerMarkedTools(tt.callerMarkers))
 			if err != nil {
 				t.Fatalf("assembleParams: %v", err)
 			}
@@ -384,7 +384,7 @@ func TestSeedFirstUserTail(t *testing.T) {
 
 	assemble := func(t *testing.T, exec *executor[*testBindable, *testResponse], tools map[string]claudetool.Metadata[*testResponse]) anthropic.MessageNewParams {
 		t.Helper()
-		params, _, err := exec.assembleParams("payload", tools)
+		params, _, err := exec.assembleParams("payload", "", tools)
 		if err != nil {
 			t.Fatalf("assembleParams: %v", err)
 		}

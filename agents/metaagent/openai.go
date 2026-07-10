@@ -102,6 +102,13 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, openaiexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
 
+	// The OpenAI-compatible API has no per-block prompt-cache semantics, so
+	// the suffix is simply appended to the built user prompt (see
+	// openaiexecutor.WithUserPromptSuffix).
+	if config.UserPromptSuffix != nil {
+		executorOpts = append(executorOpts, openaiexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
+	}
+
 	exec, err := openaiexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating OpenAI-compatible executor: %w", err)

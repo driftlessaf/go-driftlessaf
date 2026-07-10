@@ -95,6 +95,20 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// marker and is cleared by the rotation once the conversation outgrows it.
 	cacheFirstUserBlock bool
 
+	// userPromptSuffix, when non-nil, is a static operator-authored prompt
+	// rendered as a second text block of the initial user message, after the
+	// rendered request prompt. Splitting the initial message this way keeps a
+	// varying trailing instruction out of the shared cacheable prefix: cache
+	// entries are matched at cache_control block boundaries, so executions that
+	// differ only in the suffix (for example multi-pass reviewers examining one
+	// changeset through different lenses) share the cache entry covering the
+	// tool definitions, the system prompt, and the leading payload block.
+	// Setting the option implies cacheFirstUserBlock — the breakpoint on the
+	// leading block is what ends the shareable prefix. The request is never
+	// bound into the suffix; it is built once per Execute. Set via
+	// WithUserPromptSuffix.
+	userPromptSuffix *promptbuilder.Prompt
+
 	// maxToolCallsBeforeFinalize, when greater than zero, bounds the agentic loop by
 	// nudging the model to finish once it has made this many tool calls. After the
 	// live tool-call count reaches the threshold, a single instruction is injected
@@ -212,14 +226,31 @@ func (e *executor[Request, Response]) Execute(
 		return response, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Start trace — done completes and records via the context tracer
-	trace, done := agenttrace.StartTrace[Response](ctx, prompt)
+	// Build the operator-authored user prompt suffix once, before the trace
+	// starts, so the recorded trace prompt reflects everything the model was
+	// given. The request is not bound into the suffix — it is static across
+	// executions by design (see WithUserPromptSuffix); empty means absent.
+	promptSuffix := ""
+	if e.userPromptSuffix != nil {
+		promptSuffix, err = e.userPromptSuffix.Build()
+		if err != nil {
+			return response, fmt.Errorf("failed to build user prompt suffix: %w", err)
+		}
+	}
+
+	// Start trace — done completes and records via the context tracer. The
+	// trace records the full effective prompt (payload plus suffix), matching
+	// the Gemini and OpenAI paths where the suffix is folded into the prompt
+	// string itself; the API request keeps the two-block layout so the payload
+	// block stays cache-shareable.
+	trace, done := agenttrace.StartTrace[Response](ctx, tracePrompt(prompt, promptSuffix))
 	defer func() {
 		done(response, err)
 	}()
 
 	clog.InfoContext(ctx, "Starting Claude agent execution",
 		"prompt_length", len(prompt),
+		"prompt_suffix_length", len(promptSuffix),
 	)
 
 	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
@@ -240,7 +271,7 @@ func (e *executor[Request, Response]) Execute(
 	// Assemble the base request parameters: sorted tool definitions, the
 	// system prompt, the initial user message, and the cache breakpoints. The
 	// temperature warning is deferred to the caller because it needs ctx.
-	params, dropTemperatureWarn, err := e.assembleParams(prompt, tools)
+	params, dropTemperatureWarn, err := e.assembleParams(prompt, promptSuffix, tools)
 	if err != nil {
 		return response, err
 	}
@@ -708,13 +739,16 @@ func (e *executor[Request, Response]) Execute(
 
 // assembleParams builds the base request parameters shared by every turn: the
 // sorted tool definitions, the system prompt, the initial user message, the
-// sampling parameters, and the cache breakpoints. It returns the assembled
+// sampling parameters, and the cache breakpoints. promptSuffix is the built
+// user-prompt suffix (see WithUserPromptSuffix); when non-empty the initial
+// user message is rendered as two text blocks — prompt, then suffix — and an
+// empty string preserves the single-block shape. It returns the assembled
 // params and a flag indicating that an explicitly-set temperature was dropped
 // for a model that does not accept sampling params, so the caller can log the
 // warning with its context. Pulling this out of Execute keeps the breakpoint
 // placement and the breakpoint-count guard in one place that tests can drive
 // directly without a live client.
-func (e *executor[Request, Response]) assembleParams(prompt string, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, bool, error) {
+func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, bool, error) {
 	// Build tool definitions for Claude, sorted by name for deterministic ordering.
 	//
 	// Why sort? The Anthropic API uses prompt caching to avoid re-processing the
@@ -767,12 +801,20 @@ func (e *executor[Request, Response]) assembleParams(prompt string, tools map[st
 		breakpoints++
 	}
 
-	// Create initial messages, starting with the user prompt
+	// Create initial messages, starting with the user prompt. When a suffix is
+	// configured, the initial user message carries two text blocks — the
+	// rendered prompt, then the suffix — so the first-user-block breakpoint
+	// below ends a cacheable prefix that executions differing only in the
+	// suffix can share. Without a suffix the single-block shape is preserved.
+	firstUserContent := []anthropic.ContentBlockParamUnion{
+		anthropic.NewTextBlock(prompt),
+	}
+	if promptSuffix != "" {
+		firstUserContent = append(firstUserContent, anthropic.NewTextBlock(promptSuffix))
+	}
 	messages := []anthropic.MessageParam{{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewTextBlock(prompt),
-		},
+		Role:    anthropic.MessageParamRoleUser,
+		Content: firstUserContent,
 	}}
 
 	// Create request parameters
@@ -820,10 +862,13 @@ func (e *executor[Request, Response]) assembleParams(prompt string, tools map[st
 	// Optionally place a cache breakpoint on the first user content block (the
 	// rendered prompt). Messages come last in the API prefix order, so this
 	// caches everything before it — the tool definitions, the system prompt,
-	// and the initial user message — together. For agents whose first user
+	// and the rendered prompt block — together. For agents whose first user
 	// message carries a large payload and whose loop spans several turns, this
 	// lets the API read that payload from cache on turns after the first
-	// instead of re-billing it at full price. Off by default; only applied when
+	// instead of re-billing it at full price. When a user prompt suffix is
+	// configured it lives in the NEXT block, deliberately outside this
+	// prefix, so executions that differ only in the suffix still share the
+	// cache entry the breakpoint ends. Off by default; only applied when
 	// a breakpoint slot remains, so it can never push a request past the API
 	// limit. The breakpoint lives on the per-block ContentBlockParamUnion, so
 	// it travels with the message as params.Messages grows across turns.
@@ -959,6 +1004,18 @@ func (e *executor[Request, Response]) withAPIRequestCounter(ctx context.Context,
 		e.recordAPIRequest(ctx, err)
 	}
 	return cfg
+}
+
+// tracePrompt returns the full effective prompt for trace recording: the
+// bound payload plus the operator-authored suffix when one is configured,
+// joined the same way the single-prompt backends fold them. Traces must show
+// everything the model was given — for multi-pass agents the suffix is the
+// only thing distinguishing the passes.
+func tracePrompt(prompt, promptSuffix string) string {
+	if promptSuffix == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + promptSuffix
 }
 
 // samplingParamsRemovedPrefixes lists model-name prefixes for which the

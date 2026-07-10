@@ -113,7 +113,7 @@ func TestAssembleParamsTransparentWhenOptionsOff(t *testing.T) {
 			// Baseline: the executor as it exists for callers who never set the
 			// new options.
 			base := newTestExecutor(t, baseOpts()...)
-			baseParams, _, err := base.assembleParams(prompt, sh.tools)
+			baseParams, _, err := base.assembleParams(prompt, "", sh.tools)
 			if err != nil {
 				t.Fatalf("baseline assembleParams: %v", err)
 			}
@@ -123,7 +123,7 @@ func TestAssembleParamsTransparentWhenOptionsOff(t *testing.T) {
 			withDefaults := newTestExecutor(t, append(baseOpts(),
 				WithMaxToolCallsBeforeFinalize[*testBindable, *testResponse](0),
 			)...)
-			defaultParams, _, err := withDefaults.assembleParams(prompt, sh.tools)
+			defaultParams, _, err := withDefaults.assembleParams(prompt, "", sh.tools)
 			if err != nil {
 				t.Fatalf("defaults assembleParams: %v", err)
 			}
@@ -152,7 +152,7 @@ func TestCacheFirstUserBlockOnlyWhenEnabled(t *testing.T) {
 
 	// Off (default): no breakpoint on the first user block.
 	off := newTestExecutor(t, WithSystemInstructions[*testBindable, *testResponse](systemInstructions(t)))
-	offParams, _, err := off.assembleParams("payload", twoTools())
+	offParams, _, err := off.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("off assembleParams: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestCacheFirstUserBlockOnlyWhenEnabled(t *testing.T) {
 		WithSystemInstructions[*testBindable, *testResponse](systemInstructions(t)),
 		WithCacheFirstUserBlock[*testBindable, *testResponse](),
 	)
-	onParams, _, err := on.assembleParams("payload", twoTools())
+	onParams, _, err := on.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("on assembleParams: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestCacheFirstUserBlockNoOpWithoutCacheControl(t *testing.T) {
 		WithoutCacheControl[*testBindable, *testResponse](),
 		WithCacheFirstUserBlock[*testBindable, *testResponse](),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestCacheBreakpointCountWithinLimit(t *testing.T) {
 		WithSystemInstructions[*testBindable, *testResponse](systemInstructions(t)),
 		WithCacheFirstUserBlock[*testBindable, *testResponse](),
 	)
-	params, _, err := exec.assembleParams("payload", twoTools())
+	params, _, err := exec.assembleParams("payload", "", twoTools())
 	if err != nil {
 		t.Fatalf("assembleParams: %v", err)
 	}

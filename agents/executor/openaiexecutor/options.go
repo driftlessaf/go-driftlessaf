@@ -99,6 +99,26 @@ func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt
 	}
 }
 
+// WithUserPromptSuffix appends a static, operator-authored prompt to the end
+// of the built user prompt, separated by a blank line. It is the
+// OpenAI-compatible counterpart of the Claude executor's user-prompt-suffix
+// option: agents that share one large payload but vary a small trailing
+// instruction (for example multi-pass reviewers examining one changeset
+// through different lenses) keep the payload in the main prompt and the
+// varying instruction in the suffix. The OpenAI-compatible API has no
+// per-block prompt-cache semantics, so the suffix is simply concatenated and
+// there is no cache-shaping side effect. The suffix must be fully bound by
+// the caller; the request is never bound into it.
+func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *promptbuilder.Prompt) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if suffix == nil {
+			return errors.New("user prompt suffix cannot be nil")
+		}
+		e.userPromptSuffix = suffix
+		return nil
+	}
+}
+
 // SubmitResultProvider constructs tool metadata for submit_result.
 type SubmitResultProvider[Response any] func() (openaistool.Metadata[Response], error)
 

@@ -59,6 +59,7 @@ The executor supports various configuration options:
   - WithTemperature: Control response randomness (0.0-2.0)
   - WithMaxOutputTokens: Set maximum response length
   - WithSystemInstructions: Provide system-level instructions
+  - WithUserPromptSuffix: Append a static prompt to the built user prompt
   - WithResponseMIMEType: Set response format (e.g., "application/json")
   - WithResponseSchema: Define structured output schema
   - WithThinking: Enable thinking mode with a token budget

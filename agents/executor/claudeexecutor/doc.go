@@ -68,6 +68,8 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithSystemInstructions: Provide system-level instructions
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)
+//   - WithUserPromptSuffix: Render a static suffix as a second block of the
+//     initial user message, outside the shared cacheable prefix (off by default)
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //
@@ -85,6 +87,15 @@ SPDX-License-Identifier: Apache-2.0
 // several parallel tool calls — still resumes from the prior turn's cache
 // entry. Cache reads and writes are reported per turn via the
 // gen_ai.usage.cache_* metrics and on the trace.
+//
+// WithUserPromptSuffix extends the shared prefix across executions: it splits
+// the initial user message into a leading payload block (the rendered prompt,
+// carrying a cache breakpoint) and a trailing static suffix block. Because
+// cache entries are matched at breakpoint block boundaries, executions that
+// share the payload but differ only in the suffix — for example multi-pass
+// reviewers examining one changeset through different lenses — read the
+// tools + system + payload prefix from a single cache entry instead of each
+// re-paying the payload at full input price.
 //
 // # Extended Thinking
 //

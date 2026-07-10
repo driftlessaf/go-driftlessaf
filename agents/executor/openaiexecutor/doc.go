@@ -35,6 +35,7 @@ SPDX-License-Identifier: Apache-2.0
 //   - [WithTemperature]: set the sampling temperature (0.0–2.0)
 //   - [WithMaxTurns]: set the maximum conversation turns before aborting
 //   - [WithSystemInstructions]: set the system prompt
+//   - [WithUserPromptSuffix]: append a static prompt to the built user prompt
 //   - [WithSubmitResultProvider]: register the submit_result tool for structured output
 //   - [WithRetryConfig]: configure retry behavior for transient API errors
 //   - [WithResourceLabels]: set labels for observability attribution

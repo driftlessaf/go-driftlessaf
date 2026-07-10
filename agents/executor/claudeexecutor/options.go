@@ -203,6 +203,37 @@ func WithCacheFirstUserBlock[Request promptbuilder.Bindable, Response any]() Opt
 	}
 }
 
+// WithUserPromptSuffix renders a static, operator-authored prompt as a second
+// text block of the initial user message, after the rendered request prompt.
+//
+// This exists for fleets of executions that share one large payload but vary
+// a small trailing instruction — for example multi-pass reviewers that each
+// examine the same changeset through a different lens. Anthropic prompt
+// caching writes and reads cache entries at cache_control block boundaries,
+// and a prefix is only shareable when the bytes up to a marked block are
+// identical; splitting the initial message keeps the varying suffix out of
+// the shared prefix, so the tool definitions, system prompt, and leading
+// payload block are served from one cache entry across all such executions
+// while the suffix block varies freely after the breakpoint.
+//
+// Setting this option implies WithCacheFirstUserBlock: the leading block gets
+// the cache breakpoint that ends the shareable prefix — without that marker
+// the split would buy nothing. The suffix must be fully bound by the caller;
+// the request is never bound into it, and it is built once per Execute.
+// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *promptbuilder.Prompt) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if suffix == nil {
+			return errors.New("user prompt suffix cannot be nil")
+		}
+		e.userPromptSuffix = suffix
+		// The point of the split is a shareable leading block: place the
+		// breakpoint that ends the shared prefix on it.
+		e.cacheFirstUserBlock = true
+		return nil
+	}
+}
+
 // WithMaxToolCallsBeforeFinalize bounds the agentic loop with a soft cap: once
 // the model has made n investigative (non-terminal) tool calls, the executor
 // injects a single instruction asking it to call its terminal submit tool now
