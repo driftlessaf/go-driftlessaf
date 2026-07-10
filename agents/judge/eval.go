@@ -16,35 +16,6 @@ import (
 	"github.com/chainguard-dev/clog"
 )
 
-// judgeAttempts is the number of times to call the judge before giving up.
-// A judge transport or JSON-parse error is transient (Gemini occasionally
-// emits structured output with unescaped control characters), so a fresh
-// request almost always parses. The first attempt plus two retries gives
-// three total tries.
-const judgeAttempts = 3
-
-// judgeWithRetry calls j.Judge up to judgeAttempts times, returning the first
-// successful judgement. Each error is transient (transport or parse), so a
-// fresh request usually succeeds. It returns the last error if every attempt
-// fails. The caller decides whether to skip rather than fail the metric, so a
-// judge outage does not masquerade as a genuine low grade.
-func judgeWithRetry(ctx context.Context, j Interface, req *Request, criterion string) (*Judgement, error) {
-	var resp *Judgement
-	var err error
-	for attempt := range judgeAttempts {
-		resp, err = j.Judge(ctx, req)
-		if err == nil {
-			return resp, nil
-		}
-		clog.WarnContext(ctx, "judge eval attempt failed",
-			"criterion", criterion,
-			"attempt", attempt+1,
-			"attempts", judgeAttempts,
-			"error", err)
-	}
-	return nil, err
-}
-
 // NewGoldenEval creates an evaluation function for golden mode judgment
 func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, callbacks ...agenttrace.TraceCallback[*Judgement]) evals.ObservableTraceCallback[T] {
 	return func(o evals.Observer, trace *agenttrace.Trace[T]) {
@@ -88,12 +59,14 @@ func NewGoldenEval[T any](j Interface, criterion string, goldenAnswer string, ca
 		}
 		ctx := context.WithoutCancel(parentCtx)
 		ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(callbacks...))
-		resp, err := judgeWithRetry(ctx, j, &Request{
+		// Decorate the context so Retry's per-attempt WARN carries the criterion.
+		ctx = clog.WithValues(ctx, "criterion", criterion)
+		resp, err := Retry(ctx, j, &Request{
 			Mode:            GoldenMode,
 			ReferenceAnswer: goldenAnswer,
 			ActualAnswer:    string(data),
 			Criterion:       criterion,
-		}, criterion)
+		})
 		if err != nil {
 			// A judge transport/parse error is not a quality signal. After
 			// exhausting retries, skip the metric (no Fail, no Grade) rather
@@ -163,11 +136,13 @@ func NewStandaloneEval[T any](j Interface, criterion string, callbacks ...agentt
 		}
 		ctx := context.WithoutCancel(parentCtx)
 		ctx = agenttrace.WithTracer(ctx, agenttrace.ByCode(callbacks...))
-		resp, err := judgeWithRetry(ctx, j, &Request{
+		// Decorate the context so Retry's per-attempt WARN carries the criterion.
+		ctx = clog.WithValues(ctx, "criterion", criterion)
+		resp, err := Retry(ctx, j, &Request{
 			Mode:         StandaloneMode,
 			ActualAnswer: string(data),
 			Criterion:    criterion,
-		}, criterion)
+		})
 		if err != nil {
 			// See NewGoldenEval: a judge transport/parse error is not a quality
 			// signal, so skip rather than fail after retries are exhausted. The
@@ -199,7 +174,7 @@ func isNilResult[T any](value T) bool {
 		return true
 	}
 	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return v.IsNil()
 	default:
 		return false

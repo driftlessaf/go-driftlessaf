@@ -17,6 +17,28 @@ import (
 	"chainguard.dev/driftlessaf/agents/judge"
 )
 
+// ExampleRetry demonstrates calling a judge through the shared retry helper, which
+// spaces transient-error retries with exponential backoff.
+func ExampleRetry() {
+	// A judge that succeeds on the first call (so this example does not sleep).
+	j := &mockJudge{judgment: &judge.Judgement{Score: 0.90, Reasoning: "faithfully preserved"}}
+
+	res, err := judge.Retry(context.Background(), j, &judge.Request{
+		Mode:            judge.GoldenMode,
+		ReferenceAnswer: "the original upstream fix",
+		ActualAnswer:    "the adapted fix",
+		Criterion:       "fidelity - the adaptation must preserve the original security change",
+	})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Score: %.2f\n", res.Score)
+	// Output:
+	// Score: 0.90
+}
+
 func ExampleNewGoldenEval() {
 	// Create eval callback for a specific criterion
 	eval := judge.NewGoldenEval[*judge.Judgement](
