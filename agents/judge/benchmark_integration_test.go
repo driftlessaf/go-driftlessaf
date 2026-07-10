@@ -49,9 +49,9 @@ func TestBenchmark(t *testing.T) {
 		region: "global",
 		model:  "gemini-3-flash-preview",
 	}, {
-		name:   "gemini-3.1-flash-lite-preview",
+		name:   "gemini-3.5-flash",
 		region: "global",
-		model:  "gemini-3.1-flash-lite-preview",
+		model:  "gemini-3.5-flash",
 	}}
 
 	// Add Claude models when not in short mode
