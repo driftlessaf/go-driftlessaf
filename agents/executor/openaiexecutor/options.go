@@ -14,6 +14,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"chainguard.dev/driftlessaf/internal/cloudrun"
 )
@@ -120,7 +121,7 @@ func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *
 }
 
 // SubmitResultProvider constructs tool metadata for submit_result.
-type SubmitResultProvider[Response any] func() (openaistool.Metadata[Response], error)
+type SubmitResultProvider[Response any] func() (openaistool.SubmitMetadata[Response], error)
 
 // WithSubmitResultProvider registers the submit_result tool.
 func WithSubmitResultProvider[Request promptbuilder.Bindable, Response any](provider SubmitResultProvider[Response]) Option[Request, Response] {
@@ -133,6 +134,25 @@ func WithSubmitResultProvider[Request promptbuilder.Bindable, Response any](prov
 			return err
 		}
 		e.submitTool = tool
+		return nil
+	}
+}
+
+// WithResultValidator registers a validator that gates the terminal submit
+// tool. When the model calls the submit tool with a payload that parses, every
+// registered validator runs concurrently against the parsed response; any
+// findings reject the submission back to the model as the tool's result — the
+// loop continues until a submission passes — and a validator error aborts the
+// run. Repeatable: each call appends a validator, and their findings are
+// concatenated in registration order. Only meaningful when a submit tool is
+// configured via WithSubmitResultProvider; without one there is nothing to
+// gate.
+func WithResultValidator[Request promptbuilder.Bindable, Response any](v callbacks.ResultValidator[Response]) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if v == nil {
+			return errors.New("result validator cannot be nil")
+		}
+		e.resultValidators = append(e.resultValidators, v)
 		return nil
 	}
 }

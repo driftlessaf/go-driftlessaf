@@ -31,6 +31,27 @@ type Metadata[Response any] struct {
 	) map[string]any
 }
 
+// SubmitMetadata describes the terminal submit tool for the Claude executor.
+// It is registered via the executor's WithSubmitResultProvider option rather
+// than the regular tool map because the submit tool is special: its accepted
+// outcome — once the executor's result validators pass — becomes the run's
+// final result and ends the agent loop.
+type SubmitMetadata[Response any] struct {
+	// Definition is the tool definition for Claude.
+	Definition anthropic.ToolParam
+
+	// Handler parses a submit tool call into a SubmitOutcome. It performs no
+	// side effects on the run: committing the response is the executor's
+	// decision. The handler records the trace tool call for parameter and
+	// parse failures (Accepted=false); the executor records accepted calls so
+	// their completion reflects the validation verdict.
+	Handler func(
+		ctx context.Context,
+		toolUse anthropic.ToolUseBlock,
+		trace *agenttrace.Trace[Response],
+	) toolcall.SubmitOutcome[Response]
+}
+
 // Error creates an error response map for Claude tool calls
 func Error(format string, args ...any) map[string]any {
 	return params.Error(format, args...)

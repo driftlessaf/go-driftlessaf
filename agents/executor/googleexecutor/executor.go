@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -21,6 +20,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
 	"go.opentelemetry.io/otel/attribute"
@@ -66,11 +66,20 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 
 	responseMIMEType string
 	responseSchema   *genai.Schema
-	thinkingBudget   *int32                        // nil = disabled, non-nil = enabled with budget
-	submitTool       googletool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics     *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
-	retryConfig      retry.RetryConfig             // retry configuration for transient Vertex AI errors
-	resourceLabels   map[string]string             // resource labels for GCP billing attribution
+	thinkingBudget   *int32                              // nil = disabled, non-nil = enabled with budget
+	submitTool       googletool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics     *metrics.GenAI                      // OpenTelemetry metrics for token usage and tool calls
+	retryConfig      retry.RetryConfig                   // retry configuration for transient Vertex AI errors
+	resourceLabels   map[string]string                   // resource labels for GCP billing attribution
+
+	// resultValidators gate the terminal submit tool. When the model calls the
+	// submit tool with a payload that parses, every validator runs concurrently
+	// against the parsed response; any findings reject the submission back to
+	// the model as the tool's result (the loop continues), and a validator
+	// error aborts the run. Only when all validators accept does the response
+	// commit and end the run. Empty (the default) accepts every parsed
+	// submission. Set via WithResultValidator (repeatable).
+	resultValidators []callbacks.ResultValidator[Response]
 
 	// cacheControl enables Vertex AI context caching. When true, the executor
 	// creates a CachedContent resource containing system instructions and tool
@@ -183,20 +192,9 @@ func (e *executor[Request, Response]) Execute(
 		done(resp, err)
 	}()
 
-	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
-	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]googletool.Metadata[Response], len(tools)+1)
-		maps.Copy(mergedTools, tools)
-
-		name := "submit_result"
-		if e.submitTool.Definition != nil && e.submitTool.Definition.Name != "" {
-			name = e.submitTool.Definition.Name
-		}
-		if _, exists := mergedTools[name]; !exists {
-			mergedTools[name] = e.submitTool
-		}
-		tools = mergedTools
-	}
+	// submitToolName is the configured terminal tool the model calls to
+	// return its result. Empty when no submit tool is registered.
+	submitToolName := e.submitToolName()
 
 	// Build tool definitions, sorted by name for deterministic ordering.
 	//
@@ -205,9 +203,18 @@ func (e *executor[Request, Response]) Execute(
 	// without sorting, the tool definitions could serialize differently on each
 	// call — producing different cache content even though the tools haven't
 	// changed. Sorting by name ensures stable content across calls.
-	toolDeclarations := make([]*genai.FunctionDeclaration, 0, len(tools))
+	toolDeclarations := make([]*genai.FunctionDeclaration, 0, len(tools)+1)
 	for _, meta := range tools {
 		toolDeclarations = append(toolDeclarations, meta.Definition)
+	}
+	// Advertise the terminal submit tool alongside the regular tools. It lives
+	// outside the tools map — dispatch routes it through evaluateSubmission —
+	// but the model discovers it the same way. A caller-registered tool with
+	// the same name takes precedence, matching dispatch.
+	if submitToolName != "" {
+		if _, exists := tools[submitToolName]; !exists {
+			toolDeclarations = append(toolDeclarations, e.submitTool.Definition)
+		}
 	}
 	slices.SortFunc(toolDeclarations, func(a, b *genai.FunctionDeclaration) int {
 		return cmp.Compare(a.Name, b.Name)
@@ -301,33 +308,74 @@ func (e *executor[Request, Response]) Execute(
 	var finalResult Response
 	finalResultPtr := &finalResult
 
+	// executeToolCall runs a single function call and returns its response
+	// part. The handler writes any terminal result into resultPtr; each call
+	// gets its own slot on the concurrent path so handlers never race on the
+	// same pointer. The committed return reports that the terminal submit tool
+	// accepted the call and the registered result validators passed, so
+	// resultPtr holds the run's final result — even when that result is the
+	// zero value.
+	executeToolCall := func(call *genai.FunctionCall, resultPtr *Response) (*genai.Part, bool, error) {
+		kvs := make([]any, 0, 4+2*len(call.Args))
+		kvs = append(kvs, "tool", call.Name, "id", call.ID)
+		for k, v := range call.Args {
+			kvs = append(kvs, "args."+k, v)
+		}
+		clog.InfoContext(ctx, "Executing tool call", kvs...)
+
+		// Record tool call metric
+		e.recordToolCall(ctx, call.Name)
+
+		// Find and execute the handler for this tool
+		var toolResponse *genai.FunctionResponse
+		committed := false
+		switch toolMeta, found := tools[call.Name]; {
+		case found:
+			// Execute the tool handler
+			toolResponse = toolMeta.Handler(ctx, call, trace, resultPtr)
+			// Preserve the model's universal `reasoning` argument on
+			// the recorded call (handlers record curated param maps
+			// that drop it).
+			if r, ok := call.Args["reasoning"].(string); ok {
+				trace.AttachToolCallReasoning(call.ID, r)
+			}
+		case call.Name == submitToolName && e.submitTool.Handler != nil:
+			// Terminal submit tool: parse the call, gate the parsed response
+			// on the registered result validators, and only then commit it as
+			// the run's final result. A rejected submission returns the
+			// validators' findings as the tool result so the model can address
+			// them and submit again — the loop continues.
+			result, com, err := e.evaluateSubmission(ctx, call, trace, resultPtr)
+			if err != nil {
+				return nil, false, err
+			}
+			committed = com
+			toolResponse = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result}
+		default:
+			clog.ErrorContext(ctx, "Unknown function call requested by model", "function", call.Name)
+			toolResponse = googletool.Error(call, "Unknown function: %s", call.Name)
+
+			// Record bad tool call for unknown function
+			trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown function: %q", call.Name))
+		}
+
+		return &genai.Part{FunctionResponse: toolResponse}, committed, nil
+	}
+
 	// Execute seed tool calls and build complete history
 	for _, call := range seedToolCalls {
 		clog.InfoContext(ctx, "Pre-executing seed tool call", "tool", call.Name, "id", call.ID)
 
-		// Execute the tool call
-		var result *genai.FunctionResponse
-		if meta, ok := tools[call.Name]; ok {
-			result = meta.Handler(ctx, call, trace, finalResultPtr)
-			// Preserve the model's universal `reasoning` argument on the
-			// recorded call (handlers record curated param maps that drop it).
-			if r, ok := call.Args["reasoning"].(string); ok {
-				trace.AttachToolCallReasoning(call.ID, r)
-			}
-		} else {
-			clog.ErrorContext(ctx, "Unknown seed tool requested", "tool", call.Name)
-			trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown tool: %q", call.Name))
-			result = &genai.FunctionResponse{
-				ID:   call.ID,
-				Name: call.Name,
-				Response: map[string]any{
-					"error": fmt.Sprintf("unknown tool: %q", call.Name),
-				},
-			}
+		part, committed, err := executeToolCall(call, finalResultPtr)
+		if err != nil {
+			return resp, err
 		}
 
-		// Check if a tool set the final result during seed execution
-		if !reflect.ValueOf(finalResult).IsZero() {
+		// Check if a tool set the final result during seed execution. The
+		// committed flag is the submit tool's explicit signal; the zero-value
+		// check preserves the legacy contract for regular tools that write a
+		// non-zero result through their result pointer.
+		if committed || !reflect.ValueOf(finalResult).IsZero() {
 			clog.InfoContext(ctx, "Seed tool set final result, exiting immediately")
 			return finalResult, nil
 		}
@@ -339,10 +387,8 @@ func (e *executor[Request, Response]) Execute(
 				FunctionCall: call,
 			}},
 		}, &genai.Content{
-			Role: "user",
-			Parts: []*genai.Part{{
-				FunctionResponse: result,
-			}},
+			Role:  "user",
+			Parts: []*genai.Part{part},
 		})
 	}
 
@@ -571,45 +617,6 @@ func (e *executor[Request, Response]) Execute(
 
 		// If there are tool calls, execute them and send responses
 		if len(toolCalls) > 0 {
-			// executeToolCall runs a single function call and returns its
-			// response part. The handler writes any terminal result into
-			// resultPtr; the sequential path passes the shared finalResultPtr,
-			// while the concurrent path passes a per-call slot so handlers never
-			// race on the same pointer.
-			executeToolCall := func(call *genai.FunctionCall, resultPtr *Response) *genai.Part {
-				kvs := make([]any, 0, 4+2*len(call.Args))
-				kvs = append(kvs, "tool", call.Name, "id", call.ID)
-				for k, v := range call.Args {
-					kvs = append(kvs, "args."+k, v)
-				}
-				clog.InfoContext(ctx, "Executing tool call", kvs...)
-
-				// Record tool call metric
-				e.recordToolCall(ctx, call.Name)
-
-				// Find and execute the handler for this tool
-				var toolResponse *genai.FunctionResponse
-				toolMeta, found := tools[call.Name]
-				if !found {
-					clog.ErrorContext(ctx, "Unknown function call requested by model", "function", call.Name)
-					toolResponse = googletool.Error(call, "Unknown function: %s", call.Name)
-
-					// Record bad tool call for unknown function
-					trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown function: %q", call.Name))
-				} else {
-					// Execute the tool handler
-					toolResponse = toolMeta.Handler(ctx, call, trace, resultPtr)
-					// Preserve the model's universal `reasoning` argument on
-					// the recorded call (handlers record curated param maps
-					// that drop it).
-					if r, ok := call.Args["reasoning"].(string); ok {
-						trace.AttachToolCallReasoning(call.ID, r)
-					}
-				}
-
-				return &genai.Part{FunctionResponse: toolResponse}
-			}
-
 			// Dispatch the turn's function calls under a bounded pool. The model
 			// may emit several independent function calls in one turn (parallel
 			// function calling, which the API maps back by id); a concurrency of 1
@@ -619,6 +626,11 @@ func (e *executor[Request, Response]) Execute(
 			// in the model's original order and the first terminal result (in
 			// order) ends the run. Tool handlers must be safe for concurrent use
 			// when concurrency exceeds 1.
+			type toolOutcome struct {
+				committed bool
+				err       error
+			}
+			outcomes := make([]toolOutcome, len(toolCalls))
 			perCallResults := make([]Response, len(toolCalls))
 			parts := make([]*genai.Part, len(toolCalls))
 
@@ -626,7 +638,9 @@ func (e *executor[Request, Response]) Execute(
 			g.SetLimit(max(1, e.toolCallConcurrency))
 			for i, call := range toolCalls {
 				g.Go(func() error {
-					parts[i] = executeToolCall(call, &perCallResults[i])
+					part, committed, cerr := executeToolCall(call, &perCallResults[i])
+					parts[i] = part
+					outcomes[i] = toolOutcome{committed: committed, err: cerr}
 					return nil
 				})
 			}
@@ -634,7 +648,16 @@ func (e *executor[Request, Response]) Execute(
 
 			var toolResponseParts []*genai.Part
 			for i := range toolCalls {
-				if !reflect.ValueOf(perCallResults[i]).IsZero() {
+				if outcomes[i].err != nil {
+					return zero, nil, true, outcomes[i].err
+				}
+				// The committed flag is the submit tool's explicit terminal
+				// signal — it fires even for a zero-value result, so the model
+				// is never told "submitted successfully" on a run that keeps
+				// going. The zero-value check preserves the legacy contract
+				// for regular tools that write a non-zero result through
+				// their result pointer.
+				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.recordTurns(ctx, turn+1, false)
 					return perCallResults[i], nil, true, nil
@@ -738,6 +761,60 @@ func (e *executor[Request, Response]) Execute(
 		llmTurn.End()
 	}
 	return resp, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+}
+
+// submitToolName returns the configured terminal submit tool's name, or ""
+// when no submit tool is registered. The default name "submit_result" is used
+// when a submit tool is registered without an explicit name.
+func (e *executor[Request, Response]) submitToolName() string {
+	if e.submitTool.Handler == nil {
+		return ""
+	}
+	if e.submitTool.Definition != nil && e.submitTool.Definition.Name != "" {
+		return e.submitTool.Definition.Name
+	}
+	return "submit_result"
+}
+
+// evaluateSubmission runs the terminal submit tool handler for a single call
+// and gates its accepted response on the registered result validators. It
+// returns the tool result to send back to the model and whether the response
+// committed as the run's final result (written through resultPtr). A rejected
+// submission returns the validators' findings so the model can address them
+// and submit again; a validator error aborts the run.
+func (e *executor[Request, Response]) evaluateSubmission(
+	ctx context.Context,
+	call *genai.FunctionCall,
+	trace *agenttrace.Trace[Response],
+	resultPtr *Response,
+) (map[string]any, bool, error) {
+	outcome := e.submitTool.Handler(ctx, call, trace)
+	if !outcome.Accepted {
+		// The handler recorded the failed call on the trace; its ToolResult
+		// carries the parameter/parse error back to the model.
+		return outcome.ToolResult, false, nil
+	}
+
+	// The handler leaves accepted calls unrecorded so this trace call's
+	// completion reflects the validation verdict.
+	tc := trace.StartToolCall(call.ID, call.Name, call.Args)
+
+	findings, err := callbacks.ValidateResult(ctx, e.resultValidators, outcome.Response, outcome.Reasoning)
+	if err != nil {
+		err = fmt.Errorf("result validation: %w", err)
+		tc.Complete(nil, err)
+		return nil, false, err
+	}
+	if len(findings) > 0 {
+		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
+		e.recordToolCall(ctx, "submit_result_rejected")
+		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
+		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
+	}
+
+	*resultPtr = outcome.Response
+	tc.Complete(outcome.ToolResult, nil)
+	return outcome.ToolResult, true, nil
 }
 
 // getOrCreateCache returns the name of a valid CachedContent, creating one if

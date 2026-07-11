@@ -25,6 +25,27 @@ type Metadata[Response any] struct {
 	Handler func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], result *Response) *genai.FunctionResponse
 }
 
+// SubmitMetadata describes the terminal submit tool for the Google executor.
+// It is registered via the executor's WithSubmitResultProvider option rather
+// than the regular tool map because the submit tool is special: its accepted
+// outcome — once the executor's result validators pass — becomes the run's
+// final result and ends the agent loop.
+type SubmitMetadata[Response any] struct {
+	// Definition is the Google AI tool definition.
+	Definition *genai.FunctionDeclaration
+
+	// Handler parses a submit tool call into a SubmitOutcome. It performs no
+	// side effects on the run: committing the response is the executor's
+	// decision. The handler records the trace tool call for parameter and
+	// parse failures (Accepted=false); the executor records accepted calls so
+	// their completion reflects the validation verdict.
+	Handler func(
+		ctx context.Context,
+		call *genai.FunctionCall,
+		trace *agenttrace.Trace[Response],
+	) toolcall.SubmitOutcome[Response]
+}
+
 // Param extracts a parameter from a Gemini function call with type safety.
 // Returns the extracted value or a FunctionResponse error that can be sent back to the model.
 func Param[T any](call *genai.FunctionCall, name string) (T, *genai.FunctionResponse) {

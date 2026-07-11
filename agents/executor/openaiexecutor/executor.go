@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -18,6 +17,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go"
@@ -57,10 +57,19 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxTokens      int64
 	maxTurns       int
 	temperature    float64
-	submitTool     openaistool.Metadata[Response]
+	submitTool     openaistool.SubmitMetadata[Response]
 	genaiMetrics   *metrics.GenAI
 	retryConfig    retry.RetryConfig
 	resourceLabels map[string]string
+
+	// resultValidators gate the terminal submit tool. When the model calls the
+	// submit tool with a payload that parses, every validator runs concurrently
+	// against the parsed response; any findings reject the submission back to
+	// the model as the tool's result (the loop continues), and a validator
+	// error aborts the run. Only when all validators accept does the response
+	// commit and end the run. Empty (the default) accepts every parsed
+	// submission. Set via WithResultValidator (repeatable).
+	resultValidators []callbacks.ResultValidator[Response]
 
 	// toolCallConcurrency bounds how many of a single turn's tool calls run
 	// concurrently when the model emits more than one (parallel tool calls).
@@ -136,24 +145,23 @@ func (e *executor[Request, Response]) Execute(
 		"prompt_length", len(prompt),
 	)
 
-	// Merge submit_result tool if configured.
-	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]openaistool.Metadata[Response], len(tools)+1)
-		maps.Copy(mergedTools, tools)
-		name := e.submitTool.Definition.Function.Name
-		if name == "" {
-			name = "submit_result"
-		}
-		if _, exists := mergedTools[name]; !exists {
-			mergedTools[name] = e.submitTool
-		}
-		tools = mergedTools
-	}
+	// submitToolName is the configured terminal tool the model calls to
+	// return its result. Empty when no submit tool is registered.
+	submitToolName := e.submitToolName()
 
 	// Build tool definitions.
-	toolDefs := make([]openai.ChatCompletionToolParam, 0, len(tools))
+	toolDefs := make([]openai.ChatCompletionToolParam, 0, len(tools)+1)
 	for _, meta := range tools {
 		toolDefs = append(toolDefs, meta.Definition)
+	}
+	// Advertise the terminal submit tool alongside the regular tools. It lives
+	// outside the tools map — dispatch routes it through evaluateSubmission —
+	// but the model discovers it the same way. A caller-registered tool with
+	// the same name takes precedence, matching dispatch.
+	if submitToolName != "" {
+		if _, exists := tools[submitToolName]; !exists {
+			toolDefs = append(toolDefs, e.submitTool.Definition)
+		}
 	}
 
 	// Build initial messages.
@@ -182,8 +190,11 @@ func (e *executor[Request, Response]) Execute(
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
 	// turn gets its own slot so concurrent handlers never race on the same
-	// pointer.
-	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, resultPtr *Response) (string, error) {
+	// pointer. The committed return reports that the terminal submit tool
+	// accepted the call and the registered result validators passed, so
+	// resultPtr holds the run's final result — even when that result is the
+	// zero value.
+	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, resultPtr *Response) (string, bool, error) {
 		kvs := []any{"tool", tc.Function.Name, "id", tc.ID}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
@@ -194,7 +205,9 @@ func (e *executor[Request, Response]) Execute(
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
 		var res map[string]any
-		if meta, ok := tools[tc.Function.Name]; ok {
+		committed := false
+		switch meta, ok := tools[tc.Function.Name]; {
+		case ok:
 			e.recordToolCall(ctx, tc.Function.Name)
 			res = meta.Handler(ctx, tc, trace, resultPtr)
 			// Preserve the model's universal `reasoning` argument on the
@@ -202,7 +215,19 @@ func (e *executor[Request, Response]) Execute(
 			if r, ok := args["reasoning"].(string); ok {
 				trace.AttachToolCallReasoning(tc.ID, r)
 			}
-		} else {
+		case tc.Function.Name == submitToolName && e.submitTool.Handler != nil:
+			// Terminal submit tool: parse the call, gate the parsed response
+			// on the registered result validators, and only then commit it as
+			// the run's final result. A rejected submission returns the
+			// validators' findings as the tool result so the model can address
+			// them and submit again — the loop continues.
+			e.recordToolCall(ctx, tc.Function.Name)
+			var err error
+			res, committed, err = e.evaluateSubmission(ctx, tc, args, trace, resultPtr)
+			if err != nil {
+				return "", false, err
+			}
+		default:
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", tc.Function.Name)
 			trace.BadToolCall(tc.ID, tc.Function.Name,
 				map[string]any{"arguments": tc.Function.Arguments},
@@ -212,9 +237,9 @@ func (e *executor[Request, Response]) Execute(
 
 		resBytes, err := json.Marshal(res)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal tool result: %w", err)
+			return "", false, fmt.Errorf("failed to marshal tool result: %w", err)
 		}
-		return string(resBytes), nil
+		return string(resBytes), committed, nil
 	}
 
 	// The named err return is load-bearing: the deferred Fail call below reads
@@ -302,8 +327,9 @@ func (e *executor[Request, Response]) Execute(
 			// handlers must be safe for concurrent use when concurrency exceeds 1.
 			toolCalls := choice.Message.ToolCalls
 			type toolOutcome struct {
-				msg openai.ChatCompletionMessageParamUnion
-				err error
+				msg       openai.ChatCompletionMessageParamUnion
+				committed bool
+				err       error
 			}
 			outcomes := make([]toolOutcome, len(toolCalls))
 			perCallResults := make([]Response, len(toolCalls))
@@ -312,12 +338,12 @@ func (e *executor[Request, Response]) Execute(
 			g.SetLimit(max(1, e.toolCallConcurrency))
 			for i, tc := range toolCalls {
 				g.Go(func() error {
-					resJSON, cerr := executeToolCall(tc, &perCallResults[i])
+					resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
 					if cerr != nil {
 						outcomes[i] = toolOutcome{err: cerr}
 						return nil
 					}
-					outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID)}
+					outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID), committed: committed}
 					return nil
 				})
 			}
@@ -330,7 +356,13 @@ func (e *executor[Request, Response]) Execute(
 				reqParams.Messages = append(reqParams.Messages, outcomes[i].msg)
 			}
 			for i := range toolCalls {
-				if !reflect.ValueOf(perCallResults[i]).IsZero() {
+				// The committed flag is the submit tool's explicit terminal
+				// signal — it fires even for a zero-value result, so the model
+				// is never told "submitted successfully" on a run that keeps
+				// going. The zero-value check preserves the legacy contract
+				// for regular tools that write a non-zero result through
+				// their result pointer.
+				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.recordTurns(ctx, turn+1, false)
 					return perCallResults[i], true, nil
@@ -345,11 +377,6 @@ func (e *executor[Request, Response]) Execute(
 		if e.submitTool.Handler != nil && textContent != "" {
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
 			e.recordToolCall(ctx, "submit_result_redirect")
-
-			submitToolName := e.submitTool.Definition.Function.Name
-			if submitToolName == "" {
-				submitToolName = "submit_result"
-			}
 
 			reqParams.Messages = append(reqParams.Messages, choice.Message.ToParam())
 			reqParams.Messages = append(reqParams.Messages,
@@ -390,6 +417,61 @@ func (e *executor[Request, Response]) Execute(
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
 	e.recordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+}
+
+// submitToolName returns the configured terminal submit tool's name, or ""
+// when no submit tool is registered. The default name "submit_result" is used
+// when a submit tool is registered without an explicit name.
+func (e *executor[Request, Response]) submitToolName() string {
+	if e.submitTool.Handler == nil {
+		return ""
+	}
+	if e.submitTool.Definition.Function.Name != "" {
+		return e.submitTool.Definition.Function.Name
+	}
+	return "submit_result"
+}
+
+// evaluateSubmission runs the terminal submit tool handler for a single call
+// and gates its accepted response on the registered result validators. It
+// returns the tool result to send back to the model and whether the response
+// committed as the run's final result (written through resultPtr). A rejected
+// submission returns the validators' findings so the model can address them
+// and submit again; a validator error aborts the run.
+func (e *executor[Request, Response]) evaluateSubmission(
+	ctx context.Context,
+	tc openai.ChatCompletionMessageToolCall,
+	args map[string]any,
+	trace *agenttrace.Trace[Response],
+	resultPtr *Response,
+) (map[string]any, bool, error) {
+	outcome := e.submitTool.Handler(ctx, tc, trace)
+	if !outcome.Accepted {
+		// The handler recorded the failed call on the trace; its ToolResult
+		// carries the parameter/parse error back to the model.
+		return outcome.ToolResult, false, nil
+	}
+
+	// The handler leaves accepted calls unrecorded so this trace call's
+	// completion reflects the validation verdict.
+	toolCall := trace.StartToolCall(tc.ID, tc.Function.Name, args)
+
+	findings, err := callbacks.ValidateResult(ctx, e.resultValidators, outcome.Response, outcome.Reasoning)
+	if err != nil {
+		err = fmt.Errorf("result validation: %w", err)
+		toolCall.Complete(nil, err)
+		return nil, false, err
+	}
+	if len(findings) > 0 {
+		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
+		e.recordToolCall(ctx, "submit_result_rejected")
+		toolCall.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
+		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
+	}
+
+	*resultPtr = outcome.Response
+	toolCall.Complete(outcome.ToolResult, nil)
+	return outcome.ToolResult, true, nil
 }
 
 func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {

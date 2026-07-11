@@ -25,9 +25,6 @@ import (
 type openAICompatAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	executor openaiexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
-	// validateTool is the non-terminal companion to submit_result, merged into
-	// the tool set on each Execute. Zero value (nil Handler) when unavailable.
-	validateTool openaistool.Metadata[Resp]
 }
 
 // newOpenAICompatAgent creates an agent using Vertex AI's OpenAI-compatible endpoint.
@@ -73,21 +70,27 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		}),
 	)
 
-	submitTool, validateTool, err := submitresult.OpenAISubmitAndValidateForResponse[Resp]()
+	// Build the terminal submit_result tool. The executor gates accepted
+	// submissions on the configured result validators before committing them
+	// as the run's final result.
+	submitTool, err := submitresult.OpenAIToolForResponse[Resp]()
 	if err != nil {
-		return nil, fmt.Errorf("building submit/validate tools: %w", err)
+		return nil, fmt.Errorf("building submit tool: %w", err)
 	}
 
 	executorOpts := []openaiexecutor.Option[Req, Resp]{
 		openaiexecutor.WithModel[Req, Resp](model),
 		openaiexecutor.WithTemperature[Req, Resp](0.2),
 		openaiexecutor.WithMaxTokens[Req, Resp](32768),
-		openaiexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.Metadata[Resp], error) { return submitTool, nil }),
+		openaiexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.SubmitMetadata[Resp], error) { return submitTool, nil }),
 		openaiexecutor.WithResourceLabels[Req, Resp](map[string]string{
 			"projectID":  projectID,
 			"region":     region,
 			"model_name": strings.ToLower(model),
 		}),
+	}
+	for _, v := range config.ResultValidators {
+		executorOpts = append(executorOpts, openaiexecutor.WithResultValidator[Req, Resp](v))
 	}
 
 	if config.MaxTurns > 0 {
@@ -115,9 +118,8 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 	}
 
 	return &openAICompatAgent[Req, Resp, CB]{
-		executor:     exec,
-		config:       config,
-		validateTool: validateTool,
+		executor: exec,
+		config:   config,
 	}, nil
 }
 
@@ -127,12 +129,5 @@ func (a *openAICompatAgent[Req, Resp, CB]) Execute(ctx context.Context, request 
 		var zero Resp
 		return zero, fmt.Errorf("building tools: %w", err)
 	}
-	openaiTools := openaistool.Map(tools)
-	if a.validateTool.Handler != nil {
-		name := a.validateTool.Definition.Function.Name
-		if _, exists := openaiTools[name]; !exists {
-			openaiTools[name] = a.validateTool
-		}
-	}
-	return a.executor.Execute(ctx, request, openaiTools)
+	return a.executor.Execute(ctx, request, openaistool.Map(tools))
 }

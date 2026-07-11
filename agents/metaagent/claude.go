@@ -23,10 +23,6 @@ import (
 type claudeAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	executor claudeexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
-	// validateTool is the non-terminal companion to submit_result. It is merged
-	// into the tool set on each Execute so the model can check a payload's shape
-	// without ending the run. Zero value (nil Handler) when unavailable.
-	validateTool claudetool.Metadata[Resp]
 }
 
 func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
@@ -58,12 +54,12 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		provider = claudeexecutor.ProviderAnthropic
 	}
 
-	// Build the terminal submit_result tool and its non-terminal validate
-	// companion together so they share an identical schema and submit_result's
-	// payload errors point the model at validate_result.
-	submitTool, validateTool, err := submitresult.ClaudeSubmitAndValidateForResponse[Resp]()
+	// Build the terminal submit_result tool. The executor gates accepted
+	// submissions on the configured result validators before committing them
+	// as the run's final result.
+	submitTool, err := submitresult.ClaudeToolForResponse[Resp]()
 	if err != nil {
-		return nil, fmt.Errorf("building submit/validate tools: %w", err)
+		return nil, fmt.Errorf("building submit tool: %w", err)
 	}
 
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
@@ -71,8 +67,11 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		claudeexecutor.WithProvider[Req, Resp](provider),
 		claudeexecutor.WithTemperature[Req, Resp](0.2),
 		claudeexecutor.WithMaxTokens[Req, Resp](32000),
-		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.Metadata[Resp], error) { return submitTool, nil }),
+		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.SubmitMetadata[Resp], error) { return submitTool, nil }),
 		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
+	}
+	for _, v := range config.ResultValidators {
+		executorOpts = append(executorOpts, claudeexecutor.WithResultValidator[Req, Resp](v))
 	}
 
 	if config.MaxTurns > 0 {
@@ -101,9 +100,8 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	}
 
 	return &claudeAgent[Req, Resp, CB]{
-		executor:     executor,
-		config:       config,
-		validateTool: validateTool,
+		executor: executor,
+		config:   config,
 	}, nil
 }
 
@@ -113,11 +111,5 @@ func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, c
 		var zero Resp
 		return zero, fmt.Errorf("building tools: %w", err)
 	}
-	claudeTools := claudetool.Map(tools)
-	if a.validateTool.Handler != nil {
-		if _, exists := claudeTools[a.validateTool.Definition.Name]; !exists {
-			claudeTools[a.validateTool.Definition.Name] = a.validateTool
-		}
-	}
-	return a.executor.Execute(ctx, request, claudeTools)
+	return a.executor.Execute(ctx, request, claudetool.Map(tools))
 }

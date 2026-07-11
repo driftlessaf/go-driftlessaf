@@ -11,14 +11,9 @@ import (
 	"reflect"
 )
 
-// defaultValidateToolName is the tool name used for the non-terminal companion
-// to submit_result. The validate tool takes the identical schema and reports
-// whether a payload would be accepted, without ending the agent loop.
-const defaultValidateToolName = "validate_result"
-
 // parsePayload converts a raw payload object (as received from the model) into
-// the strongly-typed Response. It is shared by the terminal submit tool and the
-// non-terminal validate tool so both apply exactly the same parsing rules.
+// the strongly-typed Response. It is shared by the per-provider submit tool
+// handlers so all apply exactly the same parsing rules.
 func parsePayload[Response any](payloadRaw map[string]any) (Response, error) {
 	var zero Response
 
@@ -45,25 +40,12 @@ func parsePayload[Response any](payloadRaw map[string]any) (Response, error) {
 	return reflect.ValueOf(dest).Elem().Interface().(Response), nil
 }
 
-// withValidateHint appends guidance to a submit tool's error response pointing
-// the model at the non-terminal validate tool, so it can check a payload
-// without risking termination on a bad submit. It is a no-op when no validate
-// tool is registered (validateToolName == "").
-func withValidateHint(errResp map[string]any, validateToolName, submitToolName string) map[string]any {
-	if validateToolName == "" || errResp == nil {
-		return errResp
-	}
-	if msg, ok := errResp["error"].(string); ok {
-		errResp["error"] = msg + fmt.Sprintf(" You may call %s with the same arguments to check your payload first; it validates without ending the run. %s is terminal, so only call it once you have the correct shape.", validateToolName, submitToolName)
-	}
-	return errResp
-}
-
-// validateSuccess is the response a validate tool returns for an acceptable
-// payload. It deliberately does not set the run's final result.
-func validateSuccess(submitToolName string) map[string]any {
+// successResult is the tool result an accepted submission carries back toward
+// the model. The executor returns it only after the registered result
+// validators accept the response.
+func successResult(successMessage string) map[string]any {
 	return map[string]any{
-		"valid":   true,
-		"message": fmt.Sprintf("Payload is valid. Call %s with these same arguments to finish.", submitToolName),
+		"success": true,
+		"message": successMessage,
 	}
 }

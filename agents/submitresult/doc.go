@@ -7,13 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 // final results.
 //
 // It exposes ClaudeTool, GoogleTool, and OpenAITool constructors that build
-// executor tool metadata for the terminal submit_result tool, which agents call
-// to return a structured response at the end of a conversation.
-//
-// Each provider also offers a non-terminal validate_result companion
-// (ClaudeValidateTool and friends) that advertises the identical schema and
-// reports whether a payload would be accepted, without ending the run. The
-// SubmitAndValidateForResponse constructors build the submit/validate pair from
-// one Options so they share a schema and submit_result's payload errors point
-// the model at validate_result.
+// executor submit metadata for the terminal submit_result tool, which agents
+// call to return a structured response at the end of a conversation. The
+// handlers parse the call into a toolcall.SubmitOutcome; the executor decides
+// whether the parsed response commits (ending the run) after running its
+// registered result validators (see the executors' WithResultValidator
+// option), or is rejected back to the model with the validators' findings so
+// the loop continues.
 package submitresult

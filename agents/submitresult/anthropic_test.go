@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package submitresult
 
 import (
-	"encoding/json"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -26,36 +25,26 @@ func TestClaudeToolHandler(t *testing.T) {
 	ctx := t.Context()
 	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
-	input := map[string]any{
-		"reasoning": "done",
-		"analysis": map[string]any{
-			"summary": "all good",
-		},
-	}
-
-	payload, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("marshal input: %v", err)
-	}
-
 	block := anthropic.ToolUseBlock{
 		ID:    "tool-1",
 		Name:  meta.Definition.Name,
-		Input: payload,
+		Input: mustMarshal(t, validInput()),
 	}
 
-	var result *sampleResult
-	resp := meta.Handler(ctx, block, trace, &result)
-	if resp == nil {
-		t.Fatalf("expected response")
+	outcome := meta.Handler(ctx, block, trace)
+	if !outcome.Accepted {
+		t.Fatalf("valid payload: got = rejected (%#v), want = accepted", outcome.ToolResult)
 	}
-	if !resp["success"].(bool) {
-		t.Fatalf("expected success response: %#v", resp)
+	if success, _ := outcome.ToolResult["success"].(bool); !success {
+		t.Fatalf("expected success tool result: %#v", outcome.ToolResult)
 	}
-	if result == nil {
-		t.Fatalf("expected result to be set")
+	if outcome.Response == nil {
+		t.Fatal("expected response to be set")
 	}
-	if result.Summary != "all good" {
-		t.Fatalf("unexpected result: %#v", result)
+	if got, want := outcome.Response.Summary, "all good"; got != want {
+		t.Errorf("response summary: got = %q, want = %q", got, want)
+	}
+	if got, want := outcome.Reasoning, "done"; got != want {
+		t.Errorf("reasoning: got = %q, want = %q", got, want)
 	}
 }

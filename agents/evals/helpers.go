@@ -55,35 +55,12 @@ func NoToolCalls[T any]() ObservableTraceCallback[T] {
 	return ExactToolCalls[T](0)
 }
 
-// These mirror the default tool names registered by the submitresult package
-// (see chainguard.dev/driftlessaf/agents/submitresult). They are hardcoded here
-// rather than imported to match how callers already pass the literal
-// "submit_result" into OnlyToolCalls, and to avoid taking a new dependency on
-// submitresult from evals just to read one unexported constant.
-const (
-	submitResultToolName   = "submit_result"
-	validateResultToolName = "validate_result"
-)
-
 // OnlyToolCalls returns an ObservableTraceCallback that validates the trace only uses the specified tool names.
 func OnlyToolCalls[T any](toolNames ...string) ObservableTraceCallback[T] {
 	// Precompute the allowed set once when the callback is created
 	allowed := make(map[string]struct{}, len(toolNames))
 	for _, name := range toolNames {
 		allowed[name] = struct{}{}
-	}
-
-	// validate_result is the non-terminal companion to submit_result: the
-	// submitresult package prompts agents to call it to check a payload's shape
-	// before the terminal submit_result. Allow-lists routinely list only
-	// submit_result, so a correct validate_result call would otherwise be scored
-	// as an unexpected tool call (a false positive). Whenever submit_result is
-	// allowed, implicitly allow its validation companion too.
-	//
-	// Limitation: agents that register submit_result under a non-default tool
-	// name must still list their validate companion explicitly.
-	if _, ok := allowed[submitResultToolName]; ok {
-		allowed[validateResultToolName] = struct{}{}
 	}
 
 	return func(o Observer, trace *agenttrace.Trace[T]) {

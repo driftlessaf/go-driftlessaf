@@ -22,6 +22,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/shared"
 )
 
 // turn1ToolCallsJSON is a completion that emits two independent tool calls in a
@@ -132,14 +133,19 @@ func TestExecutorRunsTurnToolCallsConcurrently(t *testing.T) {
 		"tool_b": mkTool("tool_b"),
 	}
 
-	submit := func() (openaistool.Metadata[errCapResponse], error) {
-		return openaistool.FromTool(toolcall.Tool[errCapResponse]{
-			Def: toolcall.Definition{Name: "submit_result", Description: "submit the result"},
-			Handler: func(_ context.Context, _ toolcall.ToolCall, _ *agenttrace.Trace[errCapResponse], result *errCapResponse) map[string]any {
-				*result = errCapResponse{Answer: "done"}
-				return map[string]any{}
+	submit := func() (openaistool.SubmitMetadata[errCapResponse], error) {
+		return openaistool.SubmitMetadata[errCapResponse]{
+			Definition: openai.ChatCompletionToolParam{
+				Function: shared.FunctionDefinitionParam{Name: "submit_result"},
 			},
-		}), nil
+			Handler: func(context.Context, openai.ChatCompletionMessageToolCall, *agenttrace.Trace[errCapResponse]) toolcall.SubmitOutcome[errCapResponse] {
+				return toolcall.SubmitOutcome[errCapResponse]{
+					Accepted:   true,
+					Response:   errCapResponse{Answer: "done"},
+					ToolResult: map[string]any{"success": true},
+				}
+			},
+		}, nil
 	}
 
 	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](

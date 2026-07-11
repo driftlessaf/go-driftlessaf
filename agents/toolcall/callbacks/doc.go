@@ -42,6 +42,26 @@ FindingCallbacks provides access to CI failure information:
 		},
 	}
 
+# Result Validators
+
+ResultValidator inspects a result an agent submitted via its terminal submit
+tool and returns findings describing why it is not acceptable; an empty return
+accepts the result. Executors run every registered validator concurrently
+(ValidateResult) when the model calls the submit tool, and reject the
+submission back to the model (RejectionResult) when any validator returns
+findings — keeping the agent loop going until a submission passes:
+
+	validator := func(ctx context.Context, r Report, reasoning string) ([]callbacks.Finding, error) {
+		if r.Answer == "" {
+			return []callbacks.Finding{{
+				Kind:       callbacks.FindingKindReview,
+				Identifier: "empty-answer",
+				Details:    "the answer field is empty",
+			}}, nil
+		}
+		return nil, nil
+	}
+
 # History Callbacks
 
 HistoryCallbacks provides access to commit history and file diffs:

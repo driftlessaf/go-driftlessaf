@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
@@ -58,13 +58,13 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxTokens            int64
 	maxTurns             int // maximum conversation turns before aborting
 	temperature          float64
-	temperatureSet       bool                          // true when WithTemperature was applied; lets us warn if it gets dropped for a model that doesn't accept sampling params
-	thinkingBudgetTokens *int64                        // nil = disabled, non-nil = enabled with budget
-	submitTool           claudetool.Metadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics         *metrics.GenAI                // OpenTelemetry metrics for token usage and tool calls
-	retryConfig          retry.RetryConfig             // retry configuration for transient Claude API errors
-	resourceLabels       map[string]string             // resource labels for GCP billing attribution
-	provider             Provider                      // serving backend: Vertex AI or the Anthropic first-party API
+	temperatureSet       bool                                // true when WithTemperature was applied; lets us warn if it gets dropped for a model that doesn't accept sampling params
+	thinkingBudgetTokens *int64                              // nil = disabled, non-nil = enabled with budget
+	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
+	genaiMetrics         *metrics.GenAI                      // OpenTelemetry metrics for token usage and tool calls
+	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
+	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
+	provider             Provider                            // serving backend: Vertex AI or the Anthropic first-party API
 
 	// cacheControl enables Anthropic prompt caching. When true, the executor places
 	// cache breakpoints on tool definitions and the system prompt so the API can skip
@@ -143,6 +143,15 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// when the registered tool handlers are themselves safe for concurrent use
 	// (they share the trace, which is safe). Set via WithToolCallConcurrency.
 	toolCallConcurrency int
+
+	// resultValidators gate the terminal submit tool. When the model calls the
+	// submit tool with a payload that parses, every validator runs concurrently
+	// against the parsed response; any findings reject the submission back to
+	// the model as the tool's result (the loop continues), and a validator
+	// error aborts the run. Only when all validators accept does the response
+	// commit and end the run. Empty (the default) accepts every parsed
+	// submission. Set via WithResultValidator (repeatable).
+	resultValidators []callbacks.ResultValidator[Response]
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -253,21 +262,6 @@ func (e *executor[Request, Response]) Execute(
 		"prompt_suffix_length", len(promptSuffix),
 	)
 
-	// Merge submit_result tool if configured (opt-in via WithSubmitResultProvider)
-	if e.submitTool.Handler != nil {
-		mergedTools := make(map[string]claudetool.Metadata[Response], len(tools)+1)
-		maps.Copy(mergedTools, tools)
-
-		name := e.submitTool.Definition.Name
-		if name == "" {
-			name = "submit_result"
-		}
-		if _, exists := mergedTools[name]; !exists {
-			mergedTools[name] = e.submitTool
-		}
-		tools = mergedTools
-	}
-
 	// Assemble the base request parameters: sorted tool definitions, the
 	// system prompt, the initial user message, and the cache breakpoints. The
 	// temperature warning is deferred to the caller because it needs ctx.
@@ -343,7 +337,10 @@ func (e *executor[Request, Response]) Execute(
 	// result. The handler writes any terminal result into resultPtr; the
 	// sequential path passes the shared finalResultPtr, while the concurrent
 	// path passes a per-call slot so handlers never race on the same pointer.
-	executeToolCall := func(toolUse anthropic.ToolUseBlock, resultPtr *Response) (anthropic.ContentBlockParamUnion, error) {
+	// The committed return reports that the terminal submit tool accepted the
+	// call and the registered result validators passed, so resultPtr holds the
+	// run's final result — even when that result is the zero value.
+	executeToolCall := func(toolUse anthropic.ToolUseBlock, resultPtr *Response) (anthropic.ContentBlockParamUnion, bool, error) {
 		kvs := []any{"tool", toolUse.Name, "id", toolUse.ID}
 		var args map[string]any
 		if err := json.Unmarshal(normalizeToolUseInput(toolUse.Input), &args); err == nil {
@@ -354,8 +351,10 @@ func (e *executor[Request, Response]) Execute(
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
 		var result map[string]any
+		committed := false
 
-		if meta, ok := tools[toolUse.Name]; ok {
+		switch meta, ok := tools[toolUse.Name]; {
+		case ok:
 			// Execute registered handler with result pointer
 			result = meta.Handler(ctx, toolUse, trace, resultPtr)
 			// The model supplies a universal `reasoning` argument on every
@@ -366,7 +365,18 @@ func (e *executor[Request, Response]) Execute(
 			if r, ok := args["reasoning"].(string); ok {
 				trace.AttachToolCallReasoning(toolUse.ID, r)
 			}
-		} else {
+		case toolUse.Name == submitToolName && e.submitTool.Handler != nil:
+			// Terminal submit tool: parse the call, gate the parsed response
+			// on the registered result validators, and only then commit it as
+			// the run's final result. A rejected submission returns the
+			// validators' findings as the tool result so the model can address
+			// them and submit again — the loop continues.
+			var err error
+			result, committed, err = e.evaluateSubmission(ctx, toolUse, args, trace, resultPtr)
+			if err != nil {
+				return anthropic.ContentBlockParamUnion{}, false, err
+			}
+		default:
 			// Unknown tool
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)
 			trace.BadToolCall(toolUse.ID, toolUse.Name,
@@ -381,7 +391,7 @@ func (e *executor[Request, Response]) Execute(
 		// Marshal result
 		resultBytes, err := json.Marshal(result)
 		if err != nil {
-			return anthropic.ContentBlockParamUnion{}, fmt.Errorf("failed to marshal tool result: %w", err)
+			return anthropic.ContentBlockParamUnion{}, false, fmt.Errorf("failed to marshal tool result: %w", err)
 		}
 
 		return anthropic.ContentBlockParamUnion{
@@ -393,7 +403,7 @@ func (e *executor[Request, Response]) Execute(
 					},
 				}},
 			},
-		}, nil
+		}, committed, nil
 	}
 
 	// Pre-execute seed tool calls and add them to messages
@@ -411,13 +421,16 @@ func (e *executor[Request, Response]) Execute(
 		})
 
 		// Execute the tool call.
-		result, err := executeToolCall(toolCall, finalResultPtr)
+		result, committed, err := executeToolCall(toolCall, finalResultPtr)
 		if err != nil {
 			return response, err
 		}
 
-		// Check if a tool set the final result during seed execution
-		if !reflect.ValueOf(finalResult).IsZero() {
+		// Check if a tool set the final result during seed execution. The
+		// committed flag is the submit tool's explicit signal; the zero-value
+		// check preserves the legacy contract for regular tools that write a
+		// non-zero result through their result pointer.
+		if committed || !reflect.ValueOf(finalResult).IsZero() {
 			clog.InfoContext(ctx, "Seed tool set final result, exiting immediately")
 			e.recordTurns(ctx, 0, false)
 			return finalResult, nil
@@ -613,8 +626,9 @@ func (e *executor[Request, Response]) Execute(
 			// pairing, and the first terminal result (in order) ends the run. Tool
 			// handlers must be safe for concurrent use when concurrency exceeds 1.
 			type toolOutcome struct {
-				result anthropic.ContentBlockParamUnion
-				err    error
+				result    anthropic.ContentBlockParamUnion
+				committed bool
+				err       error
 			}
 			outcomes := make([]toolOutcome, len(toolUseBlocks))
 			perCallResults := make([]Response, len(toolUseBlocks))
@@ -623,8 +637,8 @@ func (e *executor[Request, Response]) Execute(
 			g.SetLimit(max(1, e.toolCallConcurrency))
 			for i, toolUse := range toolUseBlocks {
 				g.Go(func() error {
-					res, cerr := executeToolCall(toolUse, &perCallResults[i])
-					outcomes[i] = toolOutcome{result: res, err: cerr}
+					res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])
+					outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
 					return nil
 				})
 			}
@@ -636,7 +650,13 @@ func (e *executor[Request, Response]) Execute(
 					return response, true, outcomes[i].err
 				}
 				toolResults = append(toolResults, outcomes[i].result)
-				if !reflect.ValueOf(perCallResults[i]).IsZero() {
+				// The committed flag is the submit tool's explicit terminal
+				// signal — it fires even for a zero-value result, so the model
+				// is never told "submitted successfully" on a run that keeps
+				// going. The zero-value check preserves the legacy contract
+				// for regular tools that write a non-zero result through
+				// their result pointer.
+				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.recordTurns(ctx, turn+1, false)
 					return perCallResults[i], true, nil
@@ -760,11 +780,22 @@ func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string
 	// definitions would serialize differently on every turn — producing a different
 	// hash and invalidating the cache every time, even though the tools haven't
 	// changed. Sorting by name ensures a stable hash across turns and executions.
-	toolDefs := make([]anthropic.ToolUnionParam, 0, len(tools))
+	toolDefs := make([]anthropic.ToolUnionParam, 0, len(tools)+1)
 	for _, meta := range tools {
 		toolDefs = append(toolDefs, anthropic.ToolUnionParam{
 			OfTool: &meta.Definition,
 		})
+	}
+	// Advertise the terminal submit tool alongside the regular tools. It lives
+	// outside the tools map — dispatch routes it through evaluateSubmission —
+	// but the model discovers it the same way. A caller-registered tool with
+	// the same name takes precedence, matching dispatch. The definition is
+	// copied so cache breakpoints placed below never mutate executor state.
+	if name := e.submitToolName(); name != "" {
+		if _, exists := tools[name]; !exists {
+			def := e.submitTool.Definition
+			toolDefs = append(toolDefs, anthropic.ToolUnionParam{OfTool: &def})
+		}
 	}
 	slices.SortFunc(toolDefs, func(a, b anthropic.ToolUnionParam) int {
 		return cmp.Compare(a.OfTool.Name, b.OfTool.Name)
@@ -905,6 +936,48 @@ func (e *executor[Request, Response]) submitToolName() string {
 		return "submit_result"
 	}
 	return e.submitTool.Definition.Name
+}
+
+// evaluateSubmission runs the terminal submit tool handler for a single call
+// and gates its accepted response on the registered result validators. It
+// returns the tool result to send back to the model and whether the response
+// committed as the run's final result (written through resultPtr). A rejected
+// submission returns the validators' findings so the model can address them
+// and submit again; a validator error aborts the run.
+func (e *executor[Request, Response]) evaluateSubmission(
+	ctx context.Context,
+	toolUse anthropic.ToolUseBlock,
+	args map[string]any,
+	trace *agenttrace.Trace[Response],
+	resultPtr *Response,
+) (map[string]any, bool, error) {
+	outcome := e.submitTool.Handler(ctx, toolUse, trace)
+	if !outcome.Accepted {
+		// The handler recorded the failed call on the trace; its ToolResult
+		// carries the parameter/parse error back to the model.
+		return outcome.ToolResult, false, nil
+	}
+
+	// The handler leaves accepted calls unrecorded so this trace call's
+	// completion reflects the validation verdict.
+	tc := trace.StartToolCall(toolUse.ID, toolUse.Name, args)
+
+	findings, err := callbacks.ValidateResult(ctx, e.resultValidators, outcome.Response, outcome.Reasoning)
+	if err != nil {
+		err = fmt.Errorf("result validation: %w", err)
+		tc.Complete(nil, err)
+		return nil, false, err
+	}
+	if len(findings) > 0 {
+		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
+		e.recordToolCall(ctx, "submit_result_rejected")
+		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
+		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
+	}
+
+	*resultPtr = outcome.Response
+	tc.Complete(outcome.ToolResult, nil)
+	return outcome.ToolResult, true, nil
 }
 
 // shouldForceSubmitOnFirstTurn reports whether the forced submit tool_choice

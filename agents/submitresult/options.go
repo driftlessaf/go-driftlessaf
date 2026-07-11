@@ -23,13 +23,6 @@ type Options[Response any] struct {
 	PayloadFieldName   string
 	PayloadDescription string
 	Generator          *schema.Generator
-
-	// ValidateToolName names the non-terminal companion tool that takes the
-	// identical schema and reports whether a payload would be accepted without
-	// ending the run. When non-empty, submit_result's payload errors point the
-	// model at it. Empty (the default) emits no such hint, for callers that
-	// register submit_result without a validate companion.
-	ValidateToolName string
 }
 
 func (o *Options[Response]) setDefaults() {

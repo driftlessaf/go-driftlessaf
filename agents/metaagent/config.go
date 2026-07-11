@@ -8,6 +8,7 @@ package metaagent
 import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 )
 
 // Config defines the configuration for a meta-agent instance.
@@ -58,4 +59,14 @@ type Config[Resp, CB any] struct {
 	// adaptive thinking and the budget value is advisory only. No effect on
 	// the Gemini backend.
 	ThinkingBudget int64
+
+	// ResultValidators gate the terminal submit_result tool. When the model
+	// submits a result that parses into Resp, every validator runs
+	// concurrently against it; any findings reject the submission back to the
+	// model as the tool's result — the agent loop continues until a submission
+	// passes — and a validator error aborts the run. Empty (the default)
+	// accepts every parsed submission. Findings are concatenated in
+	// registration order. Validators must be safe for concurrent use; see
+	// callbacks.ResultValidator.
+	ResultValidators []callbacks.ResultValidator[Resp]
 }

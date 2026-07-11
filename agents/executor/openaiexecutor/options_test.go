@@ -255,8 +255,8 @@ func TestWithSubmitResultProvider_Nil(t *testing.T) {
 func TestWithSubmitResultProvider_Error(t *testing.T) {
 	t.Parallel()
 
-	provider := func() (openaistool.Metadata[testResponse], error) {
-		return openaistool.Metadata[testResponse]{}, errors.New("provider failed")
+	provider := func() (openaistool.SubmitMetadata[testResponse], error) {
+		return openaistool.SubmitMetadata[testResponse]{}, errors.New("provider failed")
 	}
 	opt := WithSubmitResultProvider[*testRequest, testResponse](provider)
 	err := opt(&executor[*testRequest, testResponse]{})

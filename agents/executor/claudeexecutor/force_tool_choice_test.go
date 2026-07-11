@@ -11,6 +11,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -34,11 +35,11 @@ const submitToolTestName = "emit_verdict"
 // submitToolTestName and a non-nil handler, so the executor treats it as the
 // configured terminal tool.
 func submitProvider() SubmitResultProvider[*testResponse] {
-	return func() (claudetool.Metadata[*testResponse], error) {
-		return claudetool.Metadata[*testResponse]{
+	return func() (claudetool.SubmitMetadata[*testResponse], error) {
+		return claudetool.SubmitMetadata[*testResponse]{
 			Definition: anthropic.ToolParam{Name: submitToolTestName},
-			Handler: func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[*testResponse], **testResponse) map[string]any {
-				return map[string]any{}
+			Handler: func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[*testResponse]) toolcall.SubmitOutcome[*testResponse] {
+				return toolcall.SubmitOutcome[*testResponse]{}
 			},
 		}, nil
 	}

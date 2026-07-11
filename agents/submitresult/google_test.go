@@ -28,26 +28,23 @@ func TestGoogleToolHandler(t *testing.T) {
 	call := &genai.FunctionCall{
 		ID:   "call-1",
 		Name: meta.Definition.Name,
-		Args: map[string]any{
-			"reasoning": "done",
-			"analysis": map[string]any{
-				"summary": "all good",
-			},
-		},
+		Args: validInput(),
 	}
 
-	var result *sampleResult
-	resp := meta.Handler(ctx, call, trace, &result)
-	if resp == nil {
-		t.Fatalf("expected response")
+	outcome := meta.Handler(ctx, call, trace)
+	if !outcome.Accepted {
+		t.Fatalf("valid payload: got = rejected (%#v), want = accepted", outcome.ToolResult)
 	}
-	if success, ok := resp.Response["success"].(bool); !ok || !success {
-		t.Fatalf("expected success response: %#v", resp.Response)
+	if success, _ := outcome.ToolResult["success"].(bool); !success {
+		t.Fatalf("expected success tool result: %#v", outcome.ToolResult)
 	}
-	if result == nil {
-		t.Fatalf("expected result to be set")
+	if outcome.Response == nil {
+		t.Fatal("expected response to be set")
 	}
-	if result.Summary != "all good" {
-		t.Fatalf("unexpected result: %#v", result)
+	if got, want := outcome.Response.Summary, "all good"; got != want {
+		t.Errorf("response summary: got = %q, want = %q", got, want)
+	}
+	if got, want := outcome.Reasoning, "done"; got != want {
+		t.Errorf("reasoning: got = %q, want = %q", got, want)
 	}
 }

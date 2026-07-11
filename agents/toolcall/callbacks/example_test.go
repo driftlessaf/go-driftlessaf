@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 )
@@ -510,4 +511,47 @@ func ExampleFindingCallbacks_GetFinding() {
 	// Output:
 	// Found: Build failed
 	// Not found: true
+}
+
+// ExampleValidateResult demonstrates running result validators against a
+// submitted result and building the rejection returned to the model.
+func ExampleValidateResult() {
+	ctx := context.Background()
+
+	type report struct {
+		Answer string
+	}
+
+	// Validators run concurrently; each returns findings describing why the
+	// result is unacceptable, or nothing to accept it.
+	validators := []callbacks.ResultValidator[report]{
+		func(_ context.Context, r report, _ string) ([]callbacks.Finding, error) {
+			if r.Answer == "" {
+				return []callbacks.Finding{{
+					Kind:       callbacks.FindingKindReview,
+					Identifier: "empty-answer",
+					Details:    "the answer field is empty",
+				}}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	findings, err := callbacks.ValidateResult(ctx, validators, report{}, "the result is complete")
+	if err != nil {
+		fmt.Printf("validator failed: %v\n", err)
+		return
+	}
+
+	if len(findings) > 0 {
+		rejection := callbacks.RejectionResult("submit_result", findings)
+		fmt.Printf("rejected with %d finding(s)\n", len(findings))
+		fmt.Printf("error mentions tool: %v\n", strings.Contains(rejection["error"].(string), "submit_result"))
+		return
+	}
+	fmt.Println("accepted")
+
+	// Output:
+	// rejected with 1 finding(s)
+	// error mentions tool: true
 }
