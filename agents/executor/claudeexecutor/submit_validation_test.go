@@ -279,3 +279,80 @@ func TestCallerToolShadowsSubmitTool(t *testing.T) {
 		t.Errorf("submit_result advertised %d times, want %d", got, want)
 	}
 }
+
+// gradedResponse carries a jsonschema enum so the base schema-conformance
+// validator — installed by default, with no WithResultValidator registered —
+// has a declared constraint to enforce.
+type gradedResponse struct {
+	Answer string `json:"answer" jsonschema:"required,enum=yes,enum=no"`
+}
+
+// TestBaseSchemaValidatorRejectsNonconformingSubmission pins the built-in
+// schema gate: a submission that parses but violates the response type's
+// declared schema is rejected back to the model with the violation named,
+// and the loop continues until a conforming submission commits.
+func TestBaseSchemaValidatorRejectsNonconformingSubmission(t *testing.T) {
+	var mu sync.Mutex
+	var requests [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, body)
+		n := len(requests)
+		mu.Unlock()
+
+		answer := "maybe"
+		if n > 1 {
+			answer = "yes"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sseBody(t, submitCallTurn(t, fmt.Sprintf("msg_%02d", n), fmt.Sprintf("toolu_s%d", n), map[string]any{
+			"reasoning": "the analysis is complete",
+			"result":    map[string]any{"answer": answer},
+		})))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := anthropic.NewClient(
+		option.WithBaseURL(srv.URL),
+		option.WithAPIKey("test"),
+		option.WithMaxRetries(0),
+	)
+	prompt, err := promptbuilder.NewPrompt("go")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+	exec, err := claudeexecutor.New[errCapRequest, gradedResponse](client, prompt,
+		claudeexecutor.WithRetryConfig[errCapRequest, gradedResponse](fastRetry(0)),
+		claudeexecutor.WithMaxTurns[errCapRequest, gradedResponse](5),
+		claudeexecutor.WithSubmitResultProvider[errCapRequest, gradedResponse](submitresult.ClaudeToolForResponse[gradedResponse]),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	resp, err := exec.Execute(t.Context(), errCapRequest{}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := resp.Answer, "yes"; got != want {
+		t.Errorf("resp.Answer: got = %q, want = %q", got, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := len(requests), 2; got != want {
+		t.Fatalf("API requests: got = %d, want = %d", got, want)
+	}
+
+	// The rejection returned to the model names the violated constraint.
+	second := string(requests[1])
+	for _, want := range []string{"schema:answer", "allowed values", "Result rejected"} {
+		if !strings.Contains(second, want) {
+			t.Errorf("second request missing %q in rejection tool result:\n%s", want, second)
+		}
+	}
+}

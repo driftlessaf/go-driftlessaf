@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package schema_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -47,4 +48,40 @@ func ExampleNewGenerator() {
 	_ = json.Unmarshal(data, &m)
 	fmt.Println("type:", m["type"])
 	// Output: type: object
+}
+
+// ExampleValidate demonstrates checking a decoded JSON document against a
+// reflected schema.
+func ExampleValidate() {
+	type Verdict struct {
+		Label      string  `json:"label" jsonschema:"required,enum=benign,enum=malicious"`
+		Confidence float64 `json:"confidence" jsonschema:"minimum=0,maximum=1"`
+	}
+
+	var doc any
+	_ = json.Unmarshal([]byte(`{"label":"unsure","confidence":1.5}`), &doc)
+
+	for _, v := range schema.Validate(schema.ReflectType[Verdict](), doc) {
+		fmt.Println(v)
+	}
+	// Output:
+	// label: value "unsure" is not one of the allowed values ["benign", "malicious"]
+	// confidence: value 1.5 exceeds the maximum 1
+}
+
+// ExampleResultValidator demonstrates the schema-conformance validator the
+// executors install as the base of every submit tool's validator chain.
+func ExampleResultValidator() {
+	type Verdict struct {
+		Label      string  `json:"label" jsonschema:"required,enum=benign,enum=malicious"`
+		Confidence float64 `json:"confidence" jsonschema:"minimum=0,maximum=1"`
+	}
+
+	validate := schema.ResultValidator[*Verdict]()
+	findings, _ := validate(context.Background(), &Verdict{Label: "unsure", Confidence: 0.5}, "reasoning")
+	for _, f := range findings {
+		fmt.Println(f.Identifier)
+	}
+	// Output:
+	// schema:label
 }

@@ -20,6 +20,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
+	"chainguard.dev/driftlessaf/agents/schema"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -149,8 +150,10 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// against the parsed response; any findings reject the submission back to
 	// the model as the tool's result (the loop continues), and a validator
 	// error aborts the run. Only when all validators accept does the response
-	// commit and end the run. Empty (the default) accepts every parsed
-	// submission. Set via WithResultValidator (repeatable).
+	// commit and end the run. The chain always begins with the base
+	// schema-conformance validator (schema.ResultValidator), which holds the
+	// response to the constraints its jsonschema struct tags declare; callers
+	// append semantic validators via WithResultValidator (repeatable).
 	resultValidators []callbacks.ResultValidator[Response]
 }
 
@@ -195,6 +198,11 @@ func New[Request promptbuilder.Bindable, Response any](
 		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 		cacheControl:        true,                       // Prompt caching on by default — see cacheControl field comment
 		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
+
+		// The base schema-conformance validator is always first: submissions
+		// must honor the constraints declared in the Response type's
+		// jsonschema tags before any caller-registered validator runs.
+		resultValidators: []callbacks.ResultValidator[Response]{schema.ResultValidator[Response]()},
 	}
 
 	// Apply options
