@@ -503,22 +503,39 @@ func (lt *LLMTurn[T]) End() {
 		// writes into a private grave.
 		lt.record.Errors = nil
 
-		if emitter != nil {
+		// localSink is the type-erased process-global sink (SetLocalSpanSink),
+		// invoked in addition to the per-tracer emitter so an in-process
+		// consumer that cannot register a per-response-type tracer (a CLI
+		// writing a local telemetry file across many agent types) still
+		// receives every turn. Build the span once and fan out to both.
+		localSink := currentLocalSpanSink()
+		if emitter != nil || localSink != nil {
 			if span, ok := lt.buildRecordedSpan(); ok {
-				// emitter is expected to be non-blocking and to handle its
+				// Emitters are expected to be non-blocking and to handle their
 				// own delivery retries (see ceEmittingTracer.emitSpan). The
-				// only way it returns a non-nil error here is a synchronous
+				// only way one returns a non-nil error here is a synchronous
 				// pre-flight failure such as ce.SetData rejecting the span
 				// (the bug fixed in #3303142362). Log it at the call site so
 				// silent span loss is observable in Cloud Run logs without
 				// forcing End() to propagate the error — End() is the cleanup
 				// path on a deferred turn and has no useful return channel.
-				if err := emitter(emitCtx, span); err != nil {
-					clog.WarnContext(emitCtx, "agent span emit dropped",
-						"trace_id", lt.trace.ID,
-						"span_id", span.SpanID,
-						"error", err.Error(),
-					)
+				if emitter != nil {
+					if err := emitter(emitCtx, span); err != nil {
+						clog.WarnContext(emitCtx, "agent span emit dropped",
+							"trace_id", lt.trace.ID,
+							"span_id", span.SpanID,
+							"error", err.Error(),
+						)
+					}
+				}
+				if localSink != nil {
+					if err := localSink(emitCtx, span); err != nil {
+						clog.WarnContext(emitCtx, "agent local span sink dropped",
+							"trace_id", lt.trace.ID,
+							"span_id", span.SpanID,
+							"error", err.Error(),
+						)
+					}
 				}
 			}
 		}
