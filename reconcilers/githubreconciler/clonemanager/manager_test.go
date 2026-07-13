@@ -197,7 +197,13 @@ func TestMakeAndPushChanges(t *testing.T) {
 	branchName := "clonemanager/test-branch"
 	barPath := filepath.ToSlash(filepath.Join("packages", "bar.yaml"))
 
-	if err := lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
+	if err := lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *git.Worktree) (string, error) {
+		// The updateFn context must carry the worktree for code that cannot
+		// receive it as a parameter (e.g. result validators).
+		if ctxWT, ok := WorktreeFromContext(ctx); !ok || ctxWT != wt {
+			return "", fmt.Errorf("WorktreeFromContext inside updateFn: got = (%p, %v), want = (%p, true)", ctxWT, ok, wt)
+		}
+
 		// Verify the worktree has our changes when the updateFn is called.
 		status, err := wt.Status()
 		if err != nil {

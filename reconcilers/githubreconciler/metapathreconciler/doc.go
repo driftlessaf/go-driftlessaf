@@ -50,6 +50,16 @@ SPDX-License-Identifier: Apache-2.0
 // (e.g. own_prs_only=false on the terraform module), and the reconciler's
 // GitHub identity needs issues:write permission.
 //
+// # Submit gating with Analyzers
+//
+// Analyzers double as submit-time reviewers: SubmitGate adapts one into a
+// result validator that reviews the files the agent changed before its
+// submission is accepted, rejecting diagnostics back to the model as
+// findings while the conversation is still alive. Register it on the
+// agent's executor (metaagent.Config.ResultValidators); the worktree reaches
+// it through the context that Lease.MakeAndPushChanges installs. See
+// SubmitGate for scope and report-only requirements.
+//
 // # Basic Usage
 //
 //	// Create the changemanager with your PR templates

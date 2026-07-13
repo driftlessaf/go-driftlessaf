@@ -433,6 +433,10 @@ func resolveRefName(ref string) plumbing.ReferenceName {
 // MakeAndPushChanges creates a new branch at the leased SHA, delegates change
 // application to updateFn, commits the staged changes using the manager's
 // identity, and force pushes the branch to origin.
+//
+// The context passed to updateFn carries the worktree (see WithWorktree), so
+// code the closure cannot thread the worktree to — result validators, tool
+// handlers — can recover it via WorktreeFromContext.
 func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updateFn UpdateFunc) error {
 	if updateFn == nil {
 		return errors.New("update function cannot be nil")
@@ -448,7 +452,7 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 		return fmt.Errorf("getting worktree: %w", err)
 	}
 
-	commitMessage, err := updateFn(ctx, worktree)
+	commitMessage, err := updateFn(WithWorktree(ctx, worktree), worktree)
 	if err != nil {
 		return fmt.Errorf("applying updates: %w", err)
 	}

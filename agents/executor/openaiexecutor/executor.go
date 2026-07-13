@@ -195,6 +195,15 @@ func (e *executor[Request, Response]) Execute(
 		Temperature:         param.NewOpt(e.temperature),
 	}
 
+	// isSubmit reports whether a call routes to the terminal submit tool. It
+	// is the single routing predicate: executeToolCall's dispatch switch and
+	// the turn loop's held-out-of-pool partition both use it, so the two
+	// sites cannot drift.
+	isSubmit := func(name string) bool {
+		_, registered := tools[name]
+		return !registered && name == submitToolName && e.submitTool.Handler != nil
+	}
+
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
 	// turn gets its own slot so concurrent handlers never race on the same
@@ -223,7 +232,7 @@ func (e *executor[Request, Response]) Execute(
 			if r, ok := args["reasoning"].(string); ok {
 				trace.AttachToolCallReasoning(tc.ID, r)
 			}
-		case tc.Function.Name == submitToolName && e.submitTool.Handler != nil:
+		case isSubmit(tc.Function.Name):
 			// Terminal submit tool: parse the call, gate the parsed response
 			// on the registered result validators, and only then commit it as
 			// the run's final result. A rejected submission returns the
@@ -333,6 +342,14 @@ func (e *executor[Request, Response]) Execute(
 			// its own result slot so the shared finalResultPtr is never raced, and
 			// the tool messages are appended in the model's original order. Tool
 			// handlers must be safe for concurrent use when concurrency exceeds 1.
+			//
+			// Submit calls are held out of the pool and evaluated only after
+			// every other handler in the turn has finished: a submission claims
+			// the turn's work is complete, and its result validators may read
+			// state the other handlers produce (worktrees, files), so they must
+			// observe the finished state rather than race the handlers still
+			// producing it. Slot order is preserved, so the result selection
+			// below is unchanged.
 			toolCalls := choice.Message.ToolCalls
 			type toolOutcome struct {
 				msg       openai.ChatCompletionMessageParamUnion
@@ -342,20 +359,31 @@ func (e *executor[Request, Response]) Execute(
 			outcomes := make([]toolOutcome, len(toolCalls))
 			perCallResults := make([]Response, len(toolCalls))
 
+			runToolCall := func(i int, tc openai.ChatCompletionMessageToolCall) {
+				resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
+				if cerr != nil {
+					outcomes[i] = toolOutcome{err: cerr}
+					return
+				}
+				outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID), committed: committed}
+			}
 			g := new(errgroup.Group)
 			g.SetLimit(max(1, e.toolCallConcurrency))
 			for i, tc := range toolCalls {
+				if isSubmit(tc.Function.Name) {
+					continue
+				}
 				g.Go(func() error {
-					resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
-					if cerr != nil {
-						outcomes[i] = toolOutcome{err: cerr}
-						return nil
-					}
-					outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID), committed: committed}
+					runToolCall(i, tc)
 					return nil
 				})
 			}
 			_ = g.Wait()
+			for i, tc := range toolCalls {
+				if isSubmit(tc.Function.Name) {
+					runToolCall(i, tc)
+				}
+			}
 
 			for i := range toolCalls {
 				if outcomes[i].err != nil {

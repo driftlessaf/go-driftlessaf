@@ -33,7 +33,10 @@ import (
 // A non-nil error reports that the validator itself failed (for example an
 // upstream API error), not that the result is unacceptable; it aborts the
 // run. Validators must be safe for concurrent use: they run in parallel with
-// each other and may run in parallel with other tool handlers.
+// each other. The executors begin evaluating a submission only after the
+// turn's other tool handlers have completed, so validators that read state
+// those handlers produce (worktrees, files) observe the finished state
+// rather than racing them.
 type ResultValidator[Response any] func(ctx context.Context, response Response, reasoning string) ([]Finding, error)
 
 // ValidateResult runs the validators concurrently against a submitted result

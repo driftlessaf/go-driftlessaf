@@ -316,6 +316,15 @@ func (e *executor[Request, Response]) Execute(
 	var finalResult Response
 	finalResultPtr := &finalResult
 
+	// isSubmit reports whether a call routes to the terminal submit tool. It
+	// is the single routing predicate: executeToolCall's dispatch switch and
+	// the turn loop's held-out-of-pool partition both use it, so the two
+	// sites cannot drift.
+	isSubmit := func(name string) bool {
+		_, registered := tools[name]
+		return !registered && name == submitToolName && e.submitTool.Handler != nil
+	}
+
 	// executeToolCall runs a single function call and returns its response
 	// part. The handler writes any terminal result into resultPtr; each call
 	// gets its own slot on the concurrent path so handlers never race on the
@@ -347,7 +356,7 @@ func (e *executor[Request, Response]) Execute(
 			if r, ok := call.Args["reasoning"].(string); ok {
 				trace.AttachToolCallReasoning(call.ID, r)
 			}
-		case call.Name == submitToolName && e.submitTool.Handler != nil:
+		case isSubmit(call.Name):
 			// Terminal submit tool: parse the call, gate the parsed response
 			// on the registered result validators, and only then commit it as
 			// the run's final result. A rejected submission returns the
@@ -634,6 +643,14 @@ func (e *executor[Request, Response]) Execute(
 			// in the model's original order and the first terminal result (in
 			// order) ends the run. Tool handlers must be safe for concurrent use
 			// when concurrency exceeds 1.
+			//
+			// Submit calls are held out of the pool and evaluated only after
+			// every other handler in the turn has finished: a submission claims
+			// the turn's work is complete, and its result validators may read
+			// state the other handlers produce (worktrees, files), so they must
+			// observe the finished state rather than race the handlers still
+			// producing it. Slot order is preserved, so the result selection
+			// below is unchanged.
 			type toolOutcome struct {
 				committed bool
 				err       error
@@ -642,17 +659,28 @@ func (e *executor[Request, Response]) Execute(
 			perCallResults := make([]Response, len(toolCalls))
 			parts := make([]*genai.Part, len(toolCalls))
 
+			runToolCall := func(i int, call *genai.FunctionCall) {
+				part, committed, cerr := executeToolCall(call, &perCallResults[i])
+				parts[i] = part
+				outcomes[i] = toolOutcome{committed: committed, err: cerr}
+			}
 			g := new(errgroup.Group)
 			g.SetLimit(max(1, e.toolCallConcurrency))
 			for i, call := range toolCalls {
+				if isSubmit(call.Name) {
+					continue
+				}
 				g.Go(func() error {
-					part, committed, cerr := executeToolCall(call, &perCallResults[i])
-					parts[i] = part
-					outcomes[i] = toolOutcome{committed: committed, err: cerr}
+					runToolCall(i, call)
 					return nil
 				})
 			}
 			_ = g.Wait()
+			for i, call := range toolCalls {
+				if isSubmit(call.Name) {
+					runToolCall(i, call)
+				}
+			}
 
 			var toolResponseParts []*genai.Part
 			for i := range toolCalls {

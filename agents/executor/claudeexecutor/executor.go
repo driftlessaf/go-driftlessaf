@@ -341,6 +341,15 @@ func (e *executor[Request, Response]) Execute(
 	// the next turn. False when no gate tool applies.
 	deferredGateResolved := false
 
+	// isSubmit reports whether a call routes to the terminal submit tool. It
+	// is the single routing predicate: executeToolCall's dispatch switch and
+	// the turn loop's held-out-of-pool partition both use it, so the two
+	// sites cannot drift.
+	isSubmit := func(name string) bool {
+		_, registered := tools[name]
+		return !registered && name == submitToolName && e.submitTool.Handler != nil
+	}
+
 	// executeToolCall handles executing a single tool call and returning the
 	// result. The handler writes any terminal result into resultPtr; the
 	// sequential path passes the shared finalResultPtr, while the concurrent
@@ -373,7 +382,7 @@ func (e *executor[Request, Response]) Execute(
 			if r, ok := args["reasoning"].(string); ok {
 				trace.AttachToolCallReasoning(toolUse.ID, r)
 			}
-		case toolUse.Name == submitToolName && e.submitTool.Handler != nil:
+		case isSubmit(toolUse.Name):
 			// Terminal submit tool: parse the call, gate the parsed response
 			// on the registered result validators, and only then commit it as
 			// the run's final result. A rejected submission returns the
@@ -633,6 +642,14 @@ func (e *executor[Request, Response]) Execute(
 			// the model's original order to preserve the tool_use/tool_result
 			// pairing, and the first terminal result (in order) ends the run. Tool
 			// handlers must be safe for concurrent use when concurrency exceeds 1.
+			//
+			// Submit calls are held out of the pool and evaluated only after
+			// every other handler in the turn has finished: a submission claims
+			// the turn's work is complete, and its result validators may read
+			// state the other handlers produce (worktrees, files), so they must
+			// observe the finished state rather than race the handlers still
+			// producing it. Slot order is preserved, so the result selection
+			// below is unchanged.
 			type toolOutcome struct {
 				result    anthropic.ContentBlockParamUnion
 				committed bool
@@ -641,16 +658,27 @@ func (e *executor[Request, Response]) Execute(
 			outcomes := make([]toolOutcome, len(toolUseBlocks))
 			perCallResults := make([]Response, len(toolUseBlocks))
 
+			runToolCall := func(i int, toolUse anthropic.ToolUseBlock) {
+				res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])
+				outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
+			}
 			g := new(errgroup.Group)
 			g.SetLimit(max(1, e.toolCallConcurrency))
 			for i, toolUse := range toolUseBlocks {
+				if isSubmit(toolUse.Name) {
+					continue
+				}
 				g.Go(func() error {
-					res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])
-					outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
+					runToolCall(i, toolUse)
 					return nil
 				})
 			}
 			_ = g.Wait()
+			for i, toolUse := range toolUseBlocks {
+				if isSubmit(toolUse.Name) {
+					runToolCall(i, toolUse)
+				}
+			}
 
 			var toolResults []anthropic.ContentBlockParamUnion
 			for i := range toolUseBlocks {
