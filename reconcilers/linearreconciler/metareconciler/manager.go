@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/statemachine"
 	"github.com/chainguard-dev/clog"
 )
 
@@ -63,7 +64,7 @@ type StateManager[T any, PT StateConstraint[T]] struct {
 	loaded                bool
 	now                   func() time.Time // injectable clock for tests
 	cb                    SaveCallback
-	emitter               *transitionEmitter // nil disables transition CloudEvents
+	emitter               *statemachine.Emitter // nil disables transition CloudEvents
 
 	// Captured from the *Issue at NewStateManager time. Save calls
 	// SetIssueID/SetIssueURL on the bot's State pointer before persisting
@@ -263,7 +264,7 @@ func (m *StateManager[T, PT]) Save(ctx context.Context, pt PT) (bool, error) {
 		})
 		if m.emitter != nil {
 			pendingTransition = &StateTransitionEvent{
-				Bot:             m.emitter.source,
+				Bot:             m.emitter.Source(),
 				Provider:        stateTransitionProvider,
 				IssueID:         m.issueID,
 				IssueURL:        m.issueURL,
@@ -314,7 +315,7 @@ func (m *StateManager[T, PT]) Save(ctx context.Context, pt PT) (bool, error) {
 	}
 
 	if pendingTransition != nil {
-		m.emitter.emit(ctx, *pendingTransition)
+		m.emitter.Emit(ctx, *pendingTransition)
 	}
 
 	if linearDirty {

@@ -5,29 +5,30 @@ SPDX-License-Identifier: Apache-2.0
 
 package metareconciler
 
-import "context"
+import (
+	"context"
 
-// Generic context plumbing for state-machine bookkeeping and bot-side
-// telemetry correlation. The keys carry opaque strings — the framework does
-// not endorse any particular vocabulary for actor identities or trigger
-// names. Bots and the framework agree on values out-of-band.
+	"chainguard.dev/driftlessaf/reconcilers/statemachine"
+)
 
-type actorKey struct{}
-type triggerKey struct{}
+// The actor/trigger context plumbing lives in the shared statemachine
+// package (so all metareconciler flavors read and write the same context
+// keys); the wrappers below keep this package's public API unchanged.
+// WithLinearIssueID stays local — it is Linear-specific.
+
 type linearIssueIDKey struct{}
 
 // WithActor returns a context carrying the actor identity (e.g. the bot's
 // own identity, or "manual" for human edits). StateManager.Save reads this
 // when appending a StateTransition to History.
 func WithActor(ctx context.Context, actor string) context.Context {
-	return context.WithValue(ctx, actorKey{}, actor)
+	return statemachine.WithActor(ctx, actor)
 }
 
 // ActorFromContext returns the actor identity stored on ctx, and true when
 // one is present.
 func ActorFromContext(ctx context.Context) (string, bool) {
-	v, ok := ctx.Value(actorKey{}).(string)
-	return v, ok
+	return statemachine.ActorFromContext(ctx)
 }
 
 // WithTrigger returns a context carrying the trigger string for the next
@@ -35,14 +36,13 @@ func ActorFromContext(ctx context.Context) (string, bool) {
 // TriggerPRMerge, TriggerCIFailureIteration). StateManager.Save reads this
 // when appending to History; bots set it before calling Save.
 func WithTrigger(ctx context.Context, trigger string) context.Context {
-	return context.WithValue(ctx, triggerKey{}, trigger)
+	return statemachine.WithTrigger(ctx, trigger)
 }
 
 // TriggerFromContext returns the trigger string stored on ctx, and true
 // when one is present.
 func TriggerFromContext(ctx context.Context) (string, bool) {
-	v, ok := ctx.Value(triggerKey{}).(string)
-	return v, ok
+	return statemachine.TriggerFromContext(ctx)
 }
 
 // WithLinearIssueID returns a context carrying the Linear issue UUID this

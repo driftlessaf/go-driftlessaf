@@ -15,6 +15,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/statemachine"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
@@ -72,7 +73,7 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 	// disabled (the default). Constructed in New from the client supplied
 	// via WithStateTransitionEmission and threaded through to every
 	// StateManager constructed by (*Reconciler).NewStateManager.
-	transitionEmitter *transitionEmitter
+	transitionEmitter *statemachine.Emitter
 }
 
 // options collects the configurable knobs that don't depend on the
@@ -198,7 +199,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT StateConstra
 		linearClient:       linearClient,
 		githubClients:      githubClients,
 		saveCallback:       o.saveCallback,
-		transitionEmitter:  newTransitionEmitter(identity, o.stateTransitionClient),
+		transitionEmitter:  statemachine.NewEmitter(identity, o.stateTransitionClient),
 	}
 }
 
