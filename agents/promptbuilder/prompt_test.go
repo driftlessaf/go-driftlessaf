@@ -1280,3 +1280,219 @@ func TestBindingMarshalFailures(t *testing.T) {
 		}
 	})
 }
+
+func TestBindPrompt(t *testing.T) {
+	t.Run("embeds inner prompt build output", func(t *testing.T) {
+		inner := promptbuilder.MustNewPrompt(`Inner says {{who}}`).
+			MustBindStringLiteral("who", "hello")
+
+		outer, err := promptbuilder.NewPrompt(`Outer wraps: {{inner}}`)
+		if err != nil {
+			t.Fatalf("NewPrompt() error = %v", err)
+		}
+		outer, err = outer.BindPrompt("inner", inner)
+		if err != nil {
+			t.Fatalf("BindPrompt() error = %v", err)
+		}
+
+		got, err := outer.Build()
+		if err != nil {
+			t.Fatalf("Build() error = %v", err)
+		}
+		if want := "Outer wraps: Inner says hello"; got != want {
+			t.Errorf("Build() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("inner output containing template syntax renders literally", func(t *testing.T) {
+		inner := promptbuilder.MustNewPrompt(`{{data}}`).MustBindJSON("data", "{{name}}")
+
+		outer := promptbuilder.MustNewPrompt(`inner={{inner}} name={{name}}`).
+			MustBindPrompt("inner", inner).
+			MustBindStringLiteral("name", "real")
+
+		got, err := outer.Build()
+		if err != nil {
+			t.Fatalf("Build() error = %v", err)
+		}
+		if want := `inner="{{name}}" name=real`; got != want {
+			t.Errorf("Build() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("propagates inner Build error", func(t *testing.T) {
+		inner, err := promptbuilder.NewPrompt(`{{missing}}`)
+		if err != nil {
+			t.Fatalf("NewPrompt() error = %v", err)
+		}
+
+		outer, err := promptbuilder.NewPrompt(`x={{inner}}`)
+		if err != nil {
+			t.Fatalf("NewPrompt() error = %v", err)
+		}
+		outer, err = outer.BindPrompt("inner", inner)
+		if err != nil {
+			t.Fatalf("BindPrompt() error = %v", err)
+		}
+
+		if _, err := outer.Build(); err == nil {
+			t.Error("Build() expected error from unbound inner placeholder, got nil")
+		} else if !strings.Contains(err.Error(), "unbound placeholder: missing") {
+			t.Errorf("Build() error = %v, want error about unbound placeholder: missing", err)
+		}
+	})
+
+	t.Run("nil inner prompt errors", func(t *testing.T) {
+		outer, err := promptbuilder.NewPrompt(`x={{inner}}`)
+		if err != nil {
+			t.Fatalf("NewPrompt() error = %v", err)
+		}
+		if _, err := outer.BindPrompt("inner", nil); err == nil {
+			t.Error("BindPrompt() expected error for nil prompt, got nil")
+		}
+	})
+
+	t.Run("unknown placeholder errors", func(t *testing.T) {
+		outer, err := promptbuilder.NewPrompt(`hello {{name}}`)
+		if err != nil {
+			t.Fatalf("NewPrompt() error = %v", err)
+		}
+		inner := promptbuilder.MustNewPrompt("x")
+		if _, err := outer.BindPrompt("missing", inner); err == nil {
+			t.Error("BindPrompt() expected error for unknown placeholder, got nil")
+		}
+	})
+}
+
+func TestBindLists(t *testing.T) {
+	tests := []struct {
+		name    string
+		ordered bool
+		items   []string
+		want    string
+		wantErr string
+	}{{
+		name:  "unordered renders bullets",
+		items: []string{"Check logs", "Summarise failures"},
+		want:  "Steps:\n- Check logs\n- Summarise failures",
+	}, {
+		name:    "ordered renders one-indexed numbers",
+		ordered: true,
+		items:   []string{"Check logs", "Summarise failures"},
+		want:    "Steps:\n1. Check logs\n2. Summarise failures",
+	}, {
+		name:  "empty list renders nothing",
+		items: nil,
+		want:  "Steps:\n",
+	}, {
+		name:    "item with newline is rejected",
+		items:   []string{"one\ntwo"},
+		wantErr: "contains a line break",
+	}, {
+		name:    "item with carriage return is rejected",
+		ordered: true,
+		items:   []string{"one\rtwo"},
+		wantErr: "contains a line break",
+	}, {
+		name:    "item with vertical tab is rejected",
+		items:   []string{"one\vtwo"},
+		wantErr: "contains a line break",
+	}, {
+		name:    "item with form feed is rejected",
+		items:   []string{"one\ftwo"},
+		wantErr: "contains a line break",
+	}, {
+		name:    "item with next-line control is rejected",
+		items:   []string{"one\u0085two"},
+		wantErr: "contains a line break",
+	}, {
+		name:    "item with Unicode line separator is rejected",
+		items:   []string{"one\u2028two"},
+		wantErr: "contains a line break",
+	}, {
+		name:    "item with Unicode paragraph separator is rejected",
+		items:   []string{"one\u2029two"},
+		wantErr: "contains a line break",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := promptbuilder.NewPrompt("Steps:\n{{steps}}")
+			if err != nil {
+				t.Fatalf("NewPrompt() error = %v", err)
+			}
+
+			if tt.ordered {
+				p, err = p.BindOrderedList("steps", tt.items)
+			} else {
+				p, err = p.BindUnorderedList("steps", tt.items)
+			}
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("bind expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("bind error = %v, want error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bind error = %v", err)
+			}
+
+			got, err := p.Build()
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Build() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildSizeLimit(t *testing.T) {
+	// A placeholder is substituted at every occurrence, so the limit counts
+	// each occurrence.
+	big := strings.Repeat("a", 33<<20)
+	p, err := promptbuilder.NewPrompt("{{a}} and {{a}}")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+	p, err = p.BindJSON("a", big)
+	if err != nil {
+		t.Fatalf("BindJSON() error = %v", err)
+	}
+
+	if _, err := p.Build(); err == nil {
+		t.Error("Build() expected size-limit error, got nil")
+	} else if !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("Build() error = %v, want size-limit error", err)
+	}
+}
+
+func TestBindListMutationSafety(t *testing.T) {
+	// The line-break check runs at bind time, so the bound content must not
+	// be reachable through the caller's slice afterwards: a post-bind
+	// mutation would otherwise smuggle a validated-away line break into the
+	// built prompt.
+	items := []string{"stable"}
+	p, err := promptbuilder.NewPrompt("{{steps}}")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+	p, err = p.BindUnorderedList("steps", items)
+	if err != nil {
+		t.Fatalf("BindUnorderedList() error = %v", err)
+	}
+
+	items[0] = "mutated\nescape"
+
+	got, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if want := "- stable"; got != want {
+		t.Errorf("Build() after source-slice mutation = %q, want %q", got, want)
+	}
+}

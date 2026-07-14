@@ -50,3 +50,20 @@ func (p *Prompt) MustBindJSON(name string, data any) *Prompt {
 func (p *Prompt) MustBindYAML(name string, data any) *Prompt {
 	return Must(p.BindYAML(name, data))
 }
+
+// MustBindUnorderedList binds single-line items as an unordered Markdown
+// list and panics on error.
+func (p *Prompt) MustBindUnorderedList(name string, items UnorderedList) *Prompt {
+	return Must(p.BindUnorderedList(name, items))
+}
+
+// MustBindOrderedList binds single-line items as a numbered Markdown list
+// and panics on error.
+func (p *Prompt) MustBindOrderedList(name string, items OrderedList) *Prompt {
+	return Must(p.BindOrderedList(name, items))
+}
+
+// MustBindPrompt binds another Prompt's Build output to a placeholder and panics on error.
+func (p *Prompt) MustBindPrompt(name string, other *Prompt) *Prompt {
+	return Must(p.BindPrompt(name, other))
+}

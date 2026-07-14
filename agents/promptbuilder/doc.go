@@ -69,12 +69,16 @@ The package provides multiple binding methods for different data formats:
 	// BindYAML - Marshals data as YAML
 	p, err = p.BindYAML("settings", yamlData)
 
+	// BindUnorderedList / BindOrderedList - Render single-line items as a Markdown list
+	p, err = p.BindUnorderedList("steps", promptbuilder.UnorderedList{"Check logs", "Summarise failures"})
+
 Each method also has a Must variant that panics on error:
 
 	p = p.MustBindStringLiteral("key", "value")
 	p = p.MustBindJSON("data", jsonData)
 	p = p.MustBindXML("config", xmlData)
 	p = p.MustBindYAML("settings", yamlData)
+	p = p.MustBindOrderedList("steps", promptbuilder.OrderedList{"Check logs", "Summarise failures"})
 
 # Template Syntax
 
@@ -113,11 +117,13 @@ no binding is needed:
 
 # Security Properties
 
-1. No Raw User Input - User data must go through encoders (XML, JSON, or YAML)
-2. Type-Safe Literals - stringLiteral ensures only developer literals bypass encoding
-3. Automatic Escaping - Encoding libraries handle all escaping for user data
-4. No Transitive Substitution - Single-pass tokenization prevents recursive replacement
-5. Immutable Prompts - All operations return new instances, preventing mutation
+ 1. No Raw User Input - User data must go through encoders (XML, JSON, or YAML)
+ 2. Type-Safe Literals - stringLiteral ensures only developer literals bypass encoding
+ 3. Automatic Escaping - Encoding libraries handle all escaping for user data
+ 4. No Transitive Substitution - Single-pass tokenization prevents recursive replacement
+ 5. Immutable Prompts - All operations return new instances, preventing mutation
+ 6. Line-Safe Lists - List items may carry runtime data; binding rejects line
+    breaks so an item always renders as exactly one list entry
 
 # Must Functions
 
@@ -137,6 +143,9 @@ The package returns errors for:
   - Attempting to rebind already-bound placeholders
   - Building with unbound placeholders
   - Marshaling failures in BindJSON/BindXML/BindYAML
+  - List items containing line breaks in BindUnorderedList/BindOrderedList
+  - BindPrompt compositions nested beyond the composition depth limit
+  - Builds whose rendered output exceeds the build size limit
 
 # Thread Safety
 

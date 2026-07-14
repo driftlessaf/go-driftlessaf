@@ -8,10 +8,23 @@ package promptbuilder
 import (
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 )
 
 // stringLiteral is a private type alias that only accepts literal strings
 type stringLiteral string
+
+// UnorderedList is a list of single-line text items rendered as Markdown
+// bullets. It is a distinct type from OrderedList, so a list declared as one
+// cannot be bound as the other; plain []string values convert to either.
+type UnorderedList []string
+
+// OrderedList is a list of single-line text items rendered as a numbered
+// Markdown list. It is a distinct type from UnorderedList, so a list
+// declared as one cannot be bound as the other; plain []string values
+// convert to either.
+type OrderedList []string
 
 // Prompt represents a template with bindable placeholders
 type Prompt struct {
@@ -112,24 +125,114 @@ func (p *Prompt) BindYAML(name string, data any) (*Prompt, error) {
 	return newPrompt, nil
 }
 
-// Build constructs the final prompt, returning an error if any bindings are unbound
+// BindUnorderedList binds items as an unordered Markdown list. Items may
+// carry runtime data but must be single-line: an item containing a line
+// break is rejected, so every item renders as exactly one bullet.
+func (p *Prompt) BindUnorderedList(name string, items UnorderedList) (*Prompt, error) {
+	return p.bindList(name, listBinding{items: slices.Clone(items)})
+}
+
+// BindOrderedList binds items as a numbered Markdown list. Items may carry
+// runtime data but must be single-line: an item containing a line break is
+// rejected, so every item renders as exactly one list entry.
+func (p *Prompt) BindOrderedList(name string, items OrderedList) (*Prompt, error) {
+	return p.bindList(name, listBinding{items: slices.Clone(items), ordered: true})
+}
+
+func (p *Prompt) bindList(name string, binding listBinding) (*Prompt, error) {
+	if err := existsAndUnbound(p.bindings, name); err != nil {
+		return nil, err
+	}
+	for i, item := range binding.items {
+		if strings.ContainsFunc(item, isLineBreak) {
+			return nil, fmt.Errorf("list item %d for %q contains a line break; items must be single-line", i, name)
+		}
+	}
+	newPrompt := &Prompt{
+		template: p.template,
+		bindings: maps.Clone(p.bindings),
+	}
+	newPrompt.bindings[name] = &binding
+	return newPrompt, nil
+}
+
+// BindPrompt binds another Prompt's Build output to a placeholder. The inner
+// Prompt is built each time the outer one is, so unresolved bindings inside
+// inner surface as Build errors on the outer. Use this to compose Prompts when
+// the content at a placeholder is itself produced by a (literal-built) Prompt.
+func (p *Prompt) BindPrompt(name string, other *Prompt) (*Prompt, error) {
+	if err := existsAndUnbound(p.bindings, name); err != nil {
+		return nil, err
+	}
+	if other == nil {
+		return nil, fmt.Errorf("BindPrompt: prompt for %q is nil", name)
+	}
+	newPrompt := &Prompt{
+		template: p.template,
+		bindings: maps.Clone(p.bindings),
+	}
+	newPrompt.bindings[name] = &promptBinding{p: other}
+	return newPrompt, nil
+}
+
+// maxCompositionDepth bounds how deeply BindPrompt compositions can nest, so
+// a pathologically deep chain surfaces as a Build error.
+const maxCompositionDepth = 100
+
+// maxBuildBytes bounds the total rendered output of one Build traversal,
+// counted per placeholder occurrence across every composed prompt, so an
+// output-multiplying template or composition surfaces as an error while the
+// aggregate held in memory stays bounded.
+const maxBuildBytes = 64 << 20
+
+// buildState carries the composition guards through one Build traversal:
+// depth follows the current path, bytes accumulates rendered output across
+// the traversal, and memo holds each composed prompt's built output so a
+// prompt bound at several placeholders builds once.
+type buildState struct {
+	depth int
+	bytes int
+	memo  map[*Prompt]string
+}
+
+// Build constructs the final prompt, returning an error if any bindings are
+// unbound or the rendered output exceeds the build size limit.
 func (p *Prompt) Build() (string, error) {
+	return p.build(&buildState{memo: map[*Prompt]string{}})
+}
+
+func (p *Prompt) build(st *buildState) (string, error) {
+	if st.depth > maxCompositionDepth {
+		return "", fmt.Errorf("prompt composition exceeds %d nested prompts", maxCompositionDepth)
+	}
+
 	// Pre-compute all binding values to check for errors and avoid recomputation
 	values := make(map[string]string, len(p.bindings))
 	for name, binding := range p.bindings {
-		val, err := binding.value()
+		val, err := binding.value(st)
 		if err != nil {
 			return "", err
 		}
 		values[name] = val
 	}
 
-	// Use the same walkTemplate function for consistent tokenization
+	// Use the same walkTemplate function for consistent tokenization. A
+	// placeholder is substituted at every occurrence, so the size guard
+	// accumulates per occurrence, across the whole traversal.
+	st.bytes += len(p.template)
+	if st.bytes > maxBuildBytes {
+		return "", fmt.Errorf("prompt build exceeds %d bytes", maxBuildBytes)
+	}
 	return walkTemplate(p.template, func(name string) (string, error) {
-		if val, exists := values[name]; exists {
-			return val, nil
+		val, exists := values[name]
+		if !exists {
+			// This should be unreachable since NewPrompt and Build use the same walkTemplate logic
+			return "", fmt.Errorf("internal error: binding %q not found in values map", name)
 		}
-		// This should be unreachable since NewPrompt and Build use the same walkTemplate logic
-		return "", fmt.Errorf("internal error: binding %q not found in values map", name)
+		st.bytes += len(val)
+		if st.bytes > maxBuildBytes {
+			return "", fmt.Errorf("prompt build exceeds %d bytes", maxBuildBytes)
+		}
+		return val, nil
 	})
 }
