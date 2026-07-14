@@ -63,6 +63,7 @@ type StateManager[T any, PT StateConstraint[T]] struct {
 	loaded                bool
 	now                   func() time.Time // injectable clock for tests
 	cb                    SaveCallback
+	emitter               *transitionEmitter // nil disables transition CloudEvents
 
 	// Captured from the *Issue at NewStateManager time. Save calls
 	// SetIssueID/SetIssueURL on the bot's State pointer before persisting
@@ -100,7 +101,9 @@ func (m *StateManager[T, PT]) SetSaveCallback(cb SaveCallback) *StateManager[T, 
 // Threads through any SaveCallback supplied via WithSaveCallback so every
 // save mirrored downstream sees the same hook.
 func (r *Reconciler[Req, Resp, CB, T, PT]) NewStateManager(issue *linearreconciler.Issue) *StateManager[T, PT] {
-	return NewStateManager[T, PT](r.linearClient, issue).SetSaveCallback(r.saveCallback)
+	mgr := NewStateManager[T, PT](r.linearClient, issue).SetSaveCallback(r.saveCallback)
+	mgr.emitter = r.transitionEmitter
+	return mgr
 }
 
 // NewStateManager is the free-function form of (*Reconciler).NewStateManager,
@@ -242,17 +245,39 @@ func (m *StateManager[T, PT]) Save(ctx context.Context, pt PT) (bool, error) {
 	// fields themselves must persist so consumers see current state.
 	linearDirty := statusOrModeChanged || prURLChanged || findingsChanged || pendingChecksChanged || noDiffCountChanged || linearStateChanged || botForcedDirty || !m.loaded
 
+	// pendingTransition is emitted as a CloudEvent only after the Linear
+	// save below succeeds — an unpersisted transition (save failure) must
+	// not reach observability as if it happened.
+	var pendingTransition *StateTransitionEvent
 	if statusOrModeChanged {
 		actor, _ := ActorFromContext(ctx)
 		trigger, _ := TriggerFromContext(ctx)
+		at := m.now().UTC()
 		pt.AppendHistory(StateTransition{
 			From:    m.snapshotStatus,
 			To:      currentStatus,
-			At:      m.now().UTC(),
+			At:      at,
 			Actor:   actor,
 			Trigger: trigger,
 			Mode:    currentFailureMode,
 		})
+		if m.emitter != nil {
+			pendingTransition = &StateTransitionEvent{
+				Bot:             m.emitter.source,
+				Provider:        stateTransitionProvider,
+				IssueID:         m.issueID,
+				IssueURL:        m.issueURL,
+				PRURL:           currentPRURL,
+				FromStatus:      m.snapshotStatus,
+				ToStatus:        currentStatus,
+				FailureMode:     currentFailureMode,
+				Actor:           actor,
+				Trigger:         trigger,
+				LinearStateType: currentLinearType,
+				LinearStateName: currentLinearName,
+				TransitionAt:    at,
+			}
+		}
 	}
 
 	if linearDirty {
@@ -286,6 +311,10 @@ func (m *StateManager[T, PT]) Save(ctx context.Context, pt PT) (bool, error) {
 		} else {
 			m.cb(ctx, m.issueID, stateJSON)
 		}
+	}
+
+	if pendingTransition != nil {
+		m.emitter.emit(ctx, *pendingTransition)
 	}
 
 	if linearDirty {

@@ -1,0 +1,15 @@
+[
+  {"name": "bot", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "provider", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "issue_id", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "issue_url", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "pr_url", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "from_status", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "to_status", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "failure_mode", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "actor", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "trigger", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "linear_state_type", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "linear_state_name", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "transition_at", "type": "TIMESTAMP", "mode": "REQUIRED"}
+]

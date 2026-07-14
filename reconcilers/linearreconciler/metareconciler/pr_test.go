@@ -56,6 +56,11 @@ type linearStateFixture struct {
 	lastSavedState atomic.Pointer[[]byte]
 	saveCount      atomic.Int32
 
+	// failSaves makes the /upload handler return 500, simulating a Linear
+	// attachment-save failure. Tests use it to assert that side effects
+	// gated on a successful save (transition CloudEvents) do not fire.
+	failSaves atomic.Bool
+
 	// callOrder records the sequence of side-effecting operations the
 	// fixture observes. "comment" appended on commentCreate/commentUpdate
 	// GraphQL mutations, "save" appended on the upload PUT. Lets tests
@@ -94,6 +99,10 @@ func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFi
 	mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		if f.failSaves.Load() {
+			http.Error(w, "simulated save failure", http.StatusInternalServerError)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -157,6 +166,7 @@ func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFi
 		ID:         "issue-1",
 		Identifier: "TEST-1",
 		Title:      "Materializer-managed test issue",
+		URL:        "https://linear.app/test/issue/TEST-1",
 	}
 	f.issue.Attachments.Nodes = []linearreconciler.Attachment{
 		{ID: "att-1", Title: "materializer_state", URL: f.server.URL + "/state.json"},

@@ -39,5 +39,17 @@ output "recorder-schemas" {
       partition_field = "recorded_at"
       clustering      = ["agent_name", "model_id"]
     }
+    // Reconciler state-machine transitions (metareconciler). One row per
+    // Status/FailureMode change, emitted framework-side; bots opt in by
+    // wiring WithStateTransitionEmission from their main. The provider
+    // column discriminates metareconciler flavors ("linear" today) so a
+    // future GitHub-side emitter shares this table without a v2 event type.
+    // Partitioned on transition_at; clustered on bot so per-bot dashboard
+    // queries (current state, stuck-in-state) stay cheap.
+    "dev.chainguard.driftlessaf.state.transition.v1" = {
+      schema          = file("${path.module}/schemas/state_transition.schema.json")
+      partition_field = "transition_at"
+      clustering      = ["bot"]
+    }
   }
 }

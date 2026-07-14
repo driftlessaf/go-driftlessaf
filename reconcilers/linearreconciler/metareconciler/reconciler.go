@@ -17,6 +17,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 )
 
 // Reconciler is a generic reconciler that bridges Linear issues to GitHub PRs
@@ -65,6 +66,13 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 	// Optional; nil means no callback. Set via WithSaveCallback. Threaded
 	// through to every StateManager constructed by (*Reconciler).NewStateManager.
 	saveCallback SaveCallback
+
+	// transitionEmitter publishes StateTransitionEvents to the CloudEvents
+	// broker on every state-machine transition. Nil means emission is
+	// disabled (the default). Constructed in New from the client supplied
+	// via WithStateTransitionEmission and threaded through to every
+	// StateManager constructed by (*Reconciler).NewStateManager.
+	transitionEmitter *transitionEmitter
 }
 
 // options collects the configurable knobs that don't depend on the
@@ -72,10 +80,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 // Option be a plain non-generic function — call sites don't have to spell
 // out [Req, Resp, CB] at every option invocation.
 type options struct {
-	requiredLabel      string
-	upstreamPrefix     string
-	repoTargetResolver RepoTargetResolver
-	saveCallback       SaveCallback
+	requiredLabel         string
+	upstreamPrefix        string
+	repoTargetResolver    RepoTargetResolver
+	saveCallback          SaveCallback
+	stateTransitionClient cloudevents.Client
 }
 
 // Option configures a Reconciler. It is intentionally non-generic; the
@@ -132,6 +141,24 @@ func WithSaveCallback(cb SaveCallback) Option {
 	}
 }
 
+// WithStateTransitionEmission supplies the CloudEvents client for
+// state-transition emission (StateTransitionEventType). Emission is off
+// unless this option provides a non-nil client; the library reads no
+// environment. Bot mains typically declare the broker URL in their
+// envconfig (conventionally EVENT_INGRESS_URI) and pass
+// agenttrace.NewBrokerClient(ctx, uri) here — that constructor
+// returns nil on an empty URI, so the option can be supplied
+// unconditionally and emission follows the environment's wiring.
+//
+// Producers on federated/WIF credentials cannot use the default
+// NewBrokerClient path (idtoken cannot mint from an external-account
+// credential); pass agenttrace.NewBrokerClientImpersonating instead.
+func WithStateTransitionEmission(client cloudevents.Client) Option {
+	return func(o *options) {
+		o.stateTransitionClient = client
+	}
+}
+
 // New creates a new Linear metareconciler. It bridges Linear issues to GitHub
 // PRs by reading repo target information from an upstream bot's state attachment
 // and using the agent to generate code changes.
@@ -171,6 +198,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT StateConstra
 		linearClient:       linearClient,
 		githubClients:      githubClients,
 		saveCallback:       o.saveCallback,
+		transitionEmitter:  newTransitionEmitter(identity, o.stateTransitionClient),
 	}
 }
 
