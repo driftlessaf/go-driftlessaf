@@ -23,8 +23,26 @@ import (
 
 // WorktreeCallbacks creates callbacks.WorktreeCallbacks bound to a git worktree.
 // All file operations are scoped to the worktree root directory.
-// Write, delete, move, copy, symlink, and chmod operations automatically stage
-// changes to the git index.
+//
+// The mutating callbacks write to the worktree on disk only; they never touch
+// the git index. This keeps them safe for concurrent use within a single agent
+// turn, which claudeexecutor requires of tool handlers (it dispatches a turn's
+// tool calls in parallel). Staging is centralized in commitChanges, which runs
+// Worktree.AddWithOptions{All:true} once, single-threaded, just before the
+// commit. Per-write staging is unsafe here: go-git's Worktree.Add rewrites
+// .git/index non-atomically (truncate in place, no lock), so two callbacks
+// staging concurrently tear the index and a later read fails with "invalid
+// checksum" (FUL-411).
+//
+// Because staging is `git add -A` at commit time, two consequences follow that
+// consumers cannot discover any other way:
+//   - Any change in the worktree is committed, not only files written through
+//     these callbacks. If a consumer's agent runs commands that drop artifacts
+//     into the worktree, those artifacts land in the signed commit.
+//   - Writes to paths matched by the target repo's .gitignore are silently
+//     dropped from the commit: the callback succeeds and the file exists on
+//     disk, but `git add -A` skips ignored paths, so the file never reaches
+//     the commit tree.
 func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 	root := wt.Filesystem.Root()
 
@@ -105,11 +123,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(fullPath, []byte(content), mode); err != nil {
-				return err
-			}
-			_, err = wt.Add(path)
-			return err
+			return os.WriteFile(fullPath, []byte(content), mode)
 		},
 
 		DeleteFile: func(_ context.Context, path string) error {
@@ -117,11 +131,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err != nil {
 				return err
 			}
-			if err := os.Remove(fullPath); err != nil {
-				return err
-			}
-			_, err = wt.Remove(path)
-			return err
+			return os.Remove(fullPath)
 		},
 
 		MoveFile: func(_ context.Context, src, dst string) error {
@@ -136,14 +146,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(dstFull), 0755); err != nil {
 				return err
 			}
-			if err := os.Rename(srcFull, dstFull); err != nil {
-				return err
-			}
-			if _, err := wt.Remove(src); err != nil {
-				return err
-			}
-			_, err = wt.Add(dst)
-			return err
+			return os.Rename(srcFull, dstFull)
 		},
 
 		CopyFile: func(_ context.Context, src, dst string) error {
@@ -166,11 +169,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(dstFull), 0755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(dstFull, data, srcInfo.Mode()); err != nil { //nolint:gosec // G703: path from git worktree
-				return err
-			}
-			_, err = wt.Add(dst)
-			return err
+			return os.WriteFile(dstFull, data, srcInfo.Mode()) //nolint:gosec // G703: path from git worktree
 		},
 
 		CreateSymlink: func(_ context.Context, path, target string) error {
@@ -184,11 +183,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 				return err
 			}
-			if err := os.Symlink(target, fullPath); err != nil {
-				return err
-			}
-			_, err = wt.Add(path)
-			return err
+			return os.Symlink(target, fullPath)
 		},
 
 		Chmod: func(_ context.Context, path string, mode os.FileMode) error {
@@ -196,11 +191,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err != nil {
 				return err
 			}
-			if err := os.Chmod(fullPath, mode); err != nil {
-				return err
-			}
-			_, err = wt.Add(path)
-			return err
+			return os.Chmod(fullPath, mode)
 		},
 
 		ListDirectory: func(_ context.Context, path, filter string, offset, limit int) (callbacks.ListResult, error) {
@@ -287,9 +278,6 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 				return callbacks.EditResult{}, err
 			}
 
-			if _, err := wt.Add(path); err != nil {
-				return callbacks.EditResult{}, err
-			}
 			return callbacks.EditResult{Replacements: len(offsets)}, nil
 		},
 

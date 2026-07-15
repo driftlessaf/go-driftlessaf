@@ -528,6 +528,18 @@ func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) erro
 		return ErrNothingToCommit
 	}
 
+	// Stage every change in one shot. WorktreeCallbacks deliberately does not
+	// stage per write: the executor may run a turn's tool callbacks
+	// concurrently, and go-git's Worktree.Add rewrites .git/index non-atomically
+	// (truncate in place, no lock), so concurrent Adds tear the index and later
+	// reads fail with "invalid checksum" (FUL-411). Staging once here,
+	// single-threaded, eliminates the race. AddWithOptions{All:true} is
+	// `git add -A` (adds, modifies, removes), writing the index exactly once
+	// before commit.
+	if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+		return fmt.Errorf("staging changes: %w", err)
+	}
+
 	email := m.identity
 	if !strings.Contains(email, "@") {
 		email = fmt.Sprintf("%s@chainguard.dev", email)

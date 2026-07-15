@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,7 +223,7 @@ func TestWriteFile(t *testing.T) {
 		if string(got) != content {
 			t.Errorf("content: got = %q, wanted = %q", got, content)
 		}
-		assertStaged(t, wt, "newfile.txt")
+		assertUnstagedChange(t, wt, "newfile.txt")
 	})
 
 	t.Run("overwrite existing", func(t *testing.T) {
@@ -250,8 +251,170 @@ func TestWriteFile(t *testing.T) {
 		if string(got) != "deep" {
 			t.Errorf("content: got = %q, wanted = %q", got, "deep")
 		}
-		assertStaged(t, wt, "deep/nested/file.txt")
+		assertUnstagedChange(t, wt, "deep/nested/file.txt")
 	})
+}
+
+// TestWriteFile_MultiWriteTurnStagesOnceAtCommit guards the invariant behind
+// FUL-411: one turn writes several files, including the same path twice, and
+// the index stays untouched until a single stage at commit. This pins the
+// deferred-staging contract but does not reproduce the crash itself — the
+// FUL-411 corruption requires concurrent Add (see
+// TestWriteFile_ConcurrentWritesStageOnce), which per-write staging triggered
+// under the executor's parallel tool dispatch. Here the callbacks defer
+// staging, so the index is byte-identical across the turn; commitChanges'
+// single AddWithOptions{All:true} then commits every file with a valid index.
+func TestWriteFile_MultiWriteTurnStagesOnceAtCommit(t *testing.T) {
+	wt, dir := initWorktree(t)
+	cb := WorktreeCallbacks(wt)
+	ctx := context.Background()
+
+	indexPath := filepath.Join(dir, ".git", "index")
+	before, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+
+	for _, w := range []struct{ path, content string }{
+		{"pkg/a.yaml", "a1\n"},
+		{"pkg/b.yaml", "b1\n"},
+		{"pkg/a.yaml", "a2\n"}, // duplicate write — the FUL-411 trigger
+	} {
+		if err := cb.WriteFile(ctx, w.path, w.content, 0o644); err != nil {
+			t.Fatalf("write %q: %v", w.path, err)
+		}
+	}
+
+	// Staging is deferred: the index must be byte-identical to before the turn.
+	after, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read index after writes: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("index changed during writes: callbacks must not stage per write")
+	}
+
+	// Status decodes cleanly (no corruption) and sees the new files.
+	status, err := wt.Status()
+	if err != nil {
+		t.Fatalf("status after writes (index corrupted?): %v", err)
+	}
+	if status.IsClean() {
+		t.Fatal("expected pending changes after writes, got clean status")
+	}
+
+	// Mirror commitChanges: stage all in one shot, then commit.
+	if err := wt.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
+		t.Fatalf("stage all: %v", err)
+	}
+	commitHash, err := wt.Commit("turn", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	repo, err := gogit.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	repoCommit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("load commit: %v", err)
+	}
+	want := map[string]string{"pkg/a.yaml": "a2\n", "pkg/b.yaml": "b1\n"}
+	for path, content := range want {
+		f, err := repoCommit.File(path)
+		if err != nil {
+			t.Fatalf("commit missing %q: %v", path, err)
+		}
+		got, err := f.Contents()
+		if err != nil {
+			t.Fatalf("read %q from commit: %v", path, err)
+		}
+		if got != content {
+			t.Errorf("%q: got %q, want %q", path, got, content)
+		}
+	}
+}
+
+// TestWriteFile_ConcurrentWritesStageOnce exercises the actual FUL-411 failure
+// shape: many callbacks writing in parallel, as claudeexecutor dispatches a
+// turn's tool calls (DefaultToolCallConcurrency = 10). The old per-write
+// Worktree.Add corrupted .git/index here — go-git writes the index
+// non-atomically and nothing serialized the concurrent Adds, so the second
+// write in a turn decoded a torn index and failed with "invalid checksum". With
+// staging deferred, the callbacks touch only the disk, so the index stays
+// intact and a single stage at commit lands every file. Run under -race, this
+// pins the "callbacks are safe for concurrent use" property the executor
+// requires of tool handlers.
+func TestWriteFile_ConcurrentWritesStageOnce(t *testing.T) {
+	wt, dir := initWorktree(t)
+	cb := WorktreeCallbacks(wt)
+	ctx := context.Background()
+
+	const n = 32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errs := make([]error, n)
+	for i := range n {
+		go func() {
+			defer wg.Done()
+			path := fmt.Sprintf("pkg/file-%02d.yaml", i)
+			errs[i] = cb.WriteFile(ctx, path, fmt.Sprintf("v: %d\n", i), 0o644)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent write %d: %v", i, err)
+		}
+	}
+
+	// The index must decode cleanly: concurrent writes never staged, so nothing
+	// tore it. Under the old per-write Add this Status often failed with
+	// "invalid checksum".
+	status, err := wt.Status()
+	if err != nil {
+		t.Fatalf("status after concurrent writes (index corrupted?): %v", err)
+	}
+	if status.IsClean() {
+		t.Fatal("expected pending changes after writes, got clean status")
+	}
+
+	// Stage once, commit, and confirm every file reached the commit tree.
+	if err := wt.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
+		t.Fatalf("stage all: %v", err)
+	}
+	commitHash, err := wt.Commit("concurrent turn", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	repo, err := gogit.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	repoCommit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("load commit: %v", err)
+	}
+	for i := range n {
+		path := fmt.Sprintf("pkg/file-%02d.yaml", i)
+		f, err := repoCommit.File(path)
+		if err != nil {
+			t.Fatalf("commit missing %q: %v", path, err)
+		}
+		got, err := f.Contents()
+		if err != nil {
+			t.Fatalf("read %q from commit: %v", path, err)
+		}
+		if want := fmt.Sprintf("v: %d\n", i); got != want {
+			t.Errorf("%q: got %q, want %q", path, got, want)
+		}
+	}
 }
 
 func TestDeleteFile(t *testing.T) {
@@ -267,18 +430,19 @@ func TestDeleteFile(t *testing.T) {
 		t.Error("file still exists after delete")
 	}
 
-	// Verify removed from git index.
+	// The deletion is visible as a pending (unstaged) worktree change; staging
+	// happens once at commit time (FUL-411).
 	status, err := wt.Status()
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	st, ok := status["hello.txt"]
 	if !ok {
-		// Not in status at all is also acceptable (fully removed).
+		t.Error("deleted file not found in git status; expected a pending deletion")
 		return
 	}
-	if st.Staging != gogit.Deleted {
-		t.Errorf("staging status: got = %v, wanted = %v", st.Staging, gogit.Deleted)
+	if st.Worktree != gogit.Deleted {
+		t.Errorf("worktree status: got = %v, wanted = %v", st.Worktree, gogit.Deleted)
 	}
 }
 
@@ -305,7 +469,7 @@ func TestMoveFile(t *testing.T) {
 		t.Errorf("content: got = %q, wanted = %q", got, "Hello, World!")
 	}
 
-	assertStaged(t, wt, "moved/hello.txt")
+	assertUnstagedChange(t, wt, "moved/hello.txt")
 }
 
 func TestCopyFile(t *testing.T) {
@@ -340,7 +504,7 @@ func TestCopyFile(t *testing.T) {
 		t.Error("copy lost executable bit")
 	}
 
-	assertStaged(t, wt, "copy.sh")
+	assertUnstagedChange(t, wt, "copy.sh")
 }
 
 func TestCreateSymlink(t *testing.T) {
@@ -360,7 +524,7 @@ func TestCreateSymlink(t *testing.T) {
 		t.Errorf("symlink target: got = %q, wanted = %q", target, "hello.txt")
 	}
 
-	assertStaged(t, wt, "link.txt")
+	assertUnstagedChange(t, wt, "link.txt")
 }
 
 func TestCreateSymlinkEscape(t *testing.T) {
@@ -420,7 +584,7 @@ func TestChmod(t *testing.T) {
 		t.Error("executable bit not set after chmod 0755")
 	}
 
-	assertStaged(t, wt, "hello.txt")
+	assertUnstagedChange(t, wt, "hello.txt")
 }
 
 func TestListDirectory(t *testing.T) {
@@ -1062,7 +1226,7 @@ func TestEditFile(t *testing.T) {
 				}
 			}
 
-			assertStaged(t, wt, tc.path)
+			assertUnstagedChange(t, wt, tc.path)
 		})
 	}
 }
@@ -1235,8 +1399,10 @@ func TestEditFileReplaceAllBoundary(t *testing.T) {
 	}
 }
 
-// assertStaged verifies that the given path appears as staged in the worktree.
-func assertStaged(t *testing.T, wt *gogit.Worktree, path string) {
+// assertUnstagedChange verifies the path has a pending change in the working
+// tree but is NOT staged. WorktreeCallbacks writes to disk without staging;
+// commitChanges stages everything in one shot at commit time (FUL-411).
+func assertUnstagedChange(t *testing.T, wt *gogit.Worktree, path string) {
 	t.Helper()
 	status, err := wt.Status()
 	if err != nil {
@@ -1244,10 +1410,13 @@ func assertStaged(t *testing.T, wt *gogit.Worktree, path string) {
 	}
 	st, ok := status[path]
 	if !ok {
-		t.Errorf("path %q not found in git status", path)
+		t.Errorf("path %q not found in git status; expected a pending worktree change", path)
 		return
 	}
-	if st.Staging == gogit.Untracked || st.Staging == gogit.Unmodified {
-		t.Errorf("path %q staging: got = %v, wanted staged", path, st.Staging)
+	if st.Worktree == gogit.Unmodified {
+		t.Errorf("path %q worktree: got unmodified, wanted a pending change", path)
+	}
+	if st.Staging != gogit.Untracked && st.Staging != gogit.Unmodified {
+		t.Errorf("path %q staging: got = %v, wanted unstaged (callbacks must not stage)", path, st.Staging)
 	}
 }

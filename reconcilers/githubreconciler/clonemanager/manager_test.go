@@ -236,8 +236,35 @@ func TestMakeAndPushChanges(t *testing.T) {
 		t.Fatalf("PlainOpen origin: %v", err)
 	}
 
-	if _, err := originRepo.Reference(plumbing.NewBranchReferenceName(branchName), true); err != nil {
+	branchRef, err := originRepo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
 		t.Fatalf("Reference lookup: %v", err)
+	}
+
+	// Under the stage-once contract, commitChanges runs `git add -A`, so the
+	// pushed commit captures both bar.yaml (written and staged inside updateFn)
+	// and foo.yaml (dirtied before the turn and never explicitly staged). Assert
+	// the tree holds both, locking the new contract end-to-end.
+	pushedCommit, err := originRepo.CommitObject(branchRef.Hash())
+	if err != nil {
+		t.Fatalf("load pushed commit: %v", err)
+	}
+	wantFiles := map[string]string{
+		filepath.ToSlash(filepath.Join("packages", "foo.yaml")): "name: foo-updated",
+		barPath: "name: bar",
+	}
+	for path, want := range wantFiles {
+		f, err := pushedCommit.File(path)
+		if err != nil {
+			t.Fatalf("pushed commit missing %q: %v", path, err)
+		}
+		got, err := f.Contents()
+		if err != nil {
+			t.Fatalf("read %q from pushed commit: %v", path, err)
+		}
+		if got != want {
+			t.Errorf("%q in pushed commit: got %q, want %q", path, got, want)
+		}
 	}
 
 	// Reacquire the lease and verify the clone was reset to the original
