@@ -1,6 +1,6 @@
 module chainguard.dev/driftlessaf
 
-go 1.26.2
+go 1.26.4
 
 require (
 	chainguard.dev/apko v1.2.18
@@ -14,7 +14,7 @@ require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.0
 	github.com/chainguard-dev/terraform-infra-common v1.0.12
-	github.com/chainguard-dev/terraform-provider-cosign v0.4.8
+	github.com/chainguard-dev/terraform-provider-cosign v0.4.11
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/go-git/go-billy/v5 v5.9.0

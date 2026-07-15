@@ -1,6 +1,6 @@
 module chainguard.dev/driftlessaf/examples
 
-go 1.26.2
+go 1.26.4
 
 require (
 	chainguard.dev/driftlessaf v0.7.1
