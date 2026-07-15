@@ -9,6 +9,8 @@ package googleexecutor_test
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -83,8 +85,18 @@ You MUST call the calculator tool. Then respond with JSON: {"answer": "<number>"
 					{Name: "expression", Type: "string", Description: "The math expression to evaluate, e.g. '17 * 23'", Required: true},
 				},
 			},
-			Handler: func(_ context.Context, _ toolcall.ToolCall, _ *agenttrace.Trace[*simpleResponse], _ **simpleResponse) map[string]any {
-				return map[string]any{"result": "391"}
+			Handler: func(_ context.Context, tc toolcall.ToolCall, _ *agenttrace.Trace[*simpleResponse], _ **simpleResponse) map[string]any {
+				// Evaluate the expression for real. The tool exists only to
+				// force a multi-turn exchange (user -> function_call ->
+				// function_response -> text), and a canned result ("391",
+				// correct for execution 1 but wrong for execution 2's
+				// 42+58) used to slip through — until models started
+				// refusing to repeat a tool result they can see is wrong,
+				// which puts refusal prose in "answer" and breaks the
+				// json.Number parse. Keep the fixture honest so the test
+				// exercises caching, not model alignment.
+				expr, _ := tc.Args["expression"].(string)
+				return map[string]any{"result": evalSimpleExpr(expr)}
 			},
 		}),
 	}
@@ -250,3 +262,27 @@ When investigating production issues:
 - Use feature flags for gradual rollouts of new functionality
 - Document deployment procedures in runbooks
 - Verify health checks pass before routing traffic to new instances`
+
+// evalSimpleExpr evaluates "a op b" for the toy calculator fixture. Unknown
+// shapes return the input unchanged, which surfaces clearly in the trace.
+func evalSimpleExpr(expr string) string {
+	f := strings.Fields(expr)
+	if len(f) != 3 {
+		return expr
+	}
+	a, errA := strconv.Atoi(f[0])
+	b, errB := strconv.Atoi(f[2])
+	if errA != nil || errB != nil {
+		return expr
+	}
+	switch f[1] {
+	case "+":
+		return strconv.Itoa(a + b)
+	case "-":
+		return strconv.Itoa(a - b)
+	case "*":
+		return strconv.Itoa(a * b)
+	default:
+		return expr
+	}
+}
