@@ -640,3 +640,68 @@ func TestNeedsRefresh(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionStateLabelAccessors verifies the identity-derived label accessors
+// the metareconciler uses to detect newly-applied state labels (the edges it
+// emits state-transition events on).
+func TestSessionStateLabelAccessors(t *testing.T) {
+	cm := &CM[testData]{identity: "test-bot"}
+
+	tests := []struct {
+		name               string
+		session            Session[testData]
+		wantTurnLimit      bool
+		wantReadyForReview bool
+		wantGaveUp         bool
+		wantPRURL          string
+	}{{
+		name:    "no PR has no labels",
+		session: Session[testData]{manager: cm},
+	}, {
+		name: "PR with all state labels",
+		session: Session[testData]{
+			manager:  cm,
+			prNumber: 42,
+			prURL:    "https://github.com/o/r/pull/42",
+			prLabels: []string{
+				"test-bot/turn-limit",
+				"test-bot/ready-for-review",
+				"test-bot/too-hard-need-human",
+			},
+		},
+		wantTurnLimit:      true,
+		wantReadyForReview: true,
+		wantGaveUp:         true,
+		wantPRURL:          "https://github.com/o/r/pull/42",
+	}, {
+		name: "another identity's labels do not match",
+		session: Session[testData]{
+			manager:  cm,
+			prNumber: 7,
+			prURL:    "https://github.com/o/r/pull/7",
+			prLabels: []string{
+				"other-bot/turn-limit",
+				"other-bot/ready-for-review",
+				"other-bot/too-hard-need-human",
+			},
+		},
+		wantPRURL: "https://github.com/o/r/pull/7",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.session.HasTurnLimitLabel(); got != tt.wantTurnLimit {
+				t.Errorf("HasTurnLimitLabel(): got = %v, want = %v", got, tt.wantTurnLimit)
+			}
+			if got := tt.session.HasReadyForReviewLabel(); got != tt.wantReadyForReview {
+				t.Errorf("HasReadyForReviewLabel(): got = %v, want = %v", got, tt.wantReadyForReview)
+			}
+			if got := tt.session.HasGaveUpLabel(); got != tt.wantGaveUp {
+				t.Errorf("HasGaveUpLabel(): got = %v, want = %v", got, tt.wantGaveUp)
+			}
+			if got := tt.session.PRURL(); got != tt.wantPRURL {
+				t.Errorf("PRURL(): got = %q, want = %q", got, tt.wantPRURL)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"chainguard.dev/driftlessaf/reconcilers/statemachine"
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v88/github"
@@ -58,19 +59,49 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		clog.InfoContext(ctx, "Issue missing required label, closing any outstanding PRs", "required_label", r.requiredLabel)
 		r.giveUp.Clear(ctx, changeSession)
-		return changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue no longer has the required label.")
+		prURL := changeSession.PRURL()
+		if err := changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue no longer has the required label."); err != nil {
+			return err
+		}
+		// Only a PR actually closed just now is a transition; a labelless
+		// issue with no PR re-reconciling is not.
+		if state.HasPR() {
+			r.emitTransition(ctx, issue, prURL,
+				statemachine.StatusFailed, statemachine.FailureModePRClosed, TriggerRequiredLabelRemoved)
+		}
+		return nil
 
 	case issue.GetState() == "closed":
 		clog.InfoContext(ctx, "Issue is closed, closing any outstanding PRs")
 		r.giveUp.Clear(ctx, changeSession)
-		return changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue was closed.")
+		prURL := changeSession.PRURL()
+		if err := changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue was closed."); err != nil {
+			return err
+		}
+		// With no persisted prior state this re-emits if a closed issue
+		// reconciles again (rare: closed issues stop generating events);
+		// latest-transition consumers are unaffected since the terminal
+		// status is unchanged.
+		to, mode := closedIssueTransition(state.HasPR(), issue.GetStateReason())
+		if !state.HasPR() {
+			prURL = ""
+		}
+		r.emitTransition(ctx, issue, prURL, to, mode, TriggerIssueClosed)
+		return nil
 
 	case state.NeedsRebase():
 		clog.InfoContext(ctx, "PR needs rebase, starting fresh from default branch")
 
 	case state.HitMaxCommits():
 		clog.InfoContext(ctx, "PR hit turn limit")
-		_, err := changeSession.ApplyTurnLimit(ctx)
+		// The label edge is the transition: ApplyTurnLimit is idempotent, so
+		// only the reconcile that newly applies the label emits.
+		newlyLimited := !changeSession.HasTurnLimitLabel()
+		prURL, err := changeSession.ApplyTurnLimit(ctx)
+		if err == nil && newlyLimited {
+			r.emitTransition(ctx, issue, prURL,
+				statemachine.StatusFailed, statemachine.FailureModeMaxTurns, statemachine.TriggerMaxTurns)
+		}
 		return err
 
 	// Historically we delayed here (commented code below), but in high-volume
@@ -91,8 +122,16 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 
 	case state.HasNoConflicts():
 		log.Info("PR is green, leaving it for human review")
-		if _, err := changeSession.ApplyReadyForReview(ctx); err != nil {
+		newlyReady := !changeSession.HasReadyForReviewLabel()
+		prURL, err := changeSession.ApplyReadyForReview(ctx)
+		if err != nil {
 			return fmt.Errorf("apply ready-for-review: %w", err)
+		}
+		if newlyReady {
+			// Still active — the PR now waits on humans, and time since this
+			// transition measures how long it has waited.
+			r.emitTransition(ctx, issue, prURL,
+				statemachine.StatusActive, "", TriggerReadyForReview)
 		}
 		// The PR is green: drop any give-up comment from a prior iteration, since
 		// the PR recovered without the agent needing to push a fix. Clear is a
@@ -209,7 +248,21 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
 			if agentRan {
+				// SurfaceResult applies the give-up label when the result
+				// carries an explanation; the session's label cache reflects
+				// that immediately, so the before/after pair is the "newly
+				// gave up" edge to emit on.
+				//
+				// This edge only fires for bots that wire WithGiveUpComment
+				// (today: linear-materializer). Without it SurfaceResult
+				// no-ops, the label never appears, and a no-diff run emits
+				// nothing — on every retry, not just the first.
+				gaveUpBefore := changeSession.HasGaveUpLabel()
 				r.giveUp.SurfaceResult(ctx, changeSession, result)
+				if !gaveUpBefore && changeSession.HasGaveUpLabel() {
+					r.emitTransition(ctx, issue, changeSession.PRURL(),
+						statemachine.StatusFailed, statemachine.FailureModeNoDiff, statemachine.TriggerNoDiff)
+				}
 			}
 			return nil
 		}
@@ -219,6 +272,22 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	// The agent pushed a fix: clear any stale give-up comment from a prior
 	// iteration where it had nothing to do.
 	r.giveUp.Clear(ctx, changeSession)
+
+	// Every push is a genuine transition (back) to active: the initial run
+	// that created the PR, a findings iteration, or a post-conflict
+	// regeneration. Upsert skips the agent closure when the PR is already up
+	// to date, so agentRan gates re-observations out. state still reflects
+	// the pre-Upsert session, so HasPR distinguishes the initial run.
+	//
+	// An empty prURL with a nil error is the closeOnEmptyDiff path: the agent
+	// pushed commits that net to zero against base, so Upsert closed the PR
+	// (or never opened one). Emitting active there would pin the issue
+	// "active" on the overlay with no PR that could ever move it again —
+	// every genuine create/update path returns a non-empty URL.
+	if agentRan && prURL != "" {
+		r.emitTransition(ctx, issue, prURL,
+			statemachine.StatusActive, "", upsertTrigger(!state.HasPR(), usePRBranch, state.NeedsRebase()))
+	}
 
 	// Assign the PR to the issue creator so they can easily find it.
 	if creator != "" {

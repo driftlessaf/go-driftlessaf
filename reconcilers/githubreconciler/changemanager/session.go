@@ -234,6 +234,39 @@ func (s *Session[T]) Extract() (*T, error) {
 	return s.manager.Extract(s.prBody)
 }
 
+// turnLimitLabelSuffix and readyForReviewLabelSuffix are defined once, like
+// gaveUpLabelSuffix, so the Apply* methods and the Has*Label accessors cannot
+// drift apart on a rename.
+const (
+	turnLimitLabelSuffix      = "/turn-limit"
+	readyForReviewLabelSuffix = "/ready-for-review"
+)
+
+// HasTurnLimitLabel reports whether the PR carries this identity's
+// turn-limit label (applied by ApplyTurnLimit). False when no PR exists.
+func (s *Session[T]) HasTurnLimitLabel() bool {
+	return s.HasLabel(s.manager.identity + turnLimitLabelSuffix)
+}
+
+// HasReadyForReviewLabel reports whether the PR carries this identity's
+// ready-for-review label (applied by ApplyReadyForReview). False when no PR
+// exists.
+func (s *Session[T]) HasReadyForReviewLabel() bool {
+	return s.HasLabel(s.manager.identity + readyForReviewLabelSuffix)
+}
+
+// HasGaveUpLabel reports whether the PR carries this identity's
+// too-hard-need-human label (applied by ApplyGaveUp, removed by
+// ClearGaveUp). False when no PR exists.
+func (s *Session[T]) HasGaveUpLabel() bool {
+	return s.HasLabel(s.manager.identity + gaveUpLabelSuffix)
+}
+
+// PRURL returns the HTML URL of the existing PR, or "" if none exists.
+func (s *Session[T]) PRURL() string {
+	return s.prURL
+}
+
 // ApplyTurnLimit adds a turn-limit label to the PR, preventing further
 // commits from being added. Unlike adding a skip label, this does not
 // block the PR from being rebased if it develops merge conflicts.
@@ -242,7 +275,7 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	turnLimitLabel := s.manager.identity + "/turn-limit"
+	turnLimitLabel := s.manager.identity + turnLimitLabelSuffix
 	if slices.Contains(s.prLabels, turnLimitLabel) {
 		clog.InfoContext(ctx, "PR already has turn-limit label", "pr", s.prNumber)
 		return s.prURL, nil
@@ -321,7 +354,7 @@ func (s *Session[T]) ApplyReadyForReview(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	label := s.manager.identity + "/ready-for-review"
+	label := s.manager.identity + readyForReviewLabelSuffix
 	if slices.Contains(s.prLabels, label) {
 		return s.prURL, nil
 	}

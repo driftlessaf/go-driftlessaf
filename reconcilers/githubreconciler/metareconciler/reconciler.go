@@ -13,7 +13,9 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"chainguard.dev/driftlessaf/reconcilers/statemachine"
 	"github.com/chainguard-dev/clog"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/google/go-github/v88/github"
 )
 
@@ -48,6 +50,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// the first time the bot reconciles it with no PR yet, announcing that work
 	// has started. Nil means disabled. See WithStartComment.
 	startComment *startComment
+
+	// transitionEmitter publishes StateTransitionEvents to the CloudEvents
+	// broker at the state edges reconcileIssue observes. Nil means emission
+	// is disabled (the default). See WithStateTransitionEmission.
+	transitionEmitter *statemachine.Emitter
 
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
@@ -121,6 +128,26 @@ func (c *startComment) surface(ctx context.Context, issue issueMarkerCommenter) 
 	}
 	if err := issue.UpsertIssueMarkerComment(ctx, c.marker, c.render()); err != nil {
 		clog.WarnContext(ctx, "Failed to post start comment", "error", err)
+	}
+}
+
+// WithStateTransitionEmission supplies the CloudEvents client for
+// state-transition emission (StateTransitionEventType). Emission is off
+// unless this option provides a non-nil client; the library reads no
+// environment. Bot mains typically declare the broker URL in their
+// envconfig (conventionally EVENT_INGRESS_URI) and pass
+// agenttrace.NewBrokerClient(ctx, uri) here — that constructor returns nil
+// on an empty URI, so the option can be supplied unconditionally and
+// emission follows the environment's wiring.
+//
+// Producers on federated/WIF credentials cannot use the default
+// NewBrokerClient path (idtoken cannot mint from an external-account
+// credential); pass agenttrace.NewBrokerClientImpersonating instead.
+func WithStateTransitionEmission[Req promptbuilder.Bindable, Resp Result, CB any](client cloudevents.Client) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		// New sets identity before applying options, so the emitter can
+		// stamp it as the CloudEvent source here.
+		r.transitionEmitter = statemachine.NewEmitter(r.identity, client)
 	}
 }
 
