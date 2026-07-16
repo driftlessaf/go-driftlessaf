@@ -14,7 +14,6 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
-	"chainguard.dev/driftlessaf/agents/toolcall/params"
 	"github.com/chainguard-dev/clog"
 )
 
@@ -24,6 +23,27 @@ const (
 	maxFindingPatternLength = 512
 	maxFindingSearchMatches = 1000
 )
+
+// callGuard detects duplicate tool calls with identical arguments to prevent
+// infinite loops. The mutex guards seen: a turn's tool calls may be
+// dispatched concurrently.
+type callGuard[K comparable] struct {
+	mu   sync.Mutex
+	seen map[K]struct{}
+}
+
+func newCallGuard[K comparable]() *callGuard[K] {
+	return &callGuard[K]{seen: make(map[K]struct{})}
+}
+
+// duplicate records key as seen and reports whether it was already seen.
+func (g *callGuard[K]) duplicate(key K) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, dup := g.seen[key]
+	g.seen[key] = struct{}{}
+	return dup
+}
 
 // FindingTools wraps a base tools type and adds finding callbacks.
 type FindingTools[T any] struct {
@@ -112,10 +132,7 @@ func getFindingDetailsTool[Resp any](getDetails func(context.Context, callbacks.
 
 			details, err := getDetails(ctx, callbacks.FindingKind(kind), identifier)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to get finding details", "kind", kind, "identifier", identifier, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"kind": kind, "identifier": identifier})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to get finding details", err, "kind", kind, "identifier", identifier)
 			}
 
 			result := map[string]any{
@@ -158,10 +175,7 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"identifier": identifier})
 
 			if err := resolve(ctx, identifier); err != nil {
-				clog.ErrorContext(ctx, "Failed to resolve finding", "identifier", identifier, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"identifier": identifier})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to resolve finding", err, "identifier", identifier)
 			}
 
 			result := map[string]any{
@@ -176,9 +190,7 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 
 func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKind, string) error) Tool[Resp] {
 	type retryCall struct{ kind, identifier string }
-	// mu guards seen: a turn's tool calls may be dispatched concurrently.
-	var mu sync.Mutex
-	seen := make(map[retryCall]struct{})
+	guard := newCallGuard[retryCall]()
 
 	return Tool[Resp]{
 		Def: Definition{
@@ -210,12 +222,7 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 			}
 
 			// Detect duplicate calls to prevent infinite retry loops.
-			key := retryCall{kind: kind, identifier: identifier}
-			mu.Lock()
-			_, dup := seen[key]
-			seen[key] = struct{}{}
-			mu.Unlock()
-			if dup {
+			if guard.duplicate(retryCall{kind: kind, identifier: identifier}) {
 				clog.WarnContext(ctx, "Duplicate retry_finding call detected", "kind", kind, "identifier", identifier)
 				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier})
 				resp := map[string]any{
@@ -230,10 +237,7 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier})
 
 			if err := retry(ctx, callbacks.FindingKind(kind), identifier); err != nil {
-				clog.ErrorContext(ctx, "Failed to retry finding", "kind", kind, "identifier", identifier, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"kind": kind, "identifier": identifier})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to retry finding", err, "kind", kind, "identifier", identifier)
 			}
 
 			result := map[string]any{
@@ -288,9 +292,7 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 		offset           int64
 		limit            int
 	}
-	// mu guards seen: a turn's tool calls may be dispatched concurrently.
-	var mu sync.Mutex
-	seen := make(map[readCall]struct{})
+	guard := newCallGuard[readCall]()
 
 	return Tool[Resp]{
 		Def: Definition{
@@ -332,12 +334,7 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 			}
 
 			// Detect duplicate calls to prevent infinite loops.
-			key := readCall{kind: kind, identifier: identifier, offset: offset, limit: limit}
-			mu.Lock()
-			_, dup := seen[key]
-			seen[key] = struct{}{}
-			mu.Unlock()
-			if dup {
+			if guard.duplicate(readCall{kind: kind, identifier: identifier, offset: offset, limit: limit}) {
 				clog.WarnContext(ctx, "Duplicate read_finding_logs call detected", "kind", kind, "identifier", identifier, "offset", offset)
 				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier, "offset": offset, "limit": limit})
 				resp := map[string]any{
@@ -355,10 +352,7 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 
 			logs, err := fetch(ctx, kind, identifier)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to get finding logs", "kind", kind, "identifier", identifier, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"kind": kind, "identifier": identifier})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to get finding logs", err, "kind", kind, "identifier", identifier)
 			}
 
 			content, nextOffset, remaining := findingReadContent(logs, offset, limit)
@@ -383,9 +377,7 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 		kind, identifier, pattern string
 		skip, limit               int
 	}
-	// mu guards seen: a turn's tool calls may be dispatched concurrently.
-	var mu sync.Mutex
-	seen := make(map[searchCall]struct{})
+	guard := newCallGuard[searchCall]()
 
 	return Tool[Resp]{
 		Def: Definition{
@@ -432,12 +424,7 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 			}
 
 			// Detect duplicate calls to prevent infinite loops.
-			key := searchCall{kind: kind, identifier: identifier, pattern: pattern, skip: skip, limit: limit}
-			mu.Lock()
-			_, dup := seen[key]
-			seen[key] = struct{}{}
-			mu.Unlock()
-			if dup {
+			if guard.duplicate(searchCall{kind: kind, identifier: identifier, pattern: pattern, skip: skip, limit: limit}) {
 				clog.WarnContext(ctx, "Duplicate search_finding_logs call detected", "kind", kind, "identifier", identifier, "pattern", pattern)
 				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier, "pattern": pattern, "skip": skip, "limit": limit})
 				resp := map[string]any{
@@ -454,18 +441,12 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 
 			logs, err := fetch(ctx, kind, identifier)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to get finding logs", "kind", kind, "identifier", identifier, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"kind": kind, "identifier": identifier})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to get finding logs", err, "kind", kind, "identifier", identifier)
 			}
 
 			matches, totalMatches, err := findingSearchContent(logs, pattern, skip, limit)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to search finding logs", "kind", kind, "identifier", identifier, "pattern", pattern, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"kind": kind, "identifier": identifier, "pattern": pattern})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to search finding logs", err, "kind", kind, "identifier", identifier, "pattern", pattern)
 			}
 
 			resp := map[string]any{
@@ -486,18 +467,12 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 // Returns content, next_offset (nil at EOF), and remaining bytes.
 func findingReadContent(s string, offset int64, limit int) (content string, nextOffset *int64, remaining int64) {
 	totalSize := int64(len(s))
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > totalSize {
-		offset = totalSize
-	}
+	offset = min(max(offset, 0), totalSize)
+	// limit <= 0 falls back to the default rather than clamping to zero.
 	if limit <= 0 {
 		limit = defaultFindingReadLimit
 	}
-	if limit > maxFindingReadLimit {
-		limit = maxFindingReadLimit
-	}
+	limit = min(limit, maxFindingReadLimit)
 
 	end := min(offset+int64(limit), totalSize)
 

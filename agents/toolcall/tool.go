@@ -12,6 +12,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
+	"github.com/chainguard-dev/clog"
 )
 
 // ToolCall is a provider-independent representation of a tool call.
@@ -415,4 +416,19 @@ func OptionalParam[T any](call ToolCall, name string, defaultValue T) (T, map[st
 		return v, params.Error("%s", err)
 	}
 	return v, nil
+}
+
+// completeError logs a failed tool call, records the error response on the
+// tool-call trace, and returns it. attrs are ordered key/value pairs (keys
+// must be strings) included both as log attributes — in the given order,
+// followed by the error — and as context fields on the error response.
+func completeError[Resp any](ctx context.Context, tc *agenttrace.ToolCall[Resp], msg string, err error, attrs ...any) map[string]any {
+	clog.ErrorContext(ctx, msg, append(attrs, "error", err)...)
+	errCtx := make(map[string]any, len(attrs)/2)
+	for i := 0; i+1 < len(attrs); i += 2 {
+		errCtx[attrs[i].(string)] = attrs[i+1]
+	}
+	result := params.ErrorWithContext(err, errCtx)
+	tc.Complete(result, err)
+	return result
 }

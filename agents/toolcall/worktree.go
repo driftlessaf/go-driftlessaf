@@ -15,7 +15,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
-	"github.com/chainguard-dev/clog"
 )
 
 // WorktreeTools wraps a base tools type and adds worktree callbacks.
@@ -116,10 +115,7 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 
 			result, err := readFile(ctx, path, offset, limit)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to read file", "path", path, "error", err)
-				resp := params.ErrorWithContext(err, map[string]any{"path": path})
-				tc.Complete(resp, err)
-				return resp
+				return completeError(ctx, tc, "Failed to read file", err, "path", path)
 			}
 
 			resp := map[string]any{
@@ -174,10 +170,7 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 
 			result, err := editFile(ctx, path, oldString, newString, replaceAll)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to edit file", "path", path, "error", err)
-				resp := params.ErrorWithContext(err, map[string]any{"path": path})
-				tc.Complete(resp, err)
-				return resp
+				return completeError(ctx, tc, "Failed to edit file", err, "path", path)
 			}
 
 			resp := map[string]any{"path": path, "replacements": result.Replacements}
@@ -225,10 +218,7 @@ func writeFileTool[Resp any](writeFile func(context.Context, string, string, os.
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path, "size": len(content), "executable": executable})
 
 			if err := writeFile(ctx, path, content, mode); err != nil {
-				clog.ErrorContext(ctx, "Failed to write file", "path", path, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"path": path})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to write file", err, "path", path)
 			}
 
 			result := map[string]any{"path": path, "written": len(content), "mode": fmt.Sprintf("%04o", mode)}
@@ -260,10 +250,7 @@ func deleteFileTool[Resp any](deleteFile func(context.Context, string) error) To
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path})
 
 			if err := deleteFile(ctx, path); err != nil {
-				clog.ErrorContext(ctx, "Failed to delete file", "path", path, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"path": path})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to delete file", err, "path", path)
 			}
 
 			result := map[string]any{"path": path, "deleted": true}
@@ -302,10 +289,7 @@ func moveFileTool[Resp any](moveFile func(context.Context, string, string) error
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"source": path, "destination": destination})
 
 			if err := moveFile(ctx, path, destination); err != nil {
-				clog.ErrorContext(ctx, "Failed to move file", "source", path, "destination", destination, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"source": path, "destination": destination})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to move file", err, "source", path, "destination", destination)
 			}
 
 			result := map[string]any{"source": path, "destination": destination}
@@ -344,10 +328,7 @@ func copyFileTool[Resp any](copyFile func(context.Context, string, string) error
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"source": path, "destination": destination})
 
 			if err := copyFile(ctx, path, destination); err != nil {
-				clog.ErrorContext(ctx, "Failed to copy file", "source", path, "destination", destination, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"source": path, "destination": destination})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to copy file", err, "source", path, "destination", destination)
 			}
 
 			result := map[string]any{"source": path, "destination": destination}
@@ -392,10 +373,7 @@ func chmodTool[Resp any](chmod func(context.Context, string, os.FileMode) error)
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path, "mode": modeStr})
 
 			if err := chmod(ctx, path, mode); err != nil {
-				clog.ErrorContext(ctx, "Failed to chmod", "path", path, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"path": path})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to chmod", err, "path", path)
 			}
 
 			result := map[string]any{"path": path, "mode": fmt.Sprintf("%04o", mode)}
@@ -433,10 +411,7 @@ func symlinkTool[Resp any](createSymlink func(context.Context, string, string) e
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path, "target": target})
 
 			if err := createSymlink(ctx, path, target); err != nil {
-				clog.ErrorContext(ctx, "Failed to create symlink", "path", path, "target", target, "error", err)
-				result := params.ErrorWithContext(err, map[string]any{"path": path, "target": target})
-				tc.Complete(result, err)
-				return result
+				return completeError(ctx, tc, "Failed to create symlink", err, "path", path, "target", target)
 			}
 
 			result := map[string]any{"path": path, "target": target}
@@ -478,10 +453,7 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 
 			result, err := listDirectory(ctx, path, filter, offset, limit)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to list directory", "path", path, "error", err)
-				resp := params.ErrorWithContext(err, map[string]any{"path": path})
-				tc.Complete(resp, err)
-				return resp
+				return completeError(ctx, tc, "Failed to list directory", err, "path", path)
 			}
 
 			resp := formatListResult(path, result)
@@ -525,10 +497,7 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 
 			result, err := searchCodebase(ctx, searchPath, pattern, filter, offset, limit)
 			if err != nil {
-				clog.ErrorContext(ctx, "Failed to search codebase", "pattern", pattern, "error", err)
-				resp := params.ErrorWithContext(err, map[string]any{"pattern": pattern})
-				tc.Complete(resp, err)
-				return resp
+				return completeError(ctx, tc, "Failed to search codebase", err, "pattern", pattern)
 			}
 
 			resp := formatSearchResult(searchPath, pattern, filter, result)

@@ -157,10 +157,7 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 
 				result, err := cb.GetFileDiff(ctx, path, start, end, offset, limit)
 				if err != nil {
-					clog.ErrorContext(ctx, "Failed to get file diff", "path", path, "error", err)
-					resp := params.ErrorWithContext(err, map[string]any{"path": path})
-					tc.Complete(resp, err)
-					return resp
+					return completeError(ctx, tc, "Failed to get file diff", err, "path", path)
 				}
 
 				resp := map[string]any{
