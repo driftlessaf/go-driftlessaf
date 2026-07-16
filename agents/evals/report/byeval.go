@@ -32,23 +32,15 @@ func ByEval(obs *evals.NamespacedObserver[*evals.ResultCollector], threshold flo
 
 // evalResult holds aggregated results for a specific evaluation across models and test cases
 type evalResult struct {
-	evalName        string
-	totalFailures   int64
-	totalGrades     int64
-	totalIterations int64
-	avgGrade        float64
-	passRate        float64
-	modelResults    map[string]*modelResult
+	evalName string
+	stats
+	modelResults map[string]*modelResult
 }
 
 // modelResult holds results for a specific model within an evaluation
 type modelResult struct {
-	modelName       string
-	totalFailures   int64
-	totalGrades     int64
-	totalIterations int64
-	avgGrade        float64
-	passRate        float64
+	modelName string
+	stats
 	testCaseResults map[string]*testCaseResult
 }
 
@@ -57,9 +49,7 @@ type testCaseResult struct {
 	testCaseName string
 	failures     []string
 	grades       []evals.Grade
-	iterations   int64
-	passRate     float64
-	avgGrade     float64
+	stats
 }
 
 // collectEvalResults walks the observer tree and organizes results by evaluation
@@ -85,13 +75,18 @@ func collectEvalResults(obs *evals.NamespacedObserver[*evals.ResultCollector]) m
 		// Initialize nested structure if needed
 		initializeEvalResult(evalResults, evalName, modelName)
 
-		// Calculate and store test case metrics
-		testCase := calculateTestCaseMetrics(testCaseName, failures, grades, iterations)
+		// Build the test case result
+		testCase := &testCaseResult{
+			testCaseName: testCaseName,
+			failures:     failures,
+			grades:       grades,
+		}
+		testCase.add(failures, grades, iterations)
 
 		// Store the result and aggregate upwards
 		evalResults[evalName].modelResults[modelName].testCaseResults[testCaseName] = testCase
-		aggregateToModelLevel(evalResults[evalName].modelResults[modelName], failures, grades, iterations)
-		aggregateToEvalLevel(evalResults[evalName], failures, grades, iterations)
+		evalResults[evalName].modelResults[modelName].add(failures, grades, iterations)
+		evalResults[evalName].add(failures, grades, iterations)
 	})
 
 	return evalResults
@@ -123,85 +118,17 @@ func initializeEvalResult(evalResults map[string]*evalResult, evalName, modelNam
 	}
 }
 
-// calculateTestCaseMetrics computes metrics for a single test case
-func calculateTestCaseMetrics(testCaseName string, failures []string, grades []evals.Grade, iterations int64) *testCaseResult {
-	passCount := iterations - int64(len(failures))
-	passRate := float64(passCount) / float64(iterations)
-
-	var avgGrade float64
-	if len(grades) > 0 {
-		var totalScore float64
-		for _, grade := range grades {
-			totalScore += grade.Score
-		}
-		avgGrade = totalScore / float64(len(grades))
-	}
-
-	return &testCaseResult{
-		testCaseName: testCaseName,
-		failures:     failures,
-		grades:       grades,
-		iterations:   iterations,
-		passRate:     passRate,
-		avgGrade:     avgGrade,
-	}
-}
-
-// aggregateToModelLevel adds test case metrics to model totals
-func aggregateToModelLevel(modelResult *modelResult, failures []string, grades []evals.Grade, iterations int64) {
-	modelResult.totalFailures += int64(len(failures))
-	modelResult.totalGrades += int64(len(grades))
-	modelResult.totalIterations += iterations
-}
-
-// aggregateToEvalLevel adds test case metrics to evaluation totals
-func aggregateToEvalLevel(evalResult *evalResult, failures []string, grades []evals.Grade, iterations int64) {
-	evalResult.totalFailures += int64(len(failures))
-	evalResult.totalGrades += int64(len(grades))
-	evalResult.totalIterations += iterations
-}
-
-// calculateAggregatedMetrics computes pass rates and average grades for models and evaluations
+// calculateAggregatedMetrics computes pass rates and average grades at every level
 func calculateAggregatedMetrics(evalResults map[string]*evalResult) {
 	for _, evalResult := range evalResults {
-		// Calculate eval-level aggregates
-		if evalResult.totalIterations > 0 {
-			evalResult.passRate = float64(evalResult.totalIterations-evalResult.totalFailures) / float64(evalResult.totalIterations)
-		}
-		if evalResult.totalGrades > 0 {
-			evalResult.avgGrade = calculateTotalGradeScore(evalResult) / float64(evalResult.totalGrades)
-		}
-
-		// Calculate model-level aggregates
+		evalResult.finalize()
 		for _, modelResult := range evalResult.modelResults {
-			if modelResult.totalIterations > 0 {
-				modelResult.passRate = float64(modelResult.totalIterations-modelResult.totalFailures) / float64(modelResult.totalIterations)
-			}
-			if modelResult.totalGrades > 0 {
-				modelResult.avgGrade = calculateModelTotalGradeScore(modelResult) / float64(modelResult.totalGrades)
+			modelResult.finalize()
+			for _, testCaseResult := range modelResult.testCaseResults {
+				testCaseResult.finalize()
 			}
 		}
 	}
-}
-
-// calculateTotalGradeScore sums all grade scores across all models and test cases
-func calculateTotalGradeScore(evalResult *evalResult) float64 {
-	var totalScore float64
-	for _, modelResult := range evalResult.modelResults {
-		totalScore += calculateModelTotalGradeScore(modelResult)
-	}
-	return totalScore
-}
-
-// calculateModelTotalGradeScore sums all grade scores for a specific model
-func calculateModelTotalGradeScore(modelResult *modelResult) float64 {
-	var totalScore float64
-	for _, testCaseResult := range modelResult.testCaseResults {
-		for _, grade := range testCaseResult.grades {
-			totalScore += grade.Score
-		}
-	}
-	return totalScore
 }
 
 // generateFormattedReport creates the tree-based report from processed results
@@ -228,15 +155,8 @@ func generateFormattedReport(evalResults map[string]*evalResult, threshold float
 	sort.Strings(evalNames)
 
 	for _, evalName := range evalNames {
-		evalResult := evalResults[evalName]
-
-		// Check if eval is below threshold
-		if checkEvalBelowThreshold(evalResult, threshold) {
-			hasFailure = true
-		}
-
 		// Add evaluation to tree and process models
-		if addEvalToTree(tree, evalResult, threshold) {
+		if addEvalToTree(tree, evalResults[evalName], threshold) {
 			hasFailure = true
 		}
 	}
@@ -254,10 +174,10 @@ func addEvalToTree(tree *pathtree.Tree, evalResult *evalResult, threshold float6
 	hasFailure := false
 
 	// Format evaluation header
-	evalValue, evalLabel := formatEvalForTree(evalResult)
+	evalValue, evalLabel := evalResult.formatForTree()
 
 	// Add failure indicator if below threshold
-	if checkEvalBelowThreshold(evalResult, threshold) {
+	if evalResult.belowThreshold(threshold) {
 		evalValue = fmt.Sprintf("❌ %s", evalValue)
 		hasFailure = true
 	}
@@ -284,42 +204,17 @@ func addEvalToTree(tree *pathtree.Tree, evalResult *evalResult, threshold float6
 	return hasFailure
 }
 
-// formatEvalForTree formats evaluation metrics for tree display
-func formatEvalForTree(evalResult *evalResult) (string, string) {
-	hasPassRate := evalResult.totalFailures > 0
-	hasGrades := evalResult.totalGrades > 0
-
-	switch {
-	case hasPassRate && hasGrades:
-		value := fmt.Sprintf("%.1f%% pass, %.2f avg", evalResult.passRate*100, evalResult.avgGrade)
-		label := fmt.Sprintf("(%d/%d)", evalResult.totalIterations-evalResult.totalFailures, evalResult.totalIterations)
-		return value, label
-	case hasGrades:
-		gradeWord := "results"
-		if evalResult.totalGrades == 1 {
-			gradeWord = "result"
-		}
-		value := fmt.Sprintf("%.2f avg", evalResult.avgGrade)
-		label := fmt.Sprintf("(%d %s)", evalResult.totalGrades, gradeWord)
-		return value, label
-	default:
-		value := fmt.Sprintf("%.1f%%", evalResult.passRate*100)
-		label := fmt.Sprintf("(%d/%d)", evalResult.totalIterations-evalResult.totalFailures, evalResult.totalIterations)
-		return value, label
-	}
-}
-
 // addModelToTree adds model results to the tree under the evaluation
 func addModelToTree(tree *pathtree.Tree, evalName string, modelResult *modelResult, threshold float64) bool {
 	// Find failing test cases
 	failingTestCases := findFailingTestCases(modelResult, threshold)
 
 	// Format model header
-	modelValue, modelLabel := formatModelForTree(modelResult)
+	modelValue, modelLabel := modelResult.formatForTree()
 
 	hasFailure := false
 	// Add failure indicator if below threshold
-	if checkModelBelowThreshold(modelResult, threshold) {
+	if modelResult.belowThreshold(threshold) {
 		modelValue = fmt.Sprintf("❌ %s", modelValue)
 		hasFailure = true
 	} else if len(failingTestCases) == 0 {
@@ -335,7 +230,7 @@ func addModelToTree(tree *pathtree.Tree, evalName string, modelResult *modelResu
 		testCaseResult := modelResult.testCaseResults[testCaseName]
 
 		// Format test case
-		testCaseValue, testCaseLabel := formatTestCaseForTree(testCaseResult)
+		testCaseValue, testCaseLabel := testCaseResult.formatForTree()
 
 		// Add failure indicator (all of these test cases are below threshold)
 		testCaseValue = fmt.Sprintf("❌ %s", testCaseValue)
@@ -346,61 +241,10 @@ func addModelToTree(tree *pathtree.Tree, evalName string, modelResult *modelResu
 
 		// Add failure details as child nodes
 		failureCount := addFailuresToTree(tree, testCasePath, testCaseResult.failures)
-		_ = addBelowThresholdGradesToTree(tree, testCasePath, testCaseResult.grades, threshold, failureCount)
+		addBelowThresholdGradesToTree(tree, testCasePath, testCaseResult.grades, threshold, failureCount)
 	}
 
 	return hasFailure
-}
-
-// formatModelForTree formats model metrics for tree display
-func formatModelForTree(modelResult *modelResult) (string, string) {
-	hasPassRate := modelResult.totalFailures > 0
-	hasGrades := modelResult.totalGrades > 0
-
-	switch {
-	case hasPassRate && hasGrades:
-		value := fmt.Sprintf("%.1f%% pass, %.2f avg", modelResult.passRate*100, modelResult.avgGrade)
-		label := fmt.Sprintf("(%d/%d)", modelResult.totalIterations-modelResult.totalFailures, modelResult.totalIterations)
-		return value, label
-	case hasGrades:
-		gradeWord := "results"
-		if modelResult.totalGrades == 1 {
-			gradeWord = "result"
-		}
-		value := fmt.Sprintf("%.2f avg", modelResult.avgGrade)
-		label := fmt.Sprintf("(%d %s)", modelResult.totalGrades, gradeWord)
-		return value, label
-	default:
-		value := fmt.Sprintf("%.1f%%", modelResult.passRate*100)
-		label := fmt.Sprintf("(%d/%d)", modelResult.totalIterations-modelResult.totalFailures, modelResult.totalIterations)
-		return value, label
-	}
-}
-
-// formatTestCaseForTree formats test case metrics for tree display
-func formatTestCaseForTree(testCaseResult *testCaseResult) (string, string) {
-	hasPassRate := len(testCaseResult.failures) > 0
-	hasGrades := len(testCaseResult.grades) > 0
-
-	switch {
-	case hasPassRate && hasGrades:
-		value := fmt.Sprintf("%.1f%% pass, %.2f avg", testCaseResult.passRate*100, testCaseResult.avgGrade)
-		label := fmt.Sprintf("(%d/%d)", testCaseResult.iterations-int64(len(testCaseResult.failures)), testCaseResult.iterations)
-		return value, label
-	case hasGrades:
-		gradeCount := len(testCaseResult.grades)
-		gradeWord := "results"
-		if gradeCount == 1 {
-			gradeWord = "result"
-		}
-		value := fmt.Sprintf("%.2f avg", testCaseResult.avgGrade)
-		label := fmt.Sprintf("(%d %s)", gradeCount, gradeWord)
-		return value, label
-	default:
-		value := fmt.Sprintf("%.1f%%", testCaseResult.passRate*100)
-		label := fmt.Sprintf("(%d/%d)", testCaseResult.iterations-int64(len(testCaseResult.failures)), testCaseResult.iterations)
-		return value, label
-	}
 }
 
 // addFailuresToTree adds failure messages as child nodes
@@ -413,7 +257,7 @@ func addFailuresToTree(tree *pathtree.Tree, basePath string, failures []string) 
 }
 
 // addBelowThresholdGradesToTree adds below-threshold grades as child nodes
-func addBelowThresholdGradesToTree(tree *pathtree.Tree, basePath string, grades []evals.Grade, threshold float64, startIndex int) int {
+func addBelowThresholdGradesToTree(tree *pathtree.Tree, basePath string, grades []evals.Grade, threshold float64, startIndex int) {
 	count := 0
 	for _, grade := range grades {
 		if grade.Score < threshold {
@@ -423,7 +267,6 @@ func addBelowThresholdGradesToTree(tree *pathtree.Tree, basePath string, grades 
 			count++
 		}
 	}
-	return count
 }
 
 // generateSummaryTable creates a hierarchical summary table showing model performance across evaluations
@@ -483,7 +326,7 @@ func generateSummaryTable(evalResults map[string]*evalResult, threshold float64)
 			modelResult := evalResult.modelResults[modelName]
 			if modelResult != nil {
 				value := modelResult.passRate * 100
-				if modelResult.totalGrades > 0 {
+				if modelResult.gradeCount > 0 {
 					value = modelResult.avgGrade * 100
 				}
 				sum += value
@@ -492,8 +335,8 @@ func generateSummaryTable(evalResults map[string]*evalResult, threshold float64)
 				valueStr := fmt.Sprintf("%.1f%%", value)
 				if len(modelResult.testCaseResults) > 1 {
 					valueStr = fmt.Sprintf("%d/%d (%.1f%%)",
-						modelResult.totalIterations-modelResult.totalFailures,
-						modelResult.totalIterations, value)
+						modelResult.iterations-modelResult.failureCount,
+						modelResult.iterations, value)
 				}
 
 				if value < threshold*100 {
@@ -611,47 +454,14 @@ func addTestCaseSummaryRows(table *tablewriter.Table, evalResult *evalResult, mo
 	}
 }
 
-// checkEvalBelowThreshold determines if an evaluation failed to meet the threshold
-func checkEvalBelowThreshold(evalResult *evalResult, threshold float64) bool {
-	if evalResult.passRate < threshold {
-		return true
-	}
-	if evalResult.totalGrades > 0 && evalResult.avgGrade < threshold {
-		return true
-	}
-	return false
-}
-
-// checkModelBelowThreshold determines if a model failed to meet the threshold
-func checkModelBelowThreshold(modelResult *modelResult, threshold float64) bool {
-	if modelResult.passRate < threshold {
-		return true
-	}
-	if modelResult.totalGrades > 0 && modelResult.avgGrade < threshold {
-		return true
-	}
-	return false
-}
-
 // findFailingTestCases identifies test cases that are below threshold
 func findFailingTestCases(modelResult *modelResult, threshold float64) []string {
 	var failingTestCases []string
 	for testCaseName, testCaseResult := range modelResult.testCaseResults {
-		if isTestCaseBelowThreshold(testCaseResult, threshold) {
+		if testCaseResult.belowThreshold(threshold) {
 			failingTestCases = append(failingTestCases, testCaseName)
 		}
 	}
 	sort.Strings(failingTestCases)
 	return failingTestCases
-}
-
-// isTestCaseBelowThreshold checks if a test case is below threshold
-func isTestCaseBelowThreshold(testCaseResult *testCaseResult, threshold float64) bool {
-	if testCaseResult.passRate < threshold {
-		return true
-	}
-	if len(testCaseResult.grades) > 0 && testCaseResult.avgGrade < threshold {
-		return true
-	}
-	return false
 }
