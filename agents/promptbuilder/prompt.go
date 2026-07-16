@@ -65,10 +65,9 @@ func (p *Prompt) GetBindings() map[string]struct{} {
 	return names
 }
 
-// BindStringLiteral binds a literal string value to a placeholder
-// The value comes from the developer, not from user input
-// Returns a new Prompt with the binding applied
-func (p *Prompt) BindStringLiteral(name string, value stringLiteral) (*Prompt, error) {
+// bind returns a copy of the Prompt with b bound at name, after verifying
+// that the placeholder exists and is not already bound.
+func (p *Prompt) bind(name string, b binding) (*Prompt, error) {
 	if err := existsAndUnbound(p.bindings, name); err != nil {
 		return nil, err
 	}
@@ -76,53 +75,36 @@ func (p *Prompt) BindStringLiteral(name string, value stringLiteral) (*Prompt, e
 		template: p.template,
 		bindings: maps.Clone(p.bindings),
 	}
-	newPrompt.bindings[name] = &literalBinding{val: string(value)}
+	newPrompt.bindings[name] = b
 	return newPrompt, nil
+}
+
+// BindStringLiteral binds a literal string value to a placeholder
+// The value comes from the developer, not from user input
+// Returns a new Prompt with the binding applied
+func (p *Prompt) BindStringLiteral(name string, value stringLiteral) (*Prompt, error) {
+	return p.bind(name, &literalBinding{val: string(value)})
 }
 
 // BindXML binds structured data to a placeholder by marshaling it as XML
 // The data parameter can be any type that xml.Marshal accepts
 // Returns a new Prompt with the binding applied
 func (p *Prompt) BindXML(name string, data any) (*Prompt, error) {
-	if err := existsAndUnbound(p.bindings, name); err != nil {
-		return nil, err
-	}
-	newPrompt := &Prompt{
-		template: p.template,
-		bindings: maps.Clone(p.bindings),
-	}
-	newPrompt.bindings[name] = &xmlBinding{data: data}
-	return newPrompt, nil
+	return p.bind(name, &xmlBinding{data: data})
 }
 
 // BindJSON binds structured data to a placeholder by marshaling it as JSON
 // The data parameter can be any type that json.Marshal accepts
 // Returns a new Prompt with the binding applied
 func (p *Prompt) BindJSON(name string, data any) (*Prompt, error) {
-	if err := existsAndUnbound(p.bindings, name); err != nil {
-		return nil, err
-	}
-	newPrompt := &Prompt{
-		template: p.template,
-		bindings: maps.Clone(p.bindings),
-	}
-	newPrompt.bindings[name] = &jsonBinding{data: data}
-	return newPrompt, nil
+	return p.bind(name, &jsonBinding{data: data})
 }
 
 // BindYAML binds structured data to a placeholder by marshaling it as YAML
 // The data parameter can be any type that yaml.Marshal accepts
 // Returns a new Prompt with the binding applied
 func (p *Prompt) BindYAML(name string, data any) (*Prompt, error) {
-	if err := existsAndUnbound(p.bindings, name); err != nil {
-		return nil, err
-	}
-	newPrompt := &Prompt{
-		template: p.template,
-		bindings: maps.Clone(p.bindings),
-	}
-	newPrompt.bindings[name] = &yamlBinding{data: data}
-	return newPrompt, nil
+	return p.bind(name, &yamlBinding{data: data})
 }
 
 // BindUnorderedList binds items as an unordered Markdown list. Items may
@@ -140,6 +122,8 @@ func (p *Prompt) BindOrderedList(name string, items OrderedList) (*Prompt, error
 }
 
 func (p *Prompt) bindList(name string, binding listBinding) (*Prompt, error) {
+	// Check the placeholder before the items so error precedence matches the
+	// other Bind methods.
 	if err := existsAndUnbound(p.bindings, name); err != nil {
 		return nil, err
 	}
@@ -148,12 +132,7 @@ func (p *Prompt) bindList(name string, binding listBinding) (*Prompt, error) {
 			return nil, fmt.Errorf("list item %d for %q contains a line break; items must be single-line", i, name)
 		}
 	}
-	newPrompt := &Prompt{
-		template: p.template,
-		bindings: maps.Clone(p.bindings),
-	}
-	newPrompt.bindings[name] = &binding
-	return newPrompt, nil
+	return p.bind(name, &binding)
 }
 
 // BindPrompt binds another Prompt's Build output to a placeholder. The inner
@@ -161,18 +140,15 @@ func (p *Prompt) bindList(name string, binding listBinding) (*Prompt, error) {
 // inner surface as Build errors on the outer. Use this to compose Prompts when
 // the content at a placeholder is itself produced by a (literal-built) Prompt.
 func (p *Prompt) BindPrompt(name string, other *Prompt) (*Prompt, error) {
+	// Check the placeholder before other so error precedence matches the
+	// other Bind methods.
 	if err := existsAndUnbound(p.bindings, name); err != nil {
 		return nil, err
 	}
 	if other == nil {
 		return nil, fmt.Errorf("BindPrompt: prompt for %q is nil", name)
 	}
-	newPrompt := &Prompt{
-		template: p.template,
-		bindings: maps.Clone(p.bindings),
-	}
-	newPrompt.bindings[name] = &promptBinding{p: other}
-	return newPrompt, nil
+	return p.bind(name, &promptBinding{p: other})
 }
 
 // maxCompositionDepth bounds how deeply BindPrompt compositions can nest, so
