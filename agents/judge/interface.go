@@ -7,6 +7,7 @@ package judge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -36,6 +37,49 @@ type Request struct {
 
 	// Criterion specifies the evaluation criterion.
 	Criterion string `json:"criterion"`
+}
+
+// validate checks the mode-specific field requirements shared by all judge
+// implementations.
+func (r *Request) validate() error {
+	switch r.Mode {
+	case GoldenMode:
+		if r.ReferenceAnswer == "" {
+			return errors.New("reference_answer is required for golden mode")
+		}
+		if r.ActualAnswer == "" {
+			return errors.New("actual_answer is required")
+		}
+		if r.Criterion == "" {
+			return errors.New("criterion is required")
+		}
+
+	case BenchmarkMode:
+		if r.ReferenceAnswer == "" {
+			return errors.New("reference_answer (first candidate) is required for benchmark mode")
+		}
+		if r.ActualAnswer == "" {
+			return errors.New("actual_answer (second candidate) is required for benchmark mode")
+		}
+		if r.Criterion == "" {
+			return errors.New("criterion is required for benchmark mode")
+		}
+
+	case StandaloneMode:
+		if r.ReferenceAnswer != "" {
+			return errors.New("reference_answer must not be provided for standalone mode")
+		}
+		if r.ActualAnswer == "" {
+			return errors.New("actual_answer is required for standalone mode")
+		}
+		if r.Criterion == "" {
+			return errors.New("criterion is required for standalone mode")
+		}
+
+	default:
+		return fmt.Errorf("unsupported mode: %q", r.Mode)
+	}
+	return nil
 }
 
 // Judgement contains the judgment result

@@ -260,6 +260,20 @@ Focus suggestions on how to better meet the criterion requirements.
 
 Respond with only the JSON object, no additional text.`)
 
+// modePrompts orders the per-mode prompts for the provider constructors:
+// golden, benchmark, standalone. The provider constructors assign the
+// resulting executors positionally, so this order must match the
+// goldenExecutor/benchmarkExecutor/standaloneExecutor assignments in
+// claude.go and google.go.
+var modePrompts = []struct {
+	name   string
+	prompt *promptbuilder.Prompt
+}{
+	{name: "golden", prompt: goldenPrompt},
+	{name: "benchmark", prompt: benchmarkPrompt},
+	{name: "standalone", prompt: standalonePrompt},
+}
+
 // Bind implements promptbuilder.Bindable for Request
 func (r *Request) Bind(prompt *promptbuilder.Prompt) (*promptbuilder.Prompt, error) {
 	var err error

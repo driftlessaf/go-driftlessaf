@@ -7,7 +7,6 @@ package judge
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -61,109 +60,51 @@ func newGoogle(ctx context.Context, projectID, region, model string, opts ...goo
 		Required: []string{"mode", "score", "reasoning", "suggestions"},
 	}
 
-	// Create golden mode executor
-	goldenOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
+	// Create one executor per mode using the pre-parsed templates from
+	// prompts.go; executors apply options read-only, so one slice is shared.
+	execOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		googleexecutor.WithModel[*Request, *Judgement](model),
 		googleexecutor.WithTemperature[*Request, *Judgement](0.1), // Lower temperature for consistent judgments
 		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
 		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
 		googleexecutor.WithResponseSchema[*Request, *Judgement](responseSchema),
 	}
-	goldenOpts = append(goldenOpts, opts...) // Apply caller-provided options (e.g., enricher)
-	goldenExecutor, err := googleexecutor.New[*Request, *Judgement](
-		client,
-		goldenPrompt,
-		goldenOpts...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create golden executor: %w", err)
-	}
-
-	// Create benchmark mode executor
-	benchmarkOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
-		googleexecutor.WithModel[*Request, *Judgement](model),
-		googleexecutor.WithTemperature[*Request, *Judgement](0.1), // Lower temperature for consistent judgments
-		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
-		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
-		googleexecutor.WithResponseSchema[*Request, *Judgement](responseSchema),
-	}
-	benchmarkOpts = append(benchmarkOpts, opts...) // Apply caller-provided options (e.g., enricher)
-	benchmarkExecutor, err := googleexecutor.New[*Request, *Judgement](
-		client,
-		benchmarkPrompt,
-		benchmarkOpts...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create benchmark executor: %w", err)
-	}
-
-	// Create standalone mode executor
-	standaloneOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
-		googleexecutor.WithModel[*Request, *Judgement](model),
-		googleexecutor.WithTemperature[*Request, *Judgement](0.1), // Lower temperature for consistent judgments
-		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
-		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
-		googleexecutor.WithResponseSchema[*Request, *Judgement](responseSchema),
-	}
-	standaloneOpts = append(standaloneOpts, opts...) // Apply caller-provided options (e.g., enricher)
-	standaloneExecutor, err := googleexecutor.New[*Request, *Judgement](
-		client,
-		standalonePrompt, // Use pre-parsed template from prompts.go
-		standaloneOpts...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create standalone executor: %w", err)
+	execOpts = append(execOpts, opts...) // Apply caller-provided options (e.g., enricher)
+	executors := make([]googleexecutor.Interface[*Request, *Judgement], len(modePrompts))
+	for i, mp := range modePrompts {
+		executor, err := googleexecutor.New[*Request, *Judgement](
+			client,
+			mp.prompt,
+			execOpts...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create %s executor: %w", mp.name, err)
+		}
+		executors[i] = executor
 	}
 
 	return &google{
-		goldenExecutor:     goldenExecutor,
-		benchmarkExecutor:  benchmarkExecutor,
-		standaloneExecutor: standaloneExecutor,
+		goldenExecutor:     executors[0],
+		benchmarkExecutor:  executors[1],
+		standaloneExecutor: executors[2],
 	}, nil
 }
 
 // Judge implements Interface
 func (g *google) Judge(ctx context.Context, request *Request) (*Judgement, error) {
-	// Validate request and select executor based on mode
-	var executor googleexecutor.Interface[*Request, *Judgement]
+	if err := request.validate(); err != nil {
+		return nil, err
+	}
 
+	// Select executor based on mode
+	var executor googleexecutor.Interface[*Request, *Judgement]
 	switch request.Mode {
 	case GoldenMode:
-		if request.ReferenceAnswer == "" {
-			return nil, errors.New("reference_answer is required for golden mode")
-		}
-		if request.ActualAnswer == "" {
-			return nil, errors.New("actual_answer is required")
-		}
-		if request.Criterion == "" {
-			return nil, errors.New("criterion is required")
-		}
 		executor = g.goldenExecutor
-
 	case BenchmarkMode:
-		if request.ReferenceAnswer == "" {
-			return nil, errors.New("reference_answer (first candidate) is required for benchmark mode")
-		}
-		if request.ActualAnswer == "" {
-			return nil, errors.New("actual_answer (second candidate) is required for benchmark mode")
-		}
-		if request.Criterion == "" {
-			return nil, errors.New("criterion is required for benchmark mode")
-		}
 		executor = g.benchmarkExecutor
-
 	case StandaloneMode:
-		if request.ReferenceAnswer != "" {
-			return nil, errors.New("reference_answer must not be provided for standalone mode")
-		}
-		if request.ActualAnswer == "" {
-			return nil, errors.New("actual_answer is required for standalone mode")
-		}
-		if request.Criterion == "" {
-			return nil, errors.New("criterion is required for standalone mode")
-		}
 		executor = g.standaloneExecutor
-
 	default:
 		return nil, fmt.Errorf("unsupported mode: %q", request.Mode)
 	}
