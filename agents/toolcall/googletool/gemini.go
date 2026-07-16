@@ -46,34 +46,6 @@ type SubmitMetadata[Response any] struct {
 	) toolcall.SubmitOutcome[Response]
 }
 
-// Param extracts a parameter from a Gemini function call with type safety.
-// Returns the extracted value or a FunctionResponse error that can be sent back to the model.
-func Param[T any](call *genai.FunctionCall, name string) (T, *genai.FunctionResponse) {
-	v, err := params.Extract[T](call.Args, name)
-	if err != nil {
-		return v, &genai.FunctionResponse{
-			ID:       call.ID,
-			Name:     call.Name,
-			Response: params.Error("%s", err),
-		}
-	}
-	return v, nil
-}
-
-// OptionalParam extracts an optional parameter from a Gemini function call.
-// Returns the default value if the parameter doesn't exist, or a FunctionResponse error if type conversion fails.
-func OptionalParam[T any](call *genai.FunctionCall, name string, defaultValue T) (T, *genai.FunctionResponse) {
-	v, err := params.ExtractOptional[T](call.Args, name, defaultValue)
-	if err != nil {
-		return v, &genai.FunctionResponse{
-			ID:       call.ID,
-			Name:     call.Name,
-			Response: params.Error("%s", err),
-		}
-	}
-	return v, nil
-}
-
 // Error creates a FunctionResponse with an error message
 func Error(call *genai.FunctionCall, format string, args ...any) *genai.FunctionResponse {
 	return &genai.FunctionResponse{

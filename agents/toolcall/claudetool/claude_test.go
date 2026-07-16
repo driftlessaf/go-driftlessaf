@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package claudetool
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 
@@ -67,119 +66,6 @@ func TestError(t *testing.T) {
 	}
 }
 
-// TestErrorWithContext tests the ErrorWithContext function
-func TestErrorWithContext(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		context  map[string]any
-		expected map[string]any
-	}{{
-		name:    "error with empty context",
-		err:     errors.New("test error"),
-		context: map[string]any{},
-		expected: map[string]any{
-			"error": "test error",
-		},
-	}, {
-		name: "error with single context field",
-		err:  errors.New("file not found"),
-		context: map[string]any{
-			"filename": "test.txt",
-		},
-		expected: map[string]any{
-			"error":    "file not found",
-			"filename": "test.txt",
-		},
-	}, {
-		name: "error with multiple context fields",
-		err:  errors.New("validation failed"),
-		context: map[string]any{
-			"field":  "email",
-			"value":  "invalid@",
-			"line":   42,
-			"column": 10,
-		},
-		expected: map[string]any{
-			"error":  "validation failed",
-			"field":  "email",
-			"value":  "invalid@",
-			"line":   42,
-			"column": 10,
-		},
-	}, {
-		name:    "error with nil context",
-		err:     errors.New("nil context test"),
-		context: nil,
-		expected: map[string]any{
-			"error": "nil context test",
-		},
-	}, {
-		name: "context error field overwrites error",
-		err:  errors.New("actual error"),
-		context: map[string]any{
-			"error": "this overwrites the actual error",
-			"other": "preserved",
-		},
-		expected: map[string]any{
-			"error": "this overwrites the actual error", // Context fields overwrite the error field
-			"other": "preserved",
-		},
-	}, {
-		name: "complex context values",
-		err:  errors.New("complex error"),
-		context: map[string]any{
-			"array": []int{1, 2, 3},
-			"nested": map[string]any{
-				"key": "value",
-			},
-			"bool":  true,
-			"float": 3.14,
-		},
-		expected: map[string]any{
-			"error": "complex error",
-			"array": []int{1, 2, 3},
-			"nested": map[string]any{
-				"key": "value",
-			},
-			"bool":  true,
-			"float": 3.14,
-		},
-	}}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ErrorWithContext(tt.err, tt.context)
-			if diff := cmp.Diff(tt.expected, got); diff != "" {
-				t.Errorf("ErrorWithContext() mismatch (-want, +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-// TestErrorWithContext_ErrorNil tests behavior with nil error
-func TestErrorWithContext_ErrorNil(t *testing.T) {
-	// Test what happens when a nil error is passed
-	defer func() {
-		if r := recover(); r != nil {
-			// If it panics, that's one valid behavior
-			t.Logf("Function panicked with nil error: %v", r)
-		}
-	}()
-
-	context := map[string]any{
-		"key": "value",
-	}
-
-	// This might panic or return "<nil>" as the error message
-	got := ErrorWithContext(nil, context)
-	if errorMsg, ok := got["error"].(string); ok {
-		if errorMsg != "<nil>" {
-			t.Errorf("error message: got %s, want <nil>", errorMsg)
-		}
-	}
-}
-
 // TestErrorConcurrent tests thread safety of the functions
 func TestErrorConcurrent(t *testing.T) {
 	// Test concurrent access to ensure thread safety
@@ -192,14 +78,6 @@ func TestErrorConcurrent(t *testing.T) {
 			expected := fmt.Sprintf("concurrent error %d", id)
 			if result["error"] != expected {
 				t.Errorf("Concurrent Error failed: got %v, want %v", result["error"], expected)
-			}
-
-			// Test ErrorWithContext
-			err := fmt.Errorf("error %d", id)
-			ctx := map[string]any{"id": id}
-			result2 := ErrorWithContext(err, ctx)
-			if result2["error"] != err.Error() || result2["id"] != id {
-				t.Errorf("Concurrent ErrorWithContext failed for id %d", id)
 			}
 
 			done <- true

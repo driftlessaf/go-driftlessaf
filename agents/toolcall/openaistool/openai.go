@@ -59,11 +59,6 @@ func Error(format string, args ...any) map[string]any {
 	return params.Error(format, args...)
 }
 
-// ErrorWithContext creates an error response with additional context.
-func ErrorWithContext(err error, context map[string]any) map[string]any {
-	return params.ErrorWithContext(err, context)
-}
-
 // FromTool converts a unified tool to OpenAI-specific metadata.
 func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
 	return Metadata[Resp]{

@@ -7,7 +7,6 @@ package openaistool
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -41,37 +40,6 @@ func TestError(t *testing.T) {
 			got := Error(tt.format, tt.args...)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
 				t.Errorf("Error() mismatch (-want, +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-func TestErrorWithContext(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		context  map[string]any
-		expected map[string]any
-	}{{
-		name:     "error with nil context",
-		err:      errors.New("test error"),
-		context:  nil,
-		expected: map[string]any{"error": "test error"},
-	}, {
-		name:    "error with context fields",
-		err:     errors.New("file not found"),
-		context: map[string]any{"filename": "test.txt"},
-		expected: map[string]any{
-			"error":    "file not found",
-			"filename": "test.txt",
-		},
-	}}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ErrorWithContext(tt.err, tt.context)
-			if diff := cmp.Diff(tt.expected, got); diff != "" {
-				t.Errorf("ErrorWithContext() mismatch (-want, +got):\n%s", diff)
 			}
 		})
 	}

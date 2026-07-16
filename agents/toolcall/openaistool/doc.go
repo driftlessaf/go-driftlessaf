@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 // OpenAI-compatible [openai.ChatCompletionToolParam] metadata for use with
 // the [openaiexecutor].
 //
-// This package mirrors [claudetool] and [googletool], providing type-safe
-// parameter extraction and error formatting for tool handlers that receive
+// This package mirrors [claudetool] and [googletool], providing tool
+// conversion and error formatting for tool handlers that receive
 // [openai.ChatCompletionMessageToolCall] values.
 //
 // # Tool Conversion
@@ -23,7 +23,7 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Error Formatting
 //
-// Use [Error] and [ErrorWithContext] to build tool error responses:
+// Use [Error] to build tool error responses:
 //
 //	return openaistool.Error("file not found: %s", path)
 //

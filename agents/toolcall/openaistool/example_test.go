@@ -7,7 +7,6 @@ package openaistool_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -73,13 +72,4 @@ func ExampleError() {
 	result := openaistool.Error("file not found: %q", "/etc/missing")
 	fmt.Println(result["error"])
 	// Output: file not found: "/etc/missing"
-}
-
-func ExampleErrorWithContext() {
-	result := openaistool.ErrorWithContext(
-		errors.New("permission denied"),
-		map[string]any{"path": "/etc/shadow"},
-	)
-	fmt.Println(result["error"])
-	// Output: permission denied
 }
