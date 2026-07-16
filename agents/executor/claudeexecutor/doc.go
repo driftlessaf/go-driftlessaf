@@ -40,8 +40,8 @@ SPDX-License-Identifier: Apache-2.0
 //	            Name:        "read_file",
 //	            Description: anthropic.String("Read a file"),
 //	            InputSchema: anthropic.ToolInputSchemaParam{
-//	                Properties: map[string]interface{}{
-//	                    "path": map[string]interface{}{
+//	                Properties: map[string]any{
+//	                    "path": map[string]any{
 //	                        "type": "string",
 //	                        "description": "File path",
 //	                    },
@@ -49,9 +49,9 @@ SPDX-License-Identifier: Apache-2.0
 //	                Required: []string{"path"},
 //	            },
 //	        },
-//	        Handler: func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*Response]) map[string]interface{} {
+//	        Handler: func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[*Response]) map[string]any {
 //	            // Tool implementation
-//	            return map[string]interface{}{"content": "file contents"}
+//	            return map[string]any{"content": "file contents"}
 //	        },
 //	    },
 //	}

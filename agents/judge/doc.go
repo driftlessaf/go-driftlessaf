@@ -51,8 +51,8 @@ SPDX-License-Identifier: Apache-2.0
 // The NewGoldenEval function creates an evals.ObservableTraceCallback that:
 //  1. Extracts the response from trace.Result as formatted JSON
 //  2. Sends it to the judge along with reference answer and criterion
-//  3. Logs the judgment score, reasoning, and suggestions
-//  4. Currently only logs results (threshold checking to be added)
+//  3. Grades the trace with the judgment score and reasoning via the Observer
+//  4. Logs any suggestions returned by the judge
 //
 // # Thread Safety
 //

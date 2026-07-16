@@ -15,9 +15,10 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Model Support
 //
-// The framework supports both Claude and Gemini models:
-//   - Models starting with "gemini-" use Google's Generative AI SDK
-//   - Models starting with "claude-" use Anthropic's SDK via Vertex AI
+// The model parameter determines which provider implementation is used:
+//   - Models starting with "gemini-" use Google's Generative AI SDK (native)
+//   - Models starting with "claude-" use Anthropic's SDK via Vertex AI (native)
+//   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
 //
 // # Usage
 //
