@@ -241,3 +241,86 @@ func TestSubmitToolNameDefaults(t *testing.T) {
 		t.Errorf("submitToolName default: got = %q, want = %q", got, want)
 	}
 }
+
+// gradedResponse carries a jsonschema enum so the base schema-conformance
+// validator, seeded by New with no WithResultValidator registered, has a
+// declared constraint to enforce.
+type gradedResponse struct {
+	Answer string `json:"answer" jsonschema:"required,enum=yes,enum=no"`
+}
+
+// TestBaseSchemaValidatorRejectsNonconformingSubmission pins the built-in
+// schema gate: a submission that parses but violates the response type's
+// declared schema is rejected back to the model with the violation named,
+// and a conforming resubmission commits.
+func TestBaseSchemaValidatorRejectsNonconformingSubmission(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := promptbuilder.NewPrompt("test prompt")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+	exec, err := New[*testBindable, gradedResponse](nil, prompt,
+		WithSubmitResultProvider[*testBindable, gradedResponse](func() (googletool.SubmitMetadata[gradedResponse], error) {
+			return googletool.SubmitMetadata[gradedResponse]{
+				Definition: &genai.FunctionDeclaration{Name: "submit_result"},
+				Handler: func(_ context.Context, call *genai.FunctionCall, _ *agenttrace.Trace[gradedResponse]) toolcall.SubmitOutcome[gradedResponse] {
+					answer, _ := call.Args["answer"].(string)
+					return toolcall.SubmitOutcome[gradedResponse]{
+						Accepted:   true,
+						Response:   gradedResponse{Answer: answer},
+						Reasoning:  "because",
+						ToolResult: map[string]any{"success": true},
+					}
+				},
+			}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	e := exec.(*executor[*testBindable, gradedResponse])
+
+	ctx := t.Context()
+	trace, _ := agenttrace.StartTrace[gradedResponse](ctx, "prompt")
+
+	var result gradedResponse
+	toolResult, committed, err := e.evaluateSubmission(ctx, &genai.FunctionCall{
+		ID: "c1", Name: "submit_result", Args: map[string]any{"answer": "maybe"},
+	}, trace, &result)
+	if err != nil {
+		t.Fatalf("evaluateSubmission: got = %v, want = nil", err)
+	}
+	if committed {
+		t.Error("committed: got = true, want = false")
+	}
+	if got, want := result.Answer, ""; got != want {
+		t.Errorf("result must stay unset on rejection: got = %q, want = %q", got, want)
+	}
+	findings, _ := toolResult["findings"].([]callbacks.Finding)
+	if got, want := len(findings), 1; got != want {
+		t.Fatalf("findings: got = %d, want = %d (%#v)", got, want, toolResult)
+	}
+	if got, want := findings[0].Identifier, "schema:answer"; got != want {
+		t.Errorf("finding identifier: got = %q, want = %q", got, want)
+	}
+	if !strings.Contains(findings[0].Details, "allowed values") {
+		t.Errorf("finding details: got = %q, want mention of allowed values", findings[0].Details)
+	}
+
+	toolResult, committed, err = e.evaluateSubmission(ctx, &genai.FunctionCall{
+		ID: "c2", Name: "submit_result", Args: map[string]any{"answer": "yes"},
+	}, trace, &result)
+	if err != nil {
+		t.Fatalf("evaluateSubmission: got = %v, want = nil", err)
+	}
+	if !committed {
+		t.Error("committed: got = false, want = true")
+	}
+	if got, want := result.Answer, "yes"; got != want {
+		t.Errorf("result: got = %q, want = %q", got, want)
+	}
+	if success, _ := toolResult["success"].(bool); !success {
+		t.Errorf("tool result: got = %#v, want = success:true", toolResult)
+	}
+}
