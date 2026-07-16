@@ -7,6 +7,7 @@ package metrics
 
 import (
 	"context"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/chainguard-dev/clog"
@@ -26,7 +27,6 @@ import (
 // with gen_ai.token.type dimension).
 // See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/
 type GenAI struct {
-	meter            metric.Meter
 	promptTokens     metric.Int64Counter
 	completionTokens metric.Int64Counter
 	toolCallCounter  metric.Int64Counter
@@ -46,6 +46,18 @@ type GenAI struct {
 	apiRequests metric.Int64Counter
 }
 
+// newInstrument creates a metric instrument with graceful degradation: if
+// creation fails, it logs warnMsg and returns the no-op fallback so metrics
+// are disabled instead of failing entirely.
+func newInstrument[I any, O any](create func(string, ...O) (I, error), fallback I, name, warnMsg, meterName string, opts ...O) I {
+	inst, err := create(name, opts...)
+	if err != nil {
+		clog.WarnContext(context.Background(), warnMsg, "error", err, "meter", meterName)
+		return fallback
+	}
+	return inst
+}
+
 // NewGenAI creates a new GenAI metrics instance with the specified meter name.
 // Uses graceful degradation: if any metric counter fails to initialize, logs a warning
 // and uses a no-op counter instead of failing entirely.
@@ -56,84 +68,48 @@ type GenAI struct {
 func NewGenAI(meterName string) *GenAI {
 	meter := otel.Meter(meterName, metric.WithInstrumentationVersion("1.0.0"))
 
-	// Create prompt tokens counter with graceful degradation
-	promptTokens, err := meter.Int64Counter("genai.token.prompt",
-		metric.WithDescription("The number of prompt tokens used"),
-		metric.WithUnit("{tokens}"))
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create prompt tokens counter, metrics will be disabled", "error", err, "meter", meterName)
-		promptTokens = noop.Int64Counter{}
-	}
-
-	// Create completion tokens counter with graceful degradation
-	completionTokens, err := meter.Int64Counter("genai.token.completion",
-		metric.WithDescription("The number of completion tokens used"),
-		metric.WithUnit("{tokens}"))
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create completion tokens counter, metrics will be disabled", "error", err, "meter", meterName)
-		completionTokens = noop.Int64Counter{}
-	}
-
-	// Create tool call counter with graceful degradation
-	toolCallCounter, err := meter.Int64Counter("genai.tool.calls",
-		metric.WithDescription("The number of tool calls made during execution"),
-		metric.WithUnit("{calls}"))
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create tool call counter, metrics will be disabled", "error", err, "meter", meterName)
-		toolCallCounter = noop.Int64Counter{}
-	}
-
-	// Create GenAI semconv token usage histogram with graceful degradation.
-	// Bucket boundaries are defined by the OpenTelemetry GenAI semantic conventions.
-	// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/
-	semconvTokenUsage, err := meter.Float64Histogram("gen_ai.client.token.usage",
-		metric.WithDescription("Measures the number of input and output tokens used"),
-		metric.WithUnit("{token}"),
-		metric.WithExplicitBucketBoundaries(
-			1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864,
-		))
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create gen_ai.client.token.usage histogram, semconv metrics will be disabled", "error", err, "meter", meterName)
-		semconvTokenUsage = noop.Float64Histogram{}
-	}
-
-	agentTurns, err := meter.Int64Histogram("genai.agent.turns",
-		metric.WithDescription("Number of LLM round-trips (turns) consumed per agent execution"),
-		metric.WithUnit("{turns}"),
-		metric.WithExplicitBucketBoundaries(1, 5, 10, 20, 50, 100, 200, 500),
-	)
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create agent turns histogram, metrics will be disabled", "error", err, "meter", meterName)
-		agentTurns = noop.Int64Histogram{}
-	}
-
-	turnLimitExceeded, err := meter.Int64Counter("genai.agent.turn_limit_exceeded",
-		metric.WithDescription("Number of agent executions aborted by the maxTurns hard limit"),
-		metric.WithUnit("{executions}"),
-	)
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create turn limit exceeded counter, metrics will be disabled", "error", err, "meter", meterName)
-		turnLimitExceeded = noop.Int64Counter{}
-	}
-
-	apiRequests, err := meter.Int64Counter("genai.api.requests",
-		metric.WithDescription("LLM API request attempts, labeled by HTTP response code"),
-		metric.WithUnit("{requests}"),
-	)
-	if err != nil {
-		clog.WarnContext(context.Background(), "Failed to create api requests counter, metrics will be disabled", "error", err, "meter", meterName)
-		apiRequests = noop.Int64Counter{}
-	}
-
 	return &GenAI{
-		meter:             meter,
-		promptTokens:      promptTokens,
-		completionTokens:  completionTokens,
-		toolCallCounter:   toolCallCounter,
-		semconvTokenUsage: semconvTokenUsage,
-		agentTurns:        agentTurns,
-		turnLimitExceeded: turnLimitExceeded,
-		apiRequests:       apiRequests,
+		promptTokens: newInstrument[metric.Int64Counter, metric.Int64CounterOption](meter.Int64Counter, noop.Int64Counter{},
+			"genai.token.prompt",
+			"Failed to create prompt tokens counter, metrics will be disabled", meterName,
+			metric.WithDescription("The number of prompt tokens used"),
+			metric.WithUnit("{tokens}")),
+		completionTokens: newInstrument[metric.Int64Counter, metric.Int64CounterOption](meter.Int64Counter, noop.Int64Counter{},
+			"genai.token.completion",
+			"Failed to create completion tokens counter, metrics will be disabled", meterName,
+			metric.WithDescription("The number of completion tokens used"),
+			metric.WithUnit("{tokens}")),
+		toolCallCounter: newInstrument[metric.Int64Counter, metric.Int64CounterOption](meter.Int64Counter, noop.Int64Counter{},
+			"genai.tool.calls",
+			"Failed to create tool call counter, metrics will be disabled", meterName,
+			metric.WithDescription("The number of tool calls made during execution"),
+			metric.WithUnit("{calls}")),
+		// Bucket boundaries are defined by the OpenTelemetry GenAI semantic conventions.
+		// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/
+		semconvTokenUsage: newInstrument[metric.Float64Histogram, metric.Float64HistogramOption](meter.Float64Histogram, noop.Float64Histogram{},
+			"gen_ai.client.token.usage",
+			"Failed to create gen_ai.client.token.usage histogram, semconv metrics will be disabled", meterName,
+			metric.WithDescription("Measures the number of input and output tokens used"),
+			metric.WithUnit("{token}"),
+			metric.WithExplicitBucketBoundaries(
+				1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864,
+			)),
+		agentTurns: newInstrument[metric.Int64Histogram, metric.Int64HistogramOption](meter.Int64Histogram, noop.Int64Histogram{},
+			"genai.agent.turns",
+			"Failed to create agent turns histogram, metrics will be disabled", meterName,
+			metric.WithDescription("Number of LLM round-trips (turns) consumed per agent execution"),
+			metric.WithUnit("{turns}"),
+			metric.WithExplicitBucketBoundaries(1, 5, 10, 20, 50, 100, 200, 500)),
+		turnLimitExceeded: newInstrument[metric.Int64Counter, metric.Int64CounterOption](meter.Int64Counter, noop.Int64Counter{},
+			"genai.agent.turn_limit_exceeded",
+			"Failed to create turn limit exceeded counter, metrics will be disabled", meterName,
+			metric.WithDescription("Number of agent executions aborted by the maxTurns hard limit"),
+			metric.WithUnit("{executions}")),
+		apiRequests: newInstrument[metric.Int64Counter, metric.Int64CounterOption](meter.Int64Counter, noop.Int64Counter{},
+			"genai.api.requests",
+			"Failed to create api requests counter, metrics will be disabled", meterName,
+			metric.WithDescription("LLM API request attempts, labeled by HTTP response code"),
+			metric.WithUnit("{requests}")),
 	}
 }
 
@@ -151,15 +127,19 @@ func enrich(ctx context.Context, base []attribute.KeyValue) []attribute.KeyValue
 	return base
 }
 
+// recordAttrs assembles the attribute set shared by the Record* methods:
+// method-specific base attributes first, enriched from the execution context,
+// with caller-provided attrs appended last.
+func recordAttrs(ctx context.Context, callerAttrs []attribute.KeyValue, base ...attribute.KeyValue) []attribute.KeyValue {
+	return append(enrich(ctx, base), callerAttrs...)
+}
+
 // RecordTokens records prompt and completion token usage.
 // Enriches attributes from the execution context propagated via context.Context.
 func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, completionTokens int64, attrs ...attribute.KeyValue) {
-	baseAttrs := []attribute.KeyValue{
+	baseAttrs := recordAttrs(ctx, attrs,
 		attribute.String("model", model),
-		attribute.String("gen_ai.request.model", model),
-	}
-	baseAttrs = enrich(ctx, baseAttrs)
-	baseAttrs = append(baseAttrs, attrs...)
+		attribute.String("gen_ai.request.model", model))
 
 	// Custom metrics (existing)
 	m.promptTokens.Add(ctx, promptTokens, metric.WithAttributes(baseAttrs...))
@@ -167,12 +147,12 @@ func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, co
 
 	// GenAI semconv: histogram with gen_ai.token.type dimension.
 	// gen_ai.operation.name is Required per spec; callers should pass gen_ai.provider.name via attrs.
-	semconvBase := append(append([]attribute.KeyValue{}, baseAttrs...),
+	semconvBase := append(slices.Clone(baseAttrs),
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 	)
-	inputAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "input"))
+	inputAttrs := append(slices.Clone(semconvBase), attribute.String("gen_ai.token.type", "input"))
 	m.semconvTokenUsage.Record(ctx, float64(promptTokens), metric.WithAttributes(inputAttrs...))
-	outputAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "output"))
+	outputAttrs := append(slices.Clone(semconvBase), attribute.String("gen_ai.token.type", "output"))
 	m.semconvTokenUsage.Record(ctx, float64(completionTokens), metric.WithAttributes(outputAttrs...))
 }
 
@@ -187,25 +167,23 @@ func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, co
 // A healthy caching setup shows high cache_read and low/zero cache_creation
 // after the first turn.
 func (m *GenAI) RecordCacheTokens(ctx context.Context, model string, cacheRead, cacheCreation int64, attrs ...attribute.KeyValue) {
-	baseAttrs := []attribute.KeyValue{
-		attribute.String("model", model),
-	}
-	baseAttrs = enrich(ctx, baseAttrs)
-	baseAttrs = append(baseAttrs, attrs...)
+	// Unlike the other Record* methods, this deliberately omits
+	// gen_ai.request.model: adding it would change the emitted metric series.
+	baseAttrs := recordAttrs(ctx, attrs, attribute.String("model", model))
 
-	semconvBase := append(append([]attribute.KeyValue{}, baseAttrs...),
+	semconvBase := append(slices.Clone(baseAttrs),
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 	)
 	if cacheRead > 0 {
-		readAttrs := append(append([]attribute.KeyValue{}, baseAttrs...), attribute.String("gen_ai.token.type", "cache_read"))
+		readAttrs := append(slices.Clone(baseAttrs), attribute.String("gen_ai.token.type", "cache_read"))
 		m.promptTokens.Add(ctx, cacheRead, metric.WithAttributes(readAttrs...))
-		semconvReadAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "cache_read"))
+		semconvReadAttrs := append(slices.Clone(semconvBase), attribute.String("gen_ai.token.type", "cache_read"))
 		m.semconvTokenUsage.Record(ctx, float64(cacheRead), metric.WithAttributes(semconvReadAttrs...))
 	}
 	if cacheCreation > 0 {
-		creationAttrs := append(append([]attribute.KeyValue{}, baseAttrs...), attribute.String("gen_ai.token.type", "cache_creation"))
+		creationAttrs := append(slices.Clone(baseAttrs), attribute.String("gen_ai.token.type", "cache_creation"))
 		m.promptTokens.Add(ctx, cacheCreation, metric.WithAttributes(creationAttrs...))
-		semconvCreationAttrs := append(append([]attribute.KeyValue{}, semconvBase...), attribute.String("gen_ai.token.type", "cache_creation"))
+		semconvCreationAttrs := append(slices.Clone(semconvBase), attribute.String("gen_ai.token.type", "cache_creation"))
 		m.semconvTokenUsage.Record(ctx, float64(cacheCreation), metric.WithAttributes(semconvCreationAttrs...))
 	}
 }
@@ -213,13 +191,10 @@ func (m *GenAI) RecordCacheTokens(ctx context.Context, model string, cacheRead, 
 // RecordToolCall records a tool invocation.
 // Enriches attributes from the execution context propagated via context.Context.
 func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attrs ...attribute.KeyValue) {
-	baseAttrs := []attribute.KeyValue{
+	baseAttrs := recordAttrs(ctx, attrs,
 		attribute.String("model", model),
 		attribute.String("gen_ai.request.model", model),
-		attribute.String("tool", toolName),
-	}
-	baseAttrs = enrich(ctx, baseAttrs)
-	baseAttrs = append(baseAttrs, attrs...)
+		attribute.String("tool", toolName))
 
 	m.toolCallCounter.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
 }
@@ -231,13 +206,10 @@ func (m *GenAI) RecordToolCall(ctx context.Context, model, toolName string, attr
 // serviceruntime.googleapis.com/api/request_count's response_code label so PromQL
 // on this metric reads the same as MQL on the GCP-side equivalent.
 func (m *GenAI) RecordAPIRequest(ctx context.Context, model, responseCode string, attrs ...attribute.KeyValue) {
-	baseAttrs := []attribute.KeyValue{
+	baseAttrs := recordAttrs(ctx, attrs,
 		attribute.String("model", model),
 		attribute.String("gen_ai.request.model", model),
-		attribute.String("response_code", responseCode),
-	}
-	baseAttrs = enrich(ctx, baseAttrs)
-	baseAttrs = append(baseAttrs, attrs...)
+		attribute.String("response_code", responseCode))
 
 	m.apiRequests.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
 }
@@ -247,12 +219,9 @@ func (m *GenAI) RecordAPIRequest(ctx context.Context, model, responseCode string
 // increments the turn_limit_exceeded counter. Call this on every exit path of the
 // executor conversation loop so p50/p95/p99 distributions are observable per service.
 func (m *GenAI) RecordTurns(ctx context.Context, model string, turns int, limitExceeded bool, attrs ...attribute.KeyValue) {
-	baseAttrs := []attribute.KeyValue{
+	baseAttrs := recordAttrs(ctx, attrs,
 		attribute.String("model", model),
-		attribute.String("gen_ai.request.model", model),
-	}
-	baseAttrs = enrich(ctx, baseAttrs)
-	baseAttrs = append(baseAttrs, attrs...)
+		attribute.String("gen_ai.request.model", model))
 
 	m.agentTurns.Record(ctx, int64(turns), metric.WithAttributes(baseAttrs...))
 	if limitExceeded {
