@@ -26,7 +26,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
-	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 )
 
@@ -324,10 +323,7 @@ func (e *executor[Request, Response]) Execute(
 	// is the single routing predicate: executeToolCall's dispatch switch and
 	// the turn loop's held-out-of-pool partition both use it, so the two
 	// sites cannot drift.
-	isSubmit := func(name string) bool {
-		_, registered := tools[name]
-		return !registered && name == submitToolName && e.submitTool.Handler != nil
-	}
+	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
 
 	// executeToolCall runs a single function call and returns its response
 	// part. The handler writes any terminal result into resultPtr; each call
@@ -638,23 +634,14 @@ func (e *executor[Request, Response]) Execute(
 
 		// If there are tool calls, execute them and send responses
 		if len(toolCalls) > 0 {
-			// Dispatch the turn's function calls under a bounded pool. The model
-			// may emit several independent function calls in one turn (parallel
-			// function calling, which the API maps back by id); a concurrency of 1
-			// runs them strictly in order, higher values run them concurrently.
-			// Each handler writes into its own result slot so the shared
-			// finalResultPtr is never raced; the response parts are then consumed
-			// in the model's original order and the first terminal result (in
-			// order) ends the run. Tool handlers must be safe for concurrent use
-			// when concurrency exceeds 1.
-			//
-			// Submit calls are held out of the pool and evaluated only after
-			// every other handler in the turn has finished: a submission claims
-			// the turn's work is complete, and its result validators may read
-			// state the other handlers produce (worktrees, files), so they must
-			// observe the finished state rather than race the handlers still
-			// producing it. Slot order is preserved, so the result selection
-			// below is unchanged.
+			// Dispatch the turn's function calls under a bounded pool, holding
+			// submit calls out until the pool drains — see
+			// execshared.DispatchToolCalls for the concurrency and
+			// submit-quiesce semantics. Each handler writes into its own result
+			// slot so the shared finalResultPtr is never raced; the response
+			// parts are then consumed in the model's original order and the
+			// first terminal result (in order) ends the run. Tool handlers must
+			// be safe for concurrent use when concurrency exceeds 1.
 			type toolOutcome struct {
 				committed bool
 				err       error
@@ -663,28 +650,13 @@ func (e *executor[Request, Response]) Execute(
 			perCallResults := make([]Response, len(toolCalls))
 			parts := make([]*genai.Part, len(toolCalls))
 
-			runToolCall := func(i int, call *genai.FunctionCall) {
-				part, committed, cerr := executeToolCall(call, &perCallResults[i])
-				parts[i] = part
-				outcomes[i] = toolOutcome{committed: committed, err: cerr}
-			}
-			g := new(errgroup.Group)
-			g.SetLimit(max(1, e.toolCallConcurrency))
-			for i, call := range toolCalls {
-				if isSubmit(call.Name) {
-					continue
-				}
-				g.Go(func() error {
-					runToolCall(i, call)
-					return nil
+			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
+				func(call *genai.FunctionCall) bool { return isSubmit(call.Name) },
+				func(i int, call *genai.FunctionCall) {
+					part, committed, cerr := executeToolCall(call, &perCallResults[i])
+					parts[i] = part
+					outcomes[i] = toolOutcome{committed: committed, err: cerr}
 				})
-			}
-			_ = g.Wait()
-			for i, call := range toolCalls {
-				if isSubmit(call.Name) {
-					runToolCall(i, call)
-				}
-			}
 
 			var toolResponseParts []*genai.Part
 			for i := range toolCalls {
@@ -817,44 +789,19 @@ func (e *executor[Request, Response]) submitToolName() string {
 }
 
 // evaluateSubmission runs the terminal submit tool handler for a single call
-// and gates its accepted response on the registered result validators. It
-// returns the tool result to send back to the model and whether the response
-// committed as the run's final result (written through resultPtr). A rejected
-// submission returns the validators' findings so the model can address them
-// and submit again; a validator error aborts the run.
+// and gates its accepted response on the registered result validators via
+// execshared.GateSubmission (see there for the gate semantics). It returns
+// the tool result to send back to the model and whether the response
+// committed as the run's final result (written through resultPtr).
 func (e *executor[Request, Response]) evaluateSubmission(
 	ctx context.Context,
 	call *genai.FunctionCall,
 	trace *agenttrace.Trace[Response],
 	resultPtr *Response,
 ) (map[string]any, bool, error) {
-	outcome := e.submitTool.Handler(ctx, call, trace)
-	if !outcome.Accepted {
-		// The handler recorded the failed call on the trace; its ToolResult
-		// carries the parameter/parse error back to the model.
-		return outcome.ToolResult, false, nil
-	}
-
-	// The handler leaves accepted calls unrecorded so this trace call's
-	// completion reflects the validation verdict.
-	tc := trace.StartToolCall(call.ID, call.Name, call.Args)
-
-	findings, err := callbacks.ValidateResult(ctx, e.resultValidators, outcome.Response, outcome.Reasoning)
-	if err != nil {
-		err = fmt.Errorf("result validation: %w", err)
-		tc.Complete(nil, err)
-		return nil, false, err
-	}
-	if len(findings) > 0 {
-		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
-		e.telemetry.RecordToolCall(ctx, "submit_result_rejected")
-		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
-		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
-	}
-
-	*resultPtr = outcome.Response
-	tc.Complete(outcome.ToolResult, nil)
-	return outcome.ToolResult, true, nil
+	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, call, trace),
+		trace, call.ID, call.Name, call.Args,
+		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
 }
 
 // getOrCreateCache returns the name of a valid CachedContent, creating one if

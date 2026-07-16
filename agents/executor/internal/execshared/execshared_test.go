@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 package execshared
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -108,6 +110,102 @@ func TestDefaultResourceLabels(t *testing.T) {
 			got := DefaultResourceLabels(tc.labels)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("DefaultResourceLabels() mismatch (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestSubmitPredicate pins the single submit-routing rule the executors
+// share: a call routes to the terminal submit tool only when its name is not
+// registered as a regular tool, matches the submit tool's name, and a submit
+// handler is configured.
+func TestSubmitPredicate(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string]struct{}{"read_file": {}, "submit_result": {}}
+	tests := []struct {
+		name             string
+		submitToolName   string
+		submitConfigured bool
+		call             string
+		want             bool
+	}{
+		{name: "submit name unregistered routes to submit", submitToolName: "finish", submitConfigured: true, call: "finish", want: true},
+		{name: "registered tool takes precedence over submit name", submitToolName: "submit_result", submitConfigured: true, call: "submit_result", want: false},
+		{name: "no submit handler configured", submitToolName: "finish", submitConfigured: false, call: "finish", want: false},
+		{name: "unrelated name does not route to submit", submitToolName: "finish", submitConfigured: true, call: "other", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			isSubmit := SubmitPredicate(tools, tt.submitToolName, tt.submitConfigured)
+			if got := isSubmit(tt.call); got != tt.want {
+				t.Errorf("isSubmit(%q): got = %v, want = %v", tt.call, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDispatchToolCallsHoldsSubmitOutOfPool asserts the submit-quiesce
+// contract: every pooled handler finishes before any submit call runs, and
+// each run lands in its original slot regardless of dispatch order.
+func TestDispatchToolCallsHoldsSubmitOutOfPool(t *testing.T) {
+	t.Parallel()
+
+	calls := []string{"submit_result", "read_file", "list_dir", "submit_result"}
+	isSubmit := func(call string) bool { return call == "submit_result" }
+
+	var pooled atomic.Int32
+	pooledDoneAtSubmit := make([]int32, 0, 2)
+	slots := make([]string, len(calls))
+	DispatchToolCalls(calls, 4, isSubmit, func(i int, call string) {
+		slots[i] = call
+		if isSubmit(call) {
+			pooledDoneAtSubmit = append(pooledDoneAtSubmit, pooled.Load())
+			return
+		}
+		pooled.Add(1)
+	})
+
+	if diff := cmp.Diff(calls, slots); diff != "" {
+		t.Errorf("slot order mismatch (-want, +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]int32{2, 2}, pooledDoneAtSubmit); diff != "" {
+		t.Errorf("pooled handlers finished before each submit run (-want, +got):\n%s", diff)
+	}
+}
+
+// TestDispatchToolCallsBoundsConcurrency asserts that no more than the
+// configured number of pooled handlers run at once, and that a non-positive
+// concurrency clamps to strictly sequential dispatch.
+func TestDispatchToolCallsBoundsConcurrency(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name        string
+		concurrency int
+		wantMax     int
+	}{
+		{name: "bounded pool", concurrency: 2, wantMax: 2},
+		{name: "non-positive clamps to sequential", concurrency: 0, wantMax: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var mu sync.Mutex
+			inFlight, maxInFlight := 0, 0
+			DispatchToolCalls(make([]int, 8), tt.concurrency, func(int) bool { return false }, func(int, int) {
+				mu.Lock()
+				inFlight++
+				maxInFlight = max(maxInFlight, inFlight)
+				mu.Unlock()
+
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+			})
+			if maxInFlight > tt.wantMax {
+				t.Errorf("max in-flight handlers: got = %d, want <= %d", maxInFlight, tt.wantMax)
 			}
 		})
 	}

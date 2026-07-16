@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
@@ -26,7 +27,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
-	"golang.org/x/sync/errgroup"
 )
 
 // Interface is the public interface for Claude agent execution
@@ -348,10 +348,7 @@ func (e *executor[Request, Response]) Execute(
 	// is the single routing predicate: executeToolCall's dispatch switch and
 	// the turn loop's held-out-of-pool partition both use it, so the two
 	// sites cannot drift.
-	isSubmit := func(name string) bool {
-		_, registered := tools[name]
-		return !registered && name == submitToolName && e.submitTool.Handler != nil
-	}
+	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
 
 	// executeToolCall handles executing a single tool call and returning the
 	// result. The handler writes any terminal result into resultPtr; the
@@ -636,23 +633,15 @@ func (e *executor[Request, Response]) Execute(
 				}
 			}
 
-			// Dispatch the turn's tool calls under a bounded pool. The model may
-			// emit several independent tool calls in a single turn (parallel tool
-			// use, which the Anthropic API documents as unordered); a concurrency
-			// of 1 runs them strictly in order, higher values run them
-			// concurrently. Each handler writes into its own result slot so the
-			// shared finalResultPtr is never raced; results are then consumed in
-			// the model's original order to preserve the tool_use/tool_result
-			// pairing, and the first terminal result (in order) ends the run. Tool
-			// handlers must be safe for concurrent use when concurrency exceeds 1.
-			//
-			// Submit calls are held out of the pool and evaluated only after
-			// every other handler in the turn has finished: a submission claims
-			// the turn's work is complete, and its result validators may read
-			// state the other handlers produce (worktrees, files), so they must
-			// observe the finished state rather than race the handlers still
-			// producing it. Slot order is preserved, so the result selection
-			// below is unchanged.
+			// Dispatch the turn's tool calls under a bounded pool, holding
+			// submit calls out until the pool drains — see
+			// execshared.DispatchToolCalls for the concurrency and
+			// submit-quiesce semantics. Each handler writes into its own result
+			// slot so the shared finalResultPtr is never raced; results are then
+			// consumed in the model's original order to preserve the
+			// tool_use/tool_result pairing, and the first terminal result (in
+			// order) ends the run. Tool handlers must be safe for concurrent use
+			// when concurrency exceeds 1.
 			type toolOutcome struct {
 				result    anthropic.ContentBlockParamUnion
 				committed bool
@@ -661,27 +650,12 @@ func (e *executor[Request, Response]) Execute(
 			outcomes := make([]toolOutcome, len(toolUseBlocks))
 			perCallResults := make([]Response, len(toolUseBlocks))
 
-			runToolCall := func(i int, toolUse anthropic.ToolUseBlock) {
-				res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])
-				outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
-			}
-			g := new(errgroup.Group)
-			g.SetLimit(max(1, e.toolCallConcurrency))
-			for i, toolUse := range toolUseBlocks {
-				if isSubmit(toolUse.Name) {
-					continue
-				}
-				g.Go(func() error {
-					runToolCall(i, toolUse)
-					return nil
+			execshared.DispatchToolCalls(toolUseBlocks, e.toolCallConcurrency,
+				func(toolUse anthropic.ToolUseBlock) bool { return isSubmit(toolUse.Name) },
+				func(i int, toolUse anthropic.ToolUseBlock) {
+					res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])
+					outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
 				})
-			}
-			_ = g.Wait()
-			for i, toolUse := range toolUseBlocks {
-				if isSubmit(toolUse.Name) {
-					runToolCall(i, toolUse)
-				}
-			}
 
 			var toolResults []anthropic.ContentBlockParamUnion
 			for i := range toolUseBlocks {
@@ -978,11 +952,10 @@ func (e *executor[Request, Response]) submitToolName() string {
 }
 
 // evaluateSubmission runs the terminal submit tool handler for a single call
-// and gates its accepted response on the registered result validators. It
-// returns the tool result to send back to the model and whether the response
-// committed as the run's final result (written through resultPtr). A rejected
-// submission returns the validators' findings so the model can address them
-// and submit again; a validator error aborts the run.
+// and gates its accepted response on the registered result validators via
+// execshared.GateSubmission (see there for the gate semantics). It returns
+// the tool result to send back to the model and whether the response
+// committed as the run's final result (written through resultPtr).
 func (e *executor[Request, Response]) evaluateSubmission(
 	ctx context.Context,
 	toolUse anthropic.ToolUseBlock,
@@ -990,33 +963,9 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	trace *agenttrace.Trace[Response],
 	resultPtr *Response,
 ) (map[string]any, bool, error) {
-	outcome := e.submitTool.Handler(ctx, toolUse, trace)
-	if !outcome.Accepted {
-		// The handler recorded the failed call on the trace; its ToolResult
-		// carries the parameter/parse error back to the model.
-		return outcome.ToolResult, false, nil
-	}
-
-	// The handler leaves accepted calls unrecorded so this trace call's
-	// completion reflects the validation verdict.
-	tc := trace.StartToolCall(toolUse.ID, toolUse.Name, args)
-
-	findings, err := callbacks.ValidateResult(ctx, e.resultValidators, outcome.Response, outcome.Reasoning)
-	if err != nil {
-		err = fmt.Errorf("result validation: %w", err)
-		tc.Complete(nil, err)
-		return nil, false, err
-	}
-	if len(findings) > 0 {
-		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
-		e.telemetry.RecordToolCall(ctx, "submit_result_rejected")
-		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
-		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
-	}
-
-	*resultPtr = outcome.Response
-	tc.Complete(outcome.ToolResult, nil)
-	return outcome.ToolResult, true, nil
+	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, toolUse, trace),
+		trace, toolUse.ID, toolUse.Name, args,
+		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
 }
 
 // shouldForceSubmitOnFirstTurn reports whether the forced submit tool_choice

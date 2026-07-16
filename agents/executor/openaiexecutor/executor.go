@@ -25,7 +25,6 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
-	"golang.org/x/sync/errgroup"
 )
 
 // Interface is the public interface for OpenAI-compatible agent execution.
@@ -205,10 +204,7 @@ func (e *executor[Request, Response]) Execute(
 	// is the single routing predicate: executeToolCall's dispatch switch and
 	// the turn loop's held-out-of-pool partition both use it, so the two
 	// sites cannot drift.
-	isSubmit := func(name string) bool {
-		_, registered := tools[name]
-		return !registered && name == submitToolName && e.submitTool.Handler != nil
-	}
+	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
 
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
@@ -342,20 +338,12 @@ func (e *executor[Request, Response]) Execute(
 			// Dispatch the turn's tool calls under a bounded pool, collecting all
 			// results before checking for a final result so the conversation
 			// history stays consistent (every tool result message is appended).
-			// The model may emit several independent tool calls in one turn
-			// (parallel tool calls); a concurrency of 1 runs them strictly in
-			// order, higher values run them concurrently. Each handler writes into
-			// its own result slot so the shared finalResultPtr is never raced, and
-			// the tool messages are appended in the model's original order. Tool
-			// handlers must be safe for concurrent use when concurrency exceeds 1.
-			//
-			// Submit calls are held out of the pool and evaluated only after
-			// every other handler in the turn has finished: a submission claims
-			// the turn's work is complete, and its result validators may read
-			// state the other handlers produce (worktrees, files), so they must
-			// observe the finished state rather than race the handlers still
-			// producing it. Slot order is preserved, so the result selection
-			// below is unchanged.
+			// Submit calls are held out until the pool drains — see
+			// execshared.DispatchToolCalls for the concurrency and
+			// submit-quiesce semantics. Each handler writes into its own result
+			// slot so the shared finalResultPtr is never raced, and the tool
+			// messages are appended in the model's original order. Tool handlers
+			// must be safe for concurrent use when concurrency exceeds 1.
 			toolCalls := choice.Message.ToolCalls
 			type toolOutcome struct {
 				msg       openai.ChatCompletionMessageParamUnion
@@ -365,31 +353,16 @@ func (e *executor[Request, Response]) Execute(
 			outcomes := make([]toolOutcome, len(toolCalls))
 			perCallResults := make([]Response, len(toolCalls))
 
-			runToolCall := func(i int, tc openai.ChatCompletionMessageToolCall) {
-				resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
-				if cerr != nil {
-					outcomes[i] = toolOutcome{err: cerr}
-					return
-				}
-				outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID), committed: committed}
-			}
-			g := new(errgroup.Group)
-			g.SetLimit(max(1, e.toolCallConcurrency))
-			for i, tc := range toolCalls {
-				if isSubmit(tc.Function.Name) {
-					continue
-				}
-				g.Go(func() error {
-					runToolCall(i, tc)
-					return nil
+			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
+				func(tc openai.ChatCompletionMessageToolCall) bool { return isSubmit(tc.Function.Name) },
+				func(i int, tc openai.ChatCompletionMessageToolCall) {
+					resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
+					if cerr != nil {
+						outcomes[i] = toolOutcome{err: cerr}
+						return
+					}
+					outcomes[i] = toolOutcome{msg: openai.ToolMessage(resJSON, tc.ID), committed: committed}
 				})
-			}
-			_ = g.Wait()
-			for i, tc := range toolCalls {
-				if isSubmit(tc.Function.Name) {
-					runToolCall(i, tc)
-				}
-			}
 
 			for i := range toolCalls {
 				if outcomes[i].err != nil {
@@ -475,11 +448,10 @@ func (e *executor[Request, Response]) submitToolName() string {
 }
 
 // evaluateSubmission runs the terminal submit tool handler for a single call
-// and gates its accepted response on the registered result validators. It
-// returns the tool result to send back to the model and whether the response
-// committed as the run's final result (written through resultPtr). A rejected
-// submission returns the validators' findings so the model can address them
-// and submit again; a validator error aborts the run.
+// and gates its accepted response on the registered result validators via
+// execshared.GateSubmission (see there for the gate semantics). It returns
+// the tool result to send back to the model and whether the response
+// committed as the run's final result (written through resultPtr).
 func (e *executor[Request, Response]) evaluateSubmission(
 	ctx context.Context,
 	tc openai.ChatCompletionMessageToolCall,
@@ -487,31 +459,7 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	trace *agenttrace.Trace[Response],
 	resultPtr *Response,
 ) (map[string]any, bool, error) {
-	outcome := e.submitTool.Handler(ctx, tc, trace)
-	if !outcome.Accepted {
-		// The handler recorded the failed call on the trace; its ToolResult
-		// carries the parameter/parse error back to the model.
-		return outcome.ToolResult, false, nil
-	}
-
-	// The handler leaves accepted calls unrecorded so this trace call's
-	// completion reflects the validation verdict.
-	toolCall := trace.StartToolCall(tc.ID, tc.Function.Name, args)
-
-	findings, err := callbacks.ValidateResult(ctx, e.resultValidators, outcome.Response, outcome.Reasoning)
-	if err != nil {
-		err = fmt.Errorf("result validation: %w", err)
-		toolCall.Complete(nil, err)
-		return nil, false, err
-	}
-	if len(findings) > 0 {
-		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
-		e.telemetry.RecordToolCall(ctx, "submit_result_rejected")
-		toolCall.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
-		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
-	}
-
-	*resultPtr = outcome.Response
-	toolCall.Complete(outcome.ToolResult, nil)
-	return outcome.ToolResult, true, nil
+	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, tc, trace),
+		trace, tc.ID, tc.Function.Name, args,
+		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
 }
