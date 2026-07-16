@@ -36,7 +36,7 @@ func TestExecutorPromptCaching(t *testing.T) {
 	projectID := detectProjectID(ctx, t)
 
 	const (
-		region = "us-east5"
+		region = "global"
 		model  = "claude-sonnet-4-5@20250929"
 	)
 

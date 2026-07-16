@@ -74,7 +74,7 @@ func TestExecutorWithThinking(t *testing.T) {
 		thinking int64 // 0 means no thinking
 	}{{
 		name:   "claude-haiku-4-5",
-		region: "us-east5",
+		region: "global",
 		model:  "claude-haiku-4-5@20251001",
 	}}
 
@@ -87,7 +87,7 @@ func TestExecutorWithThinking(t *testing.T) {
 			thinking int64
 		}{
 			name:     "claude-sonnet-4-thinking",
-			region:   "us-east5",
+			region:   "global",
 			model:    "claude-sonnet-4-5@20250929",
 			thinking: 2048,
 		})
