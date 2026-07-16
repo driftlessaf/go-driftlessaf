@@ -126,21 +126,30 @@ func (t *ceEmittingTracer[T]) emitSpan(ctx context.Context, span RecordedSpan) e
 		return err
 	}
 
+	t.send(ctx, ce, "Failed to deliver agent span event",
+		"trace_id", span.TraceID,
+		"span_id", span.SpanID,
+	)
+	return nil
+}
+
+// send dispatches ce on the bounded errgroup: the actual delivery happens on
+// a background goroutine with retry/backoff and a timeout detached from the
+// caller's cancellation, so callers return immediately under normal load and
+// only block once the in-flight cap (ceMaxInflight) is reached. Delivery
+// failures are logged — msg and logFields carry the per-event identifiers —
+// never returned.
+func (t *ceEmittingTracer[T]) send(ctx context.Context, ce cloudevents.Event, msg string, logFields ...any) {
 	t.eg.Go(func() error {
 		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ceSendTimeout)
 		defer cancel()
 
 		rctx := cloudevents.ContextWithRetriesExponentialBackoff(sendCtx, ceRetryDelay, ceMaxRetry)
 		if result := t.client.Send(rctx, ce); cloudevents.IsUndelivered(result) || cloudevents.IsNACK(result) {
-			clog.ErrorContext(ctx, "Failed to deliver agent span event",
-				"trace_id", span.TraceID,
-				"span_id", span.SpanID,
-				"error", result,
-			)
+			clog.ErrorContext(ctx, msg, append(logFields, "error", result)...)
 		}
 		return nil
 	})
-	return nil
 }
 
 func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
@@ -166,19 +175,7 @@ func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
 		return
 	}
 
-	t.eg.Go(func() error {
-		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ceSendTimeout)
-		defer cancel()
-
-		rctx := cloudevents.ContextWithRetriesExponentialBackoff(sendCtx, ceRetryDelay, ceMaxRetry)
-		if result := t.client.Send(rctx, ce); cloudevents.IsUndelivered(result) || cloudevents.IsNACK(result) {
-			clog.ErrorContext(ctx, "Failed to deliver agent trace event",
-				"trace_id", trace.ID,
-				"error", result,
-			)
-		}
-		return nil
-	})
+	t.send(ctx, ce, "Failed to deliver agent trace event", "trace_id", trace.ID)
 }
 
 // setEventData sets ce's data to obj as JSON. When a payload encryptor is

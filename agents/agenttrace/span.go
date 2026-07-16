@@ -124,6 +124,10 @@ func (lt *LLMTurn[T]) RecordResponse(content any) error {
 // the content. To keep the final encoded payload at or below maxPayloadBytes
 // the truncator iteratively shrinks the source until the encoded form fits.
 // In the common case (no special characters) one pass is enough.
+//
+// Not a duplicate of truncatePayload (trace.go): that is the raw byte cut
+// used for OTel span attributes, which this wraps with the JSON-validity
+// guarantee described above.
 func preparePayload(payload []byte) (bytes []byte, didTruncate bool) {
 	if len(payload) <= maxPayloadBytes {
 		return payload, false

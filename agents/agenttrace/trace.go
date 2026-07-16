@@ -79,9 +79,9 @@ type ReasoningContent struct {
 type ToolCall[T any] struct {
 	ID        string         `json:"id"`
 	Name      string         `json:"name"`
-	Params    map[string]any `json:"params"`
-	Result    any            `json:"result"`
-	Error     error          `json:"error,omitempty"`
+	Params    map[string]any `json:"params,omitempty"`
+	Result    any            `json:"result,omitempty"`
+	Error     error          `json:"-"` // handled by MarshalJSON
 	StartTime time.Time      `json:"start_time"`
 	EndTime   time.Time      `json:"end_time"`
 	trace     *Trace[T]      // Parent trace for auto-adding on completion
@@ -200,6 +200,15 @@ type Trace[T any] struct {
 	spanEmitter SpanEmitter
 }
 
+// otelTracer fetches this package's tracer from the global provider.
+// Deliberately a function rather than a package-level var: a var would latch
+// whichever provider was installed at first use and ignore later
+// otel.SetTracerProvider calls (tests swap providers per test).
+func otelTracer() oteltrace.Tracer {
+	return otel.Tracer("chainguard.ai.agents.agenttrace",
+		oteltrace.WithInstrumentationVersion("1.0.0"))
+}
+
 // newTrace creates a new trace for the given prompt. The context must
 // already contain a tracer (via WithTracer or StartTrace); Complete
 // will panic otherwise.
@@ -221,8 +230,7 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 	// Extract execution context from Go context
 	execCtx := GetExecutionContext(ctx)
 
-	tr := otel.Tracer("chainguard.ai.agents.agenttrace",
-		oteltrace.WithInstrumentationVersion("1.0.0"))
+	tr := otelTracer()
 
 	// Compute the per-invocation label emitted as driftlessaf.invocation.label.
 	// nameFn wins for resource-aware labels ("autofix: pr:chainguard-dev/mono#38632");
@@ -244,23 +252,19 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 			attribute.String("gen_ai.operation.name", "invoke_agent"),
 		),
 	}
-	if o.agentName != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("gen_ai.agent.name", o.agentName)))
-	}
-	if invocationLabel != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("driftlessaf.invocation.label", invocationLabel)))
-	}
-	if execCtx.ReconcilerKey != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("reconciler_key", execCtx.ReconcilerKey)))
-	}
-	if execCtx.ReconcilerType != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("reconciler_type", execCtx.ReconcilerType)))
-	}
-	if execCtx.CommitSHA != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("commit_sha", execCtx.CommitSHA)))
-	}
-	if execCtx.RequestID != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String("request_id", execCtx.RequestID)))
+	// Optional string attributes, appended in a fixed order; empty values
+	// are skipped rather than emitted as empty attributes.
+	for _, attr := range []struct{ key, value string }{
+		{"gen_ai.agent.name", o.agentName},
+		{"driftlessaf.invocation.label", invocationLabel},
+		{"reconciler_key", execCtx.ReconcilerKey},
+		{"reconciler_type", execCtx.ReconcilerType},
+		{"commit_sha", execCtx.CommitSHA},
+		{"request_id", execCtx.RequestID},
+	} {
+		if attr.value != "" {
+			spanAttrs = append(spanAttrs, oteltrace.WithAttributes(attribute.String(attr.key, attr.value)))
+		}
 	}
 
 	// Payload emission (gen_ai.prompt + gen_ai.input.messages) is gated on
@@ -312,6 +316,10 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 // truncatePayload truncates a payload string to maxPayloadBytes and reports
 // whether truncation occurred. Byte-based (not rune-based) because the
 // constraint is on the OTLP batch size, not logical content.
+//
+// Not a duplicate of preparePayload (span.go): that layers a JSON-validity
+// guarantee on top of this raw cut for values destined for json.RawMessage
+// columns; span attributes tolerate a mid-structure cut.
 func truncatePayload(s string) (string, bool) {
 	if len(s) <= maxPayloadBytes {
 		return s, false
@@ -353,8 +361,7 @@ func (t *Trace[T]) Context() context.Context {
 // Overlapping turns corrupt the span hierarchy: the later End() restores a
 // stale context, causing subsequent spans to be parented incorrectly.
 func (t *Trace[T]) BeginTurn(turn int, system, modelName string) *LLMTurn[T] {
-	tr := otel.Tracer("chainguard.ai.agents.agenttrace",
-		oteltrace.WithInstrumentationVersion("1.0.0"))
+	tr := otelTracer()
 
 	t.mu.Lock()
 	parentCtx := t.ctx
@@ -519,18 +526,18 @@ func (lt *LLMTurn[T]) End() {
 				// silent span loss is observable in Cloud Run logs without
 				// forcing End() to propagate the error — End() is the cleanup
 				// path on a deferred turn and has no useful return channel.
-				if emitter != nil {
-					if err := emitter(emitCtx, span); err != nil {
-						clog.WarnContext(emitCtx, "agent span emit dropped",
-							"trace_id", lt.trace.ID,
-							"span_id", span.SpanID,
-							"error", err.Error(),
-						)
+				for _, sink := range []struct {
+					emit SpanEmitter
+					msg  string
+				}{
+					{emitter, "agent span emit dropped"},
+					{localSink, "agent local span sink dropped"},
+				} {
+					if sink.emit == nil {
+						continue
 					}
-				}
-				if localSink != nil {
-					if err := localSink(emitCtx, span); err != nil {
-						clog.WarnContext(emitCtx, "agent local span sink dropped",
+					if err := sink.emit(emitCtx, span); err != nil {
+						clog.WarnContext(emitCtx, sink.msg,
 							"trace_id", lt.trace.ID,
 							"span_id", span.SpanID,
 							"error", err.Error(),
@@ -544,8 +551,7 @@ func (lt *LLMTurn[T]) End() {
 
 // StartToolCall starts a new tool call and returns it
 func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCall[T] {
-	tr := otel.Tracer("chainguard.ai.agents.agenttrace",
-		oteltrace.WithInstrumentationVersion("1.0.0"))
+	tr := otelTracer()
 
 	spanAttrs := []oteltrace.SpanStartOption{
 		oteltrace.WithAttributes(
@@ -586,8 +592,7 @@ func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCa
 
 // BadToolCall records a tool call that failed due to bad arguments or unknown tool
 func (t *Trace[T]) BadToolCall(id, name string, params map[string]any, err error) {
-	tr := otel.Tracer("chainguard.ai.agents.agenttrace",
-		oteltrace.WithInstrumentationVersion("1.0.0"))
+	tr := otelTracer()
 	t.mu.Lock()
 	parentCtx := t.ctx
 	t.mu.Unlock()
@@ -860,73 +865,47 @@ func (t *Trace[T]) String() string {
 	return sb.String()
 }
 
+// toolCallAlias mirrors ToolCall's memory layout without its methods so
+// MarshalJSON can reuse the struct tags without infinite recursion.
+type toolCallAlias[T any] ToolCall[T]
+
+// MarshalJSON implements json.Marshaler for ToolCall.
+// It converts the Error field to a string and excludes unexported fields.
+func (tc *ToolCall[T]) MarshalJSON() ([]byte, error) {
+	var errStr string
+	if tc.Error != nil {
+		errStr = tc.Error.Error()
+	}
+	return json.Marshal(struct {
+		*toolCallAlias[T]
+		Error string `json:"error,omitempty"`
+	}{(*toolCallAlias[T])(tc), errStr})
+}
+
+// traceAlias mirrors Trace's memory layout without its methods so MarshalJSON
+// can reuse the struct tags — the single source of truth for the JSON shape
+// (guarded by TestAgentTraceSchemaMatchesStruct) — without infinite recursion.
+type traceAlias[T any] Trace[T]
+
 // MarshalJSON implements json.Marshaler for Trace.
 // It converts the Error field to a string and excludes unexported fields.
 func (t *Trace[T]) MarshalJSON() ([]byte, error) {
-	type jsonToolCall struct {
-		ID        string         `json:"id"`
-		Name      string         `json:"name"`
-		Params    map[string]any `json:"params,omitempty"`
-		Result    any            `json:"result,omitempty"`
-		Error     string         `json:"error,omitempty"`
-		StartTime time.Time      `json:"start_time"`
-		EndTime   time.Time      `json:"end_time"`
+	// tool_calls is shadowed rather than written back to the receiver so
+	// marshaling stays read-only; the override keeps the historical `[]`
+	// (not `null`) for a trace that never recorded a call.
+	toolCalls := t.ToolCalls
+	if toolCalls == nil {
+		toolCalls = []*ToolCall[T]{}
 	}
-
-	toolCalls := make([]jsonToolCall, len(t.ToolCalls))
-	for i, tc := range t.ToolCalls {
-		jtc := jsonToolCall{
-			ID:        tc.ID,
-			Name:      tc.Name,
-			Params:    tc.Params,
-			Result:    tc.Result,
-			StartTime: tc.StartTime,
-			EndTime:   tc.EndTime,
-		}
-		if tc.Error != nil {
-			jtc.Error = tc.Error.Error()
-		}
-		toolCalls[i] = jtc
-	}
-
 	var errStr string
 	if t.Error != nil {
 		errStr = t.Error.Error()
 	}
-
 	return json.Marshal(struct {
-		ID          string             `json:"id"`
-		OTelTraceID string             `json:"otel_trace_id,omitempty"`
-		InputPrompt string             `json:"input_prompt"`
-		ExecContext ExecutionContext   `json:"exec_context,omitempty"`
-		ToolCalls   []jsonToolCall     `json:"tool_calls"`
-		Turns       []RecordedTurn     `json:"turns,omitempty"`
-		Reasoning   []ReasoningContent `json:"reasoning,omitempty"`
-		Result      T                  `json:"result"`
-		Error       string             `json:"error,omitempty"`
-		StartTime   time.Time          `json:"start_time"`
-		EndTime     time.Time          `json:"end_time"`
-		Metadata    map[string]any     `json:"metadata,omitempty"`
-		AgentName   string             `json:"agent_name,omitempty"`
-		Source      string             `json:"source,omitempty"`
-		Model       string             `json:"model,omitempty"`
-	}{
-		ID:          t.ID,
-		OTelTraceID: t.OTelTraceID,
-		InputPrompt: t.InputPrompt,
-		ExecContext: t.ExecContext,
-		ToolCalls:   toolCalls,
-		Turns:       t.Turns,
-		Reasoning:   t.Reasoning,
-		Result:      t.Result,
-		Error:       errStr,
-		StartTime:   t.StartTime,
-		EndTime:     t.EndTime,
-		Metadata:    t.Metadata,
-		AgentName:   t.AgentName,
-		Source:      t.Source,
-		Model:       t.Model,
-	})
+		*traceAlias[T]
+		ToolCalls []*ToolCall[T] `json:"tool_calls"`
+		Error     string         `json:"error,omitempty"`
+	}{(*traceAlias[T])(t), toolCalls, errStr})
 }
 
 // generateTraceID generates a unique trace ID
