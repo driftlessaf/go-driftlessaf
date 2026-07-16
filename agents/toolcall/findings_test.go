@@ -6,8 +6,14 @@ SPDX-License-Identifier: Apache-2.0
 package toolcall
 
 import (
+	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+
+	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 )
 
 func TestFindingReadContent(t *testing.T) {
@@ -204,5 +210,118 @@ func TestFindingSearchContent(t *testing.T) {
 		if total > maxFindingSearchMatches {
 			t.Errorf("total: got = %d, want ≤ %d", total, maxFindingSearchMatches)
 		}
+	})
+}
+
+// TestFindingToolsConcurrentDuplicateCalls is a race regression test: executors
+// dispatch a turn's tool calls concurrently, so the duplicate-call guards and the
+// shared log cache must be safe for concurrent handler invocations. Run with -race.
+func TestFindingToolsConcurrentDuplicateCalls(t *testing.T) {
+	const workers = 10
+
+	// run invokes the handler with the same call from several goroutines at once
+	// and returns how many invocations were short-circuited as duplicates.
+	run := func(t *testing.T, tool Tool[string], call ToolCall) (dups int) {
+		t.Helper()
+		trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+		results := make([]map[string]any, workers)
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Go(func() {
+				results[i] = tool.Handler(t.Context(), call, trace, nil)
+			})
+		}
+		wg.Wait()
+		for _, resp := range results {
+			if _, ok := resp["error"]; ok {
+				dups++
+			}
+		}
+		return dups
+	}
+
+	t.Run("retry_finding dedup guard", func(t *testing.T) {
+		var retries atomic.Int64
+		tool := retryFindingTool[string](func(context.Context, callbacks.FindingKind, string) error {
+			retries.Add(1)
+			return nil
+		})
+		dups := run(t, tool, ToolCall{
+			ID:   "retry-1",
+			Name: "retry_finding",
+			Args: map[string]any{"kind": "check", "identifier": "flaky-ci"},
+		})
+		if got := retries.Load(); got != 1 {
+			t.Errorf("retry callback invocations: got = %d, want 1", got)
+		}
+		if dups != workers-1 {
+			t.Errorf("duplicate responses: got = %d, want %d", dups, workers-1)
+		}
+	})
+
+	t.Run("read_finding_logs dedup guard", func(t *testing.T) {
+		var fetches atomic.Int64
+		tools := findingLogTools[string](func(context.Context, callbacks.FindingKind, string) (string, error) {
+			fetches.Add(1)
+			return "log line one\nlog line two\n", nil
+		})
+		dups := run(t, tools["read_finding_logs"], ToolCall{
+			ID:   "read-1",
+			Name: "read_finding_logs",
+			Args: map[string]any{"kind": "check", "identifier": "flaky-ci"},
+		})
+		if got := fetches.Load(); got != 1 {
+			t.Errorf("getLogs invocations: got = %d, want 1", got)
+		}
+		if dups != workers-1 {
+			t.Errorf("duplicate responses: got = %d, want %d", dups, workers-1)
+		}
+	})
+
+	t.Run("search_finding_logs dedup guard", func(t *testing.T) {
+		var fetches atomic.Int64
+		tools := findingLogTools[string](func(context.Context, callbacks.FindingKind, string) (string, error) {
+			fetches.Add(1)
+			return "log line one\nlog line two\n", nil
+		})
+		dups := run(t, tools["search_finding_logs"], ToolCall{
+			ID:   "search-1",
+			Name: "search_finding_logs",
+			Args: map[string]any{"kind": "check", "identifier": "flaky-ci", "pattern": "line"},
+		})
+		if got := fetches.Load(); got != 1 {
+			t.Errorf("getLogs invocations: got = %d, want 1", got)
+		}
+		if dups != workers-1 {
+			t.Errorf("duplicate responses: got = %d, want %d", dups, workers-1)
+		}
+	})
+
+	t.Run("log cache shared across read and search", func(t *testing.T) {
+		tools := findingLogTools[string](func(context.Context, callbacks.FindingKind, string) (string, error) {
+			return "log line one\nlog line two\n", nil
+		})
+		trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Go(func() {
+				// Vary offset/skip so the dedup guards do not short-circuit:
+				// every invocation exercises the shared log cache.
+				if i%2 == 0 {
+					tools["read_finding_logs"].Handler(t.Context(), ToolCall{
+						ID:   "read-cache",
+						Name: "read_finding_logs",
+						Args: map[string]any{"kind": "check", "identifier": "flaky-ci", "offset": float64(i)},
+					}, trace, nil)
+				} else {
+					tools["search_finding_logs"].Handler(t.Context(), ToolCall{
+						ID:   "search-cache",
+						Name: "search_finding_logs",
+						Args: map[string]any{"kind": "check", "identifier": "flaky-ci", "pattern": "line", "skip": float64(i)},
+					}, trace, nil)
+				}
+			})
+		}
+		wg.Wait()
 	})
 }

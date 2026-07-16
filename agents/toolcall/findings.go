@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"sync"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -175,6 +176,8 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 
 func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKind, string) error) Tool[Resp] {
 	type retryCall struct{ kind, identifier string }
+	// mu guards seen: a turn's tool calls may be dispatched concurrently.
+	var mu sync.Mutex
 	seen := make(map[retryCall]struct{})
 
 	return Tool[Resp]{
@@ -208,7 +211,11 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 
 			// Detect duplicate calls to prevent infinite retry loops.
 			key := retryCall{kind: kind, identifier: identifier}
-			if _, dup := seen[key]; dup {
+			mu.Lock()
+			_, dup := seen[key]
+			seen[key] = struct{}{}
+			mu.Unlock()
+			if dup {
 				clog.WarnContext(ctx, "Duplicate retry_finding call detected", "kind", kind, "identifier", identifier)
 				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier})
 				resp := map[string]any{
@@ -219,7 +226,6 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 				tc.Complete(resp, nil)
 				return resp
 			}
-			seen[key] = struct{}{}
 
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier})
 
@@ -246,18 +252,27 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 // to avoid re-fetching the same logs on repeated calls.
 func findingLogTools[Resp any](getLogs func(context.Context, callbacks.FindingKind, string) (string, error)) map[string]Tool[Resp] {
 	type cacheKey struct{ kind, identifier string }
+	// mu guards cache: a turn's tool calls may be dispatched concurrently.
+	// The lock is not held across getLogs, so concurrent misses on the same
+	// key may fetch twice; last write wins.
+	var mu sync.Mutex
 	cache := make(map[cacheKey]string)
 
 	fetch := func(ctx context.Context, kind, identifier string) (string, error) {
 		key := cacheKey{kind, identifier}
-		if s, ok := cache[key]; ok {
+		mu.Lock()
+		s, ok := cache[key]
+		mu.Unlock()
+		if ok {
 			return s, nil
 		}
 		logs, err := getLogs(ctx, callbacks.FindingKind(kind), identifier)
 		if err != nil {
 			return "", err
 		}
+		mu.Lock()
 		cache[key] = logs
+		mu.Unlock()
 		return logs, nil
 	}
 
@@ -273,6 +288,8 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 		offset           int64
 		limit            int
 	}
+	// mu guards seen: a turn's tool calls may be dispatched concurrently.
+	var mu sync.Mutex
 	seen := make(map[readCall]struct{})
 
 	return Tool[Resp]{
@@ -316,7 +333,11 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 
 			// Detect duplicate calls to prevent infinite loops.
 			key := readCall{kind: kind, identifier: identifier, offset: offset, limit: limit}
-			if _, dup := seen[key]; dup {
+			mu.Lock()
+			_, dup := seen[key]
+			seen[key] = struct{}{}
+			mu.Unlock()
+			if dup {
 				clog.WarnContext(ctx, "Duplicate read_finding_logs call detected", "kind", kind, "identifier", identifier, "offset", offset)
 				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier, "offset": offset, "limit": limit})
 				resp := map[string]any{
@@ -329,7 +350,6 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 				tc.Complete(resp, nil)
 				return resp
 			}
-			seen[key] = struct{}{}
 
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier, "offset": offset, "limit": limit})
 
@@ -363,6 +383,8 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 		kind, identifier, pattern string
 		skip, limit               int
 	}
+	// mu guards seen: a turn's tool calls may be dispatched concurrently.
+	var mu sync.Mutex
 	seen := make(map[searchCall]struct{})
 
 	return Tool[Resp]{
@@ -411,7 +433,11 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 
 			// Detect duplicate calls to prevent infinite loops.
 			key := searchCall{kind: kind, identifier: identifier, pattern: pattern, skip: skip, limit: limit}
-			if _, dup := seen[key]; dup {
+			mu.Lock()
+			_, dup := seen[key]
+			seen[key] = struct{}{}
+			mu.Unlock()
+			if dup {
 				clog.WarnContext(ctx, "Duplicate search_finding_logs call detected", "kind", kind, "identifier", identifier, "pattern", pattern)
 				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier, "pattern": pattern, "skip": skip, "limit": limit})
 				resp := map[string]any{
@@ -423,7 +449,6 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 				tc.Complete(resp, nil)
 				return resp
 			}
-			seen[key] = struct{}{}
 
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"kind": kind, "identifier": identifier, "pattern": pattern, "skip": skip, "limit": limit})
 
