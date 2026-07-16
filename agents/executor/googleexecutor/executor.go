@@ -417,19 +417,11 @@ func (e *executor[Request, Response]) Execute(
 
 	// Send final message to get response with retry for transient errors
 	clog.InfoContext(ctx, "Sending final message")
-	response, err := retry.RetryWithBackoff(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+	response, err := e.sendWithRetry(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", "failed to send final message", func() (*genai.GenerateContentResponse, error) {
 		return chat.Send(ctx, history[len(history)-1].Parts...)
 	})
-	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
-		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
-			return resp, requeueErr
-		}
-		return resp, fmt.Errorf("failed to send final message: %w", err)
-	}
-
-	if response != nil && response.UsageMetadata != nil {
-		e.recordTokenMetrics(ctx, response.UsageMetadata)
+		return resp, err
 	}
 
 	// Handle the conversation loop with bounded turns to prevent runaway executions.
@@ -451,9 +443,9 @@ func (e *executor[Request, Response]) Execute(
 		// Per-turn retry config wires transient API errors that the retry
 		// recovers from into the turn's Errors list. Without this, retries
 		// that eventually succeed leave no trace of the transients in BQ.
-		// Used by all three in-turn retry call sites below.
+		// Used by all in-turn sendWithRetry call sites below.
 		// Also count every retried attempt in genai.api.requests; the final
-		// attempt is counted by each call site below after RetryWithBackoff.
+		// attempt is counted by sendWithRetry after RetryWithBackoff.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
 		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
@@ -529,20 +521,11 @@ func (e *executor[Request, Response]) Execute(
 
 			// Ask the model to provide a more concise version
 			retryMsg := genai.Part{Text: "Your response exceeded the maximum output token limit. Please provide a more concise response that focuses on the most critical information while still completing the task."}
-			retryResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_max_tokens_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_max_tokens_retry", "failed to send retry message after hitting max tokens", func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, retryMsg)
 			})
-			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
-				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
-					return zero, nil, true, requeueErr
-				}
-				return zero, nil, true, fmt.Errorf("failed to send retry message after hitting max tokens: %w", err)
-			}
-
-			// Record metrics for retry call
-			if retryResp != nil && retryResp.UsageMetadata != nil {
-				e.recordTokenMetrics(ctx, retryResp.UsageMetadata)
+				return zero, nil, true, err
 			}
 
 			// Continue with the new response
@@ -562,21 +545,11 @@ func (e *executor[Request, Response]) Execute(
 
 			// Send a message asking the model to try again with retry for transient errors
 			retryMsg := genai.Part{Text: fmt.Sprintf("The function call was malformed. Please try again using the available functions: %v", funcNames)}
-			retryResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_malformed_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_malformed_retry", "failed to send retry message after malformed function call", func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, retryMsg)
 			})
-			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
-				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
-					return zero, nil, true, requeueErr
-				}
-				return zero, nil, true, fmt.Errorf("failed to send retry message after malformed function call: %w", err)
-			}
-
-			// Record metrics for retry call. Per-turn token recording for
-			// retryResp happens at the top of the next executeTurn iteration.
-			if retryResp != nil && retryResp.UsageMetadata != nil {
-				e.recordTokenMetrics(ctx, retryResp.UsageMetadata)
+				return zero, nil, true, err
 			}
 
 			// Continue with the new response
@@ -678,19 +651,11 @@ func (e *executor[Request, Response]) Execute(
 			}
 
 			// Send tool responses back to the chat with retry for transient errors
-			nextResponse, err := retry.RetryWithBackoff(ctx, turnCfg, "send_tool_responses", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+			nextResponse, err := e.sendWithRetry(ctx, turnCfg, "send_tool_responses", "failed to send tool responses", func() (*genai.GenerateContentResponse, error) {
 				return chat.Send(ctx, toolResponseParts...)
 			})
-			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
-				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
-					return zero, nil, true, requeueErr
-				}
-				return zero, nil, true, fmt.Errorf("failed to send tool responses: %w", err)
-			}
-
-			if nextResponse != nil && nextResponse.UsageMetadata != nil {
-				e.recordTokenMetrics(ctx, nextResponse.UsageMetadata)
+				return zero, nil, true, err
 			}
 			return zero, nextResponse, false, nil
 		}
@@ -702,21 +667,13 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
-			redirectResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_submit_redirect", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+			redirectResp, err := e.sendWithRetry(ctx, turnCfg, "send_submit_redirect", "failed to send submit_result redirect", func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, genai.Part{
 					Text: "You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary.",
 				})
 			})
-			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
-				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
-					return zero, nil, true, requeueErr
-				}
-				return zero, nil, true, fmt.Errorf("failed to send submit_result redirect: %w", err)
-			}
-
-			if redirectResp != nil && redirectResp.UsageMetadata != nil {
-				e.recordTokenMetrics(ctx, redirectResp.UsageMetadata)
+				return zero, nil, true, err
 			}
 
 			return zero, redirectResp, false, nil
@@ -802,6 +759,34 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, call, trace),
 		trace, call.ID, call.Name, call.Args,
 		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
+}
+
+// sendWithRetry runs a single chat send under RetryWithBackoff, counts the
+// final attempt on the API-request counter, and applies the shared error
+// policy: errors from RequeueIfRetryable propagate unwrapped (the workqueue
+// requeue path depends on the error type), any other failure is wrapped with
+// errContext. On success it records the response's usage metadata as OTel
+// token metrics; per-turn token attribution onto the trace happens separately,
+// at the top of the next executeTurn iteration.
+func (e *executor[Request, Response]) sendWithRetry(
+	ctx context.Context,
+	cfg retry.RetryConfig,
+	operation, errContext string,
+	send func() (*genai.GenerateContentResponse, error),
+) (*genai.GenerateContentResponse, error) {
+	response, err := retry.RetryWithBackoff(ctx, cfg, operation, isRetryableVertexError, send)
+	e.telemetry.RecordAPIRequest(ctx, err)
+	if err != nil {
+		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
+			return nil, requeueErr
+		}
+		return nil, fmt.Errorf("%s: %w", errContext, err)
+	}
+
+	if response != nil && response.UsageMetadata != nil {
+		e.recordTokenMetrics(ctx, response.UsageMetadata)
+	}
+	return response, nil
 }
 
 // getOrCreateCache returns the name of a valid CachedContent, creating one if
