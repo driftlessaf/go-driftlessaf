@@ -11,9 +11,6 @@ import (
 	"net/http"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/executor/retry"
-	"chainguard.dev/driftlessaf/agents/metrics"
-	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"google.golang.org/api/googleapi"
 )
 
@@ -86,7 +83,7 @@ func TestResponseCodeFromError(t *testing.T) {
 		{name: "UNAVAILABLE", err: errors.New("Status: UNAVAILABLE, Details: []"), want: 503},
 		{name: "CANCELLED", err: errors.New("rpc error: code = CANCELLED"), want: 499},
 		{name: "Internal error", err: errors.New("Internal error occurred"), want: 500},
-		// Unrecognised → -1, surfaced as "unknown" by responseCodeAttr
+		// Unrecognised → -1, surfaced as "unknown" by the telemetry recorder
 		{name: "opaque error maps to -1", err: errors.New("something weird happened"), want: -1},
 	}
 
@@ -127,29 +124,6 @@ func TestResponseCodeFromMessage(t *testing.T) {
 	}
 }
 
-func TestResponseCodeAttr(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		code int
-		want string
-	}{
-		{name: "0 is success", code: 0, want: "200"},
-		{name: "negative is unknown", code: -1, want: "unknown"},
-		{name: "429", code: 429, want: "429"},
-		{name: "503", code: 503, want: "503"},
-		{name: "529", code: 529, want: "529"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := responseCodeAttr(tt.code); got != tt.want {
-				t.Errorf("responseCodeAttr(%d) = %q, want %q", tt.code, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsRetryableVertexError_WrappedError(t *testing.T) {
 	t.Parallel()
 
@@ -172,47 +146,4 @@ func TestIsRetryableVertexError_WrappedError(t *testing.T) {
 			t.Error("isRetryableVertexError() = false, want true for wrapped ResourceExhausted error")
 		}
 	})
-}
-
-// TestWithAPIRequestCounter_PreservesBaseCallback locks in the composition
-// behaviour of withAPIRequestCounter: it must wrap the existing
-// OnAttemptError, not overwrite it. Per-attempt trace recording relies on
-// the original callback continuing to fire, so a future edit that drops the
-// chaining would silently break llmTurn error capture.
-func TestWithAPIRequestCounter_PreservesBaseCallback(t *testing.T) {
-	t.Parallel()
-
-	e := &executor[promptbuilder.Noop, struct{}]{
-		genaiMetrics: metrics.NewGenAI("test"),
-		model:        "gemini-test",
-	}
-	var got []error
-	cfg := retry.RetryConfig{
-		OnAttemptError: func(err error) { got = append(got, err) },
-	}
-	wrapped := e.withAPIRequestCounter(t.Context(), cfg)
-
-	sentinel := errors.New("transient")
-	wrapped.OnAttemptError(sentinel)
-
-	if len(got) != 1 || !errors.Is(got[0], sentinel) {
-		t.Errorf("base OnAttemptError not invoked: got %v, want one call with sentinel", got)
-	}
-}
-
-// TestWithAPIRequestCounter_NilBase ensures the wrapper handles configs
-// that don't set OnAttemptError (the outer retry call site uses one). It
-// must not panic and must still record the API request.
-func TestWithAPIRequestCounter_NilBase(t *testing.T) {
-	t.Parallel()
-
-	e := &executor[promptbuilder.Noop, struct{}]{
-		genaiMetrics: metrics.NewGenAI("test"),
-		model:        "gemini-test",
-	}
-	cfg := retry.RetryConfig{} // OnAttemptError is nil
-	wrapped := e.withAPIRequestCounter(t.Context(), cfg)
-
-	// Must not panic.
-	wrapped.OnAttemptError(errors.New("boom"))
 }

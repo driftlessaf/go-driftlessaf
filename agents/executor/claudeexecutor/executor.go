@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -25,7 +26,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -62,7 +62,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	temperatureSet       bool                                // true when WithTemperature was applied; lets us warn if it gets dropped for a model that doesn't accept sampling params
 	thinkingBudgetTokens *int64                              // nil = disabled, non-nil = enabled with budget
 	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics         *metrics.GenAI                      // OpenTelemetry metrics for token usage and tool calls
+	telemetry            *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
 	provider             Provider                            // serving backend: Vertex AI or the Anthropic first-party API
@@ -191,10 +191,9 @@ func New[Request promptbuilder.Bindable, Response any](
 		modelName:           "claude-sonnet-4@20250514", // Default to Sonnet 4
 		provider:            ProviderVertex,             // matches NewClient's Vertex fallback; anthropicauth callers override
 		prompt:              prompt,
-		maxTokens:           8192,            // Default max tokens
-		maxTurns:            DefaultMaxTurns, // Default max conversation turns
-		temperature:         0.1,             // Default temperature for consistency
-		genaiMetrics:        genaiMetrics,
+		maxTokens:           8192,                       // Default max tokens
+		maxTurns:            DefaultMaxTurns,            // Default max conversation turns
+		temperature:         0.1,                        // Default temperature for consistency
 		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 		cacheControl:        true,                       // Prompt caching on by default — see cacheControl field comment
 		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
@@ -219,6 +218,10 @@ func New[Request promptbuilder.Bindable, Response any](
 	if e.forceSubmitToolChoice && e.thinkingBudgetTokens != nil {
 		return nil, errors.New("WithForceSubmitToolChoice is incompatible with WithThinking: the API rejects a forced tool_choice while extended thinking is active")
 	}
+
+	// The recorder is built after options so it captures the final model,
+	// provider, and resource labels.
+	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.provider.metricName(), e.resourceLabels, responseCodeFromError)
 
 	return e, nil
 }
@@ -449,7 +452,7 @@ func (e *executor[Request, Response]) Execute(
 		// non-zero result through their result pointer.
 		if committed || !reflect.ValueOf(finalResult).IsZero() {
 			clog.InfoContext(ctx, "Seed tool set final result, exiting immediately")
-			e.recordTurns(ctx, 0, false)
+			e.telemetry.RecordTurns(ctx, 0, false)
 			return finalResult, nil
 		}
 
@@ -488,7 +491,7 @@ func (e *executor[Request, Response]) Execute(
 		// attempt is counted after RetryWithBackoff returns below.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
-		turnCfg = e.withAPIRequestCounter(ctx, turnCfg)
+		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
 
 		// Capture the cumulative prompt as sent to Anthropic. params.Messages
 		// grows across turns (tool results are appended in-place after each
@@ -525,7 +528,7 @@ func (e *executor[Request, Response]) Execute(
 			}
 			return msg, nil
 		})
-		e.recordAPIRequest(ctx, err)
+		e.telemetry.RecordAPIRequest(ctx, err)
 		if err != nil {
 			// If the error is a retryable Claude API error (429, 503, 504, 529) that
 			// exhausted inner retries, signal the workqueue to back off instead of
@@ -540,7 +543,7 @@ func (e *executor[Request, Response]) Execute(
 		// token totals are derived from turns[] in downstream consumers — see
 		// agent_trace_costs.sql.
 		if message.Usage.InputTokens > 0 || message.Usage.OutputTokens > 0 {
-			e.recordTokenMetrics(ctx, message.Usage.InputTokens, message.Usage.OutputTokens)
+			e.telemetry.RecordTokens(ctx, message.Usage.InputTokens, message.Usage.OutputTokens)
 			llmTurn.RecordTokens(message.Usage.InputTokens, message.Usage.OutputTokens)
 		}
 
@@ -561,7 +564,7 @@ func (e *executor[Request, Response]) Execute(
 			cacheRead := message.Usage.CacheReadInputTokens
 			cacheCreation := message.Usage.CacheCreationInputTokens
 			if cacheRead > 0 || cacheCreation > 0 {
-				e.recordCacheMetrics(ctx, cacheRead, cacheCreation)
+				e.telemetry.RecordCacheTokens(ctx, cacheRead, cacheCreation)
 				llmTurn.RecordCacheTokens(cacheRead, cacheCreation)
 				clog.DebugContext(ctx, "Prompt cache metrics",
 					"cache_read_tokens", cacheRead,
@@ -623,7 +626,7 @@ func (e *executor[Request, Response]) Execute(
 			// dispatch so these shared counters are never raced by concurrent
 			// handlers.
 			for _, toolUse := range toolUseBlocks {
-				e.recordToolCall(ctx, toolUse.Name)
+				e.telemetry.RecordToolCall(ctx, toolUse.Name)
 				if submitToolName == "" || toolUse.Name != submitToolName {
 					liveToolCalls++
 				}
@@ -694,7 +697,7 @@ func (e *executor[Request, Response]) Execute(
 				// their result pointer.
 				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
-					e.recordTurns(ctx, turn+1, false)
+					e.telemetry.RecordTurns(ctx, turn+1, false)
 					return perCallResults[i], true, nil
 				}
 			}
@@ -713,7 +716,7 @@ func (e *executor[Request, Response]) Execute(
 			// aborting at maxTurns. Off when maxToolCallsBeforeFinalize is zero.
 			if shouldNudgeFinalize(e.maxToolCallsBeforeFinalize, liveToolCalls, finalizeNudged, submitToolName) {
 				finalizeNudged = true
-				e.recordToolCall(ctx, "early_finalize_nudge")
+				e.telemetry.RecordToolCall(ctx, "early_finalize_nudge")
 				clog.InfoContext(ctx, "early-finalize threshold reached, nudging model to emit result",
 					"live_tool_calls", liveToolCalls,
 					"threshold", e.maxToolCallsBeforeFinalize)
@@ -746,7 +749,7 @@ func (e *executor[Request, Response]) Execute(
 		// force it to call the tool on the next turn using tool_choice.
 		if e.submitTool.Handler != nil && textContent != "" {
 			clog.WarnContext(ctx, "Claude responded with text instead of calling submit_result, redirecting with tool_choice")
-			e.recordToolCall(ctx, "submit_result_redirect")
+			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
 			params.Messages = append(params.Messages, message.ToParam())
 			params.Messages = append(params.Messages, anthropic.MessageParam{
@@ -771,7 +774,7 @@ func (e *executor[Request, Response]) Execute(
 			}
 
 			clog.InfoContext(ctx, "Successfully completed Claude agent execution", "turns_completed", turn+1)
-			e.recordTurns(ctx, turn+1, false)
+			e.telemetry.RecordTurns(ctx, turn+1, false)
 			return resp, true, nil
 		}
 
@@ -789,7 +792,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
-	e.recordTurns(ctx, e.maxTurns, true)
+	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
@@ -1006,7 +1009,7 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	}
 	if len(findings) > 0 {
 		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
-		e.recordToolCall(ctx, "submit_result_rejected")
+		e.telemetry.RecordToolCall(ctx, "submit_result_rejected")
 		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
 		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
 	}
@@ -1046,73 +1049,6 @@ func shouldNudgeFinalize(threshold, liveToolCalls int, alreadyNudged bool, submi
 		return false
 	}
 	return liveToolCalls >= threshold
-}
-
-// resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
-func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
-	if len(e.resourceLabels) == 0 {
-		return nil
-	}
-	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
-	for k, v := range e.resourceLabels {
-		attrs = append(attrs, attribute.String(k, v))
-	}
-	return attrs
-}
-
-// recordTokenMetrics records token usage with optional enrichment
-func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, inputTokens, outputTokens int64) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
-	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens, attrs...)
-}
-
-// recordCacheMetrics records prompt cache token usage with optional enrichment
-func (e *executor[Request, Response]) recordCacheMetrics(ctx context.Context, cacheRead, cacheCreation int64) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
-	e.genaiMetrics.RecordCacheTokens(ctx, e.modelName, cacheRead, cacheCreation, attrs...)
-}
-
-// recordToolCall records a tool call metric with optional enrichment
-func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
-	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
-}
-
-// recordTurns records the number of turns used and, when limitExceeded is true,
-// increments the turn_limit_exceeded counter.
-func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
-	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
-}
-
-// recordAPIRequest counts a single Claude API attempt with a response_code
-// derived from err. Call this after every retry-wrapped API call (whether the
-// final outcome was success, retryable failure, or non-retryable failure) so
-// the counter sees one increment per HTTP attempt.
-func (e *executor[Request, Response]) recordAPIRequest(ctx context.Context, err error) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", e.provider.metricName()))
-	e.genaiMetrics.RecordAPIRequest(ctx, e.modelName, responseCodeAttr(responseCodeFromError(err)), attrs...)
-}
-
-// withAPIRequestCounter extends cfg.OnAttemptError to also count each retried
-// API attempt in genai.api.requests. The retry loop only invokes
-// OnAttemptError for retryable errors that will be retried, so this captures
-// the intermediate attempts that retry.RetryWithBackoff would otherwise hide;
-// the final attempt is counted by the caller after RetryWithBackoff returns.
-func (e *executor[Request, Response]) withAPIRequestCounter(ctx context.Context, cfg retry.RetryConfig) retry.RetryConfig {
-	base := cfg.OnAttemptError
-	cfg.OnAttemptError = func(err error) {
-		if base != nil {
-			base(err)
-		}
-		e.recordAPIRequest(ctx, err)
-	}
-	return cfg
 }
 
 // tracePrompt returns the full effective prompt for trace recording: the

@@ -17,6 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
+	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -25,7 +26,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 )
@@ -70,7 +70,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	responseSchema   *genai.Schema
 	thinkingBudget   *int32                              // nil = disabled, non-nil = enabled with budget
 	submitTool       googletool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
-	genaiMetrics     *metrics.GenAI                      // OpenTelemetry metrics for token usage and tool calls
+	telemetry        *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig      retry.RetryConfig                   // retry configuration for transient Vertex AI errors
 	resourceLabels   map[string]string                   // resource labels for GCP billing attribution
 
@@ -131,11 +131,10 @@ func New[Request promptbuilder.Bindable, Response any](
 	exec := &executor[Request, Response]{
 		client:              client,
 		prompt:              prompt,
-		model:               "gemini-2.5-flash", // Default to Gemini 2.5 Flash
-		temperature:         0.1,                // Default temperature for consistency
-		maxOutputTokens:     8192,               // Default max tokens
-		maxTurns:            DefaultMaxTurns,    // Default max conversation turns
-		genaiMetrics:        genaiMetrics,
+		model:               "gemini-2.5-flash",         // Default to Gemini 2.5 Flash
+		temperature:         0.1,                        // Default temperature for consistency
+		maxOutputTokens:     8192,                       // Default max tokens
+		maxTurns:            DefaultMaxTurns,            // Default max conversation turns
 		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 		cacheControl:        true,                       // Context caching on by default — see cacheControl field comment
 		cacheTTL:            30 * time.Minute,           // Default cache TTL
@@ -153,6 +152,10 @@ func New[Request promptbuilder.Bindable, Response any](
 			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
+
+	// The recorder is built after options so it captures the final model and
+	// resource labels.
+	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, "gcp.vertex_ai", exec.resourceLabels, responseCodeFromError)
 
 	return exec, nil
 }
@@ -342,7 +345,7 @@ func (e *executor[Request, Response]) Execute(
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
 		// Record tool call metric
-		e.recordToolCall(ctx, call.Name)
+		e.telemetry.RecordToolCall(ctx, call.Name)
 
 		// Find and execute the handler for this tool
 		var toolResponse *genai.FunctionResponse
@@ -418,10 +421,10 @@ func (e *executor[Request, Response]) Execute(
 
 	// Send final message to get response with retry for transient errors
 	clog.InfoContext(ctx, "Sending final message")
-	response, err := retry.RetryWithBackoff(ctx, e.withAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
+	response, err := retry.RetryWithBackoff(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 		return chat.Send(ctx, history[len(history)-1].Parts...)
 	})
-	e.recordAPIRequest(ctx, err)
+	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
 		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 			return resp, requeueErr
@@ -457,7 +460,7 @@ func (e *executor[Request, Response]) Execute(
 		// attempt is counted by each call site below after RetryWithBackoff.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
-		turnCfg = e.withAPIRequestCounter(ctx, turnCfg)
+		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
 
 		// Record tokens for the response being processed in this turn.
 		// Unlike claude/openai executors (which record tokens right after
@@ -533,7 +536,7 @@ func (e *executor[Request, Response]) Execute(
 			retryResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_max_tokens_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, retryMsg)
 			})
-			e.recordAPIRequest(ctx, err)
+			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -566,7 +569,7 @@ func (e *executor[Request, Response]) Execute(
 			retryResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_malformed_retry", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, retryMsg)
 			})
-			e.recordAPIRequest(ctx, err)
+			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -696,7 +699,7 @@ func (e *executor[Request, Response]) Execute(
 				// their result pointer.
 				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
-					e.recordTurns(ctx, turn+1, false)
+					e.telemetry.RecordTurns(ctx, turn+1, false)
 					return perCallResults[i], nil, true, nil
 				}
 				toolResponseParts = append(toolResponseParts, parts[i])
@@ -706,7 +709,7 @@ func (e *executor[Request, Response]) Execute(
 			nextResponse, err := retry.RetryWithBackoff(ctx, turnCfg, "send_tool_responses", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 				return chat.Send(ctx, toolResponseParts...)
 			})
-			e.recordAPIRequest(ctx, err)
+			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -725,14 +728,14 @@ func (e *executor[Request, Response]) Execute(
 		// redirect it back to use the tool.
 		if e.submitTool.Handler != nil && hasText {
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
-			e.recordToolCall(ctx, "submit_result_redirect")
+			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
 			redirectResp, err := retry.RetryWithBackoff(ctx, turnCfg, "send_submit_redirect", isRetryableVertexError, func() (*genai.GenerateContentResponse, error) {
 				return chat.SendMessage(ctx, genai.Part{
 					Text: "You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary.",
 				})
 			})
-			e.recordAPIRequest(ctx, err)
+			e.telemetry.RecordAPIRequest(ctx, err)
 			if err != nil {
 				if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
 					return zero, nil, true, requeueErr
@@ -757,7 +760,7 @@ func (e *executor[Request, Response]) Execute(
 				return zero, nil, true, fmt.Errorf("failed to parse AI response: %w", err)
 			}
 			clog.InfoContext(ctx, "Successfully completed Google AI agent execution", "turns_completed", turn+1)
-			e.recordTurns(ctx, turn+1, false)
+			e.telemetry.RecordTurns(ctx, turn+1, false)
 			return extractedResponse, nil, true, nil
 		}
 
@@ -780,7 +783,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
-	e.recordTurns(ctx, e.maxTurns, true)
+	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
 	// The final unprocessed response carries real billable tokens (the
 	// model already generated them). Without this synthetic turn the
 	// loop would exit and only OTel metrics would see them — turns[]
@@ -844,7 +847,7 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	}
 	if len(findings) > 0 {
 		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
-		e.recordToolCall(ctx, "submit_result_rejected")
+		e.telemetry.RecordToolCall(ctx, "submit_result_rejected")
 		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
 		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
 	}
@@ -877,7 +880,7 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	// Caches.Create is a Vertex API call subject to the same quotas as
 	// chat.Send; count it on the same counter so a cache-creation 429 storm
 	// shows up on the rate-limit dashboard alongside chat-send 429s.
-	e.recordAPIRequest(ctx, err)
+	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
 		return "", fmt.Errorf("creating cached content: %w", err)
 	}
@@ -890,7 +893,7 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	if cached.UsageMetadata != nil {
 		totalTokenCount = cached.UsageMetadata.TotalTokenCount
 		if totalTokenCount > 0 {
-			e.recordCacheMetrics(ctx, 0, int64(totalTokenCount))
+			e.telemetry.RecordCacheTokens(ctx, 0, int64(totalTokenCount))
 		}
 	}
 
@@ -908,85 +911,21 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
-// resourceLabelsToAttributes converts resourceLabels map to OpenTelemetry attributes
-func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
-	if len(e.resourceLabels) == 0 {
-		return nil
-	}
-	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
-	for k, v := range e.resourceLabels {
-		attrs = append(attrs, attribute.String(k, v))
-	}
-	return attrs
-}
-
-// recordTokenMetrics records token usage with optional enrichment.
-// When context caching is active and the response includes cached tokens,
-// OTel cache metrics are also recorded. Per-turn cache token attribution
-// onto the trace happens in executeTurn (LLMTurn.RecordCacheTokens) — this
-// path only emits the OTel metrics counter.
+// recordTokenMetrics unpacks the genai usage-metadata shape into the shared
+// recorder. When context caching is active and the response includes cached
+// tokens, OTel cache metrics are also recorded. Per-turn cache token
+// attribution onto the trace happens in executeTurn
+// (LLMTurn.RecordCacheTokens) — this path only emits the OTel metrics counter.
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, usage *genai.GenerateContentResponseUsageMetadata) {
 	if usage == nil {
 		return
 	}
 
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
-	e.genaiMetrics.RecordTokens(ctx, e.model, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount), attrs...)
+	e.telemetry.RecordTokens(ctx, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount))
 
 	if e.cacheControl && usage.CachedContentTokenCount > 0 {
-		e.recordCacheMetrics(ctx, int64(usage.CachedContentTokenCount), 0)
+		e.telemetry.RecordCacheTokens(ctx, int64(usage.CachedContentTokenCount), 0)
 		clog.DebugContext(ctx, "Prompt cache metrics",
 			"cache_read_tokens", usage.CachedContentTokenCount)
 	}
-}
-
-// recordCacheMetrics records context cache token usage with optional enrichment.
-func (e *executor[Request, Response]) recordCacheMetrics(ctx context.Context, cacheRead, cacheCreation int64) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
-	e.genaiMetrics.RecordCacheTokens(ctx, e.model, cacheRead, cacheCreation, attrs...)
-}
-
-// recordToolCall records a tool call metric with optional enrichment
-func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
-	e.genaiMetrics.RecordToolCall(ctx, e.model, toolName, attrs...)
-}
-
-// recordTurns records the number of turns used and, when limitExceeded is true,
-// increments the turn_limit_exceeded counter.
-func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
-	e.genaiMetrics.RecordTurns(ctx, e.model, turns, limitExceeded, attrs...)
-}
-
-// recordAPIRequest counts a single Vertex API attempt with a response_code
-// derived from err. Call this after every retry-wrapped API call (whether the
-// final outcome was success, retryable failure, or non-retryable failure) so
-// the counter sees one increment per HTTP attempt — matching what GCP's
-// serviceruntime metric sees on its side of the wire.
-func (e *executor[Request, Response]) recordAPIRequest(ctx context.Context, err error) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "gcp.vertex_ai"))
-	e.genaiMetrics.RecordAPIRequest(ctx, e.model, responseCodeAttr(responseCodeFromError(err)), attrs...)
-}
-
-// withAPIRequestCounter extends cfg.OnAttemptError to also count each retried
-// API attempt in genai.api.requests. The retry loop only invokes
-// OnAttemptError for retryable errors that will be retried, so this captures
-// the intermediate attempts that retry.RetryWithBackoff would otherwise hide;
-// the final attempt is counted by the caller after RetryWithBackoff returns.
-// Together they give exactly one increment per HTTP attempt.
-func (e *executor[Request, Response]) withAPIRequestCounter(ctx context.Context, cfg retry.RetryConfig) retry.RetryConfig {
-	base := cfg.OnAttemptError
-	cfg.OnAttemptError = func(err error) {
-		if base != nil {
-			base(err)
-		}
-		e.recordAPIRequest(ctx, err)
-	}
-	return cfg
 }

@@ -7,7 +7,6 @@ package googleexecutor
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"google.golang.org/api/googleapi"
@@ -62,22 +61,6 @@ func responseCodeFromMessage(s string) int {
 		return 500
 	}
 	return -1
-}
-
-// responseCodeAttr formats a code from responseCodeFromError as a string
-// attribute for the genai.api.requests counter. Mirrors the response_code
-// label on serviceruntime.googleapis.com/api/request_count: "200" for
-// success, the numeric code for everything we recognise, "unknown" for
-// errors that don't carry a status (so they still get counted).
-func responseCodeAttr(code int) string {
-	switch {
-	case code == 0:
-		return "200"
-	case code < 0:
-		return "unknown"
-	default:
-		return strconv.Itoa(code)
-	}
 }
 
 // isRetryableVertexError reports whether err is a transient Vertex AI failure

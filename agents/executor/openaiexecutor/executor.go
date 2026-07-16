@@ -14,6 +14,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
+	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -24,7 +25,6 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -60,7 +60,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxTurns       int
 	temperature    float64
 	submitTool     openaistool.SubmitMetadata[Response]
-	genaiMetrics   *metrics.GenAI
+	telemetry      *telemetry.Recorder
 	retryConfig    retry.RetryConfig
 	resourceLabels map[string]string
 
@@ -101,7 +101,6 @@ func New[Request promptbuilder.Bindable, Response any](
 		maxTokens:           8192,
 		maxTurns:            DefaultMaxTurns,
 		temperature:         0.1,
-		genaiMetrics:        metrics.NewGenAI("chainguard.ai.agents"),
 		retryConfig:         retry.DefaultRetryConfig(),
 		toolCallConcurrency: DefaultToolCallConcurrency,
 
@@ -116,6 +115,12 @@ func New[Request promptbuilder.Bindable, Response any](
 			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
+
+	// The recorder is built after options so it captures the final model and
+	// resource labels. codeFromError is nil because this executor does not
+	// record genai.api.requests: it has no error→code mapping yet, and wiring
+	// one up is a behavior change tracked separately.
+	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, "openai-compat", e.resourceLabels, nil)
 
 	return e, nil
 }
@@ -226,7 +231,7 @@ func (e *executor[Request, Response]) Execute(
 		committed := false
 		switch meta, ok := tools[tc.Function.Name]; {
 		case ok:
-			e.recordToolCall(ctx, tc.Function.Name)
+			e.telemetry.RecordToolCall(ctx, tc.Function.Name)
 			res = meta.Handler(ctx, tc, trace, resultPtr)
 			// Preserve the model's universal `reasoning` argument on the
 			// recorded call (handlers record curated param maps that drop it).
@@ -239,7 +244,7 @@ func (e *executor[Request, Response]) Execute(
 			// the run's final result. A rejected submission returns the
 			// validators' findings as the tool result so the model can address
 			// them and submit again — the loop continues.
-			e.recordToolCall(ctx, tc.Function.Name)
+			e.telemetry.RecordToolCall(ctx, tc.Function.Name)
 			var err error
 			res, committed, err = e.evaluateSubmission(ctx, tc, args, trace, resultPtr)
 			if err != nil {
@@ -298,7 +303,7 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		if completion.Usage.PromptTokens > 0 || completion.Usage.CompletionTokens > 0 {
-			e.recordTokenMetrics(ctx, completion.Usage.PromptTokens, completion.Usage.CompletionTokens)
+			e.telemetry.RecordTokens(ctx, completion.Usage.PromptTokens, completion.Usage.CompletionTokens)
 			llmTurn.RecordTokens(completion.Usage.PromptTokens, completion.Usage.CompletionTokens)
 		}
 
@@ -401,7 +406,7 @@ func (e *executor[Request, Response]) Execute(
 				// their result pointer.
 				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
-					e.recordTurns(ctx, turn+1, false)
+					e.telemetry.RecordTurns(ctx, turn+1, false)
 					return perCallResults[i], true, nil
 				}
 			}
@@ -413,7 +418,7 @@ func (e *executor[Request, Response]) Execute(
 		// When submit_result is configured, redirect text responses back to the tool.
 		if e.submitTool.Handler != nil && textContent != "" {
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
-			e.recordToolCall(ctx, "submit_result_redirect")
+			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
 			reqParams.Messages = append(reqParams.Messages, choice.Message.ToParam())
 			reqParams.Messages = append(reqParams.Messages,
@@ -435,7 +440,7 @@ func (e *executor[Request, Response]) Execute(
 				return response, true, fmt.Errorf("failed to parse response: %w", err)
 			}
 			clog.InfoContext(ctx, "Successfully completed OpenAI-compatible agent execution", "turns_completed", turn+1)
-			e.recordTurns(ctx, turn+1, false)
+			e.telemetry.RecordTurns(ctx, turn+1, false)
 			return resp, true, nil
 		}
 
@@ -452,7 +457,7 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
-	e.recordTurns(ctx, e.maxTurns, true)
+	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
@@ -501,7 +506,7 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	}
 	if len(findings) > 0 {
 		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
-		e.recordToolCall(ctx, "submit_result_rejected")
+		e.telemetry.RecordToolCall(ctx, "submit_result_rejected")
 		toolCall.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
 		return callbacks.RejectionResult(e.submitToolName(), findings), false, nil
 	}
@@ -509,35 +514,4 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	*resultPtr = outcome.Response
 	toolCall.Complete(outcome.ToolResult, nil)
 	return outcome.ToolResult, true, nil
-}
-
-func (e *executor[Request, Response]) resourceLabelsToAttributes() []attribute.KeyValue {
-	if len(e.resourceLabels) == 0 {
-		return nil
-	}
-	attrs := make([]attribute.KeyValue, 0, len(e.resourceLabels))
-	for k, v := range e.resourceLabels {
-		attrs = append(attrs, attribute.String(k, v))
-	}
-	return attrs
-}
-
-func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, inputTokens, outputTokens int64) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "openai-compat"))
-	e.genaiMetrics.RecordTokens(ctx, e.modelName, inputTokens, outputTokens, attrs...)
-}
-
-func (e *executor[Request, Response]) recordToolCall(ctx context.Context, toolName string) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "openai-compat"))
-	e.genaiMetrics.RecordToolCall(ctx, e.modelName, toolName, attrs...)
-}
-
-// recordTurns records the number of turns used and, when limitExceeded is true,
-// increments the turn_limit_exceeded counter.
-func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int, limitExceeded bool) {
-	attrs := e.resourceLabelsToAttributes()
-	attrs = append(attrs, attribute.String("gen_ai.provider.name", "openai-compat"))
-	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
 }

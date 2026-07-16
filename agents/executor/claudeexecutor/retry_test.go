@@ -116,7 +116,7 @@ func TestResponseCodeFromError(t *testing.T) {
 		{name: "streaming rate_limit_error", err: errors.New(`received error while streaming: {"type":"error","error":{"type":"rate_limit_error"}}`), want: 429},
 		{name: "streaming overloaded_error", err: errors.New(`received error while streaming: {"type":"error","error":{"type":"overloaded_error"}}`), want: 529},
 		{name: "streaming api_error", err: errors.New(`received error while streaming: {"type":"error","error":{"type":"api_error"}}`), want: 500},
-		// Unrecognised errors map to -1, surfaced as "unknown" by responseCodeAttr.
+		// Unrecognised errors map to -1, surfaced as "unknown" by the telemetry recorder.
 		{name: "opaque error", err: errors.New("connection refused"), want: -1},
 	}
 
@@ -147,30 +147,6 @@ func TestResponseCodeFromMessage(t *testing.T) {
 			t.Parallel()
 			if got := responseCodeFromMessage(tt.s); got != tt.want {
 				t.Errorf("responseCodeFromMessage(%q) = %d, want %d", tt.s, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestResponseCodeAttr(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		code int
-		want string
-	}{
-		{name: "0 is success", code: 0, want: "200"},
-		{name: "negative is unknown", code: -1, want: "unknown"},
-		{name: "200 in-stream error with unrecognised body type", code: 200, want: "200"},
-		{name: "429", code: 429, want: "429"},
-		{name: "500", code: 500, want: "500"},
-		{name: "529", code: 529, want: "529"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := responseCodeAttr(tt.code); got != tt.want {
-				t.Errorf("responseCodeAttr(%d) = %q, want %q", tt.code, got, tt.want)
 			}
 		})
 	}
