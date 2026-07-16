@@ -11,7 +11,6 @@ import (
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/evals"
 )
 
 // ExampleStartTrace_toolCalls demonstrates trace creation and tool call tracking.
@@ -165,27 +164,6 @@ func ExampleTrace_StartToolCall() {
 
 	fmt.Println("Trace completed successfully")
 	// Output: Trace completed successfully
-}
-
-// ExampleNewDefaultTracer demonstrates the default logging tracer.
-func ExampleNewDefaultTracer() {
-	ctx := context.Background()
-
-	// Create default tracer (uses clog for logging)
-	tracer := evals.NewDefaultTracer[string](ctx)
-	ctx = agenttrace.WithTracer[string](ctx, tracer)
-
-	// Create and complete a trace
-	trace, done := agenttrace.StartTrace[string](ctx, "System health check")
-
-	healthCall := trace.StartToolCall("health1", "check-services", nil)
-	healthCall.Complete("all services healthy", nil)
-
-	// Complete the trace via done callback (this logs structured information)
-	done("Health check passed", nil)
-
-	fmt.Println("Health check trace completed")
-	// Output: Health check trace completed
 }
 
 // ExampleTracerFromContext demonstrates retrieving tracers from context.

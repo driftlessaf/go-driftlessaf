@@ -29,7 +29,7 @@ Ready-made ObservableTraceCallbacks cover common checks:
 
 	// Tool call counts
 	evals.ExactToolCalls[string](2)
-	// (also MinimumNToolCalls, MaximumNToolCalls, RangeToolCalls, NoToolCalls)
+	// (also MinimumNToolCalls, RangeToolCalls, NoToolCalls)
 
 	// Tool usage constraints
 	evals.RequiredToolCalls[string]([]string{"search", "analyze"})
@@ -38,14 +38,8 @@ Ready-made ObservableTraceCallbacks cover common checks:
 	// No trace-level errors
 	evals.NoErrors[string]()
 
-	// Custom validation of tool calls or the trace result
-	evals.ToolCallValidator[string](func(o evals.Observer, tc *agenttrace.ToolCall[string]) error { ... })
-	evals.ToolCallNamed[string]("search", func(o evals.Observer, tc *agenttrace.ToolCall[string]) error { ... })
+	// Custom validation of the trace result
 	evals.ResultValidator[string](func(result string) error { ... })
-
-Additional helpers guard against known bad tool-call patterns:
-NoReadFileOnDirectory, NoHallucinatedPaths, EditStringExists,
-ValidRegexPattern.
 
 # Wiring evaluations into a tracer
 
@@ -62,8 +56,7 @@ agenttrace.TraceCallback that runs when a trace completes:
 	ctx = agenttrace.WithTracer[string](ctx, tracer)
 
 BuildCallbacks and BuildTracer do the same for a map of named evaluations,
-namespacing each entry under the observer. NewDefaultTracer returns a tracer
-that logs completed traces via clog.
+namespacing each entry under the observer.
 
 # Reporting
 

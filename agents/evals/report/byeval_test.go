@@ -13,6 +13,33 @@ import (
 	"chainguard.dev/driftlessaf/agents/evals/report"
 )
 
+// mockObserver implements evals.Observer for testing
+type mockObserver struct {
+	failures []string
+	logs     []string
+	count    int64
+}
+
+func (m *mockObserver) Fail(msg string) {
+	m.failures = append(m.failures, msg)
+}
+
+func (m *mockObserver) Log(msg string) {
+	m.logs = append(m.logs, msg)
+}
+
+func (m *mockObserver) Grade(score float64, reasoning string) {
+	// Mock implementation does nothing with grades
+}
+
+func (m *mockObserver) Increment() {
+	m.count++
+}
+
+func (m *mockObserver) Total() int64 {
+	return m.count
+}
+
 func TestByEval(t *testing.T) {
 	// Create a factory that creates test observers
 	factory := func(name string) *evals.ResultCollector {

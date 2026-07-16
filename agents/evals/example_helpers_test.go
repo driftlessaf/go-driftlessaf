@@ -7,7 +7,6 @@ package evals_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -82,50 +81,6 @@ func ExampleRequiredToolCalls() {
 
 	// Output:
 	// All required tools were called
-}
-
-// ExampleToolCallValidator shows custom validation of tool calls
-func ExampleToolCallValidator() {
-	// Create a mock observer
-	obs := &mockObserver{}
-
-	// Validate that all tool calls have a reasoning parameter
-	validator := func(o evals.Observer, tc *agenttrace.ToolCall[string]) error {
-		if _, ok := tc.Params["reasoning"]; !ok {
-			return errors.New("missing reasoning parameter")
-		}
-		return nil
-	}
-
-	evalCallback := evals.ToolCallValidator[string](validator)
-
-	// Create tracer with the evaluation
-	tracer := agenttrace.ByCode[string](evals.Inject(obs, evalCallback))
-
-	// Create trace with proper reasoning parameters
-	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
-	trace, done := agenttrace.StartTrace[string](ctx, "Analyze logs")
-
-	// Add tool calls with reasoning parameters
-	tc1 := trace.StartToolCall("tc1", "read_logs", map[string]any{
-		"reasoning": "need to analyze logs",
-	})
-	tc1.Complete("log data", nil)
-
-	tc2 := trace.StartToolCall("tc2", "analyze", map[string]any{
-		"reasoning": "extract error patterns",
-	})
-	tc2.Complete("analysis done", nil)
-
-	// Complete trace via done callback (triggers evaluation)
-	done("Analysis complete", nil)
-
-	if len(obs.failures) == 0 {
-		fmt.Println("All tool calls have reasoning")
-	}
-
-	// Output:
-	// All tool calls have reasoning
 }
 
 // ExampleNoErrors shows how to validate no errors occurred

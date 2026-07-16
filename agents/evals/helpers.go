@@ -32,15 +32,6 @@ func MinimumNToolCalls[T any](n int) ObservableTraceCallback[T] {
 	}
 }
 
-// MaximumNToolCalls returns an ObservableTraceCallback that validates the trace has at most n tool calls.
-func MaximumNToolCalls[T any](n int) ObservableTraceCallback[T] {
-	return func(o Observer, trace *agenttrace.Trace[T]) {
-		if got := len(trace.ToolCalls); got > n {
-			o.Fail(fmt.Sprintf("tool call count: got = %d, wanted <= %d", got, n))
-		}
-	}
-}
-
 // RangeToolCalls returns an ObservableTraceCallback that validates the trace has between min and max tool calls (inclusive).
 func RangeToolCalls[T any](min, max int) ObservableTraceCallback[T] {
 	return func(o Observer, trace *agenttrace.Trace[T]) {
@@ -98,38 +89,6 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 			}
 			sort.Strings(missing)
 			o.Fail(fmt.Sprintf("missing required tool calls: %v", missing))
-		}
-	}
-}
-
-// ToolCallValidator creates an ObservableTraceCallback that validates individual tool calls using a custom validator function.
-func ToolCallValidator[T any](validator func(o Observer, tc *agenttrace.ToolCall[T]) error) ObservableTraceCallback[T] {
-	return func(o Observer, trace *agenttrace.Trace[T]) {
-		for i, tc := range trace.ToolCalls {
-			if err := validator(o, tc); err != nil {
-				o.Fail(fmt.Sprintf("tool call %d (%s) validation failed: %v", i, tc.Name, err))
-				return
-			}
-		}
-	}
-}
-
-// ToolCallNamed returns an ObservableTraceCallback that validates tool calls with a specific name using a custom validator.
-func ToolCallNamed[T any](name string, validator func(o Observer, tc *agenttrace.ToolCall[T]) error) ObservableTraceCallback[T] {
-	return func(o Observer, trace *agenttrace.Trace[T]) {
-		found := false
-		for _, tc := range trace.ToolCalls {
-			if tc.Name == name {
-				found = true
-				if err := validator(o, tc); err != nil {
-					o.Fail(fmt.Sprintf("tool call %s validation failed: %v", name, err))
-					return
-				}
-			}
-		}
-
-		if !found {
-			o.Fail(fmt.Sprintf("tool call named %q: got = not found, wanted = found", name))
 		}
 	}
 }
