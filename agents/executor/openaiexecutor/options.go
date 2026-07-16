@@ -6,17 +6,14 @@ SPDX-License-Identifier: Apache-2.0
 package openaiexecutor
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
-	"maps"
-	"os"
 
+	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"chainguard.dev/driftlessaf/internal/cloudrun"
 )
 
 // Option is a functional option for configuring the executor.
@@ -175,24 +172,7 @@ func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.Ret
 //   - team: from CHAINGUARD_TEAM (defaults to "unknown")
 func WithResourceLabels[Request promptbuilder.Bindable, Response any](labels map[string]string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
-		serviceName := cmp.Or(cloudrun.ServiceName(), "unknown")
-		productName := os.Getenv("CHAINGUARD_PRODUCT")
-		if productName == "" {
-			productName = "unknown"
-		}
-		teamName := os.Getenv("CHAINGUARD_TEAM")
-		if teamName == "" {
-			teamName = "unknown"
-		}
-
-		e.resourceLabels = map[string]string{
-			"service_name": serviceName,
-			"product":      productName,
-			"team":         teamName,
-		}
-		if labels != nil {
-			maps.Copy(e.resourceLabels, labels)
-		}
+		e.resourceLabels = execshared.DefaultResourceLabels(labels)
 		return nil
 	}
 }

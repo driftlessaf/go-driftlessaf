@@ -6,19 +6,16 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
-	"maps"
-	"os"
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
-	"chainguard.dev/driftlessaf/internal/cloudrun"
 )
 
 // Option is a functional option for configuring the executor
@@ -56,7 +53,7 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 // WithMaxTurns sets the maximum number of conversation turns (LLM round-trips)
 // before the executor aborts. This prevents runaway loops where the model
 // keeps calling tools without converging on a result.
-// Default is DefaultMaxTurns (50).
+// Default is DefaultMaxTurns.
 func WithMaxTurns[Request promptbuilder.Bindable, Response any](turns int) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if turns <= 0 {
@@ -370,27 +367,7 @@ func WithProvider[Request promptbuilder.Bindable, Response any](p Provider) Opti
 // Custom labels passed to this function will override defaults if they use the same keys.
 func WithResourceLabels[Request promptbuilder.Bindable, Response any](labels map[string]string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
-		// Start with default labels from environment
-		serviceName := cmp.Or(cloudrun.ServiceName(), "unknown")
-		productName := os.Getenv("CHAINGUARD_PRODUCT")
-		if productName == "" {
-			productName = "unknown"
-		}
-		teamName := os.Getenv("CHAINGUARD_TEAM")
-		if teamName == "" {
-			teamName = "unknown"
-		}
-
-		e.resourceLabels = map[string]string{
-			"service_name": serviceName,
-			"product":      productName,
-			"team":         teamName,
-		}
-
-		// Merge custom labels (these will override defaults if keys match)
-		if labels != nil {
-			maps.Copy(e.resourceLabels, labels)
-		}
+		e.resourceLabels = execshared.DefaultResourceLabels(labels)
 		return nil
 	}
 }

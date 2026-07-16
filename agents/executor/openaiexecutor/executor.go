@@ -13,6 +13,7 @@ import (
 	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -138,7 +139,7 @@ func (e *executor[Request, Response]) Execute(
 	// Append the static user prompt suffix, when configured. The
 	// OpenAI-compatible API has no per-block prompt-cache semantics, so plain
 	// concatenation preserves the prompt content without any block layout.
-	prompt, err = appendUserPromptSuffix(prompt, e.userPromptSuffix)
+	prompt, err = execshared.AppendUserPromptSuffix(prompt, e.userPromptSuffix)
 	if err != nil {
 		return response, err
 	}
@@ -539,19 +540,4 @@ func (e *executor[Request, Response]) recordTurns(ctx context.Context, turns int
 	attrs := e.resourceLabelsToAttributes()
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", "openai-compat"))
 	e.genaiMetrics.RecordTurns(ctx, e.modelName, turns, limitExceeded, attrs...)
-}
-
-// appendUserPromptSuffix appends the built suffix to the prompt with a
-// blank-line separator. A nil suffix returns the prompt unchanged. The suffix
-// must be fully bound; a Build failure (for example an unbound placeholder)
-// is returned wrapped.
-func appendUserPromptSuffix(prompt string, suffix *promptbuilder.Prompt) (string, error) {
-	if suffix == nil {
-		return prompt, nil
-	}
-	built, err := suffix.Build()
-	if err != nil {
-		return "", fmt.Errorf("failed to build user prompt suffix: %w", err)
-	}
-	return prompt + "\n\n" + built, nil
 }
