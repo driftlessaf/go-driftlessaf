@@ -8,7 +8,6 @@ package submitresult
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 
 	"chainguard.dev/driftlessaf/agents/schema"
 	"github.com/invopop/jsonschema"
@@ -52,22 +51,8 @@ func (o *Options[Response]) setDefaults() {
 	}
 }
 
-func (o *Options[Response]) validate() error {
-	if o.PayloadFieldName == "" {
-		return fmt.Errorf("payload field name is required")
-	}
-	return nil
-}
-
 func (o *Options[Response]) schemaForResponse() *jsonschema.Schema {
-	typ := reflect.TypeFor[Response]()
-	var value any
-	if typ.Kind() == reflect.Pointer {
-		value = reflect.New(typ.Elem()).Interface()
-	} else {
-		value = reflect.New(typ).Interface()
-	}
-	return o.Generator.Reflect(value)
+	return o.Generator.Reflect(newResponseValue[Response]())
 }
 
 func schemaToMap(s *jsonschema.Schema) (map[string]any, error) {

@@ -15,7 +15,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
-	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go"
 	oaiparam "github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/shared"
@@ -24,9 +23,6 @@ import (
 // OpenAITool constructs the OpenAI executor metadata for the submit_result tool.
 func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
-	if err := opts.validate(); err != nil {
-		return openaistool.SubmitMetadata[Response]{}, err
-	}
 
 	responseSchema := opts.schemaForResponse()
 	responseSchema.Description = opts.PayloadDescription
@@ -37,41 +33,12 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 	}
 
 	handler := func(ctx context.Context, tc openai.ChatCompletionMessageToolCall, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
-		var inputMap map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &inputMap); err != nil {
+		var args map[string]any
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 			trace.BadToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, errors.New("parameter error"))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool arguments: %v", err)}
 		}
-
-		reasoning, err := params.Extract[string](inputMap, "reasoning")
-		if err != nil {
-			trace.BadToolCall(tc.ID, tc.Function.Name, inputMap, errors.New("parameter error"))
-			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
-		}
-
-		payloadRaw, err := params.Extract[map[string]any](inputMap, opts.PayloadFieldName)
-		if err != nil {
-			trace.BadToolCall(tc.ID, tc.Function.Name, inputMap, errors.New("parameter error"))
-			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
-		}
-
-		clog.InfoContext(ctx, "Submitting result",
-			"reasoning", reasoning,
-		)
-
-		parsed, err := parsePayload[Response](payloadRaw)
-		if err != nil {
-			tc2 := trace.StartToolCall(tc.ID, tc.Function.Name, inputMap)
-			tc2.Complete(nil, err)
-			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%v", err)}
-		}
-
-		return toolcall.SubmitOutcome[Response]{
-			Accepted:   true,
-			Response:   parsed,
-			Reasoning:  reasoning,
-			ToolResult: successResult(opts.SuccessMessage),
-		}
+		return buildOutcome(ctx, opts, trace, tc.ID, tc.Function.Name, args)
 	}
 
 	return openaistool.SubmitMetadata[Response]{
@@ -94,7 +61,7 @@ func openaiInputSchema(payloadFieldName string, payloadSchema map[string]any) sh
 		"properties": map[string]any{
 			"reasoning": map[string]any{
 				"type":        "string",
-				"description": "Explain why you are confident this result is complete and accurate.",
+				"description": reasoningDescription,
 			},
 			payloadFieldName: payloadSchema,
 		},

@@ -22,8 +22,10 @@ type tagMetadata struct {
 	PayloadDescription string
 }
 
-// optionsForResponse builds Options from the annotations present on the response type T.
-func optionsForResponse[T any]() Options[T] {
+// OptionsForResponse returns an Options pre-populated from the annotations present on
+// the response type T. Callers may further customize the returned struct before passing
+// it to ClaudeTool or GoogleTool.
+func OptionsForResponse[T any]() Options[T] {
 	meta, _ := extractMetadata(reflect.TypeFor[T]())
 	return Options[T]{
 		ToolName:           meta.ToolName,
@@ -78,23 +80,16 @@ func parseTag(tag string, meta *tagMetadata) {
 		}
 
 		switch key {
-		case "name", "tool", "toolname":
+		case "name":
 			meta.ToolName = value
-		case "description", "toolDescription":
+		case "description":
 			meta.Description = value
-		case "success", "successmessage":
+		case "success":
 			meta.SuccessMessage = value
-		case "payload", "payloadfield", "payloadfieldname":
+		case "payload":
 			meta.PayloadFieldName = value
-		case "payloaddescription", "payload_desc":
+		case "payloaddescription":
 			meta.PayloadDescription = value
 		}
 	}
-}
-
-// OptionsForResponse returns an Options pre-populated from the annotations present on
-// the response type T. Callers may further customize the returned struct before passing
-// it to ClaudeTool or GoogleTool.
-func OptionsForResponse[T any]() Options[T] {
-	return optionsForResponse[T]()
 }
