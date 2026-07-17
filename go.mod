@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	chainguard.dev/apko v1.2.18
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.137
+	chainguard.dev/sdk v0.1.57
 	cloud.google.com/go/aiplatform v1.125.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.31.0
@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.51.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v1.21.0
+	github.com/chainguard-dev/terraform-infra-common v1.0.12
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.11
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.19.0
@@ -45,6 +45,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.21.0
+	golang.org/x/time v0.15.0
 	google.golang.org/api v0.286.0
 	google.golang.org/genai v1.62.0
 	google.golang.org/grpc v1.81.1
@@ -289,7 +290,6 @@ require (
 	golang.org/x/telemetry v0.0.0-20260610154732-fb80ec83bdd9 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.46.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto v0.0.0-20260519071638-aa98bba5eb94 // indirect
@@ -300,3 +300,7 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common

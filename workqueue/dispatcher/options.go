@@ -75,8 +75,19 @@ func (nopErrorEmitter) drain()                             {}
 type Option func(*config)
 
 type config struct {
-	errors  errorEmitter
-	backoff func(attempts int) time.Duration
+	errors         errorEmitter
+	backoff        func(attempts int) time.Duration
+	dispatchPeriod time.Duration
+}
+
+// WithDispatchPeriod sets the minimum interval between dispatch passes for
+// a Handler: at most one pass is admitted per period, and triggers beyond
+// that are acknowledged and dropped. The default is one second. It has no
+// effect on Handle or HandleAsync, which initiate unconditionally.
+func WithDispatchPeriod(d time.Duration) Option {
+	return func(c *config) {
+		c.dispatchPeriod = d
+	}
 }
 
 // WithBackoff sets the failure-retry backoff for the dispatcher. On each

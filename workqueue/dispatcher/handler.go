@@ -7,13 +7,25 @@ package dispatcher
 
 import (
 	"net/http"
-	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"chainguard.dev/driftlessaf/workqueue"
 )
 
+// defaultDispatchPeriod is the pass-admission interval used when
+// WithDispatchPeriod is not supplied.
+const defaultDispatchPeriod = time.Second
+
 func Handler(wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) http.Handler {
+	period := applyOptions(opts).dispatchPeriod
+	if period <= 0 {
+		period = defaultDispatchPeriod
+	}
 	return &handler{
+		// burst 1: pass admissions are at least one period apart.
+		limiter:     rate.NewLimiter(rate.Every(period), 1),
 		wq:          wq,
 		concurrency: concurrency,
 		batchSize:   batchSize,
@@ -24,8 +36,7 @@ func Handler(wq workqueue.Interface, concurrency, batchSize int, f Callback, max
 }
 
 type handler struct {
-	doWork sync.Mutex
-	doWait sync.Mutex
+	limiter *rate.Limiter
 
 	wq          workqueue.Interface
 	concurrency int
@@ -39,39 +50,17 @@ var _ http.Handler = (*handler)(nil)
 
 // ServeHTTP implements http.Handler
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// If something else is already dispatching, then we enter the waiting room.
-	if !h.doWork.TryLock() {
-		// If there is already someone in the waiting room, then we deduplicate
-		// ourselves with that event by returning and allowing the waiting
-		// request to trigger any subsequent processing.
-		if !h.doWait.TryLock() {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		// As the waiting room occupant, wait patiently to acquire the work lock
-		// and once we have it, then we can vacate the waiting room.
-		// Note: it is conceivably possible for two races to occur:
-		// 1. A new request acquires the lock instead of us, and we continue to
-		//   occupy the waiting room.
-		// 2. A new request comes in while we hold both locks, and nothing fills
-		//   the waiting room.
-		// In both of these cases, there isn't really a risk of data loss, so
-		// this is acceptable.
-		h.doWork.Lock()
-		h.doWait.Unlock()
+	// Admit at most one dispatch pass per period. Triggers beyond that are
+	// acknowledged and dropped — the admitted passes already cover the
+	// queue, and the workqueue's periodic triggers provide the follow-up
+	// passes. Passes are deliberately unbounded in flight: a slow pass over
+	// a deep queue must not stop a full sweep from launching each period.
+	if !h.limiter.Allow() {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
-	// Launch the dispatch future while holding the lock.
-	future := func() Future {
-		// We do this via a defer to ensure that it is invoked in the event of
-		// a panic during HandleAsync.
-		defer h.doWork.Unlock()
-		return HandleAsync(r.Context(), h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry, h.opts...)
-	}()
-
-	// Once we have initiated the dispatch, allow other dispatches to
-	// initiate while we wait on this round of results.
-	if err := future(); err != nil {
+	if err := HandleAsync(r.Context(), h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry, h.opts...)(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
