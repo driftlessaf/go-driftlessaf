@@ -201,10 +201,30 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	// isSubmit reports whether a call routes to the terminal submit tool. It
-	// is the single routing predicate: executeToolCall's dispatch switch and
-	// the turn loop's held-out-of-pool partition both use it, so the two
-	// sites cannot drift.
+	// is the routing predicate consulted by executeToolCall's dispatch switch.
 	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
+
+	// heldOutTools is the set of tool names dispatched sequentially after the
+	// concurrent tool pool drains, rather than within it (see
+	// execshared.DispatchToolCalls). A held-out call's work runs only once
+	// every sibling handler has finished and its real tool_result is in the
+	// transcript. Today the only member is the terminal submit tool — its
+	// result validators may read state the sibling handlers produce
+	// (worktrees, files), so they must observe the finished state rather than
+	// race the handlers still producing it — and only when the call actually
+	// routes to submit (a caller tool of the same name shadows it and is
+	// dispatched in the pool, so it is not held out). Membership is derived
+	// from isSubmit so the two predicates cannot drift. Building the partition
+	// as a set is the seam DEV-2247 widens: the suspend tool joins this set so
+	// it too quiesces behind its siblings' real tool_results.
+	heldOutTools := make(map[string]struct{}, 1)
+	if isSubmit(submitToolName) {
+		heldOutTools[submitToolName] = struct{}{}
+	}
+	heldOut := func(name string) bool {
+		_, ok := heldOutTools[name]
+		return ok
+	}
 
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
@@ -354,7 +374,7 @@ func (e *executor[Request, Response]) Execute(
 			perCallResults := make([]Response, len(toolCalls))
 
 			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
-				func(tc openai.ChatCompletionMessageToolCall) bool { return isSubmit(tc.Function.Name) },
+				func(tc openai.ChatCompletionMessageToolCall) bool { return heldOut(tc.Function.Name) },
 				func(i int, tc openai.ChatCompletionMessageToolCall) {
 					resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
 					if cerr != nil {
