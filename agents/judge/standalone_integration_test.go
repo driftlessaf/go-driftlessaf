@@ -379,8 +379,10 @@ I'll stay with you through the entire resolution process to make sure you're com
 					testCtx := context.Background()
 					testCtx = agenttrace.WithTracer(testCtx, evals.BuildTracer(testObs, tc.Evals))
 
-					// Call judge with standalone mode and verify response via evals callbacks
-					_, err := judgeInstance.Judge(testCtx, &judge.Request{
+					// Call judge with standalone mode and verify response via evals callbacks.
+					// Bounded by judgeSem so the parallel fan-out stays under the
+					// per-model Vertex quota (see concurrency_test.go).
+					_, err := judgeWithLimit(testCtx, judgeInstance, &judge.Request{
 						Mode:         judge.StandaloneMode,
 						ActualAnswer: tc.Response,
 						Criterion:    tc.Criterion,

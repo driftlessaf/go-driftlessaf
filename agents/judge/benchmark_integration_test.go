@@ -375,8 +375,10 @@ func TestBenchmark(t *testing.T) {
 			// Run each test case
 			for _, tc := range testCases {
 				t.Run(tc.Name, func(t *testing.T) {
-					// Don't run in parallel to avoid overwhelming API quotas
-					// t.Parallel()
+					// Run in parallel under the shared concurrency bound; judgeSem
+					// keeps the fan-out from overwhelming the per-model Vertex quota
+					// (see concurrency_test.go), so this no longer needs to serialize.
+					t.Parallel()
 					t.Cleanup(wg.Done)
 					// Create a child observer for this test case
 					testObs := modelObs.Child(tc.Name)
@@ -385,8 +387,10 @@ func TestBenchmark(t *testing.T) {
 					testCtx := context.Background()
 					testCtx = agenttrace.WithTracer(testCtx, evals.BuildTracer(testObs, tc.Evals))
 
-					// Call judge with benchmark mode and verify response via evals callbacks
-					_, err := judgeInstance.Judge(testCtx, &judge.Request{
+					// Call judge with benchmark mode and verify response via evals callbacks.
+					// Bounded by judgeSem so the parallel fan-out stays under the
+					// per-model Vertex quota (see concurrency_test.go).
+					_, err := judgeWithLimit(testCtx, judgeInstance, &judge.Request{
 						Mode:            judge.BenchmarkMode,
 						ReferenceAnswer: tc.Foo,
 						ActualAnswer:    tc.Bar,
