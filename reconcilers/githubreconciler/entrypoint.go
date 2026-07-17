@@ -55,6 +55,10 @@ type mainOptions struct {
 	middleware     []Middleware
 	tsff           func(identity string) TokenSourceFunc
 	reconcilerOpts []Option
+	// installIDFunc, when set, is attached to the ClientCache so reconcilers can
+	// resolve an org to its GitHub App installation ID (reusing the App's cached
+	// lookup) without constructing a second App. Set by AppMain.
+	installIDFunc func(ctx context.Context, org string) (int64, error)
 }
 
 // WithInterceptors adds gRPC unary server interceptors that run before
@@ -123,9 +127,15 @@ func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error
 		return fmt.Errorf("create GitHub App: %w", err)
 	}
 
-	return Main(ctx, f, append(opts, WithTokenSourceFuncFactory(func(_ string) TokenSourceFunc {
-		return app.TokenSourceFunc()
-	}))...)
+	return Main(ctx, f, append(opts,
+		WithTokenSourceFuncFactory(func(_ string) TokenSourceFunc {
+			return app.TokenSourceFunc()
+		}),
+		// Expose the App's cached installation-ID lookup on the ClientCache so
+		// reconcilers can resolve org -> installation ID without building a
+		// second App (the token minting already primes this cache).
+		func(o *mainOptions) { o.installIDFunc = app.LookupInstallID },
+	)...)
 }
 
 // RepoMain is the entrypoint for reconcilers that use repo-scoped GitHub
@@ -206,6 +216,7 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 	defer httpmetrics.SetupTracer(ctx)()
 
 	clientCache := NewClientCache(mo.tsff(identity))
+	clientCache.installIDFunc = mo.installIDFunc
 
 	rec, err := f(ctx, identity, clientCache, env.Config)
 	if err != nil {

@@ -25,6 +25,13 @@ type ClientCache struct {
 	mu              sync.RWMutex
 	clients         map[string]*github.Client
 	tokenSources    map[string]oauth2.TokenSource
+
+	// installIDFunc resolves an org to its GitHub App installation ID. It is set
+	// by AppMain to the underlying App's (cached) LookupInstallID, so callers can
+	// reuse the same installation-ID resolution the token minting already does,
+	// rather than constructing a second App. It is nil for non-App entrypoints
+	// (e.g. Octo STS via RepoMain/OrgMain), where LookupInstallID returns an error.
+	installIDFunc func(ctx context.Context, org string) (int64, error)
 }
 
 // NewClientCache creates a new client cache with the provided token source function.
@@ -39,6 +46,17 @@ func NewClientCache(tokenSourceFunc TokenSourceFunc) *ClientCache {
 // getKey returns the cache key for an org/repo combination.
 func (cc *ClientCache) getKey(org, repo string) string {
 	return fmt.Sprintf("%s/%s", org, repo)
+}
+
+// LookupInstallID returns the GitHub App installation ID for org, reusing the
+// underlying App's cached lookup (the same one used to mint installation
+// tokens). It returns an error when the cache was not created from a GitHub App
+// entrypoint (AppMain), since only then is an App available to resolve it.
+func (cc *ClientCache) LookupInstallID(ctx context.Context, org string) (int64, error) {
+	if cc.installIDFunc == nil {
+		return 0, fmt.Errorf("installation ID lookup is not configured: the client cache was not created from a GitHub App entrypoint")
+	}
+	return cc.installIDFunc(ctx, org)
 }
 
 // Get returns a GitHub client for the given org/repo, creating one if needed.
