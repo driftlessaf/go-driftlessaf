@@ -14,4 +14,10 @@ SPDX-License-Identifier: Apache-2.0
 // registered result validators (see the executors' WithResultValidator
 // option), or is rejected back to the model with the validators' findings so
 // the loop continues.
+//
+// Payload leniency: when the model JSON-encodes the payload object into a
+// string instead of passing it as a nested object (a common model mistake),
+// the handlers transparently decode the string and accept the submit instead
+// of rejecting it with a parameter error. Strings that do not contain a JSON
+// object are still rejected back to the model.
 package submitresult

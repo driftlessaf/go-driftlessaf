@@ -34,8 +34,16 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 
 	payloadRaw, err := params.Extract[map[string]any](args, opts.PayloadFieldName)
 	if err != nil {
-		trace.BadToolCall(id, name, args, errors.New("parameter error"))
-		return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
+		coerced, ok := coerceStringPayload(args, opts.PayloadFieldName)
+		if !ok {
+			trace.BadToolCall(id, name, args, errors.New("parameter error"))
+			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
+		}
+		clog.WarnContext(ctx, "Coerced stringified submit payload into an object",
+			"tool", name,
+			"field", opts.PayloadFieldName,
+		)
+		payloadRaw = coerced
 	}
 
 	clog.InfoContext(ctx, "Submitting result",
@@ -55,6 +63,24 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 		Reasoning:  reasoning,
 		ToolResult: successResult(opts.SuccessMessage),
 	}
+}
+
+// coerceStringPayload recovers the common model mistake of JSON-encoding the
+// payload object into a string instead of passing it as a nested object. It
+// reports ok when the field is a string containing a JSON object, returning
+// the decoded object; callers fall back to the original extraction error
+// otherwise, so the model still sees the type-mismatch hint.
+func coerceStringPayload(args map[string]any, field string) (map[string]any, bool) {
+	s, err := params.Extract[string](args, field)
+	if err != nil {
+		return nil, false
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(s), &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
 }
 
 // parsePayload converts a raw payload object (as received from the model) into
