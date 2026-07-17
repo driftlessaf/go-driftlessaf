@@ -163,8 +163,8 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 // system block, plus up to tailBreakpointLimit moving markers on the
 // conversation tail (the first-user-block marker, when opted in, is seeded as
 // the initial tail marker), for a worst case of exactly four. The limit is
-// enforced at runtime: assembleParams counts caller-supplied markers on tool
-// definitions before placing its own, and the tail tracker's budget is
+// enforced at runtime: buildStaticParams counts caller-supplied markers on
+// tool definitions before placing its own, and the tail tracker's budget is
 // derived from whatever the static prefix left over (see newTailBreakpoints)
 // — over-budget placements are skipped rather than letting the API reject the
 // request with a non-retryable 400.
@@ -345,10 +345,30 @@ func (e *executor[Request, Response]) Execute(
 	deferredGateResolved := false
 
 	// isSubmit reports whether a call routes to the terminal submit tool. It
-	// is the single routing predicate: executeToolCall's dispatch switch and
-	// the turn loop's held-out-of-pool partition both use it, so the two
-	// sites cannot drift.
+	// is the routing predicate consulted by executeToolCall's dispatch switch.
 	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
+
+	// heldOutTools is the set of tool names dispatched sequentially after the
+	// concurrent tool pool drains, rather than within it (see
+	// execshared.DispatchToolCalls). A held-out call's work runs only once
+	// every sibling handler has finished and its real tool_result is in the
+	// transcript. Today the only member is the terminal submit tool — its
+	// result validators may read state the sibling handlers produce
+	// (worktrees, files), so they must observe the finished state rather than
+	// race the handlers still producing it — and only when the call actually
+	// routes to submit (a caller tool of the same name shadows it and is
+	// dispatched in the pool, so it is not held out). Membership is derived
+	// from isSubmit so the two predicates cannot drift. Building the partition
+	// as a set is the seam DEV-2247 widens: the suspend tool joins this set so
+	// it too quiesces behind its siblings' real tool_results.
+	heldOutTools := make(map[string]struct{}, 1)
+	if isSubmit(submitToolName) {
+		heldOutTools[submitToolName] = struct{}{}
+	}
+	heldOut := func(name string) bool {
+		_, ok := heldOutTools[name]
+		return ok
+	}
 
 	// executeToolCall handles executing a single tool call and returning the
 	// result. The handler writes any terminal result into resultPtr; the
@@ -651,7 +671,7 @@ func (e *executor[Request, Response]) Execute(
 			perCallResults := make([]Response, len(toolUseBlocks))
 
 			execshared.DispatchToolCalls(toolUseBlocks, e.toolCallConcurrency,
-				func(toolUse anthropic.ToolUseBlock) bool { return isSubmit(toolUse.Name) },
+				func(toolUse anthropic.ToolUseBlock) bool { return heldOut(toolUse.Name) },
 				func(i int, toolUse anthropic.ToolUseBlock) {
 					res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])
 					outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
@@ -770,18 +790,18 @@ func (e *executor[Request, Response]) Execute(
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
 }
 
-// assembleParams builds the base request parameters shared by every turn: the
-// sorted tool definitions, the system prompt, the initial user message, the
-// sampling parameters, and the cache breakpoints. promptSuffix is the built
-// user-prompt suffix (see WithUserPromptSuffix); when non-empty the initial
-// user message is rendered as two text blocks — prompt, then suffix — and an
-// empty string preserves the single-block shape. It returns the assembled
-// params and a flag indicating that an explicitly-set temperature was dropped
-// for a model that does not accept sampling params, so the caller can log the
-// warning with its context. Pulling this out of Execute keeps the breakpoint
-// placement and the breakpoint-count guard in one place that tests can drive
-// directly without a live client.
-func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, bool, error) {
+// buildStaticParams builds the turn-invariant request prefix: the sorted tool
+// definitions (including the advertised terminal submit tool), the sampling
+// parameters, the system prompt, and the cache breakpoints on those blocks. It
+// deliberately leaves params.Messages unset — the initial user message is a
+// per-execution input added by assembleParams — so the static prefix can be
+// reassembled independently of the conversation it fronts. It returns the
+// assembled params, the running count of cache breakpoints already placed (so
+// the caller can respect maxCacheBreakpoints when placing any further markers),
+// and a flag indicating that an explicitly-set temperature was dropped for a
+// model that does not accept sampling params, so the caller can log the warning
+// with its context.
+func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, int, bool, error) {
 	// Build tool definitions for Claude, sorted by name for deterministic ordering.
 	//
 	// Why sort? The Anthropic API uses prompt caching to avoid re-processing the
@@ -845,27 +865,11 @@ func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string
 		breakpoints++
 	}
 
-	// Create initial messages, starting with the user prompt. When a suffix is
-	// configured, the initial user message carries two text blocks — the
-	// rendered prompt, then the suffix — so the first-user-block breakpoint
-	// below ends a cacheable prefix that executions differing only in the
-	// suffix can share. Without a suffix the single-block shape is preserved.
-	firstUserContent := []anthropic.ContentBlockParamUnion{
-		anthropic.NewTextBlock(prompt),
-	}
-	if promptSuffix != "" {
-		firstUserContent = append(firstUserContent, anthropic.NewTextBlock(promptSuffix))
-	}
-	messages := []anthropic.MessageParam{{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: firstUserContent,
-	}}
-
-	// Create request parameters
+	// Create request parameters. Messages are left unset here — assembleParams
+	// supplies the initial user message.
 	params := anthropic.MessageNewParams{
 		Model:     e.modelName,
 		MaxTokens: e.maxTokens,
-		Messages:  messages,
 		Tools:     toolDefs,
 	}
 
@@ -889,7 +893,7 @@ func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string
 	if e.systemInstructions != nil {
 		systemPrompt, err := e.systemInstructions.Build()
 		if err != nil {
-			return anthropic.MessageNewParams{}, false, fmt.Errorf("building system prompt: %w", err)
+			return anthropic.MessageNewParams{}, 0, false, fmt.Errorf("building system prompt: %w", err)
 		}
 		systemBlock := anthropic.TextBlockParam{Text: systemPrompt}
 		// Place a second cache breakpoint on the system prompt. Since the API prefix
@@ -902,6 +906,44 @@ func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string
 		}
 		params.System = []anthropic.TextBlockParam{systemBlock}
 	}
+
+	return params, breakpoints, dropTemperatureWarn, nil
+}
+
+// assembleParams builds the base request parameters shared by every turn: it
+// calls buildStaticParams for the turn-invariant prefix (sorted tool
+// definitions, the system prompt, the sampling parameters, and their cache
+// breakpoints), then adds the initial user message and the optional
+// first-user-block breakpoint. promptSuffix is the built user-prompt suffix
+// (see WithUserPromptSuffix); when non-empty the initial user message is
+// rendered as two text blocks — prompt, then suffix — and an empty string
+// preserves the single-block shape. It returns the assembled params and a flag
+// indicating that an explicitly-set temperature was dropped for a model that
+// does not accept sampling params, so the caller can log the warning with its
+// context. Pulling this out of Execute keeps the breakpoint placement and the
+// breakpoint-count guard in one place that tests can drive directly without a
+// live client.
+func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, bool, error) {
+	params, breakpoints, dropTemperatureWarn, err := e.buildStaticParams(tools)
+	if err != nil {
+		return anthropic.MessageNewParams{}, false, err
+	}
+
+	// Create initial messages, starting with the user prompt. When a suffix is
+	// configured, the initial user message carries two text blocks — the
+	// rendered prompt, then the suffix — so the first-user-block breakpoint
+	// below ends a cacheable prefix that executions differing only in the
+	// suffix can share. Without a suffix the single-block shape is preserved.
+	firstUserContent := []anthropic.ContentBlockParamUnion{
+		anthropic.NewTextBlock(prompt),
+	}
+	if promptSuffix != "" {
+		firstUserContent = append(firstUserContent, anthropic.NewTextBlock(promptSuffix))
+	}
+	params.Messages = []anthropic.MessageParam{{
+		Role:    anthropic.MessageParamRoleUser,
+		Content: firstUserContent,
+	}}
 
 	// Optionally place a cache breakpoint on the first user content block (the
 	// rendered prompt). Messages come last in the API prefix order, so this

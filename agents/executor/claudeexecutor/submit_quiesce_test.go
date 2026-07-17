@@ -9,9 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,11 +50,12 @@ func slowToolAndSubmitTurn(t *testing.T, input map[string]any) []string {
 // produce (worktrees, files) observe the finished state instead of racing
 // them under the concurrent tool pool.
 func TestSubmitEvaluatedAfterToolHandlers(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, sseBody(t, slowToolAndSubmitTurn(t, submitInput("done"))))
-	}))
-	t.Cleanup(srv.Close)
+	// Drive the turn through the validating server so the submit + slow_tool
+	// turn is additionally checked for tool_use/tool_result pairing and the
+	// cache-breakpoint budget.
+	srv := newValidatingAnthropicServer(t, func(int, []byte) []string {
+		return slowToolAndSubmitTurn(t, submitInput("done"))
+	})
 
 	// validatorStarted lets the tool handler observe a validator that began
 	// while the handler was still running — the exact interleaving the
