@@ -16,6 +16,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // Option is a functional option for configuring the executor
@@ -47,6 +48,27 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 		e.temperature = temp
 		e.temperatureSet = true
 		return nil
+	}
+}
+
+// WithEffort sets the reasoning effort (output_config.effort), which controls
+// how deeply the model thinks and its overall token spend. Valid values are
+// "low", "medium", "high", "xhigh", and "max"; leaving it unset keeps the
+// model's default ("high"). Effort is GA on every serving backend (Vertex AI
+// and the first-party API) and needs no beta header. It is the recommended
+// depth control on Claude 4.7+/Sonnet 5, which removed the extended-thinking
+// budget — "xhigh" is the recommended setting for hard coding/agentic work.
+func WithEffort[Request promptbuilder.Bindable, Response any](effort string) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		switch anthropic.OutputConfigEffort(effort) {
+		case anthropic.OutputConfigEffortLow, anthropic.OutputConfigEffortMedium,
+			anthropic.OutputConfigEffortHigh, anthropic.OutputConfigEffortXhigh,
+			anthropic.OutputConfigEffortMax:
+			e.effort = anthropic.OutputConfigEffort(effort)
+			return nil
+		default:
+			return fmt.Errorf("invalid effort %q (want low|medium|high|xhigh|max)", effort)
+		}
 	}
 }
 

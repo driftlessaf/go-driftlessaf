@@ -60,6 +60,13 @@ type Config[Resp, CB any] struct {
 	// the Gemini backend.
 	ThinkingBudget int64
 
+	// Effort sets the Claude reasoning effort (output_config.effort): one of
+	// "low", "medium", "high", "xhigh", "max". Empty (the default) leaves the
+	// model default ("high"). "xhigh" is recommended for hard coding/agentic
+	// work on Sonnet 5 / Opus 4.7+. Claude backend only; no effect on the
+	// Gemini or OpenAI backends. See claudeexecutor.WithEffort.
+	Effort string
+
 	// ResultValidators gate the terminal submit_result tool. When the model
 	// submits a result that parses into Resp, every validator runs
 	// concurrently against it; any findings reject the submission back to the

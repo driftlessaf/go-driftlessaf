@@ -61,6 +61,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	temperature          float64
 	temperatureSet       bool                                // true when WithTemperature was applied; lets us warn if it gets dropped for a model that doesn't accept sampling params
 	thinkingBudgetTokens *int64                              // nil = disabled, non-nil = enabled with budget
+	effort               anthropic.OutputConfigEffort        // "" = model default (high); set via WithEffort to tune reasoning depth / token spend
 	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
 	telemetry            *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
@@ -887,6 +888,15 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 		}
 	} else if e.temperatureSet {
 		dropTemperatureWarn = true
+	}
+
+	// Reasoning effort (output_config.effort) controls thinking depth and overall
+	// token spend. Empty leaves the model default (high); omitzero drops the field
+	// when unset. GA on every serving backend (Vertex AI and the first-party API),
+	// no beta header. It is the recommended depth control on models that removed
+	// the extended-thinking budget (Opus 4.7+, Sonnet 5).
+	if e.effort != "" {
+		params.OutputConfig.Effort = e.effort
 	}
 
 	// Add system instructions if provided
