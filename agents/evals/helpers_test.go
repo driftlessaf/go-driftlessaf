@@ -286,6 +286,25 @@ func TestNoErrors(t *testing.T) {
 	if len(obs.failures) == 0 {
 		t.Errorf("expected failure for non-ignored error")
 	}
+
+	// A suspended trace (halted mid-run to await a human answer) is a
+	// non-error terminal state: NoErrors must not fail it even when an error
+	// surfaced through the tool-call channel (the suspension sentinel is
+	// error-shaped). The same tool-call error on a non-suspended trace fails
+	// NoErrors — see the read_logs case above — so this proves the Suspended
+	// short-circuit does the suppressing, not the absence of errors.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Suspended:        true,
+		SuspensionReason: "awaiting human answer",
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "ask_human", Error: errors.New("suspended: awaiting human answer")},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for suspended trace: %v", obs.failures)
+	}
 }
 
 func TestRangeToolCalls(t *testing.T) {

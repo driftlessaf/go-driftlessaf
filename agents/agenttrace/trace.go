@@ -188,11 +188,29 @@ type Trace[T any] struct {
 	// reasoned about turn-by-turn.
 	Model string `json:"model,omitempty"`
 
+	// Suspended marks a trace that halted mid-run to await an out-of-band
+	// signal (e.g. a human answer, a checkpoint wake) rather than completing
+	// or failing. A suspended trace is NOT an error: the root span carries
+	// status OK and a driftlessaf.suspension.reason attribute, and Error stays
+	// nil. Set only by Suspend, so eval graders and dashboards can distinguish
+	// an intentional halt from a failure.
+	Suspended bool `json:"suspended,omitempty"`
+
+	// SuspensionReason is the free-form reason recorded by Suspend (e.g.
+	// "awaiting human answer"). Empty unless Suspended is true; also emitted
+	// as the driftlessaf.suspension.reason span attribute.
+	SuspensionReason string `json:"suspension_reason,omitempty"`
+
 	// mu protects mutable fields during the build-up phase (concurrent
 	// tool calls). After Complete the trace is immutable.
-	mu   sync.Mutex
-	ctx  context.Context
-	span oteltrace.Span
+	mu sync.Mutex
+	// finalized guards the terminal transition: whichever of complete or
+	// Suspend runs first wins and the other becomes a no-op. This keeps a
+	// suspended trace from being re-closed as an error (or double-ending the
+	// root span) if both paths fire.
+	finalized bool
+	ctx       context.Context
+	span      oteltrace.Span
 
 	// spanEmitter, when non-nil, receives a RecordedSpan from LLMTurn.End
 	// for every turn that recorded a prompt payload. Wired by the
@@ -722,6 +740,11 @@ func (tc *ToolCall[T]) Duration() time.Duration {
 // done callback returned by StartTrace).
 func (t *Trace[T]) complete(result T, err error) {
 	t.mu.Lock()
+	if t.finalized {
+		t.mu.Unlock()
+		return
+	}
+	t.finalized = true
 	t.Result = result
 	t.Error = err
 	t.EndTime = time.Now()
@@ -752,6 +775,59 @@ func (t *Trace[T]) complete(result T, err error) {
 		} else {
 			span.SetStatus(codes.Ok, "")
 		}
+		span.End()
+	}
+}
+
+// Suspension span attributes describing a trace's terminal disposition when
+// it halted mid-run instead of completing or failing.
+const (
+	// AttrDisposition names a trace's terminal disposition when it is neither
+	// a plain success nor an error (currently only DispositionSuspended).
+	AttrDisposition = "driftlessaf.disposition"
+	// AttrSuspensionReason carries the free-form reason a trace suspended.
+	AttrSuspensionReason = "driftlessaf.suspension.reason"
+	// DispositionSuspended is the AttrDisposition value for a suspended trace.
+	DispositionSuspended = "suspended"
+	// AttrResumeLinkedTraceID links a resumed run's root span back to the
+	// trace that suspended, since a resume mints a fresh trace rather than
+	// continuing the suspended one.
+	AttrResumeLinkedTraceID = "driftlessaf.resume.linked_trace_id"
+)
+
+// Suspend finalizes the trace as suspended: it halted mid-run to await an
+// out-of-band signal (a human answer, a checkpoint wake) rather than
+// completing or failing. Unlike complete's error path, the root span is closed
+// with status OK and stamped with driftlessaf.disposition=suspended and
+// driftlessaf.suspension.reason=<reason>, so eval graders (e.g. NoErrors) and
+// dashboards treat a suspension as a non-error terminal state. Trace.Error
+// stays nil.
+//
+// Suspend does NOT record the trace; that remains the caller's responsibility
+// (mirroring complete). It is idempotent with complete via the finalized
+// guard: whichever finalizer runs first wins and the second is a no-op, so a
+// suspended trace is never re-closed as an error and the root span is ended
+// exactly once. Executors call this explicitly on the suspend path.
+func (t *Trace[T]) Suspend(reason string) {
+	t.mu.Lock()
+	if t.finalized {
+		t.mu.Unlock()
+		return
+	}
+	t.finalized = true
+	t.Suspended = true
+	t.SuspensionReason = reason
+	t.EndTime = time.Now()
+	span := t.span
+	t.mu.Unlock()
+
+	if span != nil {
+		span.SetAttributes(
+			attribute.String(AttrDisposition, DispositionSuspended),
+			attribute.String(AttrSuspensionReason, reason),
+		)
+		// Status OK — a suspension is an intentional halt, not a failure.
+		span.SetStatus(codes.Ok, "")
 		span.End()
 	}
 }

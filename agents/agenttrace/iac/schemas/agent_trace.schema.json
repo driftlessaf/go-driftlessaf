@@ -62,6 +62,8 @@
   {"name": "agent_name", "type": "STRING", "mode": "NULLABLE"},
   {"name": "source", "type": "STRING", "mode": "NULLABLE"},
   {"name": "model", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "suspended", "type": "BOOLEAN", "mode": "NULLABLE"},
+  {"name": "suspension_reason", "type": "STRING", "mode": "NULLABLE"},
   {"name": "input_tokens", "type": "INTEGER", "mode": "NULLABLE"},
   {"name": "output_tokens", "type": "INTEGER", "mode": "NULLABLE"},
   {"name": "cache_read_tokens", "type": "INTEGER", "mode": "NULLABLE"},

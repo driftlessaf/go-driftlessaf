@@ -96,6 +96,10 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 // NoErrors returns an ObservableTraceCallback that validates no tool calls resulted in errors.
 // Optional ignore functions can be provided to filter out expected errors (e.g., file not found).
 // If any ignore function returns true for a given error, that error is skipped.
+//
+// A suspended trace (Trace.Suspended) never fails: suspension is an
+// intentional mid-run halt awaiting an out-of-band signal, not a failure,
+// and the resumed run is graded on its own trace.
 func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 	shouldIgnore := func(err error) bool {
 		for _, fn := range ignore {
@@ -106,6 +110,15 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 		return false
 	}
 	return func(o Observer, trace *agenttrace.Trace[T]) {
+		// Short-circuit before the error checks: the suspension sentinel is
+		// error-shaped and can surface through the trace's error channels
+		// (e.g. recorded on the intercepted suspend tool call), and grading
+		// a half-run's errors is premature — the resumed run completes on
+		// its own trace.
+		if trace.Suspended {
+			return
+		}
+
 		// Check trace error
 		if trace.Error != nil && !shouldIgnore(trace.Error) {
 			o.Fail(fmt.Sprintf("trace error: got = %v, wanted = nil", trace.Error))
