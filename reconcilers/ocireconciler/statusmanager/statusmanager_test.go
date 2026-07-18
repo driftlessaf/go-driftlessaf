@@ -18,6 +18,7 @@ import (
 	statusmanagertesting "chainguard.dev/driftlessaf/reconcilers/ocireconciler/statusmanager/testing"
 	"github.com/google/go-containerregistry/pkg/name"
 	crregistry "github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/require"
 )
 
@@ -262,4 +263,65 @@ func TestStatusManagerLargePayload(t *testing.T) {
 // LargeTestStatus carries a large payload to exercise the Rekor v2 bundle path.
 type LargeTestStatus struct {
 	Data string `json:"data"`
+}
+
+// TestStatusManagerSkipsIdenticalStatus pins the SKIPSAME write semantics:
+// re-persisting a byte-identical status is a registry no-op (the original
+// bundle remains the only referrer, and nothing is signed or uploaded),
+// while a changed status is written alongside the superseded bundle and
+// wins on read.
+func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
+	ctx := context.Background()
+
+	registryHost := setupTestRegistry(t)
+
+	writer, err := statusmanagertesting.New[TestStatus](ctx, t, "skip-same-reconciler",
+		statusmanager.WithRepositoryOverride(registryHost+"/skip-same-repo"),
+	)
+	require.NoError(t, err, "failed to create writable manager")
+
+	digest, err := name.NewDigest("example.com/foo@sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	require.NoError(t, err, "failed to create digest")
+
+	subject, err := name.NewDigest(registryHost + "/skip-same-repo@" + digest.DigestStr())
+	require.NoError(t, err, "failed to create subject digest")
+
+	referrerCount := func() int {
+		idx, err := remote.Referrers(subject)
+		require.NoError(t, err, "listing referrers")
+		im, err := idx.IndexManifest()
+		require.NoError(t, err, "reading referrers index")
+		return len(im.Manifests)
+	}
+
+	session := writer.NewSession(digest)
+	status := &statusmanager.Status[TestStatus]{
+		Details: TestStatus{
+			Message:   "reconciliation complete",
+			Timestamp: "2026-01-01T00:00:00Z",
+		},
+	}
+	require.NoError(t, session.SetActualState(ctx, status), "first write")
+	require.Equal(t, 1, referrerCount(), "first write should create one bundle")
+
+	// A byte-identical payload must be skipped, leaving the original bundle
+	// as the only referrer.
+	require.NoError(t, session.SetActualState(ctx, status), "identical write")
+	require.Equal(t, 1, referrerCount(), "identical write should be skipped")
+
+	// A changed payload is written alongside the superseded bundle rather
+	// than replacing it; readers resolve the newest verified bundle.
+	updated := &statusmanager.Status[TestStatus]{
+		Details: TestStatus{
+			Message:   "reconciliation complete again",
+			Timestamp: "2026-01-01T01:00:00Z",
+		},
+	}
+	require.NoError(t, session.SetActualState(ctx, updated), "changed write")
+	require.Equal(t, 2, referrerCount(), "changed write should add a bundle without deleting the superseded one")
+
+	observed, err := session.ObservedState(ctx)
+	require.NoError(t, err, "reading status after changed write")
+	require.NotNil(t, observed, "expected a status after changed write")
+	require.Equal(t, updated.Details.Message, observed.Details.Message, "reader should resolve the latest bundle")
 }

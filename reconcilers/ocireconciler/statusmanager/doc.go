@@ -14,7 +14,10 @@ SPDX-License-Identifier: Apache-2.0
 //
 //   - Keyless signing using Fulcio certificates and Rekor transparency log
 //   - Identity-scoped attestations with predicate type "https://statusmanager.chainguard.dev/{identity}"
-//   - REPLACE semantics ensuring exactly one attestation per digest/predicate pair
+//   - SKIPSAME semantics: writing a byte-identical status is a no-op (no
+//     signing or registry write); a changed status is written alongside any
+//     prior bundle, readers resolve the latest verified bundle, and
+//     superseded bundles are left to registry cleanup policies
 //   - Full signature verification on read using cosign verification
 //   - Support for repository override (similar to COSIGN_REPOSITORY)
 //
