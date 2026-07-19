@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strings"
@@ -16,6 +17,11 @@ import (
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 )
+
+// defaultMaxTokens is the per-turn output-token cap applied when Config.MaxTokens
+// is unset. It matches the historical meta-agent default; agents that need room
+// for extended thinking plus a tool call on the same turn raise it via Config.
+const defaultMaxTokens int64 = 32000
 
 // claudeAgent implements Agent using Claude via Vertex AI (default) or the
 // Anthropic-direct first-party API + WIF backend when configured (see
@@ -66,7 +72,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		claudeexecutor.WithModel[Req, Resp](model),
 		claudeexecutor.WithProvider[Req, Resp](provider),
 		claudeexecutor.WithTemperature[Req, Resp](0.2),
-		claudeexecutor.WithMaxTokens[Req, Resp](32000),
+		claudeexecutor.WithMaxTokens[Req, Resp](cmp.Or(config.MaxTokens, defaultMaxTokens)),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.SubmitMetadata[Resp], error) { return submitTool, nil }),
 		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
 	}

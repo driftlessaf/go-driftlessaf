@@ -28,8 +28,12 @@ func WithMaxTokens[Request promptbuilder.Bindable, Response any](tokens int64) O
 		if tokens <= 0 {
 			return fmt.Errorf("max tokens must be positive, got %d", tokens)
 		}
-		if tokens > 32000 { // Maximum output tokens for Claude models on Vertex AI
-			return fmt.Errorf("max tokens %d exceeds maximum of 32000", tokens)
+		// 128000 is the max output-token ceiling for current Claude models (Sonnet 5,
+		// Opus 4.6/4.7/4.8, Fable 5) on both the Vertex and Anthropic-direct backends. The
+		// executor streams every response (Messages.NewStreaming), so values well above the
+		// old 32000 cap do not risk the SDK's non-streaming HTTP timeout.
+		if tokens > 128000 {
+			return fmt.Errorf("max tokens %d exceeds maximum of 128000", tokens)
 		}
 		e.maxTokens = tokens
 		return nil

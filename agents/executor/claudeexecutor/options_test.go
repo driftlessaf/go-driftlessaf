@@ -14,6 +14,45 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
+func TestWithMaxTokens(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := promptbuilder.NewPrompt("test prompt")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		tokens  int64
+		wantErr bool
+	}{
+		{name: "typical", tokens: 16000, wantErr: false},
+		{name: "old default", tokens: 32000, wantErr: false},
+		{name: "above old cap", tokens: 64000, wantErr: false},
+		{name: "at ceiling", tokens: 128000, wantErr: false},
+		{name: "above ceiling", tokens: 128001, wantErr: true},
+		{name: "zero", tokens: 0, wantErr: true},
+		{name: "negative", tokens: -1, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := New[*testBindable, *testResponse](
+				anthropic.Client{}, // client not needed for option validation
+				prompt,
+				WithMaxTokens[*testBindable, *testResponse](tt.tokens),
+			)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("WithMaxTokens(%d) error = %v, wantErr %v", tt.tokens, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestWithMaxTurns(t *testing.T) {
 	t.Parallel()
 

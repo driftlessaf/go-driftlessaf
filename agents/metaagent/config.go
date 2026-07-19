@@ -50,10 +50,22 @@ type Config[Resp, CB any] struct {
 	// whose tool handlers mutate shared state without their own synchronization.
 	ToolCallConcurrency int
 
+	// MaxTokens caps the model's output tokens per turn (the Anthropic
+	// max_tokens parameter). Zero (the default) uses the meta-agent default of
+	// 32000; the executor rejects values above 128000, the ceiling for current
+	// Claude models. Because the executor streams every response, large values
+	// do not risk the SDK's non-streaming HTTP timeout. Raise it for stages
+	// whose turns need room for BOTH extended thinking and a tool call: at high
+	// effort on a large context, adaptive thinking can otherwise consume the
+	// whole budget and stop at max_tokens before the model emits its tool call,
+	// which the executor surfaces as "no content in Claude's response". Claude
+	// backend only; no effect on the Gemini or OpenAI backends.
+	MaxTokens int64
+
 	// ThinkingBudget enables Claude extended thinking with the given token
 	// budget when running on the Claude backend. Zero (the default) leaves
 	// thinking disabled. Must be at least 1024 and less than the executor's
-	// max tokens (32000 for meta-agents); see claudeexecutor.WithThinking.
+	// max tokens (MaxTokens, or the 32000 default); see claudeexecutor.WithThinking.
 	// On models where the Anthropic API has removed the explicit budget
 	// parameter (Opus 4.7 and later), the executor automatically maps this to
 	// adaptive thinking and the budget value is advisory only. No effect on
