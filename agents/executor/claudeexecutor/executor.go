@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -63,6 +64,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	thinkingBudgetTokens *int64                              // nil = disabled, non-nil = enabled with budget
 	effort               anthropic.OutputConfigEffort        // "" = model default (high); set via WithEffort to tune reasoning depth / token spend
 	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
+	suspendTool          *anthropic.ToolParam                // opt-in: set via WithSuspendTool — the held-out ask-human tool; nil disables suspension entirely
 	telemetry            *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
@@ -220,6 +222,19 @@ func New[Request promptbuilder.Bindable, Response any](
 		return nil, errors.New("WithForceSubmitToolChoice is incompatible with WithThinking: the API rejects a forced tool_choice while extended thinking is active")
 	}
 
+	// A suspend tool must not share the terminal submit tool's name: the two
+	// route to different post-quiesce outcomes (submit commits a result and
+	// ends the run; suspend parks the conversation), so a collision would make
+	// dispatch ambiguous. Checked after all options are applied so the order
+	// WithSuspendTool and WithSubmitResultProvider were supplied in is
+	// irrelevant. The complementary caller-tool collision is checked in Execute,
+	// where the run's tool map is known. See suspend.go.
+	if e.suspendTool != nil {
+		if err := execshared.ValidateSuspendToolName(e.suspendTool.Name, e.submitToolName()); err != nil {
+			return nil, err
+		}
+	}
+
 	// The recorder is built after options so it captures the final model,
 	// provider, and resource labels.
 	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.provider.metricName(), e.resourceLabels, responseCodeFromError)
@@ -322,6 +337,32 @@ func (e *executor[Request, Response]) Execute(
 	tail := newTailBreakpoints(params)
 	tail.positions = seedFirstUserTail(e.cacheControl, e.cacheFirstUserBlock, params)
 
+	// A fresh Execute runs the full turn budget starting at turn 0. Resume
+	// (resume.go) shares the same loop with a restored params, a startTurn past
+	// the suspension point, and the envelope's remaining budget.
+	return e.runConversation(ctx, trace, params, tools, tail, 0, e.maxTurns, seedToolCalls)
+}
+
+// runConversation drives the bounded turn loop shared by Execute (a fresh run,
+// startTurn 0) and Resume (a restored run, startTurn env.Turn+1). It owns the
+// per-run mutable state, the tool-dispatch closures, the optional seed tool
+// calls, and the suspend/submit held-out partition. params is the fully
+// assembled request: Execute builds it from the bound prompt; Resume unmarshals
+// it from the checkpoint envelope, strips stale cache markers, and appends the
+// human answer as the pending tool_result. turnBudget bounds how many turns may
+// run before aborting — for a resume it is the envelope's RemainingTurns, so
+// the overall turn budget is enforced across pauses. trace is already started
+// by the caller (its done callback reads the caller's named err on return).
+func (e *executor[Request, Response]) runConversation(
+	ctx context.Context,
+	trace *agenttrace.Trace[Response],
+	params anthropic.MessageNewParams,
+	tools map[string]claudetool.Metadata[Response],
+	tail *tailBreakpoints,
+	startTurn int,
+	turnBudget int,
+	seedToolCalls []anthropic.ToolUseBlock,
+) (response Response, err error) {
 	// finalResult stores the result if a tool sets it
 	var finalResult Response
 	finalResultPtr := &finalResult
@@ -345,30 +386,24 @@ func (e *executor[Request, Response]) Execute(
 	// the next turn. False when no gate tool applies.
 	deferredGateResolved := false
 
-	// isSubmit reports whether a call routes to the terminal submit tool. It
-	// is the routing predicate consulted by executeToolCall's dispatch switch.
-	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
+	// suspendToolName is the configured ask-human suspend tool the model calls
+	// to park the conversation for an out-of-band answer. Empty when
+	// WithSuspendTool was not applied — in which case isSuspend is always false
+	// and every suspend-specific branch below is dead, so behavior is
+	// byte-for-byte unchanged from a build without this feature.
+	suspendToolName := e.suspendToolName()
 
-	// heldOutTools is the set of tool names dispatched sequentially after the
-	// concurrent tool pool drains, rather than within it (see
-	// execshared.DispatchToolCalls). A held-out call's work runs only once
-	// every sibling handler has finished and its real tool_result is in the
-	// transcript. Today the only member is the terminal submit tool — its
-	// result validators may read state the sibling handlers produce
-	// (worktrees, files), so they must observe the finished state rather than
-	// race the handlers still producing it — and only when the call actually
-	// routes to submit (a caller tool of the same name shadows it and is
-	// dispatched in the pool, so it is not held out). Membership is derived
-	// from isSubmit so the two predicates cannot drift. Building the partition
-	// as a set is the seam DEV-2247 widens: the suspend tool joins this set so
-	// it too quiesces behind its siblings' real tool_results.
-	heldOutTools := make(map[string]struct{}, 1)
-	if isSubmit(submitToolName) {
-		heldOutTools[submitToolName] = struct{}{}
-	}
-	heldOut := func(name string) bool {
-		_, ok := heldOutTools[name]
-		return ok
+	// Partition the tool set into the routing predicates the dispatch loop
+	// consults: isSubmit routes the terminal submit tool (executeToolCall's
+	// dispatch switch), isSuspend routes the held-out ask-human suspend tool,
+	// and heldOut is their union — dispatched only after the concurrent pool
+	// drains so a held-out call observes every sibling's real tool_result (see
+	// execshared.HeldOutPartition). It also rejects a suspend tool shadowed by
+	// a caller-registered tool of the same name, which can only be caught here,
+	// where the run's tool map is known.
+	isSubmit, isSuspend, heldOut, perr := execshared.HeldOutPartition(tools, submitToolName, e.submitTool.Handler != nil, suspendToolName, e.suspendTool != nil)
+	if perr != nil {
+		return response, perr
 	}
 
 	// executeToolCall handles executing a single tool call and returning the
@@ -414,6 +449,15 @@ func (e *executor[Request, Response]) Execute(
 			if err != nil {
 				return anthropic.ContentBlockParamUnion{}, false, err
 			}
+		case isSuspend(toolUse.Name):
+			// Held-out ask-human tool. Its real result is the human's answer,
+			// supplied on resume — not here. We emit only a synthetic paired
+			// placeholder so the transcript stays valid in the submit-wins case
+			// (a terminal submit in the same turn ends the run and the pending
+			// question is moot). On the actual suspension path this placeholder
+			// is dropped: the consumption loop excludes the suspend call's
+			// result from the transcript so the human answer can take its slot.
+			result = map[string]any{"status": checkpoint.StatusAwaitingHumanAnswer}
 		default:
 			// Unknown tool
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)
@@ -488,9 +532,11 @@ func (e *executor[Request, Response]) Execute(
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
 		llmTurn := trace.BeginTurn(turn, e.provider.traceSystem(), e.modelName)
 		defer func() {
-			if err != nil {
-				llmTurn.Fail(err)
-			}
+			// A suspension is an intentional halt, not a failure: the shared
+			// carve-out keeps the turn from being marked Failed (the trace-level
+			// disposition is set by trace.Suspend on the suspend path). Every
+			// other error still fails the turn.
+			execshared.FailTurnUnlessSuspended(llmTurn, err)
 			llmTurn.End()
 		}()
 
@@ -678,10 +724,22 @@ func (e *executor[Request, Response]) Execute(
 					outcomes[i] = toolOutcome{result: res, committed: committed, err: cerr}
 				})
 
+			// suspendIdx records the slot of the held-out suspend call, if the
+			// model issued one this turn. The suspension is deferred until the
+			// whole turn is consumed: a sibling submit (or any tool that writes a
+			// terminal result) still wins, because a committed result makes the
+			// pending question moot. Its result is deliberately excluded from
+			// toolResults below so the human answer takes the pending slot on
+			// resume.
+			suspendIdx := -1
 			var toolResults []anthropic.ContentBlockParamUnion
 			for i := range toolUseBlocks {
 				if outcomes[i].err != nil {
 					return response, true, outcomes[i].err
+				}
+				if isSuspend(toolUseBlocks[i].Name) {
+					suspendIdx = i
+					continue
 				}
 				toolResults = append(toolResults, outcomes[i].result)
 				// The committed flag is the submit tool's explicit terminal
@@ -697,11 +755,33 @@ func (e *executor[Request, Response]) Execute(
 				}
 			}
 
-			// Add tool results to conversation
+			// Add tool results to conversation. When a suspension is pending,
+			// this carries the siblings' real results only; the suspend call's
+			// tool_use stays unanswered so resume can pair the human answer to
+			// it (see checkpoint.PendingToolCall).
 			params.Messages = append(params.Messages, anthropic.MessageParam{
 				Role:    anthropic.MessageParamRoleUser,
 				Content: toolResults,
 			})
+
+			// No terminal result won the turn: if the model asked to pause, park
+			// the conversation now. Every sibling handler has finished and its
+			// real tool_result is in the transcript above, so the envelope's
+			// PendingToolCalls shrinks to just the suspend call.
+			if suspendIdx >= 0 {
+				susp, berr := e.buildSuspension(params, tools, turn, toolUseBlocks[suspendIdx], trace.ID)
+				if berr != nil {
+					return response, true, berr
+				}
+				clog.InfoContext(ctx, "Suspending Claude agent execution to await human answer",
+					"turn", turn, "tool", toolUseBlocks[suspendIdx].Name, "tool_use_id", toolUseBlocks[suspendIdx].ID)
+				// Finalize the trace as suspended (status OK, not Error) before
+				// returning the Suspension error; the deferred done(...) then
+				// no-ops via the finalized guard.
+				trace.Suspend(susp.Reason)
+				e.telemetry.RecordTurns(ctx, turn+1, false)
+				return response, true, susp
+			}
 
 			// Optional early-finalize nudge. When the investigative tool-call
 			// count reaches the configured threshold and a terminal tool is
@@ -776,8 +856,12 @@ func (e *executor[Request, Response]) Execute(
 		return response, true, errors.New("no content in Claude's response")
 	}
 
-	// Conversation loop with bounded turns to prevent runaway executions.
-	for turn := range e.maxTurns {
+	// Conversation loop with bounded turns to prevent runaway executions. turn
+	// is offset by startTurn so a resumed run's trace turns continue past the
+	// suspension point; the loop runs at most turnBudget iterations so the
+	// overall turn budget is honored across pauses.
+	for i := range turnBudget {
+		turn := startTurn + i
 		resp, done, err := executeTurn(turn)
 		// done=true on all terminal paths (including errors); || err != nil is a
 		// safety net in case a future path sets err without setting done.
@@ -786,9 +870,10 @@ func (e *executor[Request, Response]) Execute(
 		}
 	}
 
-	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
-	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
-	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+	lastTurn := startTurn + turnBudget
+	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", turnBudget)
+	e.telemetry.RecordTurns(ctx, lastTurn, true)
+	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", turnBudget)
 }
 
 // buildStaticParams builds the turn-invariant request prefix: the sorted tool
@@ -828,6 +913,18 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	if name := e.submitToolName(); name != "" {
 		if _, exists := tools[name]; !exists {
 			def := e.submitTool.Definition
+			toolDefs = append(toolDefs, anthropic.ToolUnionParam{OfTool: &def})
+		}
+	}
+	// Advertise the held-out ask-human suspend tool the same way. It lives
+	// outside the tools map — dispatch routes it to the suspension path rather
+	// than a handler — but the model discovers it like any other tool. A
+	// caller-registered tool of the same name is rejected in Execute, so the
+	// no-collision case is all that reaches here. The definition is copied so
+	// cache-breakpoint placement below never mutates executor state.
+	if name := e.suspendToolName(); name != "" {
+		if _, exists := tools[name]; !exists {
+			def := *e.suspendTool
 			toolDefs = append(toolDefs, anthropic.ToolUnionParam{OfTool: &def})
 		}
 	}

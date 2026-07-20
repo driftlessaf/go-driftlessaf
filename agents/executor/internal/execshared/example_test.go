@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/metrics"
@@ -91,4 +92,39 @@ func ExampleGateSubmission() {
 	fmt.Println(committed, result.Verdict, toolResult["success"])
 	// Output:
 	// true pass true
+}
+
+func ExampleValidateSuspendToolName() {
+	fmt.Println(execshared.ValidateSuspendToolName("ask_human", "submit_result"))
+	fmt.Println(execshared.ValidateSuspendToolName("submit_result", "submit_result"))
+	// Output:
+	// <nil>
+	// suspend tool "submit_result" collides with the submit tool name; the run could never terminate
+}
+
+func ExampleHeldOutPartition() {
+	// The suspend tool joins the submit tool in the held-out set; a
+	// caller-registered tool is dispatched in the concurrent pool.
+	tools := map[string]struct{}{"read_file": {}}
+	isSubmit, isSuspend, heldOut, err := execshared.HeldOutPartition(tools, "submit_result", true, "ask_human", true)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(isSubmit("submit_result"), isSuspend("ask_human"), heldOut("read_file"))
+	// Output:
+	// true true false
+}
+
+func ExampleFailTurnUnlessSuspended() {
+	ctx := context.Background()
+	trace, _ := agenttrace.StartTrace[string](ctx, "prompt")
+	llmTurn := trace.BeginTurn(0, "anthropic", "model")
+	defer llmTurn.End()
+
+	// A suspension is an intentional halt, not a failure: the turn is left
+	// unfailed. Any other error would mark the turn failed.
+	execshared.FailTurnUnlessSuspended(llmTurn, &checkpoint.Suspension{})
+	fmt.Println("turn not failed")
+	// Output:
+	// turn not failed
 }
