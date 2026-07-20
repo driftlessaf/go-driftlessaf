@@ -14,6 +14,11 @@ import (
 type User struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// App is true for organization app users (e.g. incident.io, GitHub).
+	// App users generally cannot be assigned issues unless their app
+	// carries the assignable scope — issueCreate with such an assigneeId
+	// fails with "App user not valid".
+	App bool `json:"app"`
 }
 
 // Comment represents a comment on a Linear issue.

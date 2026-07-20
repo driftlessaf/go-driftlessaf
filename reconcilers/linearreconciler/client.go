@@ -349,7 +349,7 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 			state { name type }
 			team { id key name }
 			assignee { id name }
-			creator { id name }
+			creator { id name app }
 			labels { nodes { name } }
 			documents { nodes { id slugId title url } }
 			attachments { nodes { id title subtitle url createdAt } }
