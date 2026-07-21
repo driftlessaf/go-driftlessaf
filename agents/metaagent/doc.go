@@ -47,4 +47,14 @@ SPDX-License-Identifier: Apache-2.0
 //
 // The agent uses the submit_result tool to return structured results. The Resp
 // type's JSON tags define the schema for the tool's payload.
+//
+// # Suspend/Resume (ask-human)
+//
+// Setting Config.SuspendToolName advertises a held-out ask-human tool; when
+// the model calls it, Execute returns a *checkpoint.Suspension instead of a
+// Resp, and the paused conversation is later continued through the opt-in
+// Resumer capability (obtained via AsResumer). Only the Claude backend
+// supports this today — the Gemini and OpenAI-compatible backends reject a
+// set SuspendToolName at construction until their executors grow suspend
+// support. See the suspend package for the park/wake orchestration around it.
 package metaagent

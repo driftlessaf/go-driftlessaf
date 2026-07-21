@@ -12,10 +12,12 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // defaultMaxTokens is the per-turn output-token cap applied when Config.MaxTokens
@@ -104,6 +106,20 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
+	if config.SuspendToolName != "" {
+		name, desc := config.SuspendToolName, config.SuspendToolDescription
+		executorOpts = append(executorOpts, claudeexecutor.WithSuspendTool[Req, Resp](func() (anthropic.ToolParam, error) {
+			return anthropic.ToolParam{
+				Name:        name,
+				Description: anthropic.String(desc),
+				InputSchema: anthropic.ToolInputSchemaParam{
+					Type:       "object",
+					Properties: map[string]any{suspendQuestionProperty: map[string]any{"type": "string"}},
+				},
+			}, nil
+		}))
+	}
+
 	executor, err := claudeexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude executor: %w", err)
@@ -122,4 +138,23 @@ func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, c
 		return zero, fmt.Errorf("building tools: %w", err)
 	}
 	return a.executor.Execute(ctx, request, claudetool.Map(tools))
+}
+
+// Resume implements Resumer by delegating to the concrete Claude executor's
+// resume capability. Resume is deliberately off the executor's exported
+// Interface (see claudeexecutor.Resumer), so the concrete type is reached by
+// type assertion; the executor built by claudeexecutor.New always satisfies
+// it, making the ok-check a guard against a future non-resumable Interface
+// implementation being injected, not an expected runtime path.
+func (a *claudeAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.Envelope, answers map[string]string, callbacks CB) (Resp, error) {
+	var zero Resp
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		return zero, fmt.Errorf("building tools: %w", err)
+	}
+	resumer, ok := a.executor.(claudeexecutor.Resumer[Req, Resp])
+	if !ok {
+		return zero, fmt.Errorf("claude executor does not support resume")
+	}
+	return resumer.Resume(ctx, env, answers, claudetool.Map(tools))
 }

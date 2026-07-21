@@ -102,4 +102,34 @@ type Config[Resp, CB any] struct {
 	// registration order. Validators must be safe for concurrent use; see
 	// callbacks.ResultValidator.
 	ResultValidators []callbacks.ResultValidator[Resp]
+
+	// SuspendToolName, when non-empty, enables the ask-human suspend/resume
+	// capability: the backend advertises a held-out tool by this name, and when
+	// the model calls it, Execute returns a *checkpoint.Suspension (extract it
+	// with checkpoint.AsSuspension) carrying the envelope needed to resume the
+	// paused conversation later, instead of a Resp. A resume-capable caller
+	// obtains the resume path by type-asserting the constructed agent with
+	// AsResumer.
+	//
+	// Claude backend only for now: the Gemini and OpenAI-compatible backends
+	// reject a non-empty SuspendToolName at construction with a clear error
+	// until their executors grow suspend support (DEV-2247 follow-up slices) —
+	// silently ignoring it would advertise a lifecycle that can never fire.
+	// The name must differ from the terminal submit tool's name and from every
+	// caller-registered tool (both validated by the executor). Empty (the
+	// default) leaves suspension disabled and the run's behavior byte-for-byte
+	// unchanged.
+	SuspendToolName string
+
+	// SuspendToolDescription is the human-facing description advertised to the
+	// model for the suspend tool. Ignored when SuspendToolName is empty.
+	SuspendToolDescription string
 }
+
+// suspendQuestionProperty is the single input property the suspend tool schema
+// declares: the human-facing question text. checkpoint.QuestionFromPending
+// reads the same key ("question") when deriving a Question from a pending
+// suspend call, so the schema and the extraction can never drift. Backends
+// that gain suspend support later must build their schemas from this same
+// constant.
+const suspendQuestionProperty = "question"

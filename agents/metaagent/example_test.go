@@ -74,3 +74,30 @@ func ExampleAgent_Execute() {
 		fmt.Println("error:", err)
 	}
 }
+
+// executeOnly is an Agent without the Resume capability, standing in for a
+// backend that has not grown suspend/resume support yet.
+type executeOnly struct{}
+
+func (executeOnly) Execute(context.Context, *request, toolcall.EmptyTools) (*response, error) {
+	return &response{}, nil
+}
+
+// ExampleAsResumer demonstrates obtaining the opt-in resume capability from a
+// constructed agent. AsResumer reports false when the agent's backend does not
+// support suspend/resume, so a waker can branch to a fresh run instead of
+// assuming every backend can wake a checkpoint. Today only the Claude backend
+// (Config.SuspendToolName set) yields a Resumer.
+func ExampleAsResumer() {
+	var agent metaagent.Agent[*request, *response, toolcall.EmptyTools] = executeOnly{}
+
+	if resumer, ok := metaagent.AsResumer[*request](agent); ok {
+		// Resume the parked conversation: answers are keyed by the pending
+		// tool-call IDs persisted in the envelope (Envelope.PendingToolCalls).
+		_ = resumer
+		fmt.Println("resumable")
+	} else {
+		fmt.Println("not resumable: run from scratch")
+	}
+	// Output: not resumable: run from scratch
+}

@@ -28,6 +28,16 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	projectID, region, model string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
+	// Suspend/resume is not wired for this backend yet: googleexecutor has no
+	// suspend tool option, so a set SuspendToolName would otherwise be silently
+	// dropped and the advertised pause lifecycle could never fire. Fail closed
+	// with a clear error (before any client is built) until the googleexecutor
+	// suspend/resume slice lands (DEV-2247). googleAgent likewise does not
+	// implement Resumer, so AsResumer reports false for agents built here.
+	if config.SuspendToolName != "" {
+		return nil, fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the Gemini backend; it lands with the googleexecutor suspend/resume slice", config.SuspendToolName)
+	}
+
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  projectID,
 		Location: region,

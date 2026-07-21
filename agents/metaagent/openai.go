@@ -38,6 +38,15 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 	if config.UserPrompt == nil {
 		return nil, fmt.Errorf("creating OpenAI-compatible executor: prompt cannot be nil")
 	}
+	// Suspend/resume is not wired for this backend yet: openaiexecutor has no
+	// suspend tool option, so a set SuspendToolName would otherwise be silently
+	// dropped and the advertised pause lifecycle could never fire. Fail closed
+	// with a clear error until the openaiexecutor suspend/resume slice lands
+	// (DEV-2247). openAICompatAgent likewise does not implement Resumer, so
+	// AsResumer reports false for agents built here.
+	if config.SuspendToolName != "" {
+		return nil, fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the OpenAI-compatible backend; it lands with the openaiexecutor suspend/resume slice", config.SuspendToolName)
+	}
 
 	// Use GCP Application Default Credentials for authentication.
 	// The oauth2 transport overwrites the Authorization header set by the OpenAI SDK,
