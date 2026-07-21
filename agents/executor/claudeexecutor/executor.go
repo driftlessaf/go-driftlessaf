@@ -64,7 +64,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	thinkingBudgetTokens *int64                              // nil = disabled, non-nil = enabled with budget
 	effort               anthropic.OutputConfigEffort        // "" = model default (high); set via WithEffort to tune reasoning depth / token spend
 	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
-	suspendTool          *anthropic.ToolParam                // opt-in: set via WithSuspendTool — the held-out ask-human tool; nil disables suspension entirely
+	suspendTool          *anthropic.ToolParam                // opt-in: set via WithSuspendTool — the held-out ask-a-friend tool; nil disables suspension entirely
 	telemetry            *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
@@ -401,7 +401,7 @@ func (e *executor[Request, Response]) runConversation(
 	// the next turn. False when no gate tool applies.
 	deferredGateResolved := false
 
-	// suspendToolName is the configured ask-human suspend tool the model calls
+	// suspendToolName is the configured ask-a-friend suspend tool the model calls
 	// to park the conversation for an out-of-band answer. Empty when
 	// WithSuspendTool was not applied — in which case isSuspend is always false
 	// and every suspend-specific branch below is dead, so behavior is
@@ -410,7 +410,7 @@ func (e *executor[Request, Response]) runConversation(
 
 	// Partition the tool set into the routing predicates the dispatch loop
 	// consults: isSubmit routes the terminal submit tool (executeToolCall's
-	// dispatch switch), isSuspend routes the held-out ask-human suspend tool,
+	// dispatch switch), isSuspend routes the held-out ask-a-friend suspend tool,
 	// and heldOut is their union — dispatched only after the concurrent pool
 	// drains so a held-out call observes every sibling's real tool_result (see
 	// execshared.HeldOutPartition). It also rejects a suspend tool shadowed by
@@ -465,14 +465,14 @@ func (e *executor[Request, Response]) runConversation(
 				return anthropic.ContentBlockParamUnion{}, false, err
 			}
 		case isSuspend(toolUse.Name):
-			// Held-out ask-human tool. Its real result is the human's answer,
+			// Held-out ask-a-friend tool. Its real result is the human's answer,
 			// supplied on resume — not here. We emit only a synthetic paired
 			// placeholder so the transcript stays valid in the submit-wins case
 			// (a terminal submit in the same turn ends the run and the pending
 			// question is moot). On the actual suspension path this placeholder
 			// is dropped: the consumption loop excludes the suspend call's
 			// result from the transcript so the human answer can take its slot.
-			result = map[string]any{"status": checkpoint.StatusAwaitingHumanAnswer}
+			result = map[string]any{"status": checkpoint.StatusAwaitingAnswer}
 		default:
 			// Unknown tool
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)
@@ -931,7 +931,7 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 			toolDefs = append(toolDefs, anthropic.ToolUnionParam{OfTool: &def})
 		}
 	}
-	// Advertise the held-out ask-human suspend tool the same way. It lives
+	// Advertise the held-out ask-a-friend suspend tool the same way. It lives
 	// outside the tools map — dispatch routes it to the suspension path rather
 	// than a handler — but the model discovers it like any other tool. A
 	// caller-registered tool of the same name is rejected in Execute, so the

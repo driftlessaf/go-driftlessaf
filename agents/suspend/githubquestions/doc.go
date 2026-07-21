@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 */
 
 // Package githubquestions implements suspend.QuestionStore over GitHub PR
-// (or issue) comments, so the human half of an ask-human pause happens where
+// (or issue) comments, so the human half of an ask-a-friend pause happens where
 // humans already are: the question appears as a comment on the conversation
 // the paused run belongs to, and a collaborator answers by replying
 //
@@ -34,6 +34,10 @@ SPDX-License-Identifier: Apache-2.0
 // commenter — which would otherwise supersede the real question and deny the
 // resume — is ignored. Apps installed on the repository remain trusted; they
 // are admin-granted.
+//
+// This transport's friend is deliberately a human: app and bot replies are
+// rejected. An agent answering as a peer arrives as a sibling QuestionStore
+// with its own authorization model, not by loosening this one.
 //
 // # Race semantics
 //

@@ -84,7 +84,7 @@ func TestEnvelopeCarriesAnthropicPayload(t *testing.T) {
 				}},
 				{OfToolUse: &anthropic.ToolUseBlockParam{
 					ID:    "toolu_01ABCDEF",
-					Name:  "ask_human",
+					Name:  "ask_a_friend",
 					Input: json.RawMessage(`{"question":"Should I force-push?"}`),
 				}},
 			},
@@ -117,7 +117,7 @@ func TestEnvelopeCarriesGenaiHistory(t *testing.T) {
 				},
 				{FunctionCall: &genai.FunctionCall{
 					ID:   "fc_01",
-					Name: "ask_human",
+					Name: "ask_a_friend",
 					Args: map[string]any{"question": "Should I force-push?"},
 				}},
 			},

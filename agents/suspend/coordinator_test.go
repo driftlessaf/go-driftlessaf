@@ -32,7 +32,7 @@ func newSuspension(reason string) *checkpoint.Suspension {
 			Turn:          3,
 			PendingToolCalls: []checkpoint.PendingToolCall{{
 				ID:   "toolu_01ABC",
-				Name: "ask_human",
+				Name: "ask_a_friend",
 			}},
 			// Suspend validates the envelope before persisting it, so the fixture
 			// must carry everything a real executor captures: provider state, a
@@ -94,7 +94,7 @@ func TestSuspendReturnsRequeue(t *testing.T) {
 }
 
 // TestSuspendRejectsExhaustedTurnBudget proves a final-turn suspension — the
-// RemainingTurns 0 shape NewAskHumanSuspension produces when the ask-human
+// RemainingTurns 0 shape NewAskAFriendSuspension produces when the ask-a-friend
 // call fires on the last turn — fails park-time validation inside Suspend:
 // no checkpoint is persisted and no question is posted, so a human is never
 // asked to answer a run that could not resume.

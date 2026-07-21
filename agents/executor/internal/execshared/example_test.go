@@ -95,7 +95,7 @@ func ExampleGateSubmission() {
 }
 
 func ExampleValidateSuspendToolName() {
-	fmt.Println(execshared.ValidateSuspendToolName("ask_human", "submit_result"))
+	fmt.Println(execshared.ValidateSuspendToolName("ask_a_friend", "submit_result"))
 	fmt.Println(execshared.ValidateSuspendToolName("submit_result", "submit_result"))
 	// Output:
 	// <nil>
@@ -106,11 +106,11 @@ func ExampleHeldOutPartition() {
 	// The suspend tool joins the submit tool in the held-out set; a
 	// caller-registered tool is dispatched in the concurrent pool.
 	tools := map[string]struct{}{"read_file": {}}
-	isSubmit, isSuspend, heldOut, err := execshared.HeldOutPartition(tools, "submit_result", true, "ask_human", true)
+	isSubmit, isSuspend, heldOut, err := execshared.HeldOutPartition(tools, "submit_result", true, "ask_a_friend", true)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(isSubmit("submit_result"), isSuspend("ask_human"), heldOut("read_file"))
+	fmt.Println(isSubmit("submit_result"), isSuspend("ask_a_friend"), heldOut("read_file"))
 	// Output:
 	// true true false
 }

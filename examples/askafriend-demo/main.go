@@ -3,18 +3,18 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Command askhuman-demo drives the durable suspend/resume lifecycle end-to-end
+// Command askafriend-demo drives the durable suspend/resume lifecycle end-to-end
 // against real Claude on Vertex AI and local files, one subcommand per
 // lifecycle step so each phase runs in its own OS process:
 //
-//	askhuman-demo ask     — run the agent; it must ask a human before it can
+//	askafriend-demo ask     — run the agent; it must ask a friend before it can
 //	                        submit, so it suspends: the checkpoint envelope and
 //	                        the pending question land as two local files.
-//	askhuman-demo status  — pretty-print the parked envelope + question.
-//	askhuman-demo resume  — tri-state wake: before an answer exists this is a
+//	askafriend-demo status  — pretty-print the parked envelope + question.
+//	askafriend-demo resume  — tri-state wake: before an answer exists this is a
 //	                        cheap re-arm (no model call, nothing mutated).
-//	askhuman-demo answer  — record the human's answer next to the question.
-//	askhuman-demo resume  — claims the checkpoint (CAS), rebuilds a fresh
+//	askafriend-demo answer  — record the friend's answer next to the question.
+//	askafriend-demo resume  — claims the checkpoint (CAS), rebuilds a fresh
 //	                        executor, injects the answer, runs to completion,
 //	                        and consumes both records.
 //
@@ -26,7 +26,7 @@ SPDX-License-Identifier: Apache-2.0
 // Configuration (env): GCP_PROJECT_ID (required), GCP_REGION (default global),
 // AGENT_MODEL (default claude-sonnet-4-6 — must be claude-*: suspend/resume is
 // only wired for the Claude backend today), CHECKPOINT_PATH / QUESTIONS_PATH
-// (default under /tmp/askhuman-demo), DEMO_KEY (default deploy/billing-api).
+// (default under /tmp/askafriend-demo), DEMO_KEY (default deploy/billing-api).
 package main
 
 import (
@@ -55,8 +55,8 @@ var env = envconfig.MustProcess(context.Background(), &struct {
 	Project        string `env:"GCP_PROJECT_ID,required"`
 	Region         string `env:"GCP_REGION,default=global"`
 	Model          string `env:"AGENT_MODEL,default=claude-sonnet-4-6"`
-	CheckpointPath string `env:"CHECKPOINT_PATH,default=/tmp/askhuman-demo/checkpoints.jsonl"`
-	QuestionsPath  string `env:"QUESTIONS_PATH,default=/tmp/askhuman-demo/questions.json"`
+	CheckpointPath string `env:"CHECKPOINT_PATH,default=/tmp/askafriend-demo/checkpoints.jsonl"`
+	QuestionsPath  string `env:"QUESTIONS_PATH,default=/tmp/askafriend-demo/questions.json"`
 	Key            string `env:"DEMO_KEY,default=deploy/billing-api"`
 }{})
 
@@ -73,14 +73,14 @@ func (r *DeployRequest) Bind(prompt *promptbuilder.Prompt) (*promptbuilder.Promp
 
 // DeployPlan is the agent's submitted result.
 type DeployPlan struct {
-	Environment string `json:"environment" jsonschema:"description=The deployment target environment the human approved"`
+	Environment string `json:"environment" jsonschema:"description=The deployment target environment the friend approved"`
 	Summary     string `json:"summary" jsonschema:"description=One-sentence summary of the planned deployment"`
 }
 
 var systemInstructions = promptbuilder.MustNewPrompt(`ROLE: deployment planner.
 You are finalizing a deployment plan. You do NOT know the target environment
-and MUST NOT guess it: call the ask_human tool exactly once to obtain it from
-the operator, then call submit_result with the environment the human named.`)
+and MUST NOT guess it: call the ask_a_friend tool exactly once to obtain it from
+the operator, then call submit_result with the environment the friend named.`)
 
 var userPrompt = promptbuilder.MustNewPrompt(`Plan the deployment described in
 <deploy_request>. Ask the operator which environment to target, then submit.
@@ -88,9 +88,9 @@ var userPrompt = promptbuilder.MustNewPrompt(`Plan the deployment described in
 {{deploy_request}}`)
 
 const (
-	askHumanTool     = "ask_human"
-	askHumanToolDesc = "Ask the human operator a question and pause until they answer. The conversation resumes with their answer as this call's result."
-	wakeInterval     = time.Minute
+	askAFriendTool     = "ask_a_friend"
+	askAFriendToolDesc = "Ask a friend (the human operator) a question and pause until they answer. The conversation resumes with their answer as this call's result."
+	wakeInterval       = time.Minute
 )
 
 // fileQuestions is a QuestionStore keeping every key's pending question (and
@@ -189,8 +189,8 @@ func (q *fileQuestions) Consume(_ context.Context, key, questionID string) error
 	return q.store(m)
 }
 
-// provide records a human answer bound to the pending question's nonce. It is
-// the demo's stand-in for a real human-transport ingress.
+// provide records a friend answer bound to the pending question's nonce. It is
+// the demo's stand-in for a real friend-transport ingress.
 func (q *fileQuestions) provide(key, text string) (suspend.Question, error) {
 	m, err := q.load()
 	if err != nil {
@@ -213,14 +213,14 @@ func newAgent(ctx context.Context) (metaagent.Agent[*DeployRequest, *DeployPlan,
 			UserPrompt:             userPrompt,
 			Tools:                  toolcall.NewEmptyToolsProvider[*DeployPlan](),
 			MaxTurns:               8,
-			SuspendToolName:        askHumanTool,
-			SuspendToolDescription: askHumanToolDesc,
+			SuspendToolName:        askAFriendTool,
+			SuspendToolDescription: askAFriendToolDesc,
 		})
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: askhuman-demo ask|status|answer <text>|resume|clean")
+		fmt.Fprintln(os.Stderr, "usage: askafriend-demo ask|status|answer <text>|resume|clean")
 		os.Exit(2)
 	}
 	if !strings.HasPrefix(strings.ToLower(env.Model), "claude-") {
@@ -252,7 +252,7 @@ func main() {
 		cmdStatus(ctx, store, questions)
 	case "answer":
 		if len(os.Args) < 3 {
-			fatal("usage: askhuman-demo answer <text>")
+			fatal("usage: askafriend-demo answer <text>")
 		}
 		cmdAnswer(questions, strings.Join(os.Args[2:], " "))
 	case "resume":
@@ -272,12 +272,12 @@ func cmdAsk(ctx context.Context, coord *suspend.Coordinator) {
 	}
 	plan, err := agent.Execute(ctx, &DeployRequest{Service: "billing-api", Version: "v1.4.2"}, toolcall.EmptyTools{})
 	if susp, ok := checkpoint.AsSuspension(err); ok {
-		step("model called %s — agent SUSPENDED at turn %d", askHumanTool, susp.Turn)
+		step("model called %s — agent SUSPENDED at turn %d", askAFriendTool, susp.Turn)
 		if err := coord.Suspend(ctx, env.Key, susp); err != nil {
 			if delay, ok := workqueue.GetRequeueDelay(err); ok {
 				step("checkpoint (%s) + question (%s) persisted — parked (workqueue would requeue in %s; no process holds any state now)",
 					env.CheckpointPath, env.QuestionsPath, delay.Round(time.Second))
-				step("next: `askhuman-demo status`, then `askhuman-demo answer <env>`")
+				step("next: `askafriend-demo status`, then `askafriend-demo answer <env>`")
 				return
 			}
 			fatal("suspend: %v", err)
@@ -322,8 +322,8 @@ func cmdAnswer(questions *fileQuestions, text string) {
 	if err != nil {
 		fatal("answer: %v", err)
 	}
-	step("human answered %q (bound to question nonce %s)", text, q.ID)
-	step("next: `askhuman-demo resume`")
+	step("friend answered %q (bound to question nonce %s)", text, q.ID)
+	step("next: `askafriend-demo resume`")
 }
 
 func cmdResume(ctx context.Context, coord *suspend.Coordinator) {

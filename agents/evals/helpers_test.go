@@ -346,9 +346,9 @@ func TestNoErrors(t *testing.T) {
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		Suspended:        true,
-		SuspensionReason: "awaiting human answer",
+		SuspensionReason: "awaiting answer",
 		ToolCalls: []*agenttrace.ToolCall[string]{
-			{Name: "ask_human", Error: errors.New("suspended: awaiting human answer")},
+			{Name: "ask_a_friend", Error: errors.New("suspended: awaiting answer")},
 		},
 	}
 	callback(obs, trace)

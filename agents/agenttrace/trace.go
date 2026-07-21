@@ -208,7 +208,7 @@ type Trace[T any] struct {
 	Suspended bool `json:"suspended,omitempty"`
 
 	// SuspensionReason is the free-form reason recorded by Suspend (e.g.
-	// "awaiting human answer"). Empty unless Suspended is true; also emitted
+	// "awaiting answer"). Empty unless Suspended is true; also emitted
 	// as the driftlessaf.suspension.reason span attribute.
 	SuspensionReason string `json:"suspension_reason,omitempty"`
 

@@ -103,7 +103,7 @@ type Config[Resp, CB any] struct {
 	// callbacks.ResultValidator.
 	ResultValidators []callbacks.ResultValidator[Resp]
 
-	// SuspendToolName, when non-empty, enables the ask-human suspend/resume
+	// SuspendToolName, when non-empty, enables the ask-a-friend suspend/resume
 	// capability: the backend advertises a held-out tool by this name, and when
 	// the model calls it, Execute returns a *checkpoint.Suspension (extract it
 	// with checkpoint.AsSuspension) carrying the envelope needed to resume the
@@ -121,13 +121,13 @@ type Config[Resp, CB any] struct {
 	// unchanged.
 	SuspendToolName string
 
-	// SuspendToolDescription is the human-facing description advertised to the
+	// SuspendToolDescription is the friend-facing description advertised to the
 	// model for the suspend tool. Ignored when SuspendToolName is empty.
 	SuspendToolDescription string
 }
 
 // suspendQuestionProperty is the single input property the suspend tool schema
-// declares: the human-facing question text. checkpoint.QuestionFromPending
+// declares: the friend-facing question text. checkpoint.QuestionFromPending
 // reads the same key ("question") when deriving a Question from a pending
 // suspend call, so the schema and the extraction can never drift. Backends
 // that gain suspend support later must build their schemas from this same

@@ -1,17 +1,17 @@
-# askhuman-demo — durable suspend/resume, live
+# askafriend-demo — durable suspend/resume, live
 
 This demo shows a DriftlessAF agent (real Claude on Vertex AI) **suspend**
-mid-conversation to ask a human a question, park its entire state on disk (no
+mid-conversation to ask a friend a question, park its entire state on disk (no
 process, no lease, no memory holds anything), and later **resume in a
 completely different OS process** that knows only the checkpoint path and key
-— completing the run with the human's answer injected as the pending tool
+— completing the run with the friend's answer injected as the pending tool
 result.
 
 Every lifecycle phase is a separate subcommand, so every phase is a separate
 process by construction:
 
 ```
- ask ──► model calls ask_human ──► SUSPEND ──► checkpoint + question land on disk
+ ask ──► model calls ask_a_friend ──► SUSPEND ──► checkpoint + question land on disk
                                                      │
  resume (before answer) ──► WakeRearm: nothing runs, nothing is mutated
                                                      │
@@ -48,7 +48,7 @@ OpenAI-compatible backends gain it with their executor slices).
 
 ```bash
 cd public/go-driftlessaf/examples
-go build -o /tmp/demo ./askhuman-demo
+go build -o /tmp/demo ./askafriend-demo
 ```
 
 ## Configuration
@@ -58,8 +58,8 @@ go build -o /tmp/demo ./askhuman-demo
 | `GCP_PROJECT_ID` | yes | — | Vertex AI project |
 | `GCP_REGION` | no | `global` | Vertex AI region (`global` serves Claude) |
 | `AGENT_MODEL` | no | `claude-sonnet-4-6` | Model (must be `claude-*`) |
-| `CHECKPOINT_PATH` | no | `/tmp/askhuman-demo/checkpoints.jsonl` | jsonlstore envelope log |
-| `QUESTIONS_PATH` | no | `/tmp/askhuman-demo/questions.json` | question/answer transport file |
+| `CHECKPOINT_PATH` | no | `/tmp/askafriend-demo/checkpoints.jsonl` | jsonlstore envelope log |
+| `QUESTIONS_PATH` | no | `/tmp/askafriend-demo/questions.json` | question/answer transport file |
 | `DEMO_KEY` | no | `deploy/billing-api` | The workqueue-style key being parked |
 
 ```bash
@@ -73,7 +73,7 @@ a right pane a live view of the state directory so the audience watches state
 appear, persist, and get consumed:
 
 ```bash
-watch -n2 'ls -l /tmp/askhuman-demo/ 2>/dev/null; echo; jq . /tmp/askhuman-demo/questions.json 2>/dev/null'
+watch -n2 'ls -l /tmp/askafriend-demo/ 2>/dev/null; echo; jq . /tmp/askafriend-demo/questions.json 2>/dev/null'
 ```
 
 ### 1. Start the agent — it suspends
@@ -82,12 +82,12 @@ watch -n2 'ls -l /tmp/askhuman-demo/ 2>/dev/null; echo; jq . /tmp/askhuman-demo/
 /tmp/demo ask
 ```
 
-Expected: the model calls `ask_human` on turn 0 and the process **exits**:
+Expected: the model calls `ask_a_friend` on turn 0 and the process **exits**:
 
 ```
 ▶ PROCESS 88545 — starting agent run (model claude-sonnet-4-6, project …)
-▶ model called ask_human — agent SUSPENDED at turn 0
-▶ checkpoint (/tmp/askhuman-demo/checkpoints.jsonl) + question (/tmp/askhuman-demo/questions.json)
+▶ model called ask_a_friend — agent SUSPENDED at turn 0
+▶ checkpoint (/tmp/askafriend-demo/checkpoints.jsonl) + question (/tmp/askafriend-demo/questions.json)
   persisted — parked (workqueue would requeue in 1m0s; no process holds any state now)
 ```
 
@@ -114,10 +114,10 @@ and the question — including the model's actual question text as `prompt`.
 ▶ WakeRearm — question still unanswered; nothing executed, nothing mutated, would requeue in 1m0s
 ```
 
-Narration beat: *"this is what every poll wake costs while a human thinks —
+Narration beat: *"this is what every poll wake costs while the friend thinks —
 one small read, zero model calls, zero mutations."*
 
-### 4. The human answers
+### 4. The friend answers
 
 ```bash
 /tmp/demo answer staging
@@ -140,7 +140,7 @@ The answer is written next to the question, **bound to the question's nonce**
 
 A brand-new process rebuilt a fresh executor from the envelope alone, verified
 the config digest fail-closed, injected the framed answer as the pending tool
-result, and the model completed — quoting the human's answer. The Claude
+result, and the model completed — quoting the friend's answer. The Claude
 resume also exercises the cache_control strip/reseed (prompt caching is on by
 default; a verbatim replay of the parked transcript would exceed the API's
 four-breakpoint limit).
@@ -149,7 +149,7 @@ four-breakpoint limit).
 
 ```bash
 /tmp/demo clean               # removes the parked state for DEMO_KEY
-rm -rf /tmp/askhuman-demo     # full reset
+rm -rf /tmp/askafriend-demo     # full reset
 ```
 
 ## What this demo intentionally does not show

@@ -33,7 +33,7 @@ type config struct {
 	MaxFixAttempts int    `env:"MAX_FIX_ATTEMPTS,default=2"`
 
 	// Ask-human (suspend/resume) demo configuration. Opt-in and off by
-	// default; when enabled the agent advertises an ask_human suspend tool, and
+	// default; when enabled the agent advertises an ask_a_friend suspend tool, and
 	// the reconciler drives the checkpoint/suspend lifecycle (park on suspend,
 	// poll on wake, resume on answer). Requires a claude-* AGENT_MODEL:
 	// suspend/resume is only wired for the Claude backend today.
@@ -45,15 +45,15 @@ type config struct {
 	// runs survive restarts, redeploys, and scale-out.
 	//
 	// WARNING — NOT DURABLE without CHECKPOINT_BUCKET: the fallback is a
-	// node-local file (ASK_HUMAN_SNAPSHOT_PATH, defaults under /tmp) plus an
+	// node-local file (ASK_A_FRIEND_SNAPSHOT_PATH, defaults under /tmp) plus an
 	// in-memory question store. Parked runs and any human answers already
 	// collected DO NOT survive a pod restart, redeploy, or a second replica: a
 	// wake that finds no checkpoint silently falls back to a fresh run,
 	// discarding the parked conversation. That path is demo-grade only.
-	EnableAskHuman       bool          `env:"ENABLE_ASK_HUMAN,default=false"`
-	AskHumanBucket       string        `env:"CHECKPOINT_BUCKET"`
-	AskHumanWakeInterval time.Duration `env:"ASK_HUMAN_WAKE_INTERVAL,default=30s"`
-	AskHumanSnapshotPath string        `env:"ASK_HUMAN_SNAPSHOT_PATH,default=/tmp/ask-human-checkpoints.jsonl"`
+	EnableAskAFriend       bool          `env:"ENABLE_ASK_A_FRIEND,default=false"`
+	AskAFriendBucket       string        `env:"CHECKPOINT_BUCKET"`
+	AskAFriendWakeInterval time.Duration `env:"ASK_A_FRIEND_WAKE_INTERVAL,default=30s"`
+	AskAFriendSnapshotPath string        `env:"ASK_A_FRIEND_SNAPSHOT_PATH,default=/tmp/ask-a-friend-checkpoints.jsonl"`
 }
 
 func New(ctx context.Context, identity string, clients *githubreconciler.ClientCache, cfg config) (githubreconciler.ReconcilerFunc, error) {
@@ -62,30 +62,30 @@ func New(ctx context.Context, identity string, clients *githubreconciler.ClientC
 		return nil, fmt.Errorf("creating status manager: %w", err)
 	}
 
-	if cfg.EnableAskHuman && !cfg.EnableAutofix {
-		clog.WarnContextf(ctx, "ENABLE_ASK_HUMAN=true has no effect without ENABLE_AUTOFIX=true: the ask-human lifecycle is part of the autofix agent, and only the plain validation path will run")
+	if cfg.EnableAskAFriend && !cfg.EnableAutofix {
+		clog.WarnContextf(ctx, "ENABLE_ASK_A_FRIEND=true has no effect without ENABLE_AUTOFIX=true: the ask-a-friend lifecycle is part of the autofix agent, and only the plain validation path will run")
 	}
 
 	var agent metaagent.Agent[*PRContext, *PRFixResult, PRTools]
-	var askHuman *askHumanReconciler
+	var askAFriend *askAFriendReconciler
 	if cfg.EnableAutofix {
 		if cfg.GCPProjectID == "" {
 			return nil, fmt.Errorf("GCP_PROJECT_ID is required when ENABLE_AUTOFIX=true")
 		}
-		if cfg.EnableAskHuman {
+		if cfg.EnableAskAFriend {
 			// Ask-human path: the agent is built fresh per wake by the
 			// reconciler (a meta-agent binds its executor once at construction,
 			// so a resume needs a fresh one), so no long-lived agent is captured
 			// here.
-			askHuman, err = newAskHumanReconciler(ctx, &cfg, clients)
+			askAFriend, err = newAskAFriendReconciler(ctx, &cfg, clients)
 			if err != nil {
-				return nil, fmt.Errorf("creating ask-human reconciler: %w", err)
+				return nil, fmt.Errorf("creating ask-a-friend reconciler: %w", err)
 			}
 			clog.InfoContextf(ctx, "Ask-human suspend/resume enabled with model %s", cfg.Model)
-			if cfg.AskHumanBucket != "" {
-				clog.InfoContextf(ctx, "Ask-human state is durable: checkpoints in GCS bucket %s under %s/, questions as PR comments answered with %s", cfg.AskHumanBucket, askHumanCheckpointPrefix, "/answer")
+			if cfg.AskAFriendBucket != "" {
+				clog.InfoContextf(ctx, "Ask-human state is durable: checkpoints in GCS bucket %s under %s/, questions as PR comments answered with %s", cfg.AskAFriendBucket, askAFriendCheckpointPrefix, "/answer")
 			} else {
-				clog.WarnContextf(ctx, "Ask-human state is NOT durable: checkpoints live in the node-local file %s and answers in memory; parked runs will not survive a restart or redeploy, and with more than one replica a wake routed to another replica re-runs the agent from scratch (a duplicate model run and a burned fix attempt) while the original parked conversation is orphaned (demo only — set CHECKPOINT_BUCKET for the durable path)", cfg.AskHumanSnapshotPath)
+				clog.WarnContextf(ctx, "Ask-human state is NOT durable: checkpoints live in the node-local file %s and answers in memory; parked runs will not survive a restart or redeploy, and with more than one replica a wake routed to another replica re-runs the agent from scratch (a duplicate model run and a burned fix attempt) while the original parked conversation is orphaned (demo only — set CHECKPOINT_BUCKET for the durable path)", cfg.AskAFriendSnapshotPath)
 			}
 		} else {
 			agent, err = newPRFixerAgent(ctx, &cfg)
@@ -97,7 +97,7 @@ func New(ctx context.Context, identity string, clients *githubreconciler.ClientC
 	}
 
 	return func(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
-		return reconcilePR(ctx, res, gh, sm, &cfg, agent, askHuman)
+		return reconcilePR(ctx, res, gh, sm, &cfg, agent, askAFriend)
 	}, nil
 }
 
@@ -127,7 +127,7 @@ func hasLabel(pr *github.PullRequest, labelName string) bool {
 var errMaxFixAttempts = errors.New("max fix attempts reached")
 
 // reconcilePR validates a PR and optionally uses an agent to fix issues.
-func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent metaagent.Agent[*PRContext, *PRFixResult, PRTools], askHuman *askHumanReconciler) error {
+func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent metaagent.Agent[*PRContext, *PRFixResult, PRTools], askAFriend *askAFriendReconciler) error {
 	clog.InfoContextf(ctx, "Validating PR: %s/%s#%d", res.Owner, res.Repo, res.Number)
 
 	pr, _, err := gh.PullRequests.Get(ctx, res.Owner, res.Repo, res.Number)
@@ -170,7 +170,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 		})
 	}
 
-	if !cfg.EnableAutofix || (agent == nil && askHuman == nil) {
+	if !cfg.EnableAutofix || (agent == nil && askAFriend == nil) {
 		return session.SetActualState(ctx, fmt.Sprintf("Found %d issue(s)", len(issues)), &statusmanager.Status[prvalidation.Details]{
 			Status:     "completed",
 			Conclusion: "failure",
@@ -194,12 +194,12 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	// attemptsRecorded is the FixAttempts value the terminal status writes
 	// carry. It stays at the observed count unless this reconcile begins a
-	// fresh execution: an ask-human resume completes the attempt its parked
+	// fresh execution: an ask-a-friend resume completes the attempt its parked
 	// fresh run already recorded, so it must not re-increment.
 	attemptsRecorded := fixAttempts
 	// beginAttempt gates on MaxFixAttempts and records the attempt as an
 	// in_progress status write. The plain path runs it before every execution;
-	// the ask-human path defers it into run()'s WakeFresh branch so that a
+	// the ask-a-friend path defers it into run()'s WakeFresh branch so that a
 	// rearm poll (which re-enters this reconcile every wake interval) burns no
 	// fix attempt and writes no status, and an answered resume is never
 	// blocked by the attempts gate — a parked run must stay resumable even at
@@ -230,7 +230,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 		return nil
 	}
 
-	if askHuman == nil {
+	if askAFriend == nil {
 		if err := beginAttempt(ctx); err != nil {
 			if errors.Is(err, errMaxFixAttempts) {
 				return nil
@@ -247,12 +247,12 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	prContext := &PRContext{Owner: res.Owner, Repo: res.Repo, PRNumber: res.Number, Title: title, Body: body, Issues: issues, ChangedFiles: changedFiles}
 	prTools := NewPRTools(gh, res.Owner, res.Repo, res.Number)
-	// The ask-human path drives the checkpoint/suspend lifecycle: a suspension
+	// The ask-a-friend path drives the checkpoint/suspend lifecycle: a suspension
 	// or an unanswered wake surfaces as a workqueue requeue error (the pause
 	// signal). A completed resume returns a result like a plain run.
 	var result *PRFixResult
-	if askHuman != nil {
-		result, err = askHuman.run(ctx, res.String(), prContext, prTools, beginAttempt)
+	if askAFriend != nil {
+		result, err = askAFriend.run(ctx, res.String(), prContext, prTools, beginAttempt)
 		// A requeue is the pause signal, not a failure: propagate it untouched so
 		// the key parks (or re-polls) without recording a failed run or burning a
 		// fix attempt.

@@ -20,14 +20,14 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-const askHumanToolName = "ask_human"
+const askAFriendToolName = "ask_a_friend"
 
-// askHumanProvider is a SuspendProvider registering an ask_human tool the model
+// askAFriendProvider is a SuspendProvider registering an ask_a_friend tool the model
 // can call to pause the conversation for a human answer.
-func askHumanProvider() claudeexecutor.SuspendProvider {
+func askAFriendProvider() claudeexecutor.SuspendProvider {
 	return func() (anthropic.ToolParam, error) {
 		return anthropic.ToolParam{
-			Name:        askHumanToolName,
+			Name:        askAFriendToolName,
 			Description: anthropic.String("Pause and ask a human operator a question."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Type:       "object",
@@ -80,7 +80,7 @@ func TestSuspendReturnsSuspension(t *testing.T) {
 	const maxTurns = 7
 	srv := newValidatingAnthropicServer(t, func(int, []byte) []string {
 		return wrapTurn("msg_ask",
-			toolUseBlockSSE(t, 0, "toolu_ask", askHumanToolName,
+			toolUseBlockSSE(t, 0, "toolu_ask", askAFriendToolName,
 				map[string]any{"reasoning": "need a human decision", "question": "ship it?"})...)
 	})
 
@@ -97,7 +97,7 @@ func TestSuspendReturnsSuspension(t *testing.T) {
 		client, prompt,
 		claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
 		claudeexecutor.WithMaxTurns[errCapRequest, errCapResponse](maxTurns),
-		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askHumanProvider()),
+		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askAFriendProvider()),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -119,8 +119,8 @@ func TestSuspendReturnsSuspension(t *testing.T) {
 	if pc.ID != "toolu_ask" {
 		t.Errorf("PendingToolCalls[0].ID: got %q, want %q", pc.ID, "toolu_ask")
 	}
-	if pc.Name != askHumanToolName {
-		t.Errorf("PendingToolCalls[0].Name: got %q, want %q", pc.Name, askHumanToolName)
+	if pc.Name != askAFriendToolName {
+		t.Errorf("PendingToolCalls[0].Name: got %q, want %q", pc.Name, askAFriendToolName)
 	}
 	if got, want := susp.Turn, 0; got != want {
 		t.Errorf("Turn: got %d, want %d", got, want)
@@ -163,7 +163,7 @@ func TestSubmitAndSuspendSameTurn(t *testing.T) {
 			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":%s}}`, partial),
 			`{"type":"content_block_stop","index":0}`,
 		}
-		askBlock := toolUseBlockSSE(t, 1, "toolu_ask", askHumanToolName,
+		askBlock := toolUseBlockSSE(t, 1, "toolu_ask", askAFriendToolName,
 			map[string]any{"reasoning": "just in case", "question": "ship it?"})
 		return wrapTurn("msg_both", append(submitBlock, askBlock...)...)
 	})
@@ -182,7 +182,7 @@ func TestSubmitAndSuspendSameTurn(t *testing.T) {
 		claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
 		claudeexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
 		claudeexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.ClaudeToolForResponse[errCapResponse]),
-		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askHumanProvider()),
+		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askAFriendProvider()),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -230,7 +230,7 @@ func TestWithSuspendToolCollidesWithSubmit(t *testing.T) {
 // the pause, so Execute rejects the run.
 func TestSuspendCallerToolCollisionRejected(t *testing.T) {
 	srv := newValidatingAnthropicServer(t, func(int, []byte) []string {
-		return wrapTurn("msg_x", toolUseBlockSSE(t, 0, "toolu_x", askHumanToolName, map[string]any{"reasoning": "x"})...)
+		return wrapTurn("msg_x", toolUseBlockSSE(t, 0, "toolu_x", askAFriendToolName, map[string]any{"reasoning": "x"})...)
 	})
 	client := anthropic.NewClient(
 		option.WithBaseURL(srv.URL),
@@ -244,7 +244,7 @@ func TestSuspendCallerToolCollisionRejected(t *testing.T) {
 	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
 		client, prompt,
 		claudeexecutor.WithMaxTurns[errCapRequest, errCapResponse](3),
-		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askHumanProvider()),
+		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askAFriendProvider()),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -252,7 +252,7 @@ func TestSuspendCallerToolCollisionRejected(t *testing.T) {
 
 	// Register a caller tool with the same name as the suspend tool.
 	tools := map[string]claudetool.Metadata[errCapResponse]{
-		askHumanToolName: {Definition: anthropic.ToolParam{Name: askHumanToolName}},
+		askAFriendToolName: {Definition: anthropic.ToolParam{Name: askAFriendToolName}},
 	}
 	_, err = exec.Execute(t.Context(), errCapRequest{}, tools)
 	if err == nil {

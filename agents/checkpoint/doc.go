@@ -11,7 +11,7 @@ of an executor's Execute loop the same way workqueue's requeue errors do, and
 a Store contract (with compare-and-swap Token semantics) for durably parking
 exactly one envelope per {identity}/{key}.
 
-The package is a pure primitive: it knows nothing about human questions, the
+The package is a pure primitive: it knows nothing about friend questions, the
 workqueue, or any specific LLM provider. The three provider SDK payloads are
 carried opaquely in Envelope.ProviderState as json.RawMessage so a microVM
 checkpointer or a GCS-backed store can reuse the exact same envelope shape.
@@ -29,7 +29,7 @@ The core types compose into a suspend/park/wake/resume lifecycle:
   - Store: the durable home for parked envelopes, with Load returning a CAS
     Token that Delete uses as a claim-once primitive (ErrTokenMismatch
     signals a lost race).
-  - FrameAnswer / FramedAnswers: wrap human answers in distinctive
+  - FrameAnswer / FramedAnswers: wrap friend answers in distinctive
     delimiters, substitute a placeholder for empty answers, and cap length
     on a UTF-8 boundary before they are injected as tool results.
 
@@ -38,7 +38,7 @@ The core types compose into a suspend/park/wake/resume lifecycle:
 Validation happens at both ends of the pause. Envelope.Validate rejects an
 unpairable or unreplayable envelope at suspend time — including one with no
 remaining turn budget, which could never pass the resume gate — before a
-checkpoint is persisted and a human spends time answering. ValidateForResume gates the
+checkpoint is persisted and a friend spends time answering. ValidateForResume gates the
 wake side: version, provider, model, and config digest (see DigestJSON) must
 all match the live executor — the digest is required, so an empty digest on
 either side fails closed rather than vacuously matching — turn budget must
@@ -50,7 +50,7 @@ stale state.
 
 An executor suspends by returning a Suspension from its Execute loop:
 
-	return &checkpoint.Suspension{...} // typically via NewAskHumanSuspension
+	return &checkpoint.Suspension{...} // typically via NewAskAFriendSuspension
 
 The reconciler at the top extracts it, parks the envelope, and requeues:
 
@@ -58,13 +58,13 @@ The reconciler at the top extracts it, parks the envelope, and requeues:
 		if err := store.Save(ctx, key, &s.Envelope); err != nil {
 			return err
 		}
-		// ask the human s.Question, then requeue to wake later.
+		// ask the friend s.Question, then requeue to wake later.
 	}
 
 On wake, the resumer claims the envelope with the CAS token and replays it:
 
 	env, tok, ok, err := store.Load(ctx, key)
-	// validate with checkpoint.ValidateForResume, frame the human answer
+	// validate with checkpoint.ValidateForResume, frame the friend answer
 	// with checkpoint.FramedAnswers, then claim via store.Delete(ctx, key, tok).
 
 Store implementations live in the memstore (in-memory), jsonlstore

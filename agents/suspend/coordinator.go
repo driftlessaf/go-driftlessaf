@@ -26,7 +26,7 @@ import (
 const defaultParkDeadline = 14 * 24 * time.Hour
 
 // Coordinator drives the halt/wake lifecycle. It parks suspended envelopes in
-// Store, posts and reaps human questions through Questions, and expresses the
+// Store, posts and reaps friend questions through Questions, and expresses the
 // wait as a workqueue requeue paced by WakeInterval.
 //
 // Construct it with New so WakeInterval is validated > 0; the exported fields
@@ -36,7 +36,7 @@ const defaultParkDeadline = 14 * 24 * time.Hour
 type Coordinator struct {
 	// Store is the durable home for suspended envelopes.
 	Store checkpoint.Store
-	// Questions is the human transport for the pending question/answer.
+	// Questions is the friend transport for the pending question/answer.
 	Questions QuestionStore
 	// WakeInterval is the base requeue delay between wake probes. Must be > 0.
 	WakeInterval time.Duration
@@ -46,7 +46,7 @@ type Coordinator struct {
 	// at once. Optional; zero means no jitter.
 	Jitter time.Duration
 
-	// DefaultParkDeadline bounds how long a park may wait for a human when the
+	// DefaultParkDeadline bounds how long a park may wait for an answer when the
 	// suspension's envelope carries no Deadline of its own: Suspend stamps
 	// Envelope.Deadline = now + DefaultParkDeadline before persisting, so
 	// Wake's dead-checkpoint sweep retires every park once its answer SLA
@@ -125,7 +125,7 @@ func (c *Coordinator) Suspend(ctx context.Context, key string, s *checkpoint.Sus
 	// the envelope finalization point: stamp the key and the park deadline,
 	// then validate. Park-time validation is deliberate — an unpairable or
 	// unreplayable envelope must fail here, before a checkpoint is persisted
-	// and a human spends time answering, not at resume.
+	// and a friend spends time answering, not at resume.
 	env.ReconcilerKey = key
 	// Bound the wait: envelope validation does not require a deadline and
 	// envelopeDead only fails-closed on a non-zero one, so a zero-Deadline
@@ -157,7 +157,7 @@ func (c *Coordinator) Suspend(ctx context.Context, key string, s *checkpoint.Sus
 		Key:   key,
 		RunID: env.RunID,
 		// Prefer the suspension's own question text; when the executor did not
-		// carry one, derive it from the pending ask-human call's input so the
+		// carry one, derive it from the pending ask-a-friend call's input so the
 		// posted question is never blank.
 		Prompt:  cmp.Or(s.Question, checkpoint.QuestionFromPending(env.PendingToolCalls)),
 		AskedAt: c.clock(),
@@ -205,7 +205,7 @@ func (c *Coordinator) Wake(ctx context.Context, key string) (WakeDecision, *Wake
 			return WakeFresh, nil, fmt.Errorf("wake: delete dead envelope for %q: %w", key, derr)
 		}
 		// The envelope is gone, so nothing can ever resume against this pause:
-		// consume the orphaned question so a human is not left answering a dead
+		// consume the orphaned question so a friend is not left answering a dead
 		// run. Best-effort, mirroring the post-claim Consume contract — the
 		// sweep committed at the CAS delete above.
 		switch {

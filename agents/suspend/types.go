@@ -12,7 +12,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 )
 
-// Question is the human-facing prompt posted when a run suspends. Its ID is a
+// Question is the prompt posted to the friend — the answering party, a human
+// operator or another agent — when a run suspends. Its ID is a
 // per-pause nonce: it binds an incoming Answer to one specific pause instance so
 // a stale answer left over from an earlier pause of the same key can never be
 // mistaken for the current one. The Coordinator mints a fresh ID on every
@@ -32,23 +33,24 @@ type Question struct {
 	AskedAt time.Time `json:"asked_at"`
 }
 
-// Answer is a human's reply to a Question. QuestionID MUST equal the ID of the
-// Question it answers so the store can reject answers bound to a stale pause.
+// Answer is the friend's reply to a Question. QuestionID MUST equal the ID of
+// the Question it answers so the store can reject answers bound to a stale
+// pause.
 type Answer struct {
 	// QuestionID is the nonce of the Question this answers.
 	QuestionID string `json:"question_id"`
-	// Text is the raw human answer. It flows raw all the way to the executor's
+	// Text is the raw friend answer. It flows raw all the way to the executor's
 	// Resume, which owns framing (checkpoint.FramedAnswers) before the answer
 	// reaches a provider payload — no layer in between frames or caps it.
 	Text string `json:"text"`
-	// AnsweredAt is when the human replied.
+	// AnsweredAt is when the friend replied.
 	AnsweredAt time.Time `json:"answered_at"`
 }
 
-// QuestionStore is the human-transport half of the lifecycle: where a pending
+// QuestionStore is the transport half of the lifecycle: where a pending
 // Question is posted and where its Answer eventually appears. It is deliberately
 // separate from checkpoint.Store — the envelope is durable machine state, the
-// question is human-facing I/O — so the two can live in different systems (a GCS
+// question is friend-facing I/O — so the two can live in different systems (a GCS
 // bucket for envelopes, a GitHub issue for questions, say).
 //
 // Nonce binding is the store's responsibility: Answer must only return a reply
@@ -64,7 +66,7 @@ type QuestionStore interface {
 	// be consumed by its nonce.
 	Pending(ctx context.Context, key string) (Question, bool, error)
 
-	// Answer returns the human reply for key's pending question. The bool is
+	// Answer returns the friend reply for key's pending question. The bool is
 	// false (with a zero Answer and nil error) when the question is unanswered
 	// or when the only available answer is bound to a stale question ID.
 	Answer(ctx context.Context, key string) (Answer, bool, error)
@@ -118,7 +120,7 @@ func (d WakeDecision) String() string {
 type WakeResult struct {
 	// Envelope is the claimed checkpoint envelope to rebuild the request from.
 	Envelope *checkpoint.Envelope
-	// Answer is the human reply, passed raw to the executor's Resume — which
+	// Answer is the friend reply, passed raw to the executor's Resume — which
 	// owns framing — and paired back to the suspending tool call.
 	Answer Answer
 	// Token is the CAS handle that was used to claim (delete) the envelope,

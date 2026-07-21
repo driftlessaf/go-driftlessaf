@@ -16,17 +16,17 @@ import (
 	"chainguard.dev/driftlessaf/agents/checkpoint/memstore"
 )
 
-// ExampleNewAskHumanSuspension demonstrates the suspend half of the lifecycle:
+// ExampleNewAskAFriendSuspension demonstrates the suspend half of the lifecycle:
 // an executor assembles a Suspension when the model calls its held-out
-// ask-human tool, returns it as an ordinary error, and the reconciler at the
+// ask-a-friend tool, returns it as an ordinary error, and the reconciler at the
 // top extracts it with AsSuspension.
-func ExampleNewAskHumanSuspension() {
-	s := checkpoint.NewAskHumanSuspension(
+func ExampleNewAskAFriendSuspension() {
+	s := checkpoint.NewAskAFriendSuspension(
 		checkpoint.ProviderAnthropic, "claude-fable-5", "sha256:cfg",
 		3, 12,
 		checkpoint.PendingToolCall{
 			ID:        "toolu_01ABC",
-			Name:      "ask_human",
+			Name:      "ask_a_friend",
 			InputJSON: json.RawMessage(`{"question":"Should I force-push?"}`),
 		},
 		json.RawMessage(`{"model":"claude-fable-5","max_tokens":1024}`),
@@ -73,7 +73,7 @@ func ExampleFrameAnswer() {
 // provider request ever carries an unanswered tool call.
 func ExampleFramedAnswers() {
 	pending := []checkpoint.PendingToolCall{
-		{ID: "toolu_01", Name: "ask_human"},
+		{ID: "toolu_01", Name: "ask_a_friend"},
 		{ID: "toolu_02", Name: "sibling_tool"},
 	}
 	framed, err := checkpoint.FramedAnswers(pending, map[string]string{
@@ -87,7 +87,7 @@ func ExampleFramedAnswers() {
 		fmt.Printf("%s (%s):\n%s\n", fa.ID, fa.Name, fa.Text)
 	}
 	// Output:
-	// toolu_01 (ask_human):
+	// toolu_01 (ask_a_friend):
 	// <<<BEGIN HUMAN ANSWER>>>
 	// Ship it.
 	// <<<END HUMAN ANSWER>>>

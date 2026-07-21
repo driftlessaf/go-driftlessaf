@@ -22,34 +22,34 @@ const (
 	ProviderGoogle    = "google"
 )
 
-// ReasonAwaitingHumanAnswer is the Envelope.Reason for a suspension triggered
-// by a held-out ask-human tool call.
-const ReasonAwaitingHumanAnswer = "awaiting human answer"
+// ReasonAwaitingAnswer is the Envelope.Reason for a suspension triggered
+// by a held-out ask-a-friend tool call.
+const ReasonAwaitingAnswer = "awaiting answer"
 
-// StatusAwaitingHumanAnswer is the status value in the synthetic tool result
+// StatusAwaitingAnswer is the status value in the synthetic tool result
 // recorded for the suspend call itself (the call is intercepted, never
 // dispatched, so the transcript needs a placeholder result to stay paired).
-const StatusAwaitingHumanAnswer = "awaiting_human_answer"
+const StatusAwaitingAnswer = "awaiting_answer"
 
-// DefaultAnswerMaxBytes caps a framed human answer on the resume path. One
+// DefaultAnswerMaxBytes caps a framed friend answer on the resume path. One
 // policy value for the whole lifecycle: FrameAnswer applies it inside the
 // executors' Resume, which own framing (callers pass answers raw).
 const DefaultAnswerMaxBytes = 16384
 
 // questionInputKey is the tool-input property conventionally carrying the
-// human-facing question text in an ask-human suspend call.
+// friend-facing question text in an ask-a-friend suspend call.
 const questionInputKey = "question"
 
-// NewAskHumanSuspension assembles the Suspension an executor returns when the
-// model calls its held-out ask-human tool: it stamps the schema version,
+// NewAskAFriendSuspension assembles the Suspension an executor returns when the
+// model calls its held-out ask-a-friend tool: it stamps the schema version,
 // clamps the remaining-turns budget (turn is 0-based, so turn+1 turns are
 // consumed), records the suspend call as the sole pending tool call, and
-// derives the human-facing Question from the call's input. Executors supply
+// derives the friend-facing Question from the call's input. Executors supply
 // only the provider-typed pieces: the marshaled ProviderState/LoopState and
 // their own config digest. A suspension fired on the final turn yields
 // RemainingTurns 0; Validate rejects that envelope at park time (there is no
-// budget left to resume into), so the run fails before a human is asked.
-func NewAskHumanSuspension(provider, model, configDigest string, turn, maxTurns int, call PendingToolCall, providerState, loopState json.RawMessage, traceID string) *Suspension {
+// budget left to resume into), so the run fails before a friend is asked.
+func NewAskAFriendSuspension(provider, model, configDigest string, turn, maxTurns int, call PendingToolCall, providerState, loopState json.RawMessage, traceID string) *Suspension {
 	return &Suspension{
 		Envelope: Envelope{
 			Version:          EnvelopeVersion,
@@ -58,7 +58,7 @@ func NewAskHumanSuspension(provider, model, configDigest string, turn, maxTurns 
 			ConfigDigest:     configDigest,
 			Turn:             turn,
 			RemainingTurns:   max(maxTurns-(turn+1), 0),
-			Reason:           ReasonAwaitingHumanAnswer,
+			Reason:           ReasonAwaitingAnswer,
 			PendingToolCalls: []PendingToolCall{call},
 			ProviderState:    providerState,
 			LoopState:        loopState,
@@ -68,9 +68,9 @@ func NewAskHumanSuspension(provider, model, configDigest string, turn, maxTurns 
 	}
 }
 
-// QuestionFromPending extracts the human-facing question text from the first
+// QuestionFromPending extracts the friend-facing question text from the first
 // pending tool call whose input carries a "question" string property (the
-// ask-human tool convention, see questionInputKey). It returns "" when no
+// ask-a-friend tool convention, see questionInputKey). It returns "" when no
 // pending call carries one, so callers can fall back to their own prompt.
 func QuestionFromPending(calls []PendingToolCall) string {
 	for _, pc := range calls {
@@ -87,7 +87,7 @@ func QuestionFromPending(calls []PendingToolCall) string {
 
 // Validate reports whether the envelope is complete enough to park: an
 // unpairable, unreplayable, or unverifiable envelope must fail at suspend
-// time — before a checkpoint is persisted and a human spends time answering —
+// time — before a checkpoint is persisted and a friend spends time answering —
 // not at resume. That includes an exhausted turn budget: ValidateForResume
 // rejects RemainingTurns <= 0, so an envelope parked without budget could
 // never wake, and the two gates must agree.
@@ -151,7 +151,7 @@ func ValidateForResume(env Envelope, provider, model, liveDigest string, now tim
 	return nil
 }
 
-// FramedAnswer is a human answer framed for injection, paired to the pending
+// FramedAnswer is a friend answer framed for injection, paired to the pending
 // tool call it answers. The executor maps it into its provider message shape.
 type FramedAnswer struct {
 	// ID is the pending tool call's provider identifier.
@@ -168,9 +168,9 @@ type FramedAnswer struct {
 // an unanswered tool call. maxBytes <= 0 applies DefaultAnswerMaxBytes.
 //
 // Pairing an answer to every pending call cannot fabricate a result for a
-// privileged tool: only held-out ask-human calls can be pending — dispatched
+// privileged tool: only held-out ask-a-friend calls can be pending — dispatched
 // siblings quiesce to real transcript results before park (see
-// PendingToolCall) — and FrameAnswer delimits every body as quoted human
+// PendingToolCall) — and FrameAnswer delimits every body as quoted friend
 // text, so the model never reads it as native output of the named tool.
 func FramedAnswers(pending []PendingToolCall, answers map[string]string, maxBytes int) ([]FramedAnswer, error) {
 	if len(pending) == 0 {

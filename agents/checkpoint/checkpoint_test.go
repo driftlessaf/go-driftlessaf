@@ -20,7 +20,7 @@ import (
 func TestAsSuspension(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
 		err := error(&checkpoint.Suspension{
-			Envelope: checkpoint.Envelope{ReconcilerKey: "k", RunID: "r", Turn: 2, Reason: "ask_human"},
+			Envelope: checkpoint.Envelope{ReconcilerKey: "k", RunID: "r", Turn: 2, Reason: "ask_a_friend"},
 		})
 		s, ok := checkpoint.AsSuspension(err)
 		if !ok {
@@ -54,9 +54,9 @@ func TestAsSuspension(t *testing.T) {
 }
 
 func TestSuspensionErrorString(t *testing.T) {
-	s := &checkpoint.Suspension{Envelope: checkpoint.Envelope{ReconcilerKey: "org/repo#1", RunID: "run-9", Turn: 4, Reason: "ask_human"}}
+	s := &checkpoint.Suspension{Envelope: checkpoint.Envelope{ReconcilerKey: "org/repo#1", RunID: "run-9", Turn: 4, Reason: "ask_a_friend"}}
 	got := s.Error()
-	for _, want := range []string{"org/repo#1", "run-9", "ask_human", "turn 4"} {
+	for _, want := range []string{"org/repo#1", "run-9", "ask_a_friend", "turn 4"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Error() = %q, missing %q", got, want)
 		}
@@ -193,7 +193,7 @@ func TestEnvelopeValidateRequiresConfigDigest(t *testing.T) {
 		ConfigDigest:     "sha256:cfg",
 		RemainingTurns:   2,
 		ProviderState:    json.RawMessage(`{}`),
-		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "t1", Name: "ask_human"}},
+		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "t1", Name: "ask_a_friend"}},
 	}
 	if err := env.Validate(); err != nil {
 		t.Fatalf("Validate with a config digest: %v", err)
@@ -213,7 +213,7 @@ func TestEnvelopeValidateRequiresTurnBudget(t *testing.T) {
 		ConfigDigest:     "sha256:cfg",
 		RemainingTurns:   1,
 		ProviderState:    json.RawMessage(`{}`),
-		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "t1", Name: "ask_human"}},
+		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "t1", Name: "ask_a_friend"}},
 	}
 	if err := env.Validate(); err != nil {
 		t.Fatalf("Validate with remaining budget: %v", err)
@@ -228,16 +228,16 @@ func TestEnvelopeValidateRequiresTurnBudget(t *testing.T) {
 	}
 }
 
-func TestNewAskHumanSuspensionFinalTurnFailsValidate(t *testing.T) {
+func TestNewAskAFriendSuspensionFinalTurnFailsValidate(t *testing.T) {
 	call := checkpoint.PendingToolCall{
 		ID:        "toolu_01",
-		Name:      "ask_human",
+		Name:      "ask_a_friend",
 		InputJSON: json.RawMessage(`{"question":"Proceed?"}`),
 	}
 	// A suspension fired on the final turn (turn 11 of maxTurns 12 consumes
 	// the whole budget) yields RemainingTurns 0 and must be rejected at park
 	// time rather than parked as a checkpoint that can never resume.
-	s := checkpoint.NewAskHumanSuspension(
+	s := checkpoint.NewAskAFriendSuspension(
 		checkpoint.ProviderAnthropic, "m", "sha256:cfg",
 		11, 12, call,
 		json.RawMessage(`{}`), nil, "")
@@ -273,7 +273,7 @@ func TestDigestJSON(t *testing.T) {
 
 func TestEnvelopeClone(t *testing.T) {
 	orig := &checkpoint.Envelope{
-		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "t1", Name: "ask_human", InputJSON: json.RawMessage(`{"q":1}`)}},
+		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "t1", Name: "ask_a_friend", InputJSON: json.RawMessage(`{"q":1}`)}},
 		ProviderState:    json.RawMessage(`{"a":1}`),
 		LoopState:        json.RawMessage(`{"turn":1}`),
 	}

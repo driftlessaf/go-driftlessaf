@@ -23,7 +23,7 @@ import (
 
 // fakeAgent is a scripted metaagent.Agent + metaagent.Resumer stand-in that
 // avoids any network. Its first Execute suspends (as if the model called the
-// ask-human tool); Resume records the answers it was handed and returns a
+// ask-a-friend tool); Resume records the answers it was handed and returns a
 // completed result. It lets the demo's tri-state lifecycle be exercised
 // deterministically with the real Coordinator and real checkpoint/question
 // stores.
@@ -60,7 +60,7 @@ func (f *fakeAgent) Execute(_ context.Context, _ *PRContext, _ PRTools) (*PRFixR
 	}
 	pending := make([]checkpoint.PendingToolCall, 0, len(f.suspendCallIDs))
 	for _, id := range f.suspendCallIDs {
-		pending = append(pending, checkpoint.PendingToolCall{ID: id, Name: askHumanToolName})
+		pending = append(pending, checkpoint.PendingToolCall{ID: id, Name: askAFriendToolName})
 	}
 	return nil, &checkpoint.Suspension{
 		Envelope: checkpoint.Envelope{
@@ -70,7 +70,7 @@ func (f *fakeAgent) Execute(_ context.Context, _ *PRContext, _ PRTools) (*PRFixR
 			RunID:            "run-1",
 			Turn:             1,
 			RemainingTurns:   5,
-			Reason:           checkpoint.ReasonAwaitingHumanAnswer,
+			Reason:           checkpoint.ReasonAwaitingAnswer,
 			PendingToolCalls: pending,
 			// Coordinator.Suspend validates the envelope before persisting it: a
 			// real executor always captures provider state AND stamps a config
@@ -93,7 +93,7 @@ func (f *fakeAgent) Resume(_ context.Context, env checkpoint.Envelope, answers m
 	if q := f.resumeSuspendsWith; q != "" {
 		f.resumeSuspendsWith = ""
 		env.Turn++
-		env.PendingToolCalls = []checkpoint.PendingToolCall{{ID: "toolu_ask_again", Name: askHumanToolName}}
+		env.PendingToolCalls = []checkpoint.PendingToolCall{{ID: "toolu_ask_again", Name: askAFriendToolName}}
 		return nil, &checkpoint.Suspension{Envelope: env, Question: q}
 	}
 	return &PRFixResult{Success: true, FixesApplied: []string{"applied after human answer"}, Reasoning: "resumed"}, nil
@@ -102,7 +102,7 @@ func (f *fakeAgent) Resume(_ context.Context, env checkpoint.Envelope, answers m
 // newTestReconciler wires a real Coordinator over a temp-file jsonlstore and an
 // in-memory question store, handing every wake the same fakeAgent so the test
 // can inspect what Resume received.
-func newTestReconciler(t *testing.T, agent *fakeAgent) (*askHumanReconciler, *memquestions.Store) {
+func newTestReconciler(t *testing.T, agent *fakeAgent) (*askAFriendReconciler, *memquestions.Store) {
 	t.Helper()
 	store, err := jsonlstore.New(filepath.Join(t.TempDir(), "checkpoints.jsonl"))
 	if err != nil {
@@ -113,7 +113,7 @@ func newTestReconciler(t *testing.T, agent *fakeAgent) (*askHumanReconciler, *me
 	if err != nil {
 		t.Fatalf("suspend.New: %v", err)
 	}
-	r := &askHumanReconciler{
+	r := &askAFriendReconciler{
 		coord: coord,
 		newAgent: func(context.Context) (metaagent.Agent[*PRContext, *PRFixResult, PRTools], error) {
 			return agent, nil
@@ -122,7 +122,7 @@ func newTestReconciler(t *testing.T, agent *fakeAgent) (*askHumanReconciler, *me
 	return r, questions
 }
 
-// TestAskHumanLifecycle drives the full suspend -> rearm -> resume path through
+// TestAskAFriendLifecycle drives the full suspend -> rearm -> resume path through
 // the real Coordinator and stores: a fresh run begins exactly one fix attempt,
 // suspends, and parks; a poll wake before an answer rearms without re-executing
 // or beginning another attempt; and once answered the run resumes — without
@@ -130,7 +130,7 @@ func newTestReconciler(t *testing.T, agent *fakeAgent) (*askHumanReconciler, *me
 // pending tool-call ID. The fake suspends with TWO pending calls to the same
 // tool under distinct IDs, so pairing by tool name (which would collapse them
 // to one colliding entry) cannot pass.
-func TestAskHumanLifecycle(t *testing.T) {
+func TestAskAFriendLifecycle(t *testing.T) {
 	const key = "acme/widgets#7"
 	const answer = "gcr.io/distroless/base"
 	callIDs := []string{"toolu_ask_123", "toolu_ask_456"}
@@ -213,11 +213,11 @@ func TestAskHumanLifecycle(t *testing.T) {
 	}
 }
 
-// TestAskHumanFreshRunCompletes pins the ordinary outcome once ask-human is
+// TestAskAFriendFreshRunCompletes pins the ordinary outcome once ask-a-friend is
 // enabled: a fresh run whose model never asks a human returns its result
 // straight through — one fix attempt begun, nothing parked, no question
 // posted, and no requeue.
-func TestAskHumanFreshRunCompletes(t *testing.T) {
+func TestAskAFriendFreshRunCompletes(t *testing.T) {
 	const key = "acme/widgets#13"
 	agent := &fakeAgent{
 		executeResult: &PRFixResult{Success: true, FixesApplied: []string{"title fixed"}, Reasoning: "no human needed"},
@@ -248,11 +248,11 @@ func TestAskHumanFreshRunCompletes(t *testing.T) {
 	}
 }
 
-// TestAskHumanResumeCanSuspendAgain pins the multi-question conversation: a
-// resumed run that calls the ask-human tool again must RE-PARK (a requeue and
+// TestAskAFriendResumeCanSuspendAgain pins the multi-question conversation: a
+// resumed run that calls the ask-a-friend tool again must RE-PARK (a requeue and
 // a fresh pending question), never fall through to the caller as a terminal
 // error — and the second pause must still burn no additional fix attempt.
-func TestAskHumanResumeCanSuspendAgain(t *testing.T) {
+func TestAskAFriendResumeCanSuspendAgain(t *testing.T) {
 	const key = "acme/widgets#9"
 	agent := &fakeAgent{
 		suspendCallIDs:     []string{"toolu_ask_1"},
@@ -313,13 +313,13 @@ func TestAskHumanResumeCanSuspendAgain(t *testing.T) {
 	}
 }
 
-// TestAskHumanResumeFailureSurfacesForRetry pins the claimed-run failure
+// TestAskAFriendResumeFailureSurfacesForRetry pins the claimed-run failure
 // contract: a non-suspension Resume error happens AFTER the wake CAS-deleted
 // the envelope and consumed the answer, so run must return an error marked
 // errResumeFailed (which reconcilePR passes to the workqueue for retry) —
 // never a requeue and never a result — and the retry wake must find no
 // checkpoint and re-run from scratch.
-func TestAskHumanResumeFailureSurfacesForRetry(t *testing.T) {
+func TestAskAFriendResumeFailureSurfacesForRetry(t *testing.T) {
 	const key = "acme/widgets#11"
 	transient := errors.New("vertex: 529 overloaded")
 	agent := &fakeAgent{
@@ -364,17 +364,17 @@ func TestAskHumanResumeFailureSurfacesForRetry(t *testing.T) {
 	}
 }
 
-// TestAskHumanRequiresClaudeModel pins newAskHumanReconciler's fail-fast model
+// TestAskAFriendRequiresClaudeModel pins newAskAFriendReconciler's fail-fast model
 // guard: suspend/resume is only wired for the Claude backend today, so a
 // non-claude AGENT_MODEL must fail at startup rather than on the first
 // reconcile.
-func TestAskHumanRequiresClaudeModel(t *testing.T) {
+func TestAskAFriendRequiresClaudeModel(t *testing.T) {
 	cfg := &config{
-		Model:                "gemini-2.5-flash",
-		AskHumanWakeInterval: time.Second,
-		AskHumanSnapshotPath: filepath.Join(t.TempDir(), "checkpoints.jsonl"),
+		Model:                  "gemini-2.5-flash",
+		AskAFriendWakeInterval: time.Second,
+		AskAFriendSnapshotPath: filepath.Join(t.TempDir(), "checkpoints.jsonl"),
 	}
-	if _, err := newAskHumanReconciler(t.Context(), cfg, nil); err == nil {
-		t.Fatal("newAskHumanReconciler: want an error for a non-claude model, got nil")
+	if _, err := newAskAFriendReconciler(t.Context(), cfg, nil); err == nil {
+		t.Fatal("newAskAFriendReconciler: want an error for a non-claude model, got nil")
 	}
 }

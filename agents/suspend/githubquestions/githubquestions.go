@@ -28,14 +28,14 @@ const answerCommand = "/answer"
 // question as base64 JSON. Base64 keeps the marker safe no matter what the
 // question text contains ("-->" in a prompt would otherwise terminate the
 // HTML comment and corrupt the marker).
-const markerPrefix = "<!-- askhuman:question:v1 "
+const markerPrefix = "<!-- askafriend:question:v1 "
 
 // markerSuffix closes the hidden marker.
 const markerSuffix = " -->"
 
 // answeredMarker replaces the question marker once the question is consumed,
 // so Pending stops surfacing it.
-const answeredMarker = "<!-- askhuman:answered -->"
+const answeredMarker = "<!-- askafriend:answered -->"
 
 // Store is a suspend.QuestionStore that keeps the human transport on GitHub:
 // Ask posts the question as a PR (or issue) comment carrying the pause nonce

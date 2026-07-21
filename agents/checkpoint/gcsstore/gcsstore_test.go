@@ -81,7 +81,7 @@ func sampleEnvelope(runID string) *checkpoint.Envelope {
 		RemainingTurns: 9,
 		PendingToolCalls: []checkpoint.PendingToolCall{{
 			ID:        "toolu_01ABC",
-			Name:      "ask_human",
+			Name:      "ask_a_friend",
 			InputJSON: json.RawMessage(`{"question":"proceed?"}`),
 		}},
 		ProviderState: json.RawMessage(`{"max_tokens":1024}`),

@@ -16,7 +16,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 )
 
-// suspendConfig returns a config with the ask-human suspend tool enabled, over
+// suspendConfig returns a config with the ask-a-friend suspend tool enabled, over
 // the standard test tool composition.
 func suspendConfig(t *testing.T) Config[*testResponse, testCallbacks] {
 	t.Helper()
@@ -29,7 +29,7 @@ func suspendConfig(t *testing.T) Config[*testResponse, testCallbacks] {
 		Tools: toolcall.NewFindingToolsProvider[*testResponse, toolcall.WorktreeTools[toolcall.EmptyTools]](
 			toolcall.NewWorktreeToolsProvider[*testResponse, toolcall.EmptyTools](
 				toolcall.NewEmptyToolsProvider[*testResponse]())),
-		SuspendToolName:        "ask_human",
+		SuspendToolName:        "ask_a_friend",
 		SuspendToolDescription: "Ask the human operator a question and pause until they answer.",
 	}
 }
@@ -37,7 +37,7 @@ func suspendConfig(t *testing.T) Config[*testResponse, testCallbacks] {
 // TestSuspendToolRejectedOnGeminiBackend pins the fail-closed contract for the
 // backend without executor suspend support: a set SuspendToolName must be a
 // clear construction error, never silently dropped — a run whose model was
-// promised an ask-human tool that is never advertised could neither pause nor
+// promised an ask-a-friend tool that is never advertised could neither pause nor
 // be diagnosed.
 func TestSuspendToolRejectedOnGeminiBackend(t *testing.T) {
 	_, err := New[*testRequest](t.Context(), "test-project", "us-central1", "gemini-2.5-flash", suspendConfig(t))

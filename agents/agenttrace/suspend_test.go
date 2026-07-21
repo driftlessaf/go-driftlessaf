@@ -28,7 +28,7 @@ func TestSuspendSetsOKStatusAndReason(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
 	trace := tracer.NewTrace(t.Context(), randomString())
 
-	const reason = "awaiting human answer"
+	const reason = "awaiting answer"
 	trace.Suspend(reason)
 
 	if !trace.Suspended {

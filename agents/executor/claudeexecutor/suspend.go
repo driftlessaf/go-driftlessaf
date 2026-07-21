@@ -23,13 +23,13 @@ import (
 // regardless of which backend serves it.
 const suspendProviderName = checkpoint.ProviderAnthropic
 
-// SuspendProvider constructs the tool definition for the held-out ask-human
+// SuspendProvider constructs the tool definition for the held-out ask-a-friend
 // suspend tool. It mirrors SubmitResultProvider's shape (a constructor that can
 // fail) so callers wire suspension the same way they wire the terminal submit
 // tool.
 type SuspendProvider func() (anthropic.ToolParam, error)
 
-// WithSuspendTool registers the ask-human suspend tool advertised to the model.
+// WithSuspendTool registers the ask-a-friend suspend tool advertised to the model.
 // When the model calls it, Execute halts after the turn quiesces (every sibling
 // tool call has produced its real tool_result) and returns a
 // *checkpoint.Suspension — an error value carrying the full envelope needed to
@@ -58,7 +58,7 @@ func WithSuspendTool[Request promptbuilder.Bindable, Response any](provider Susp
 	}
 }
 
-// suspendToolName returns the configured ask-human suspend tool's name, or ""
+// suspendToolName returns the configured ask-a-friend suspend tool's name, or ""
 // when WithSuspendTool was not applied. Symmetric with submitToolName.
 func (e *executor[Request, Response]) suspendToolName() string {
 	if e.suspendTool == nil {
@@ -100,11 +100,11 @@ func (e *executor[Request, Response]) buildSuspension(
 		return nil, err
 	}
 
-	// NewAskHumanSuspension stamps the schema version, the shared reason, and
+	// NewAskAFriendSuspension stamps the schema version, the shared reason, and
 	// the clamped remaining-turn budget; this executor supplies only the
 	// provider-typed pieces. LoopState is nil: the parked turn index lives in
 	// Envelope.Turn and Resume re-enters the loop at Turn+1.
-	return checkpoint.NewAskHumanSuspension(suspendProviderName, e.modelName, digest, turn, e.maxTurns,
+	return checkpoint.NewAskAFriendSuspension(suspendProviderName, e.modelName, digest, turn, e.maxTurns,
 		checkpoint.PendingToolCall{
 			ID:        suspendCall.ID,
 			Name:      suspendCall.Name,

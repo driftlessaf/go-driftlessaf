@@ -20,7 +20,7 @@ const EnvelopeVersion = 1
 // result has not yet been produced. Because suspension fires post-quiesce —
 // every dispatched sibling handler in the turn has finished and its real
 // result is already in ProviderState's transcript — the only calls that can be
-// pending are the held-out ask-human call(s) from the suspended turn.
+// pending are the held-out ask-a-friend call(s) from the suspended turn.
 // Executors MUST NOT park a dispatched tool's call as pending: on resume every
 // pending call is paired with framed human-answer text (see FramedAnswers),
 // which would fabricate a result for a tool that never ran. The ID is the
@@ -84,7 +84,7 @@ type Envelope struct {
 	// Reason is a short machine-readable reason for the suspension.
 	Reason string `json:"reason,omitempty"`
 
-	// PendingToolCalls are the unanswered held-out ask-human calls from the
+	// PendingToolCalls are the unanswered held-out ask-a-friend calls from the
 	// suspended turn (usually one; more only when the turn issued several).
 	// Dispatched siblings never appear here — their real results were already
 	// in ProviderState when the turn quiesced (see PendingToolCall).
@@ -107,7 +107,7 @@ type Envelope struct {
 	// conversation can never be handed to another model directly — it will not
 	// verify or replay. The workable approach: start a brand-new run on the
 	// target model and feed it the parked conversation as plain text, together
-	// with the pending question and the human's answer. Everything needed for
+	// with the pending question and the friend's answer. Everything needed for
 	// that already lives in ProviderState, so no envelope schema change is
 	// required.
 	ProviderState json.RawMessage `json:"provider_state,omitempty"`

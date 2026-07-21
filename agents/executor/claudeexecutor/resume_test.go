@@ -61,7 +61,7 @@ func staleCacheProviderState(t *testing.T) (json.RawMessage, int) {
 	askUse := anthropic.ContentBlockParamUnion{
 		OfToolUse: &anthropic.ToolUseBlockParam{
 			ID:    "toolu_ask",
-			Name:  askHumanToolName,
+			Name:  askAFriendToolName,
 			Input: json.RawMessage(`{"question":"ship it?"}`),
 		},
 	}
@@ -162,10 +162,10 @@ func TestResumeStripsStaleCacheControl(t *testing.T) {
 		ConfigDigest:   liveConfigDigest(t),
 		Turn:           0,
 		RemainingTurns: 5,
-		Reason:         "awaiting human answer",
+		Reason:         "awaiting answer",
 		PendingToolCalls: []checkpoint.PendingToolCall{{
 			ID:   "toolu_ask",
-			Name: askHumanToolName,
+			Name: askAFriendToolName,
 		}},
 		ProviderState: providerState,
 		TraceID:       "trace-origin",
@@ -250,10 +250,10 @@ func TestResumeCapsTurnBudgetAtLiveMaxTurns(t *testing.T) {
 		ConfigDigest:   liveConfigDigest(t),
 		Turn:           0,
 		RemainingTurns: 5, // exceeds the live executor's budget of 1
-		Reason:         "awaiting human answer",
+		Reason:         "awaiting answer",
 		PendingToolCalls: []checkpoint.PendingToolCall{{
 			ID:   "toolu_ask",
-			Name: askHumanToolName,
+			Name: askAFriendToolName,
 		}},
 		ProviderState: providerState,
 	}
@@ -293,7 +293,7 @@ func TestResumeFailsClosedOnModelDrift(t *testing.T) {
 		Provider:         "anthropic",
 		Model:            "claude-opus-4-8", // differs from the executor default
 		RemainingTurns:   5,
-		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "toolu_ask", Name: askHumanToolName}},
+		PendingToolCalls: []checkpoint.PendingToolCall{{ID: "toolu_ask", Name: askAFriendToolName}},
 		ProviderState:    json.RawMessage(`{"model":"claude-opus-4-8"}`),
 	}
 

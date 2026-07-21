@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 // Package suspend orchestrates the question/answer lifecycle and halt/wake
 // loop that sits on top of the checkpoint primitive. It turns an executor's
 // checkpoint.Suspension (an error value carrying a serializable Envelope) into
-// a durable pause: the envelope is parked in a checkpoint.Store, a human-facing
-// Question is posted to a QuestionStore under a fresh nonce, and the reconciler
-// is asked to come back later via a workqueue requeue — no live process is held
+// a durable pause: the envelope is parked in a checkpoint.Store, a Question
+// for the friend — the answering party, a human operator or another agent —
+// is posted to a QuestionStore under a fresh nonce, and the reconciler is
+// asked to come back later via a workqueue requeue — no live process is held
 // across the wait. The wait itself is always bounded: an envelope parked
 // without a deadline is stamped with the Coordinator's DefaultParkDeadline
 // (14 days unless configured), and Wake's dead-checkpoint sweep retires any

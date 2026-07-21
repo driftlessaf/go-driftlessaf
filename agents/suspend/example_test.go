@@ -32,7 +32,7 @@ func ExampleCoordinator() {
 		return
 	}
 
-	// An executor suspended on a held-out ask-human call and handed the
+	// An executor suspended on a held-out ask-a-friend call and handed the
 	// Suspension up as an ordinary error; the reconciler parks it here.
 	err = c.Suspend(ctx, "org/repo#42", &checkpoint.Suspension{
 		Envelope: checkpoint.Envelope{
@@ -45,7 +45,7 @@ func ExampleCoordinator() {
 			RemainingTurns: 8,
 			PendingToolCalls: []checkpoint.PendingToolCall{{
 				ID:   "toolu_01ABC",
-				Name: "ask_human",
+				Name: "ask_a_friend",
 			}},
 			ProviderState: json.RawMessage(`{"messages":[]}`),
 		},

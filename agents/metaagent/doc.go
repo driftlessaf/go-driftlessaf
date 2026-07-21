@@ -48,9 +48,9 @@ SPDX-License-Identifier: Apache-2.0
 // The agent uses the submit_result tool to return structured results. The Resp
 // type's JSON tags define the schema for the tool's payload.
 //
-// # Suspend/Resume (ask-human)
+// # Suspend/Resume (ask-a-friend)
 //
-// Setting Config.SuspendToolName advertises a held-out ask-human tool; when
+// Setting Config.SuspendToolName advertises a held-out ask-a-friend tool; when
 // the model calls it, Execute returns a *checkpoint.Suspension instead of a
 // Resp, and the paused conversation is later continued through the opt-in
 // Resumer capability (obtained via AsResumer). Only the Claude backend

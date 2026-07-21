@@ -81,8 +81,8 @@ func (s *Store) Consume(_ context.Context, key, questionID string) error {
 	return nil
 }
 
-// Provide records a human answer for key's pending question. It is the test/demo
-// stand-in for a real human-transport ingress. The answer is bound to the
+// Provide records a friend answer for key's pending question. It is the test/demo
+// stand-in for a real transport ingress. The answer is bound to the
 // current question's nonce; if no question is pending, Provide reports false.
 func (s *Store) Provide(_ context.Context, key, text string) (suspend.Question, bool) {
 	s.mu.Lock()
