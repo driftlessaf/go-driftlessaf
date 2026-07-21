@@ -13,14 +13,15 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
-	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/schema"
@@ -1178,94 +1179,51 @@ func tracePrompt(prompt, promptSuffix string) string {
 	return prompt + "\n\n" + promptSuffix
 }
 
-// samplingParamsRemovedPrefixes lists model-name prefixes for which the
-// Anthropic API removed the sampling parameters (temperature, top_p, top_k)
-// AND the extended-thinking budget parameter (thinking.type="enabled",
-// budget_tokens=N) in favor of adaptive thinking. Opus 4.7 introduced this
-// surface; Opus 4.8 and Fable 5 share it.
-// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
-var samplingParamsRemovedPrefixes = []string{
-	"claude-opus-4-7",
-	"claude-opus-4-8",
-	"claude-fable-5",
-	"claude-sonnet-5",
-}
-
 // supportsSamplingParams reports whether the Anthropic API accepts the
-// temperature, top_p, and top_k parameters for the given model. Models with
-// the removed surface return a 400 ("`temperature` is deprecated for this
-// model.") when any of these is set to a non-default value.
+// temperature, top_p, and top_k parameters for the given model. Claude models
+// with the Opus 4.7 adaptive-thinking surface removed these parameters and
+// return a 400 ("`temperature` is deprecated for this model.") when any of
+// them is set to a non-default value; the per-model table lives in the model
+// package. Ids outside the Claude routing shape never hit the removed
+// surface, so they keep the parameters.
+// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
 func supportsSamplingParams(modelName string) bool {
-	for _, prefix := range samplingParamsRemovedPrefixes {
-		if strings.HasPrefix(modelName, prefix) {
-			return false
-		}
-	}
-	return true
+	info := model.Resolve(modelName)
+	return info.Backend != model.BackendClaude || info.SamplingParams
 }
 
 // supportsExtendedThinkingBudget reports whether the Anthropic API accepts the
 // extended-thinking budget parameter (thinking.type="enabled", budget_tokens=N)
 // for the given model. The models that removed sampling params removed the
-// budget parameter with them.
+// budget parameter with them; the per-model table lives in the model package.
 // See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#extended-thinking-budgets-removed
 func supportsExtendedThinkingBudget(modelName string) bool {
-	return supportsSamplingParams(modelName)
-}
-
-// noEffortModelPrefixes lists model-name prefixes that predate the effort
-// parameter (output_config.effort): the API returns a 400 when it is set.
-// Unlisted models — including future ones — are assumed effort-capable, so a
-// new model keeps the newest surface by default and this list only grows when
-// a model is verified to reject the parameter.
-var noEffortModelPrefixes = []string{
-	"claude-2",
-	"claude-3",
-	"claude-instant",
-	"claude-haiku",
-	"claude-sonnet-4@",
-	"claude-sonnet-4-0",
-	"claude-sonnet-4-5",
-	"claude-opus-4@",
-	"claude-opus-4-0",
-	"claude-opus-4-1",
-}
-
-// preXHighEffortModelPrefixes lists effort-capable model-name prefixes that
-// predate the "xhigh" level and accept low|medium|high|max only. xhigh
-// arrived with the Opus 4.7 surface (Opus 4.7+, Sonnet 5, Fable 5); the API
-// rejects it on these models with a 400 naming the accepted values.
-var preXHighEffortModelPrefixes = []string{
-	"claude-sonnet-4-6",
-	"claude-opus-4-5",
-	"claude-opus-4-6",
-}
-
-// modelHasPrefix reports whether modelName starts with any of the prefixes.
-func modelHasPrefix(modelName string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(modelName, p) {
-			return true
-		}
-	}
-	return false
+	info := model.Resolve(modelName)
+	return info.Backend != model.BackendClaude || info.ExtendedThinkingBudget
 }
 
 // effortForModel resolves a configured effort level against the model's
-// supported set: exact where the model takes the full scale, the nearest
-// supported level otherwise ("xhigh" clamps down to "high" on models that
-// predate it), and dropped entirely (empty) on models that reject the effort
-// parameter. This mirrors the nearest-supported mappings the googleexecutor
-// and openaiexecutor apply to the same provider-neutral scale, so swapping
-// models never turns a tuned effort into a request error. Execute logs when
-// the resolution is not exact.
+// supported set (model.Resolve): exact where the model takes the full scale,
+// the nearest supported level otherwise ("xhigh" clamps down to "high" on
+// models that predate it), and dropped entirely (empty) on models that reject
+// the effort parameter. This mirrors the nearest-supported mappings the
+// googleexecutor and openaiexecutor apply to the same provider-neutral scale,
+// so swapping models never turns a tuned effort into a request error. Execute
+// logs when the resolution is not exact.
 func effortForModel(modelName string, level anthropic.OutputConfigEffort) anthropic.OutputConfigEffort {
+	if level == "" {
+		return ""
+	}
+	info := model.Resolve(modelName)
 	switch {
-	case level == "":
+	case info.SupportsEffort(effort.Level(level)):
+		return level
+	case len(info.Efforts) == 0:
+		// The model rejects the effort parameter entirely: drop it.
 		return ""
-	case modelHasPrefix(modelName, noEffortModelPrefixes):
-		return ""
-	case level == anthropic.OutputConfigEffortXhigh && modelHasPrefix(modelName, preXHighEffortModelPrefixes):
+	case level == anthropic.OutputConfigEffortXhigh:
+		// Effort-capable model that predates xhigh: clamp to the nearest
+		// supported level.
 		return anthropic.OutputConfigEffortHigh
 	default:
 		return level

@@ -8,13 +8,13 @@ package googleexecutor
 import (
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
@@ -210,17 +210,11 @@ func thinkingConfigForEffort(model string, level effort.Level) *genai.ThinkingCo
 }
 
 // usesThinkingLevel reports whether the model takes the discrete thinkingLevel
-// control, which replaced thinkingBudget with Gemini 3. Models whose major
-// version cannot be determined fall back to the budget control.
-func usesThinkingLevel(model string) bool {
-	rest, ok := strings.CutPrefix(model, "gemini-")
-	if !ok {
-		return false
-	}
-	version, _, _ := strings.Cut(rest, "-")
-	major, _, _ := strings.Cut(version, ".")
-	n, err := strconv.Atoi(major)
-	return err == nil && n >= 3
+// control, which replaced thinkingBudget with Gemini 3. The generation is
+// derived from the model capability registry; models whose thinking-knob
+// generation cannot be determined fall back to the budget control.
+func usesThinkingLevel(modelName string) bool {
+	return model.Resolve(modelName).ThinkingControl == model.ThinkingControlLevel
 }
 
 // thinkingLevelForEffort maps the shared scale onto Gemini thinking levels.
