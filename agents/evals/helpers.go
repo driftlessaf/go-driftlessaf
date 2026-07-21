@@ -97,6 +97,15 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 // Optional ignore functions can be provided to filter out expected errors (e.g., file not found).
 // If any ignore function returns true for a given error, that error is skipped.
 //
+// Tool calls marked Recoverable are skipped: they record a designed
+// correction loop — a handler rejected the call but returned a corrective
+// hint the model acted on (e.g. a resubmitted terminal submit) — not a
+// failure. The gate still catches the bad outcomes: an unrecovered
+// rejection surfaces as a trace-level error (with a submit tool configured
+// the executor's only clean exit is a committed result, so a model that
+// never lands one exhausts the turn budget), and every unmarked tool-call
+// error fails exactly as before.
+//
 // A suspended trace (Trace.Suspended) never fails: suspension is an
 // intentional mid-run halt awaiting an out-of-band signal, not a failure,
 // and the resumed run is graded on its own trace.
@@ -127,7 +136,7 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 
 		// Check tool call errors
 		for _, tc := range trace.ToolCalls {
-			if tc.Error != nil && !shouldIgnore(tc.Error) {
+			if tc.Error != nil && !tc.Recoverable && !shouldIgnore(tc.Error) {
 				o.Fail(fmt.Sprintf("tool call %s error: got = %v, wanted = nil", tc.Name, tc.Error))
 				return
 			}

@@ -287,6 +287,56 @@ func TestNoErrors(t *testing.T) {
 		t.Errorf("expected failure for non-ignored error")
 	}
 
+	// A recoverable rejection (a handler declined the call but returned a
+	// corrective hint the model acted on — e.g. a resubmitted terminal
+	// submit) must not fail an otherwise-clean trace, even with no ignore
+	// functions configured. This is the shape that failed the
+	// skillup-skillfixer eval gate on 2026-07-20: a stringified submit
+	// payload rejected with "parameter error", then resubmitted cleanly.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "submit_result", Error: errors.New("parameter error"), Recoverable: true},
+			{Name: "submit_result"},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for recovered rejection: %v", obs.failures)
+	}
+
+	// An UNRECOVERED rejection still fails: a run whose model never lands an
+	// accepted submission cannot complete cleanly — it exhausts the turn
+	// budget, which surfaces as a trace-level error the recoverable mark
+	// does not shield.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: errors.New("agent exceeded maximum conversation turns (200)"),
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "submit_result", Error: errors.New("parameter error"), Recoverable: true},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) == 0 {
+		t.Errorf("expected failure for unrecovered rejection (trace error)")
+	}
+
+	// Semantic freeze for every unmarked error: a recovered-in-conversation
+	// blip that the producer did NOT mark recoverable (e.g. an edit_file
+	// old-string miss) fails exactly as before — the recoverable mark is a
+	// producer-scoped contract, not a fleet-wide loosening.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "edit_file", Error: errors.New("old string appears 0 times in the file")},
+			{Name: "submit_result"},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) == 0 {
+		t.Errorf("expected failure for unmarked tool call error")
+	}
+
 	// A suspended trace (halted mid-run to await a human answer) is a
 	// non-error terminal state: NoErrors must not fail it even when an error
 	// surfaced through the tool-call channel (the suspension sentinel is

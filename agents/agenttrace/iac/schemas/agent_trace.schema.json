@@ -23,6 +23,7 @@
       {"name": "params", "type": "JSON", "mode": "NULLABLE"},
       {"name": "result", "type": "JSON", "mode": "NULLABLE"},
       {"name": "error", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "recoverable", "type": "BOOLEAN", "mode": "NULLABLE"},
       {"name": "start_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
       {"name": "end_time", "type": "TIMESTAMP", "mode": "NULLABLE"}
     ]

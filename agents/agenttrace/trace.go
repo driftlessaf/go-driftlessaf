@@ -77,17 +77,28 @@ type ReasoningContent struct {
 
 // ToolCall represents a single tool invocation within a trace
 type ToolCall[T any] struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	Params    map[string]any `json:"params,omitempty"`
-	Result    any            `json:"result,omitempty"`
-	Error     error          `json:"-"` // handled by MarshalJSON
-	StartTime time.Time      `json:"start_time"`
-	EndTime   time.Time      `json:"end_time"`
-	trace     *Trace[T]      // Parent trace for auto-adding on completion
-	mu        sync.Mutex     // Protects mutable fields
-	ctx       context.Context
-	span      oteltrace.Span
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Params map[string]any `json:"params,omitempty"`
+	Result any            `json:"result,omitempty"`
+	Error  error          `json:"-"` // handled by MarshalJSON
+	// Recoverable marks an error-carrying call as a designed correction:
+	// the handler rejected the call but returned a corrective hint the model
+	// can act on, so the record is retryable rather than terminal — the
+	// tool-call-level twin of RecordedTurn.Failed's recovered-error
+	// semantics. The error stays on the trace for observability; consumers
+	// that gate on tool-call errors (e.g. the no-errors eval scorer) skip
+	// recoverable records. Producers may set it only on paths where a run
+	// that never recovers cannot complete cleanly (e.g. a rejected terminal
+	// submit: the run either lands an accepted submission later or fails
+	// with a trace-level error).
+	Recoverable bool       `json:"recoverable,omitempty"`
+	StartTime   time.Time  `json:"start_time"`
+	EndTime     time.Time  `json:"end_time"`
+	trace       *Trace[T]  // Parent trace for auto-adding on completion
+	mu          sync.Mutex // Protects mutable fields
+	ctx         context.Context
+	span        oteltrace.Span
 }
 
 // LLMTurn represents a single LLM call within a trace.
@@ -610,28 +621,47 @@ func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCa
 
 // BadToolCall records a tool call that failed due to bad arguments or unknown tool
 func (t *Trace[T]) BadToolCall(id, name string, params map[string]any, err error) {
+	t.badToolCall(id, name, params, err, false)
+}
+
+// RejectedToolCall records a tool call the handler rejected with a
+// corrective hint the model can act on — the recoverable sibling of
+// BadToolCall. See ToolCall.Recoverable for the contract producers must
+// honor before choosing this over BadToolCall.
+func (t *Trace[T]) RejectedToolCall(id, name string, params map[string]any, err error) {
+	t.badToolCall(id, name, params, err, true)
+}
+
+// badToolCall records a failed tool call that never started a span of its
+// own, emitting a synthetic error span and appending the completed record.
+func (t *Trace[T]) badToolCall(id, name string, params map[string]any, err error, recoverable bool) {
 	tr := otelTracer()
 	t.mu.Lock()
 	parentCtx := t.ctx
 	t.mu.Unlock()
 
-	_, span := tr.Start(parentCtx, "execute_tool "+name, oteltrace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("gen_ai.operation.name", "execute_tool"),
 		attribute.String("tool.name", name),
 		attribute.String("tool.id", id),
 		attribute.String("error", err.Error()),
-	))
+	}
+	if recoverable {
+		attrs = append(attrs, attribute.Bool("driftlessaf.tool.recoverable", true))
+	}
+	_, span := tr.Start(parentCtx, "execute_tool "+name, oteltrace.WithAttributes(attrs...))
 	span.SetStatus(codes.Error, err.Error())
 	span.End()
 
 	tc := &ToolCall[T]{
-		ID:        id,
-		Name:      name,
-		Params:    params,
-		StartTime: time.Now(),
-		EndTime:   time.Now(),
-		Error:     err,
-		trace:     t,
+		ID:          id,
+		Name:        name,
+		Params:      params,
+		StartTime:   time.Now(),
+		EndTime:     time.Now(),
+		Error:       err,
+		Recoverable: recoverable,
+		trace:       t,
 	}
 
 	t.mu.Lock()
@@ -668,6 +698,22 @@ func (tc *ToolCall[T]) Complete(result any, err error) {
 	trace.mu.Lock()
 	defer trace.mu.Unlock()
 	trace.ToolCalls = append(trace.ToolCalls, tc)
+}
+
+// CompleteRejected marks the tool call as complete with a rejection the
+// model can correct: the error is recorded for observability, but the call
+// is marked Recoverable because the handler returned a corrective hint and
+// the conversation loop continues. See ToolCall.Recoverable for the contract
+// producers must honor before choosing this over Complete.
+func (tc *ToolCall[T]) CompleteRejected(err error) {
+	tc.mu.Lock()
+	tc.Recoverable = true
+	if tc.span != nil {
+		tc.span.SetAttributes(attribute.Bool("driftlessaf.tool.recoverable", true))
+	}
+	tc.mu.Unlock()
+
+	tc.Complete(nil, err)
 }
 
 // AttachToolCallReasoning merges the model-supplied reasoning for the tool

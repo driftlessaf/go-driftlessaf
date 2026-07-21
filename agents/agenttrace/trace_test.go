@@ -275,6 +275,60 @@ func TestBadToolCall(t *testing.T) {
 	if duration > time.Millisecond {
 		t.Errorf("bad tool call duration: got = %v, wanted = < 1ms", duration)
 	}
+	// Kind separation: BadToolCall records genuine failures, never
+	// recoverable rejections.
+	if badTC.Recoverable {
+		t.Errorf("bad tool call recoverable: got = true, wanted = false")
+	}
+}
+
+func TestRejectedToolCall(t *testing.T) {
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+
+	err := errors.New("parameter error")
+	trace.RejectedToolCall("rej-tc-1", "submit_result", map[string]any{
+		"result": `{"summary":"stringified"}`,
+	}, err)
+
+	if len(trace.ToolCalls) != 1 {
+		t.Fatalf("tool calls length after RejectedToolCall: got = %d, wanted = 1", len(trace.ToolCalls))
+	}
+
+	tc := trace.ToolCalls[0]
+	if !errors.Is(tc.Error, err) {
+		t.Errorf("rejected tool call error: got = %v, wanted = %v", tc.Error, err)
+	}
+	if !tc.Recoverable {
+		t.Errorf("rejected tool call recoverable: got = false, wanted = true")
+	}
+	if trace.Error != nil {
+		t.Errorf("trace error after RejectedToolCall: got = %v, wanted = nil (rejection is not terminal)", trace.Error)
+	}
+}
+
+func TestCompleteRejected(t *testing.T) {
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+
+	err := errors.New("result rejected: validation raised 1 finding(s)")
+	tc := trace.StartToolCall("tc-1", "submit_result", map[string]any{"result": "..."})
+	tc.CompleteRejected(err)
+
+	if len(trace.ToolCalls) != 1 {
+		t.Fatalf("tool calls length after CompleteRejected: got = %d, wanted = 1", len(trace.ToolCalls))
+	}
+
+	got := trace.ToolCalls[0]
+	if !errors.Is(got.Error, err) {
+		t.Errorf("rejected tool call error: got = %v, wanted = %v", got.Error, err)
+	}
+	if !got.Recoverable {
+		t.Errorf("rejected tool call recoverable: got = false, wanted = true")
+	}
+	if got.EndTime.IsZero() {
+		t.Errorf("rejected tool call end time: got = zero, wanted = set")
+	}
 }
 
 func TestLLMTurnBeginAndEnd(t *testing.T) {

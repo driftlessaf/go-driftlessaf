@@ -28,7 +28,7 @@ const reasoningDescription = "Explain why you are confident this result is compl
 func buildOutcome[Response any](ctx context.Context, opts Options[Response], trace *agenttrace.Trace[Response], id, name string, args map[string]any) toolcall.SubmitOutcome[Response] {
 	reasoning, err := params.Extract[string](args, "reasoning")
 	if err != nil {
-		trace.BadToolCall(id, name, args, errors.New("parameter error"))
+		trace.RejectedToolCall(id, name, args, errors.New("parameter error"))
 		return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
 	}
 
@@ -36,7 +36,7 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 	if err != nil {
 		coerced, ok := coerceStringPayload(args, opts.PayloadFieldName)
 		if !ok {
-			trace.BadToolCall(id, name, args, errors.New("parameter error"))
+			trace.RejectedToolCall(id, name, args, errors.New("parameter error"))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
 		}
 		clog.WarnContext(ctx, "Coerced stringified submit payload into an object",
@@ -53,7 +53,7 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 	parsed, err := parsePayload[Response](payloadRaw)
 	if err != nil {
 		tc := trace.StartToolCall(id, name, args)
-		tc.Complete(nil, err)
+		tc.CompleteRejected(err)
 		return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%v", err)}
 	}
 

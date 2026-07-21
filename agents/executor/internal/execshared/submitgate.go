@@ -55,7 +55,7 @@ func GateSubmission[Response any](
 	if len(findings) > 0 {
 		clog.InfoContext(ctx, "Submission rejected by result validators", "findings", len(findings))
 		rec.RecordToolCall(ctx, "submit_result_rejected")
-		tc.Complete(nil, fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
+		tc.CompleteRejected(fmt.Errorf("result rejected: validation raised %d finding(s)", len(findings)))
 		return callbacks.RejectionResult(submitToolName, findings), false, nil
 	}
 

@@ -6,11 +6,18 @@ SPDX-License-Identifier: Apache-2.0
 package execshared
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
+	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/toolcall"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -209,4 +216,74 @@ func TestDispatchToolCallsBoundsConcurrency(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGateSubmissionRejectionKinds pins the trace-record kinds GateSubmission
+// produces: a validator-findings rejection returns the findings to the model
+// and records a recoverable tool call (the model corrects and resubmits),
+// while a validator error aborts the run and records a genuine failure.
+func TestGateSubmissionRejectionKinds(t *testing.T) {
+	type reviewResult struct {
+		Verdict string `json:"verdict"`
+	}
+	rec := telemetry.NewRecorder(metrics.NewGenAI("test"), "model", "provider", nil, nil)
+	outcome := toolcall.SubmitOutcome[reviewResult]{
+		Accepted:   true,
+		Response:   reviewResult{Verdict: "pass"},
+		Reasoning:  "all checks passed",
+		ToolResult: map[string]any{"success": true},
+	}
+
+	t.Run("validator findings record a recoverable rejection", func(t *testing.T) {
+		ctx := t.Context()
+		trace, _ := agenttrace.StartTrace[reviewResult](ctx, "prompt")
+		findingsValidator := func(context.Context, reviewResult, string) ([]callbacks.Finding, error) {
+			return []callbacks.Finding{{Details: "verdict lacks evidence"}}, nil
+		}
+
+		var result reviewResult
+		toolResult, committed, err := GateSubmission(ctx, outcome, trace, "call-1", "submit_result",
+			map[string]any{"verdict": "pass"},
+			[]callbacks.ResultValidator[reviewResult]{findingsValidator}, rec, "submit_result", &result)
+		if err != nil {
+			t.Fatalf("GateSubmission() error = %v, want = nil (findings reject, they do not abort)", err)
+		}
+		if committed {
+			t.Errorf("committed: got = true, want = false")
+		}
+		if toolResult == nil {
+			t.Errorf("tool result: got = nil, want = rejection payload for the model")
+		}
+		if len(trace.ToolCalls) != 1 {
+			t.Fatalf("tool calls length: got = %d, want = 1", len(trace.ToolCalls))
+		}
+		if tc := trace.ToolCalls[0]; tc.Error == nil || !tc.Recoverable {
+			t.Errorf("tool call record: got = {error: %v, recoverable: %t}, want = rejection error with recoverable = true", tc.Error, tc.Recoverable)
+		}
+	})
+
+	t.Run("validator error records a genuine failure", func(t *testing.T) {
+		ctx := t.Context()
+		trace, _ := agenttrace.StartTrace[reviewResult](ctx, "prompt")
+		errValidator := func(context.Context, reviewResult, string) ([]callbacks.Finding, error) {
+			return nil, errors.New("validator infrastructure down")
+		}
+
+		var result reviewResult
+		_, committed, err := GateSubmission(ctx, outcome, trace, "call-1", "submit_result",
+			map[string]any{"verdict": "pass"},
+			[]callbacks.ResultValidator[reviewResult]{errValidator}, rec, "submit_result", &result)
+		if err == nil {
+			t.Fatalf("GateSubmission() error = nil, want = validator error (aborts the run)")
+		}
+		if committed {
+			t.Errorf("committed: got = true, want = false")
+		}
+		if len(trace.ToolCalls) != 1 {
+			t.Fatalf("tool calls length: got = %d, want = 1", len(trace.ToolCalls))
+		}
+		if tc := trace.ToolCalls[0]; tc.Error == nil || tc.Recoverable {
+			t.Errorf("tool call record: got = {error: %v, recoverable: %t}, want = terminal error with recoverable = false", tc.Error, tc.Recoverable)
+		}
+	})
 }

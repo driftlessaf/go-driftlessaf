@@ -135,6 +135,32 @@ func TestTraceMarshalJSON(t *testing.T) {
 			},
 		},
 	}, {
+		// A genuine failure (above) omits recoverable via omitempty; a
+		// rejection with a corrective hint serializes recoverable=true so
+		// BQ can separate designed correction loops from real tool failures.
+		name: "recoverable rejection serializes flag",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), "prompt")
+			trace.RejectedToolCall("tc1", "submit_result", map[string]any{"key": "val"}, errors.New("parameter error"))
+			trace.complete("done", nil)
+			return trace
+		},
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"exec_context": map[string]any{},
+			"tool_calls": []any{
+				map[string]any{
+					"id":          "tc1",
+					"name":        "submit_result",
+					"params":      map[string]any{"key": "val"},
+					"error":       "parameter error",
+					"recoverable": true,
+				},
+			},
+		},
+	}, {
 		name: "unexported fields excluded from JSON",
 		setup: func(t *testing.T) *Trace[string] {
 			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
