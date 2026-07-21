@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 )
@@ -73,6 +74,51 @@ func TestNewModelSelection(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("New() got = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestEffortWiredOnGoogleAndOpenAIBackends pins the cross-backend Effort
+// contract: Config.Effort must reach the Gemini and OpenAI-compatible
+// backends' executor options rather than being silently dropped. A valid
+// level must leave construction succeeding, and an invalid level must fail
+// construction on both backends — the rejection is what proves the wiring
+// exists, since removing the Effort plumbing from a backend would make the
+// invalid case construct successfully again.
+//
+// Construction acquires Application Default Credentials before applying
+// executor options, so the test points GOOGLE_APPLICATION_CREDENTIALS at a
+// hermetic fake service-account key (see fakeGoogleCredentials); construction
+// genuinely reaches option application rather than failing early and passing
+// vacuously.
+func TestEffortWiredOnGoogleAndOpenAIBackends(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", fakeGoogleCredentials(t))
+
+	userPrompt, err := promptbuilder.NewPrompt("payload")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+
+	// gemini-* routes to the Gemini backend; publisher/model routes to the
+	// OpenAI-compatible backend.
+	for _, model := range []string{"gemini-2.5-flash", "google/gemini-2.5-pro"} {
+		t.Run(model, func(t *testing.T) {
+			config := Config[*testResponse, testCallbacks]{
+				UserPrompt: userPrompt,
+				Tools: toolcall.NewFindingToolsProvider[*testResponse, toolcall.WorktreeTools[toolcall.EmptyTools]](
+					toolcall.NewWorktreeToolsProvider[*testResponse, toolcall.EmptyTools](
+						toolcall.NewEmptyToolsProvider[*testResponse]())),
+			}
+
+			config.Effort = effort.XHigh
+			if _, err := New[*testRequest](t.Context(), "test-project", "us-central1", model, config); err != nil {
+				t.Errorf("New() with effort %q: got = %v, want = nil", config.Effort, err)
+			}
+
+			config.Effort = "not-a-level"
+			if _, err := New[*testRequest](t.Context(), "test-project", "us-central1", model, config); err == nil {
+				t.Errorf("New() with effort %q: got = nil, want validation error (Effort must be wired to this backend)", config.Effort)
 			}
 		})
 	}

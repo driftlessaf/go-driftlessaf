@@ -63,6 +63,7 @@ The executor supports various configuration options:
   - WithResponseMIMEType: Set response format (e.g., "application/json")
   - WithResponseSchema: Define structured output schema
   - WithThinking: Enable thinking mode with a token budget
+  - WithEffort: Enable thinking via the provider-neutral effort scale
 
 # Thinking Mode
 
@@ -73,6 +74,17 @@ thought blocks are captured in the trace:
 	    client,
 	    prompt,
 	    googleexecutor.WithThinking[*Request, *Response](2048), // 2048 token budget for thinking
+	)
+
+WithEffort is the backend-portable alternative: it maps the shared effort.Level
+scale onto the thinking control the configured model understands — a discrete
+thinking level on Gemini 3.x and later, a token-budget tier on earlier models.
+Configure exactly one of WithThinking and WithEffort:
+
+	executor, err := googleexecutor.New[*Request, *Response](
+	    client,
+	    prompt,
+	    googleexecutor.WithEffort[*Request, *Response](effort.High),
 	)
 
 Reasoning blocks are stored in trace.Reasoning as []agenttrace.ReasoningContent,

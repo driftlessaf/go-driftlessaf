@@ -112,6 +112,10 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, openaiexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
 	}
 
+	if config.Effort != "" {
+		executorOpts = append(executorOpts, openaiexecutor.WithEffort[Req, Resp](config.Effort))
+	}
+
 	exec, err := openaiexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating OpenAI-compatible executor: %w", err)

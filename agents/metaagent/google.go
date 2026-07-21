@@ -74,6 +74,10 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, googleexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
 	}
 
+	if config.Effort != "" {
+		executorOpts = append(executorOpts, googleexecutor.WithEffort[Req, Resp](config.Effort))
+	}
+
 	executor, err := googleexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Google executor: %w", err)

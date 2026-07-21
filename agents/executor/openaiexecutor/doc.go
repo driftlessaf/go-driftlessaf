@@ -33,6 +33,7 @@ SPDX-License-Identifier: Apache-2.0
 //   - [WithModel]: set the model name (required for Vertex AI partner models)
 //   - [WithMaxTokens]: set the maximum completion tokens
 //   - [WithTemperature]: set the sampling temperature (0.0–2.0)
+//   - [WithEffort]: set the reasoning effort for reasoning models (xhigh/max clamp to high)
 //   - [WithMaxTurns]: set the maximum conversation turns before aborting
 //   - [WithSystemInstructions]: set the system prompt
 //   - [WithUserPromptSuffix]: append a static prompt to the built user prompt

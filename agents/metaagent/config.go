@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -69,15 +70,28 @@ type Config[Resp, CB any] struct {
 	// On models where the Anthropic API has removed the explicit budget
 	// parameter (Opus 4.7 and later), the executor automatically maps this to
 	// adaptive thinking and the budget value is advisory only. No effect on
-	// the Gemini backend.
+	// the Gemini or OpenAI backends.
+	//
+	// Deprecated: ThinkingBudget is Claude-only and already advisory-only on
+	// Opus 4.7+. Use Effort, which works on every backend; do not set both.
+	// The field will be removed once remaining consumers migrate.
 	ThinkingBudget int64
 
-	// Effort sets the Claude reasoning effort (output_config.effort): one of
-	// "low", "medium", "high", "xhigh", "max". Empty (the default) leaves the
-	// model default ("high"). "xhigh" is recommended for hard coding/agentic
-	// work on Sonnet 5 / Opus 4.7+. Claude backend only; no effect on the
-	// Gemini or OpenAI backends. See claudeexecutor.WithEffort.
-	Effort string
+	// Effort sets the provider-neutral reasoning-effort level, controlling how
+	// deeply the model thinks and its overall token spend. Empty (the default)
+	// leaves each backend's model default in place. Every backend maps the
+	// level onto the nearest control the configured model supports:
+	//   - Claude: output_config.effort — exact on Opus 4.7+/Sonnet 5/Fable 5;
+	//     "xhigh" clamps to "high" on models that predate it (Sonnet 4.6,
+	//     Opus 4.5/4.6); dropped with a warning on models without effort
+	//     support; see claudeexecutor.WithEffort.
+	//   - Gemini: thinkingLevel on Gemini 3.x models, thinkingBudget tiers on
+	//     earlier models; see googleexecutor.WithEffort.
+	//   - OpenAI-compatible: reasoning_effort, where xhigh and max clamp to
+	//     "high"; reasoning models only, see openaiexecutor.WithEffort.
+	// effort.XHigh is recommended for hard coding/agentic work on
+	// Sonnet 5 / Opus 4.7+.
+	Effort effort.Level
 
 	// ResultValidators gate the terminal submit_result tool. When the model
 	// submits a result that parses into Resp, every validator runs

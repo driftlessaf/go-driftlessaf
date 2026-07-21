@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -56,23 +57,25 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 }
 
 // WithEffort sets the reasoning effort (output_config.effort), which controls
-// how deeply the model thinks and its overall token spend. Valid values are
-// "low", "medium", "high", "xhigh", and "max"; leaving it unset keeps the
-// model's default ("high"). Effort is GA on every serving backend (Vertex AI
-// and the first-party API) and needs no beta header. It is the recommended
-// depth control on Claude 4.7+/Sonnet 5, which removed the extended-thinking
-// budget — "xhigh" is the recommended setting for hard coding/agentic work.
-func WithEffort[Request promptbuilder.Bindable, Response any](effort string) Option[Request, Response] {
+// how deeply the model thinks and its overall token spend. The level is
+// validated against the provider-neutral scale here and resolved against the
+// configured model's supported set at request time: Opus 4.7+/Sonnet 5/
+// Fable 5 take the full scale unchanged; models that predate "xhigh"
+// (Sonnet 4.6, Opus 4.5/4.6) clamp it down to "high"; models without effort
+// support drop the parameter — each with a logged warning, mirroring the
+// nearest-supported mappings on the Gemini and OpenAI backends so a model
+// swap never turns a tuned effort into a request error. Leaving it unset
+// keeps the model default ("high" where supported). Effort is GA on every
+// serving backend (Vertex AI and the first-party API) and needs no beta
+// header; effort.XHigh is the recommended setting for hard coding/agentic
+// work on the models that take it.
+func WithEffort[Request promptbuilder.Bindable, Response any](level effort.Level) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
-		switch anthropic.OutputConfigEffort(effort) {
-		case anthropic.OutputConfigEffortLow, anthropic.OutputConfigEffortMedium,
-			anthropic.OutputConfigEffortHigh, anthropic.OutputConfigEffortXhigh,
-			anthropic.OutputConfigEffortMax:
-			e.effort = anthropic.OutputConfigEffort(effort)
-			return nil
-		default:
-			return fmt.Errorf("invalid effort %q (want low|medium|high|xhigh|max)", effort)
+		if err := level.Validate(); err != nil {
+			return err
 		}
+		e.effort = anthropic.OutputConfigEffort(level)
+		return nil
 	}
 }
 

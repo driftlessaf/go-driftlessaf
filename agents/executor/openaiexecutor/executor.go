@@ -25,6 +25,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
+	"github.com/openai/openai-go/shared"
 )
 
 // Interface is the public interface for OpenAI-compatible agent execution.
@@ -55,13 +56,14 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// WithUserPromptSuffix; the request is never bound into it.
 	userPromptSuffix *promptbuilder.Prompt
 
-	maxTokens      int64
-	maxTurns       int
-	temperature    float64
-	submitTool     openaistool.SubmitMetadata[Response]
-	telemetry      *telemetry.Recorder
-	retryConfig    retry.RetryConfig
-	resourceLabels map[string]string
+	maxTokens       int64
+	maxTurns        int
+	temperature     float64
+	reasoningEffort shared.ReasoningEffort // "" = unset; omitted from requests
+	submitTool      openaistool.SubmitMetadata[Response]
+	telemetry       *telemetry.Recorder
+	retryConfig     retry.RetryConfig
+	resourceLabels  map[string]string
 
 	// resultValidators gate the terminal submit tool. When the model calls the
 	// submit tool with a payload that parses, every validator runs concurrently
@@ -198,6 +200,9 @@ func (e *executor[Request, Response]) Execute(
 		Tools:               toolDefs,
 		MaxCompletionTokens: param.NewOpt(e.maxTokens),
 		Temperature:         param.NewOpt(e.temperature),
+		// The zero value is omitted from the request (omitzero), so this only
+		// takes effect when WithEffort configured it.
+		ReasoningEffort: e.reasoningEffort,
 	}
 
 	// isSubmit reports whether a call routes to the terminal submit tool. It

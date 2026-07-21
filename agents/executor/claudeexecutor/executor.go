@@ -301,6 +301,21 @@ func (e *executor[Request, Response]) Execute(
 			"model", e.modelName, "temperature", e.temperature)
 	}
 
+	// Surface a non-exact effort resolution (see effortForModel): the request
+	// already carries the resolved level; the log preserves the operator's
+	// signal that their configured level was adjusted for this model.
+	if e.effort != "" {
+		switch resolved := effortForModel(e.modelName, e.effort); resolved {
+		case e.effort:
+		case "":
+			clog.WarnContext(ctx, "dropping effort: not supported by this model",
+				"model", e.modelName, "effort", e.effort)
+		default:
+			clog.WarnContext(ctx, "clamping effort to the model's nearest supported level",
+				"model", e.modelName, "effort", e.effort, "resolved", resolved)
+		}
+	}
+
 	// Add thinking configuration if enabled. Opus 4.7 removed extended-thinking
 	// budgets; adaptive is the only thinking-on mode. Map WithThinking to adaptive
 	// for those models and warn that the requested budget was ignored. Display is
@@ -991,9 +1006,11 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// token spend. Empty leaves the model default (high); omitzero drops the field
 	// when unset. GA on every serving backend (Vertex AI and the first-party API),
 	// no beta header. It is the recommended depth control on models that removed
-	// the extended-thinking budget (Opus 4.7+, Sonnet 5).
-	if e.effort != "" {
-		params.OutputConfig.Effort = e.effort
+	// the extended-thinking budget (Opus 4.7+, Sonnet 5). The configured level is
+	// resolved against the model's supported set (see effortForModel) so callers
+	// don't need model-aware logic; Execute logs when the resolution is not exact.
+	if resolved := effortForModel(e.modelName, e.effort); resolved != "" {
+		params.OutputConfig.Effort = resolved
 	}
 
 	// Add system instructions if provided
@@ -1194,4 +1211,63 @@ func supportsSamplingParams(modelName string) bool {
 // See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#extended-thinking-budgets-removed
 func supportsExtendedThinkingBudget(modelName string) bool {
 	return supportsSamplingParams(modelName)
+}
+
+// noEffortModelPrefixes lists model-name prefixes that predate the effort
+// parameter (output_config.effort): the API returns a 400 when it is set.
+// Unlisted models — including future ones — are assumed effort-capable, so a
+// new model keeps the newest surface by default and this list only grows when
+// a model is verified to reject the parameter.
+var noEffortModelPrefixes = []string{
+	"claude-2",
+	"claude-3",
+	"claude-instant",
+	"claude-haiku",
+	"claude-sonnet-4@",
+	"claude-sonnet-4-0",
+	"claude-sonnet-4-5",
+	"claude-opus-4@",
+	"claude-opus-4-0",
+	"claude-opus-4-1",
+}
+
+// preXHighEffortModelPrefixes lists effort-capable model-name prefixes that
+// predate the "xhigh" level and accept low|medium|high|max only. xhigh
+// arrived with the Opus 4.7 surface (Opus 4.7+, Sonnet 5, Fable 5); the API
+// rejects it on these models with a 400 naming the accepted values.
+var preXHighEffortModelPrefixes = []string{
+	"claude-sonnet-4-6",
+	"claude-opus-4-5",
+	"claude-opus-4-6",
+}
+
+// modelHasPrefix reports whether modelName starts with any of the prefixes.
+func modelHasPrefix(modelName string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(modelName, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// effortForModel resolves a configured effort level against the model's
+// supported set: exact where the model takes the full scale, the nearest
+// supported level otherwise ("xhigh" clamps down to "high" on models that
+// predate it), and dropped entirely (empty) on models that reject the effort
+// parameter. This mirrors the nearest-supported mappings the googleexecutor
+// and openaiexecutor apply to the same provider-neutral scale, so swapping
+// models never turns a tuned effort into a request error. Execute logs when
+// the resolution is not exact.
+func effortForModel(modelName string, level anthropic.OutputConfigEffort) anthropic.OutputConfigEffort {
+	switch {
+	case level == "":
+		return ""
+	case modelHasPrefix(modelName, noEffortModelPrefixes):
+		return ""
+	case level == anthropic.OutputConfigEffortXhigh && modelHasPrefix(modelName, preXHighEffortModelPrefixes):
+		return anthropic.OutputConfigEffortHigh
+	default:
+		return level
+	}
 }

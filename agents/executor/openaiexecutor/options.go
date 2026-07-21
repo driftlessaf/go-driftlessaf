@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
+	"github.com/openai/openai-go/shared"
 )
 
 // Option is a functional option for configuring the executor.
@@ -38,6 +40,34 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 		}
 		e.temperature = temp
 		return nil
+	}
+}
+
+// WithEffort sets the provider-neutral reasoning-effort level, sent as the
+// reasoning_effort request parameter. OpenAI's scale is a subset of the shared
+// one — low, medium, and high — so effort.XHigh and effort.Max clamp to
+// "high". The parameter is only valid for reasoning models; sending it to a
+// non-reasoning model is rejected by the API, so leave it unset for those.
+func WithEffort[Request promptbuilder.Bindable, Response any](level effort.Level) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if err := level.Validate(); err != nil {
+			return err
+		}
+		e.reasoningEffort = reasoningEffortForLevel(level)
+		return nil
+	}
+}
+
+// reasoningEffortForLevel maps the shared scale onto OpenAI's reasoning_effort
+// values, clamping the levels OpenAI does not have down to "high".
+func reasoningEffortForLevel(level effort.Level) shared.ReasoningEffort {
+	switch level {
+	case effort.Low:
+		return shared.ReasoningEffortLow
+	case effort.Medium:
+		return shared.ReasoningEffortMedium
+	default: // High, XHigh, Max
+		return shared.ReasoningEffortHigh
 	}
 }
 

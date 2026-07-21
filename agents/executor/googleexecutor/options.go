@@ -8,9 +8,11 @@ package googleexecutor
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -173,6 +175,83 @@ func WithThinking[Request promptbuilder.Bindable, Response any](budgetTokens int
 		}
 		e.thinkingBudget = &budgetTokens
 		return nil
+	}
+}
+
+// WithEffort sets the provider-neutral reasoning-effort level. The executor
+// maps it onto whichever thinking control the configured model understands:
+// Gemini 3.x and later take a discrete thinking level, while earlier models
+// (the Gemini 2.5 family and before) take a token budget — see
+// thinkingConfigForEffort for both mappings. Incompatible with WithThinking:
+// configure exactly one depth control.
+func WithEffort[Request promptbuilder.Bindable, Response any](level effort.Level) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if err := level.Validate(); err != nil {
+			return err
+		}
+		e.effortLevel = level
+		return nil
+	}
+}
+
+// thinkingConfigForEffort maps the provider-neutral effort level onto the
+// generation of Gemini thinking control the model understands.
+func thinkingConfigForEffort(model string, level effort.Level) *genai.ThinkingConfig {
+	if usesThinkingLevel(model) {
+		return &genai.ThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingLevel:   thinkingLevelForEffort(level),
+		}
+	}
+	return &genai.ThinkingConfig{
+		IncludeThoughts: true,
+		ThinkingBudget:  ptr(thinkingBudgetForEffort(level)),
+	}
+}
+
+// usesThinkingLevel reports whether the model takes the discrete thinkingLevel
+// control, which replaced thinkingBudget with Gemini 3. Models whose major
+// version cannot be determined fall back to the budget control.
+func usesThinkingLevel(model string) bool {
+	rest, ok := strings.CutPrefix(model, "gemini-")
+	if !ok {
+		return false
+	}
+	version, _, _ := strings.Cut(rest, "-")
+	major, _, _ := strings.Cut(version, ".")
+	n, err := strconv.Atoi(major)
+	return err == nil && n >= 3
+}
+
+// thinkingLevelForEffort maps the shared scale onto Gemini thinking levels.
+// Gemini's scale tops out at HIGH, so XHigh and Max clamp to it.
+func thinkingLevelForEffort(level effort.Level) genai.ThinkingLevel {
+	switch level {
+	case effort.Low:
+		return genai.ThinkingLevelLow
+	case effort.Medium:
+		return genai.ThinkingLevelMedium
+	default: // High, XHigh, Max
+		return genai.ThinkingLevelHigh
+	}
+}
+
+// thinkingBudgetForEffort maps the shared scale onto token-budget tiers for
+// the pre-thinking-level models (the Gemini 2.5 family). High maps to -1,
+// dynamic thinking: the model picks a budget per task, which is both the
+// model default and the closest analog to Anthropic's default high effort.
+// XHigh and Max pin the budget to 24576, the maximum shared across the 2.5
+// family (Pro allows more, but a higher value would be rejected on Flash).
+func thinkingBudgetForEffort(level effort.Level) int32 {
+	switch level {
+	case effort.Low:
+		return 1024
+	case effort.Medium:
+		return 8192
+	case effort.High:
+		return -1
+	default: // XHigh, Max
+		return 24576
 	}
 }
 

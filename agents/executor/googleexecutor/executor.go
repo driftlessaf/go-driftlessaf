@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -68,6 +69,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	responseMIMEType string
 	responseSchema   *genai.Schema
 	thinkingBudget   *int32                              // nil = disabled, non-nil = enabled with budget
+	effortLevel      effort.Level                        // "" = unset; resolved per model via thinkingConfigForEffort
 	submitTool       googletool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
 	telemetry        *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig      retry.RetryConfig                   // retry configuration for transient Vertex AI errors
@@ -152,6 +154,21 @@ func New[Request promptbuilder.Bindable, Response any](
 		}
 	}
 
+	// Effort resolution needs the final model and max_output_tokens, so it is
+	// validated after all options have been applied.
+	if exec.effortLevel != "" {
+		if exec.thinkingBudget != nil {
+			return nil, errors.New("WithEffort is incompatible with WithThinking: configure exactly one depth control")
+		}
+		if !usesThinkingLevel(exec.model) {
+			// Mirrors the WithThinking constraint: the API counts thinking and
+			// output tokens together against max_output_tokens.
+			if budget := thinkingBudgetForEffort(exec.effortLevel); budget > 0 && budget >= exec.maxOutputTokens {
+				return nil, fmt.Errorf("effort %q maps to thinking budget %d, which must be less than max_output_tokens (%d); raise WithMaxOutputTokens or lower the effort", exec.effortLevel, budget, exec.maxOutputTokens)
+			}
+		}
+	}
+
 	// The recorder is built after options so it captures the final model and
 	// resource labels.
 	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, "gcp.vertex_ai", exec.resourceLabels, responseCodeFromError)
@@ -171,7 +188,7 @@ func (e *executor[Request, Response]) Execute(
 	// When ThinkingConfig is set, Gemini requires that model turns with FunctionCall
 	// parts also include Thought parts. Synthetic seed turns have no Thought parts,
 	// causing a Vertex AI API validation error.
-	if e.thinkingBudget != nil && len(seedToolCalls) > 0 {
+	if (e.thinkingBudget != nil || e.effortLevel != "") && len(seedToolCalls) > 0 {
 		return resp, errors.New("seed tool calls cannot be used with thinking mode: " +
 			"synthetic function call history is missing required thought blocks")
 	}
@@ -290,12 +307,16 @@ func (e *executor[Request, Response]) Execute(
 		config.ResponseSchema = e.responseSchema
 	}
 
-	// Add thinking configuration if enabled
-	if e.thinkingBudget != nil {
+	// Add thinking configuration if enabled. WithEffort and WithThinking are
+	// mutually exclusive (enforced in New), so at most one branch applies.
+	switch {
+	case e.thinkingBudget != nil:
 		config.ThinkingConfig = &genai.ThinkingConfig{
 			IncludeThoughts: true,
 			ThinkingBudget:  e.thinkingBudget,
 		}
+	case e.effortLevel != "":
+		config.ThinkingConfig = thinkingConfigForEffort(e.model, e.effortLevel)
 	}
 
 	// Create a new chat session with optional seed messages
