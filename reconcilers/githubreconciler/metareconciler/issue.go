@@ -150,6 +150,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	// when no PR exists yet, so new commits on an open PR never retrigger it; the
 	// marker dedup keeps it to one comment across repeated no-PR reconciles (a
 	// first attempt may end in ErrNoChanges or a transient agent error).
+	//
+	// This gate is untested at this level: TestStartCommentSurface covers
+	// surface() in isolation, not reconcileIssue. Deferred deliberately; a real
+	// test needs a full GitHub-client + agent harness that doesn't exist yet.
 	if !state.HasPR() {
 		r.startComment.surface(ctx, changeSession)
 	}

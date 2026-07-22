@@ -157,6 +157,9 @@ func WithStateTransitionEmission[Req promptbuilder.Bindable, Resp Result, CB any
 // repeated no-PR reconciles dedup to one comment rather than posting again.
 // Once a PR exists the comment is never posted, so new commits on an open PR do
 // not retrigger it. Off by default.
+//
+// The comment is never edited or removed once posted, even after a PR opens;
+// it permanently records that work started, not current state.
 func WithStartComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func() string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.startComment = &startComment{marker: marker, render: render}
