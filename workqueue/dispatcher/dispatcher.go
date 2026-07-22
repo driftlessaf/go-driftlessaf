@@ -8,6 +8,7 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/chainguard-dev/clog"
@@ -205,10 +206,11 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 						return fmt.Errorf("fail(after reaching max retries) = %w", err)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{
-						Key:      oip.Name(),
-						Err:      err,
-						Attempts: attempts,
-						Action:   ErrorDeadLettered,
+						Key:            oip.Name(),
+						Err:            err,
+						Attempts:       attempts,
+						Action:         ErrorDeadLettered,
+						Infrastructure: workqueue.IsInfrastructureError(err),
 					})
 				} else if d := workqueue.GetNonRetriableDetails(err); d != nil {
 					clog.InfoContextf(ctx, "Key %q is marked as non-retriable - reason: %s, err: %v", oip.Name(), d.GetMessage(), err)
@@ -222,6 +224,32 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 						Attempts:           attempts,
 						Action:             ErrorDropped,
 						NonRetriableReason: d.GetMessage(),
+					})
+				} else if workqueue.IsInfrastructureError(err) {
+					// Infrastructure failure: the transport died before the
+					// reconciler could return a verdict (e.g. its instance was
+					// killed mid-dispatch), or a downstream dependency reported
+					// itself unavailable. Retrying immediately tends to fail the
+					// same way, so space these retries on a dedicated doubling
+					// curve, jittered so keys that failed together do not come
+					// back (and fail again) in lockstep. BackoffDelay preserves
+					// the attempt count: a key that only ever fails this way
+					// (e.g. an input that OOM-kills its receiver) still reaches
+					// the dead-letter cutoff above.
+					delay := infraBackoff(attempts)
+					if jitter := delay / 2; jitter > 0 {
+						delay += rand.N(jitter) //nolint:gosec // G404: jitter, not security-sensitive
+					}
+					clog.InfoContextf(ctx, "Key %q failed for infrastructure reasons (attempt %d), requeueing with %v backoff", oip.Name(), attempts, delay)
+					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{BackoffDelay: delay}); err != nil {
+						return fmt.Errorf("requeue(after infrastructure failure) = %w", err)
+					}
+					cfg.errors.emit(cleanupCtx, ErrorContext{
+						Key:            oip.Name(),
+						Err:            err,
+						Attempts:       attempts,
+						Action:         ErrorRequeued,
+						Infrastructure: true,
 					})
 				} else {
 					// Apply the optional failure-retry backoff. A nil hook or a
@@ -270,4 +298,20 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 		cfg.errors.drain()
 		return err
 	}
+}
+
+// infraBackoff returns the base backoff for an infrastructure dispatch
+// failure on the given attempt: workqueue.InfraBackoffPeriod doubling per
+// recorded attempt, capped at workqueue.MaximumInfraBackoffPeriod. Attempt
+// counts below one (possible when a key's attempt metadata is malformed)
+// yield the base period.
+func infraBackoff(attempts int) time.Duration {
+	delay := workqueue.InfraBackoffPeriod
+	for range attempts - 1 {
+		if delay >= workqueue.MaximumInfraBackoffPeriod {
+			break
+		}
+		delay *= 2
+	}
+	return min(delay, workqueue.MaximumInfraBackoffPeriod)
 }

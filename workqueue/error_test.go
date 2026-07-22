@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestRequeueAfter(t *testing.T) {
@@ -312,5 +314,49 @@ func TestRequeueAfterWithJitter(t *testing.T) {
 	// Zero jitter must not panic and adds no delay.
 	if got, _ := GetRequeueDelay(RequeueAfterWithJitter(10*time.Second, 0)); got != 10*time.Second {
 		t.Errorf("delay: got = %v, want = 10s", got)
+	}
+}
+
+func TestIsInfrastructureError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{{
+		name: "nil error",
+		err:  nil,
+		want: false,
+	}, {
+		name: "plain error",
+		err:  errors.New("boom"),
+		want: false,
+	}, {
+		name: "unavailable status",
+		err:  status.Error(codes.Unavailable, "upstream connect error or disconnect/reset before headers"),
+		want: true,
+	}, {
+		name: "wrapped unavailable status",
+		err:  fmt.Errorf("calling Process: %w", status.Error(codes.Unavailable, "connection termination")),
+		want: true,
+	}, {
+		name: "internal status",
+		err:  status.Error(codes.Internal, "reconcile failed"),
+		want: false,
+	}, {
+		name: "deadline exceeded status",
+		err:  status.Error(codes.DeadlineExceeded, "took too long"),
+		want: false,
+	}, {
+		name: "requeue sentinel",
+		err:  RequeueAfter(time.Minute),
+		want: false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsInfrastructureError(tt.err); got != tt.want {
+				t.Errorf("IsInfrastructureError: got = %t, want = %t", got, tt.want)
+			}
+		})
 	}
 }

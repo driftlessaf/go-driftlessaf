@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -55,6 +56,19 @@ func GetNonRetriableDetails(err error) *NoRetryDetails {
 		}
 	}
 	return nil
+}
+
+// IsInfrastructureError reports whether err represents an infrastructure
+// failure rather than an application verdict. gRPC transports synthesize
+// codes.Unavailable when the receiver could not be reached or the connection
+// was severed mid-call (e.g. the receiving instance was killed), and
+// reconcilers propagate it when a downstream dependency is itself
+// unavailable. Either way the failure says nothing about the key, and an
+// immediate retry is likely to fail the same way, so the dispatcher spaces
+// these retries on a dedicated backoff curve (see InfraBackoffPeriod) rather
+// than the ordinary failure path.
+func IsInfrastructureError(err error) bool {
+	return status.Code(err) == codes.Unavailable
 }
 
 // requeueError is a special error type that indicates the work item should be

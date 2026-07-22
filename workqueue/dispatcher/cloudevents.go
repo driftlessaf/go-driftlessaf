@@ -48,6 +48,10 @@ type DispatcherErrorEvent struct {
 	// reason the error was marked non-retriable.
 	NonRetriableReason string `json:"nonRetriableReason,omitempty"`
 
+	// Infrastructure indicates the error was classified as an infrastructure
+	// failure (see workqueue.IsInfrastructureError).
+	Infrastructure bool `json:"infrastructure,omitempty"`
+
 	// OccurAt is the time the error occurred. This field is used as the
 	// BigQuery partition field.
 	OccurAt time.Time `json:"occurAt"`
@@ -83,6 +87,7 @@ func (e *cloudEventErrorEmitter) emit(ctx context.Context, ec ErrorContext) {
 		Attempts:           ec.Attempts,
 		Action:             ec.Action.String(),
 		NonRetriableReason: ec.NonRetriableReason,
+		Infrastructure:     ec.Infrastructure,
 		OccurAt:            occurAt,
 		ReconcilerName:     e.workqueueName,
 	}); err != nil {

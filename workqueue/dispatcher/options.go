@@ -57,6 +57,12 @@ type ErrorContext struct {
 	// NonRetriableReason is set when Action is ErrorDropped, providing
 	// the reason the error was marked non-retriable.
 	NonRetriableReason string
+
+	// Infrastructure indicates Err was classified as an infrastructure
+	// failure (see workqueue.IsInfrastructureError). When Action is
+	// ErrorRequeued this means the key was requeued on the infrastructure
+	// backoff curve rather than the ordinary failure path.
+	Infrastructure bool
 }
 
 // errorEmitter is an internal interface for emitting dispatch errors.
@@ -92,10 +98,12 @@ func WithDispatchPeriod(d time.Duration) Option {
 
 // WithBackoff sets the failure-retry backoff for the dispatcher. On each
 // callback failure that is requeued (not dead-lettered, not dropped as
-// non-retriable), the dispatcher calls fn with the key's current attempt count
-// and, when fn returns a positive duration, requeues the key with that
-// not-before delay while preserving the attempt count (so the dead-letter
-// cutoff stays reachable).
+// non-retriable, and not classified as an infrastructure failure — those are
+// spaced on their own curve, see workqueue.IsInfrastructureError), the
+// dispatcher calls fn with the key's current attempt count and, when fn
+// returns a positive duration, requeues the key with that not-before delay
+// while preserving the attempt count (so the dead-letter cutoff stays
+// reachable).
 //
 // When fn is nil or returns a non-positive duration, the dispatcher falls back
 // to a bare requeue, identical to the behavior with this option unset. This

@@ -811,3 +811,164 @@ type mockWorkqueueServiceClient struct {
 func (m *mockWorkqueueServiceClient) Process(_ context.Context, _ *workqueue.ProcessRequest, _ ...grpc.CallOption) (*workqueue.ProcessResponse, error) {
 	return m.resp, m.err
 }
+
+// TestInfraBackoff pins the infrastructure backoff curve: the base period
+// doubling per recorded attempt, capped at the maximum, with malformed
+// (sub-one) attempt counts yielding the base period.
+func TestInfraBackoff(t *testing.T) {
+	tests := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{attempts: 0, want: 2 * time.Minute},
+		{attempts: 1, want: 2 * time.Minute},
+		{attempts: 2, want: 4 * time.Minute},
+		{attempts: 3, want: 8 * time.Minute},
+		{attempts: 4, want: 15 * time.Minute},
+		{attempts: 100, want: 15 * time.Minute},
+	}
+	for _, tt := range tests {
+		if got := infraBackoff(tt.attempts); got != tt.want {
+			t.Errorf("infraBackoff(%d): got = %v, want = %v", tt.attempts, got, tt.want)
+		}
+	}
+}
+
+// TestHandleAsync_InfraFailure_BackoffRequeue verifies that a callback
+// failure classified as infrastructure is requeued with a jittered
+// BackoffDelay on the infrastructure curve (never a bare requeue), without
+// resetting the attempt count, and is emitted with Infrastructure=true.
+func TestHandleAsync_InfraFailure_BackoffRequeue(t *testing.T) {
+	next := &mockKey{name: "infra", attempts: 2}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	cap := &captureEmitter{}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return status.Error(codes.Unavailable, "upstream connect error or disconnect/reset before headers. reset reason: connection termination")
+	}, 0, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.bareRequeue != 0 {
+		t.Errorf("bare Requeue: got = %d, want = 0", next.bareRequeue)
+	}
+	if next.requeueOpts != 1 {
+		t.Fatalf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
+	}
+	// attempts=2 yields a 4m base with up to 50% additive jitter.
+	base := 4 * time.Minute
+	if got := next.lastReqOpts.BackoffDelay; got < base || got >= base+base/2 {
+		t.Errorf("BackoffDelay: got = %v, want in [%v, %v)", got, base, base+base/2)
+	}
+	// The infra path must never reset the attempt count via Delay.
+	if next.lastReqOpts.Delay != 0 {
+		t.Errorf("Delay: got = %v, want = 0 (infra backoff must not reset attempts)", next.lastReqOpts.Delay)
+	}
+	got := cap.result()
+	if got == nil {
+		t.Fatal("error emitter was not called")
+	}
+	if got.Action != ErrorRequeued {
+		t.Errorf("action: got = %v, want = %v", got.Action, ErrorRequeued)
+	}
+	if !got.Infrastructure {
+		t.Error("infrastructure: got = false, want = true")
+	}
+}
+
+// TestHandleAsync_InfraFailure_BypassesBackoffHook verifies infrastructure
+// failures are spaced on their own curve even when a WithBackoff hook is
+// installed: the hook's (shorter) delay must not be consulted.
+func TestHandleAsync_InfraFailure_BypassesBackoffHook(t *testing.T) {
+	next := &mockKey{name: "infra", attempts: 1}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return status.Error(codes.Unavailable, "no healthy upstream")
+	}, 0, WithBackoff(func(int) time.Duration { return time.Second }))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.requeueOpts != 1 {
+		t.Fatalf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
+	}
+	if got := next.lastReqOpts.BackoffDelay; got < 2*time.Minute {
+		t.Errorf("BackoffDelay: got = %v, want >= 2m (hook's 1s must not win)", got)
+	}
+}
+
+// TestHandleAsync_InfraFailure_DeadletterStillWins verifies the dead-letter
+// cutoff takes precedence over the infrastructure backoff: attempts still
+// count, so a key that only ever fails for infrastructure reasons (e.g. an
+// input that OOM-kills its receiver) is dead-lettered at the limit, and the
+// emitted context still records the infrastructure classification.
+func TestHandleAsync_InfraFailure_DeadletterStillWins(t *testing.T) {
+	next := &mockKey{name: "infra", attempts: 3}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	cap := &captureEmitter{}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return status.Error(codes.Unavailable, "connection termination")
+	}, 3, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 1 {
+		t.Errorf("Deadletter calls: got = %d, want = 1", next.dead)
+	}
+	if next.requeue != 0 {
+		t.Errorf("Requeue calls: got = %d, want = 0", next.requeue)
+	}
+	got := cap.result()
+	if got == nil {
+		t.Fatal("error emitter was not called")
+	}
+	if got.Action != ErrorDeadLettered {
+		t.Errorf("action: got = %v, want = %v", got.Action, ErrorDeadLettered)
+	}
+	if !got.Infrastructure {
+		t.Error("infrastructure: got = false, want = true")
+	}
+}
+
+// TestHandleAsync_InfraFailure_NonRetriableWins verifies an explicit
+// non-retriable marking takes precedence over the infrastructure
+// classification: the reconciler's verdict to drop the key is respected.
+func TestHandleAsync_InfraFailure_NonRetriableWins(t *testing.T) {
+	next := &mockKey{name: "infra", attempts: 1}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return workqueue.NonRetriableError(status.Error(codes.Unavailable, "gone"), "do not retry")
+	}, 0)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.complete != 1 {
+		t.Errorf("Complete calls: got = %d, want = 1", next.complete)
+	}
+	if next.requeue != 0 {
+		t.Errorf("Requeue calls: got = %d, want = 0", next.requeue)
+	}
+}
+
+// TestHandleAsync_AppFailure_NotInfrastructure verifies an ordinary
+// application failure keeps the bare-requeue path and is emitted with
+// Infrastructure=false.
+func TestHandleAsync_AppFailure_NotInfrastructure(t *testing.T) {
+	next := &mockKey{name: "app", attempts: 1}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	cap := &captureEmitter{}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return errors.New("reconcile failed")
+	}, 0, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.bareRequeue != 1 {
+		t.Errorf("bare Requeue: got = %d, want = 1", next.bareRequeue)
+	}
+	got := cap.result()
+	if got == nil {
+		t.Fatal("error emitter was not called")
+	}
+	if got.Infrastructure {
+		t.Error("infrastructure: got = true, want = false")
+	}
+}

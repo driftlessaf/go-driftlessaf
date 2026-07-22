@@ -22,6 +22,17 @@ var (
 	// being retried.
 	MaximumBackoffPeriod = 10 * time.Minute
 
+	// InfraBackoffPeriod is the initial backoff the dispatcher applies when a
+	// dispatch fails for infrastructure reasons (see IsInfrastructureError).
+	// It doubles with each recorded attempt, up to MaximumInfraBackoffPeriod.
+	// Infrastructure failures still count against the dead-letter budget; the
+	// wider spacing keeps a transient outage (instance churn, dependency
+	// downtime) from burning through that budget in minutes.
+	InfraBackoffPeriod = 2 * time.Minute
+
+	// MaximumInfraBackoffPeriod caps the infrastructure-failure backoff.
+	MaximumInfraBackoffPeriod = 15 * time.Minute
+
 	// MaximumRequeueFloor caps the delay of a floored requeue (RequeueNotBefore).
 	// A floor cannot be undercut by events or resync, so an unbounded floor would
 	// starve a key indefinitely; the dispatcher clamps floored requeue delays to
