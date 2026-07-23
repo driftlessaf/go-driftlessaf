@@ -21,6 +21,21 @@ import (
 	"github.com/chainguard-dev/clog"
 	_ "github.com/chainguard-dev/clog/gcp/init"
 	"github.com/google/go-github/v88/github"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// mReconcile tracks reconcile outcomes: "ok" for a completed reconcile
+// (including ones that record a validation or agent failure as a terminal
+// status), "skip" for no-ops and pause wakes (closed or already-processed
+// PRs, ask-a-friend park/rearm requeues), and "error" for failures returned
+// to the workqueue for retry.
+var mReconcile = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "github_pr_autofix_reconcile_total",
+		Help: "Reconcile calls by outcome.",
+	},
+	[]string{"result"},
 )
 
 type config struct {
@@ -32,7 +47,7 @@ type config struct {
 	Model          string `env:"AGENT_MODEL,default=gemini-2.5-flash"`
 	MaxFixAttempts int    `env:"MAX_FIX_ATTEMPTS,default=2"`
 
-	// Ask-human (suspend/resume) demo configuration. Opt-in and off by
+	// Ask-a-friend (suspend/resume) demo configuration. Opt-in and off by
 	// default; when enabled the agent advertises an ask_a_friend suspend tool, and
 	// the reconciler drives the checkpoint/suspend lifecycle (park on suspend,
 	// poll on wake, resume on answer). Requires a claude-* AGENT_MODEL:
@@ -73,7 +88,7 @@ func New(ctx context.Context, identity string, clients *githubreconciler.ClientC
 			return nil, fmt.Errorf("GCP_PROJECT_ID is required when ENABLE_AUTOFIX=true")
 		}
 		if cfg.EnableAskAFriend {
-			// Ask-human path: the agent is built fresh per wake by the
+			// Ask-a-friend path: the agent is built fresh per wake by the
 			// reconciler (a meta-agent binds its executor once at construction,
 			// so a resume needs a fresh one), so no long-lived agent is captured
 			// here.
@@ -81,11 +96,11 @@ func New(ctx context.Context, identity string, clients *githubreconciler.ClientC
 			if err != nil {
 				return nil, fmt.Errorf("creating ask-a-friend reconciler: %w", err)
 			}
-			clog.InfoContextf(ctx, "Ask-human suspend/resume enabled with model %s", cfg.Model)
+			clog.InfoContextf(ctx, "Ask-a-friend suspend/resume enabled with model %s", cfg.Model)
 			if cfg.AskAFriendBucket != "" {
-				clog.InfoContextf(ctx, "Ask-human state is durable: checkpoints in GCS bucket %s under %s/, questions as PR comments answered with %s", cfg.AskAFriendBucket, askAFriendCheckpointPrefix, "/answer")
+				clog.InfoContextf(ctx, "Ask-a-friend state is durable: checkpoints in GCS bucket %s under %s/, questions as PR comments answered with %s", cfg.AskAFriendBucket, askAFriendCheckpointPrefix, "/answer")
 			} else {
-				clog.WarnContextf(ctx, "Ask-human state is NOT durable: checkpoints live in the node-local file %s and answers in memory; parked runs will not survive a restart or redeploy, and with more than one replica a wake routed to another replica re-runs the agent from scratch (a duplicate model run and a burned fix attempt) while the original parked conversation is orphaned (demo only — set CHECKPOINT_BUCKET for the durable path)", cfg.AskAFriendSnapshotPath)
+				clog.WarnContextf(ctx, "Ask-a-friend state is NOT durable: checkpoints live in the node-local file %s and answers in memory; parked runs will not survive a restart or redeploy, and with more than one replica a wake routed to another replica re-runs the agent from scratch (a duplicate model run and a burned fix attempt) while the original parked conversation is orphaned (demo only — set CHECKPOINT_BUCKET for the durable path)", cfg.AskAFriendSnapshotPath)
 			}
 		} else {
 			agent, err = newPRFixerAgent(ctx, &cfg)
@@ -127,7 +142,20 @@ func hasLabel(pr *github.PullRequest, labelName string) bool {
 var errMaxFixAttempts = errors.New("max fix attempts reached")
 
 // reconcilePR validates a PR and optionally uses an agent to fix issues.
-func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent metaagent.Agent[*PRContext, *PRFixResult, PRTools], askAFriend *askAFriendReconciler) error {
+// Every return is counted in mReconcile: the deferred classifier maps a
+// requeue (the ask-a-friend pause signal) to "skip" and any other non-nil
+// error to "error"; the explicit no-op returns mark themselves "skip".
+func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, sm *statusmanager.StatusManager[prvalidation.Details], cfg *config, agent metaagent.Agent[*PRContext, *PRFixResult, PRTools], askAFriend *askAFriendReconciler) (retErr error) {
+	outcome := "ok"
+	defer func() {
+		if _, isRequeue := workqueue.GetRequeueDelay(retErr); isRequeue {
+			outcome = "skip"
+		} else if retErr != nil {
+			outcome = "error"
+		}
+		mReconcile.WithLabelValues(outcome).Inc()
+	}()
+
 	clog.InfoContextf(ctx, "Validating PR: %s/%s#%d", res.Owner, res.Repo, res.Number)
 
 	pr, _, err := gh.PullRequests.Get(ctx, res.Owner, res.Repo, res.Number)
@@ -137,6 +165,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 
 	if pr.GetState() == "closed" {
 		clog.InfoContext(ctx, "Skipping closed PR")
+		outcome = "skip"
 		return nil
 	}
 
@@ -155,6 +184,7 @@ func reconcilePR(ctx context.Context, res *githubreconciler.Resource, gh *github
 	if observed != nil && observed.Status == "completed" && observed.Details.Generation == generation {
 		if observed.Details.AgentEnabled || !hasAutofixLabel {
 			clog.InfoContextf(ctx, "Already processed generation %s, skipping", generation[:8])
+			outcome = "skip"
 			return nil
 		}
 		clog.InfoContextf(ctx, "Label %q added since last run, re-processing", cfg.AutofixLabel)
