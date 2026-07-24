@@ -63,10 +63,11 @@ func GetNonRetriableDetails(err error) *NoRetryDetails {
 // codes.Unavailable when the receiver could not be reached or the connection
 // was severed mid-call (e.g. the receiving instance was killed), and
 // reconcilers propagate it when a downstream dependency is itself
-// unavailable. Either way the failure says nothing about the key, and an
-// immediate retry is likely to fail the same way, so the dispatcher spaces
-// these retries on a dedicated backoff curve (see InfraBackoffPeriod) rather
-// than the ordinary failure path.
+// unavailable. The classification does not change scheduling — every
+// retriable failure requeues on the same widening backoff curve — it is
+// surfaced for observability (dispatch error events and logs), where
+// separating infrastructure churn from application failures is what makes
+// the failure-rate dashboards readable.
 func IsInfrastructureError(err error) bool {
 	return status.Code(err) == codes.Unavailable
 }

@@ -18,8 +18,10 @@ import (
 // ExampleIsInfrastructureError demonstrates how dispatch errors are
 // classified: transport-level failures (the receiver died mid-call, no
 // healthy backend, a dependency reporting itself unavailable) are
-// infrastructure errors and are retried on a dedicated, wider backoff
-// curve, while application verdicts are not.
+// infrastructure errors. The classification is observability-only — it
+// separates infrastructure churn from application failures on dispatch
+// error events — while scheduling retries every failure on the same
+// widening backoff curve.
 func ExampleIsInfrastructureError() {
 	// The gRPC transport synthesizes codes.Unavailable when the receiving
 	// instance is killed mid-dispatch.

@@ -13,25 +13,19 @@ import (
 // Note that these are variables, so that they can be modified by tests and
 // made flags in binary entrypoints.
 var (
-	// BackoffPeriod is the unit of backoff used when requeueing keys.
-	// This unit is combined with the number of attempts to determine the
-	// wait period before a key should be reprocessed.
+	// BackoffPeriod is the first step of the dispatcher's failure-retry
+	// backoff. Every retriable dispatch failure requeues on a jittered
+	// doubling curve starting here: the fast first step keeps races and
+	// transient blips cheap, and the widening keeps persistent failures
+	// (infrastructure storms, deterministic errors awaiting a fix) from
+	// burning the dead-letter budget in minutes. Failures still count
+	// against that budget regardless of spacing. The storage
+	// implementations also use this as the unit of their legacy linear
+	// backoff on bare Requeue (e.g. orphan recovery).
 	BackoffPeriod = 30 * time.Second
 
-	// MaximumBackoffPeriod is a cap on the period a key must wait before
-	// being retried.
+	// MaximumBackoffPeriod caps the failure-retry backoff.
 	MaximumBackoffPeriod = 10 * time.Minute
-
-	// InfraBackoffPeriod is the initial backoff the dispatcher applies when a
-	// dispatch fails for infrastructure reasons (see IsInfrastructureError).
-	// It doubles with each recorded attempt, up to MaximumInfraBackoffPeriod.
-	// Infrastructure failures still count against the dead-letter budget; the
-	// wider spacing keeps a transient outage (instance churn, dependency
-	// downtime) from burning through that budget in minutes.
-	InfraBackoffPeriod = 2 * time.Minute
-
-	// MaximumInfraBackoffPeriod caps the infrastructure-failure backoff.
-	MaximumInfraBackoffPeriod = 15 * time.Minute
 
 	// MaximumRequeueFloor caps the delay of a floored requeue (RequeueNotBefore).
 	// A floor cannot be undercut by events or resync, so an unbounded floor would

@@ -217,11 +217,11 @@ func TestHandleAsync_CallbackFails_Requeue(t *testing.T) {
 	}
 }
 
-// TestHandleAsync_NoBackoff_UsesBareRequeue proves the default-off equivalence:
-// with no WithBackoff option, a failed callback is requeued via the bare
-// Requeue path (no BackoffDelay), bit-for-bit identical to the prior behavior.
-func TestHandleAsync_NoBackoff_UsesBareRequeue(t *testing.T) {
-	next := &mockKey{name: "fail"}
+// TestHandleAsync_DefaultBackoff proves every retriable failure requeues on
+// the default jittered doubling curve: never a bare requeue, BackoffDelay in
+// [base, base+base/2), and no Delay (which would reset the attempt count).
+func TestHandleAsync_DefaultBackoff(t *testing.T) {
+	next := &mockKey{name: "fail", attempts: 1}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return errors.New("fail")
@@ -229,75 +229,67 @@ func TestHandleAsync_NoBackoff_UsesBareRequeue(t *testing.T) {
 	if err := future(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if next.bareRequeue != 1 {
-		t.Errorf("bare Requeue: got = %d, want = 1", next.bareRequeue)
+	if next.bareRequeue != 0 {
+		t.Errorf("bare Requeue: got = %d, want = 0", next.bareRequeue)
 	}
-	if next.requeueOpts != 0 {
-		t.Errorf("RequeueWithOptions calls: got = %d, want = 0 (must not be used when unconfigured)", next.requeueOpts)
+	if next.requeueOpts != 1 {
+		t.Fatalf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
 	}
-	if next.lastReqOpts.BackoffDelay != 0 {
-		t.Errorf("BackoffDelay: got = %v, want = 0", next.lastReqOpts.BackoffDelay)
+	base := workqueue.BackoffPeriod
+	if got := next.lastReqOpts.BackoffDelay; got < base || got >= base+base/2 {
+		t.Errorf("BackoffDelay: got = %v, want in [%v, %v)", got, base, base+base/2)
+	}
+	if next.lastReqOpts.Delay != 0 {
+		t.Errorf("Delay: got = %v, want = 0 (backoff must not reset attempts)", next.lastReqOpts.Delay)
 	}
 }
 
-// TestHandleAsync_WithBackoff verifies the WithBackoff hook drives the
-// requeue path: a positive return requeues with that BackoffDelay (preserving
-// attempts), while a nil hook or non-positive return falls back to a bare
-// requeue.
+// TestHandleAsync_WithBackoff verifies the WithBackoff hook replaces the
+// default curve when it returns a positive duration, and that a nil hook or
+// non-positive return falls back to the default jittered doubling curve.
 func TestHandleAsync_WithBackoff(t *testing.T) {
+	curveMin := 2 * workqueue.BackoffPeriod // attempts=2 → base doubles once
 	tests := []struct {
-		name            string
-		backoff         func(attempts int) time.Duration
-		attempts        int
-		wantBare        int
-		wantOpts        int
-		wantBackoffWait time.Duration
+		name    string
+		backoff func(attempts int) time.Duration
+		// wantExact is the exact BackoffDelay when the hook drives it;
+		// zero means "expect the default curve range for attempts=2".
+		wantExact time.Duration
 	}{{
-		name:     "nil hook falls back to bare requeue",
-		backoff:  nil,
-		attempts: 2,
-		wantBare: 1,
-		wantOpts: 0,
+		name:    "nil hook falls back to the default curve",
+		backoff: nil,
 	}, {
-		name:     "non-positive return falls back to bare requeue",
-		backoff:  func(int) time.Duration { return 0 },
-		attempts: 2,
-		wantBare: 1,
-		wantOpts: 0,
+		name:    "non-positive return falls back to the default curve",
+		backoff: func(int) time.Duration { return 0 },
 	}, {
-		name:            "positive return requeues with backoff delay",
-		backoff:         func(attempts int) time.Duration { return time.Duration(attempts) * time.Second },
-		attempts:        3,
-		wantBare:        0,
-		wantOpts:        1,
-		wantBackoffWait: 3 * time.Second,
+		name:      "positive return replaces the default curve",
+		backoff:   func(attempts int) time.Duration { return time.Duration(attempts) * time.Second },
+		wantExact: 2 * time.Second,
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			next := &mockKey{name: "fail", attempts: tt.attempts}
+			next := &mockKey{name: "fail", attempts: 2}
 			q := &mockQueue{next: []workqueue.QueuedKey{next}}
-			opts := []Option{}
-			if tt.backoff != nil {
-				opts = append(opts, WithBackoff(tt.backoff))
-			} else {
-				// Explicitly install a nil hook to exercise that branch too.
-				opts = append(opts, WithBackoff(nil))
-			}
 			future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
 				return errors.New("fail")
-			}, 0, opts...)
+			}, 0, WithBackoff(tt.backoff))
 			if err := future(); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if next.bareRequeue != tt.wantBare {
-				t.Errorf("bare Requeue: got = %d, want = %d", next.bareRequeue, tt.wantBare)
+			if next.bareRequeue != 0 {
+				t.Errorf("bare Requeue: got = %d, want = 0", next.bareRequeue)
 			}
-			if next.requeueOpts != tt.wantOpts {
-				t.Errorf("RequeueWithOptions calls: got = %d, want = %d", next.requeueOpts, tt.wantOpts)
+			if next.requeueOpts != 1 {
+				t.Fatalf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
 			}
-			if next.lastReqOpts.BackoffDelay != tt.wantBackoffWait {
-				t.Errorf("BackoffDelay: got = %v, want = %v", next.lastReqOpts.BackoffDelay, tt.wantBackoffWait)
+			got := next.lastReqOpts.BackoffDelay
+			if tt.wantExact != 0 {
+				if got != tt.wantExact {
+					t.Errorf("BackoffDelay: got = %v, want = %v", got, tt.wantExact)
+				}
+			} else if got < curveMin || got >= curveMin+curveMin/2 {
+				t.Errorf("BackoffDelay: got = %v, want in [%v, %v)", got, curveMin, curveMin+curveMin/2)
 			}
 			// The backoff path must never reset the attempt count via Delay.
 			if next.lastReqOpts.Delay != 0 {
@@ -812,32 +804,34 @@ func (m *mockWorkqueueServiceClient) Process(_ context.Context, _ *workqueue.Pro
 	return m.resp, m.err
 }
 
-// TestInfraBackoff pins the infrastructure backoff curve: the base period
+// TestRetryBackoff pins the failure-retry backoff curve: the base period
 // doubling per recorded attempt, capped at the maximum, with malformed
 // (sub-one) attempt counts yielding the base period.
-func TestInfraBackoff(t *testing.T) {
+func TestRetryBackoff(t *testing.T) {
 	tests := []struct {
 		attempts int
 		want     time.Duration
 	}{
-		{attempts: 0, want: 2 * time.Minute},
-		{attempts: 1, want: 2 * time.Minute},
-		{attempts: 2, want: 4 * time.Minute},
-		{attempts: 3, want: 8 * time.Minute},
-		{attempts: 4, want: 15 * time.Minute},
-		{attempts: 100, want: 15 * time.Minute},
+		{attempts: 0, want: 30 * time.Second},
+		{attempts: 1, want: 30 * time.Second},
+		{attempts: 2, want: time.Minute},
+		{attempts: 3, want: 2 * time.Minute},
+		{attempts: 4, want: 4 * time.Minute},
+		{attempts: 5, want: 8 * time.Minute},
+		{attempts: 6, want: 10 * time.Minute},
+		{attempts: 100, want: 10 * time.Minute},
 	}
 	for _, tt := range tests {
-		if got := infraBackoff(tt.attempts); got != tt.want {
-			t.Errorf("infraBackoff(%d): got = %v, want = %v", tt.attempts, got, tt.want)
+		if got := retryBackoff(tt.attempts); got != tt.want {
+			t.Errorf("retryBackoff(%d): got = %v, want = %v", tt.attempts, got, tt.want)
 		}
 	}
 }
 
-// TestHandleAsync_InfraFailure_BackoffRequeue verifies that a callback
-// failure classified as infrastructure is requeued with a jittered
-// BackoffDelay on the infrastructure curve (never a bare requeue), without
-// resetting the attempt count, and is emitted with Infrastructure=true.
+// TestHandleAsync_InfraFailure_BackoffRequeue verifies that an
+// infrastructure-classified failure requeues on the same default curve as
+// any other failure, without resetting the attempt count, and is emitted
+// with Infrastructure=true.
 func TestHandleAsync_InfraFailure_BackoffRequeue(t *testing.T) {
 	next := &mockKey{name: "infra", attempts: 2}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
@@ -854,8 +848,8 @@ func TestHandleAsync_InfraFailure_BackoffRequeue(t *testing.T) {
 	if next.requeueOpts != 1 {
 		t.Fatalf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
 	}
-	// attempts=2 yields a 4m base with up to 50% additive jitter.
-	base := 4 * time.Minute
+	// attempts=2 yields one doubling of the base with up to 50% additive jitter.
+	base := 2 * workqueue.BackoffPeriod
 	if got := next.lastReqOpts.BackoffDelay; got < base || got >= base+base/2 {
 		t.Errorf("BackoffDelay: got = %v, want in [%v, %v)", got, base, base+base/2)
 	}
@@ -875,10 +869,10 @@ func TestHandleAsync_InfraFailure_BackoffRequeue(t *testing.T) {
 	}
 }
 
-// TestHandleAsync_InfraFailure_BypassesBackoffHook verifies infrastructure
-// failures are spaced on their own curve even when a WithBackoff hook is
-// installed: the hook's (shorter) delay must not be consulted.
-func TestHandleAsync_InfraFailure_BypassesBackoffHook(t *testing.T) {
+// TestHandleAsync_BackoffHook_AppliesToInfraFailures verifies the WithBackoff
+// hook drives the delay for infrastructure failures too: scheduling treats
+// every retriable failure alike, so there is no separate curve to bypass.
+func TestHandleAsync_BackoffHook_AppliesToInfraFailures(t *testing.T) {
 	next := &mockKey{name: "infra", attempts: 1}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
@@ -890,8 +884,8 @@ func TestHandleAsync_InfraFailure_BypassesBackoffHook(t *testing.T) {
 	if next.requeueOpts != 1 {
 		t.Fatalf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
 	}
-	if got := next.lastReqOpts.BackoffDelay; got < 2*time.Minute {
-		t.Errorf("BackoffDelay: got = %v, want >= 2m (hook's 1s must not win)", got)
+	if got := next.lastReqOpts.BackoffDelay; got != time.Second {
+		t.Errorf("BackoffDelay: got = %v, want = 1s (hook drives all failures)", got)
 	}
 }
 
@@ -949,7 +943,7 @@ func TestHandleAsync_InfraFailure_NonRetriableWins(t *testing.T) {
 }
 
 // TestHandleAsync_AppFailure_NotInfrastructure verifies an ordinary
-// application failure keeps the bare-requeue path and is emitted with
+// application failure requeues on the default curve and is emitted with
 // Infrastructure=false.
 func TestHandleAsync_AppFailure_NotInfrastructure(t *testing.T) {
 	next := &mockKey{name: "app", attempts: 1}
@@ -961,8 +955,11 @@ func TestHandleAsync_AppFailure_NotInfrastructure(t *testing.T) {
 	if err := future(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if next.bareRequeue != 1 {
-		t.Errorf("bare Requeue: got = %d, want = 1", next.bareRequeue)
+	if next.requeueOpts != 1 {
+		t.Errorf("RequeueWithOptions calls: got = %d, want = 1", next.requeueOpts)
+	}
+	if got, base := next.lastReqOpts.BackoffDelay, workqueue.BackoffPeriod; got < base || got >= base+base/2 {
+		t.Errorf("BackoffDelay: got = %v, want in [%v, %v)", got, base, base+base/2)
 	}
 	got := cap.result()
 	if got == nil {
