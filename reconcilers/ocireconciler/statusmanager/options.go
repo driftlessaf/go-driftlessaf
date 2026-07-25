@@ -39,6 +39,13 @@ func WithRemoteOptions(opts ...remote.Option) Option {
 }
 
 // WithRepositoryOverride directs attestation writes to the provided repository string.
+//
+// An override also pins every bundle read and write to that single
+// repository, so the Manager shares one ggcr Puller/Pusher across all of its
+// remote interactions for its lifetime, collapsing per-operation token
+// exchanges and registry pings. This assumes the Manager's credentials for
+// the override repository are process-stable (e.g. a service identity), not
+// request-scoped.
 func WithRepositoryOverride(repo string) Option {
 	return func(c *config) {
 		if repo == "" {

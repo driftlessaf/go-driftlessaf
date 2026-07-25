@@ -167,6 +167,31 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 
 	predicateType := fmt.Sprintf("https://statusmanager.chainguard.dev/%s", identity)
 
+	remoteOpts := slices.Clone(cfg.remoteOpts)
+	if cfg.repoOverride != nil {
+		// A repository override pins every bundle read and write to a
+		// single repository under the manager's process-stable identity,
+		// so the token exchanges and per-repo state that ggcr's
+		// Puller/Pusher cache are safe to share for the life of the
+		// Manager — collapsing the per-operation /v2/token exchange (and
+		// registry ping) to once per process. Without an override,
+		// subjects live in arbitrary repositories whose credentials may
+		// be request-scoped (e.g. per-tenant impersonation), so each call
+		// keeps its clean-slate options.
+		puller, err := remote.NewPuller(remoteOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("creating shared puller: %w", err)
+		}
+		remoteOpts = append(remoteOpts, remote.Reuse(puller))
+		if !readOnly {
+			pusher, err := remote.NewPusher(remoteOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("creating shared pusher: %w", err)
+			}
+			remoteOpts = append(remoteOpts, remote.Reuse(pusher))
+		}
+	}
+
 	return &Manager[T]{
 		identity:        identity,
 		signingIdentity: signingIdentity,
@@ -174,7 +199,7 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 		readOnly:        readOnly,
 		signer:          signer,
 		trustedMaterial: trustedMaterial,
-		remoteOpts:      slices.Clone(cfg.remoteOpts),
+		remoteOpts:      remoteOpts,
 		repoOverride:    cfg.repoOverride,
 	}, nil
 }
