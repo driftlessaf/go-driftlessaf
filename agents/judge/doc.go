@@ -58,4 +58,14 @@ SPDX-License-Identifier: Apache-2.0
 //
 // All judge implementations (Claude and Google) are stateless and safe for concurrent use.
 // The eval callback functions are also thread-safe and can be used concurrently.
+//
+// # Quality Evals
+//
+// The judge's live model-quality suites (golden, benchmark, and standalone
+// cases that grade the judge's own Judgements against expected score bands
+// and a meta-judge) run as an eval CLI in chainguard-dev/mono
+// (agents/cmd/eval-judge) under the agent-evals framework, gated by the
+// per-scorer floors in .github/eval-thresholds.yaml — not as tests in this
+// package. The withauth tests in this package cover constructor and auth
+// plumbing only.
 package judge
