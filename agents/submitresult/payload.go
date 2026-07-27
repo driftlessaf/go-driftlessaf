@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -70,14 +71,28 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 // reports ok when the field is a string containing a JSON object, returning
 // the decoded object; callers fall back to the original extraction error
 // otherwise, so the model still sees the type-mismatch hint.
+//
+// A stringified payload often arrives double-closed — the complete object
+// followed by one or more spurious `}`/`]` (the model closes both the
+// payload and the string it imagined around it). Those are coerced too:
+// rejecting them assumes the model resubmits correctly, but on CI run
+// 30109908781 opus reproduced the same malformed shape across retries and
+// then submitted a minimal payload without the artifact, which was accepted
+// and zeroed the golden-eval judges. Trailing content other than
+// whitespace and closing delimiters still declines coercion, so truncated
+// or otherwise mangled payloads keep the corrective type-mismatch hint.
 func coerceStringPayload(args map[string]any, field string) (map[string]any, bool) {
 	s, err := params.Extract[string](args, field)
 	if err != nil {
 		return nil, false
 	}
 
+	dec := json.NewDecoder(strings.NewReader(s))
 	var obj map[string]any
-	if err := json.Unmarshal([]byte(s), &obj); err != nil || obj == nil {
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return nil, false
+	}
+	if rest := strings.TrimLeft(s[dec.InputOffset():], "}] \t\r\n"); rest != "" {
 		return nil, false
 	}
 	return obj, true

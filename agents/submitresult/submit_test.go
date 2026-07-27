@@ -7,6 +7,7 @@ package submitresult
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -44,13 +45,26 @@ func malformedInput() map[string]any {
 
 // trailingBraceInput carries a stringified payload that is a complete JSON
 // object followed by one spurious closing brace — the shape that failed the
-// skillup-skillfixer eval gate on 2026-07-20 (CI job 88351919967): coercion
-// declines the trailing data, so the submit is rejected with a corrective
-// hint and the model resubmits.
+// skillup-skillfixer eval gate on 2026-07-20 (CI job 88351919967) and the
+// manifest-gen testgen golden gate on 2026-07-24 (run 30109908781, where the
+// model reproduced the malformed shape across retries and then submitted an
+// artifact-less minimal payload). Coercion recovers the object instead of
+// betting on a clean resubmit.
 func trailingBraceInput() map[string]any {
 	return map[string]any{
 		"reasoning": "done",
 		"analysis":  `{"summary":"all good"}}`,
+	}
+}
+
+// trailingGarbageInput carries a stringified payload with non-delimiter
+// content after the object, which coercion must still decline: the payload
+// may be truncated or interleaved with prose, and only the model can fix
+// that.
+func trailingGarbageInput() map[string]any {
+	return map[string]any{
+		"reasoning": "done",
+		"analysis":  `{"summary":"all good"} and that is my answer`,
 	}
 }
 
@@ -73,7 +87,58 @@ func requireRecoverableRejection(t *testing.T, trace *agenttrace.Trace[*sampleRe
 	}
 }
 
-func TestClaudeSubmitRejectsTrailingBracePayloadAsRecoverable(t *testing.T) {
+func TestClaudeSubmitCoercesTrailingBracePayload(t *testing.T) {
+	submit, err := ClaudeToolForResponse[*sampleResult]()
+	if err != nil {
+		t.Fatalf("ClaudeToolForResponse: %v", err)
+	}
+
+	block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, trailingBraceInput())}
+
+	ctx := t.Context()
+	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	outcome := submit.Handler(ctx, block, trace)
+
+	if !outcome.Accepted {
+		t.Fatalf("trailing-brace payload: got = rejected (%#v), want = coerced and accepted", outcome.ToolResult)
+	}
+	if got, want := outcome.Response.Summary, "all good"; got != want {
+		t.Errorf("response summary: got = %q, want = %q", got, want)
+	}
+}
+
+// TestClaudeSubmitCoercesTrailingDelimiterPayloads pins the full breadth the
+// coercion promises: any run of spurious closing delimiters (`}`/`]`) and
+// whitespace after the payload object is tolerated, not just a single `}`.
+func TestClaudeSubmitCoercesTrailingDelimiterPayloads(t *testing.T) {
+	submit, err := ClaudeToolForResponse[*sampleResult]()
+	if err != nil {
+		t.Fatalf("ClaudeToolForResponse: %v", err)
+	}
+
+	for _, tail := range []string{"}}", "]", "}]", " }\n} ", "]]}"} {
+		t.Run(fmt.Sprintf("tail=%q", tail), func(t *testing.T) {
+			input := map[string]any{
+				"reasoning": "done",
+				"analysis":  `{"summary":"all good"}` + tail,
+			}
+			block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, input)}
+
+			ctx := t.Context()
+			trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+			outcome := submit.Handler(ctx, block, trace)
+
+			if !outcome.Accepted {
+				t.Fatalf("trailing %q payload: got = rejected (%#v), want = coerced and accepted", tail, outcome.ToolResult)
+			}
+			if got, want := outcome.Response.Summary, "all good"; got != want {
+				t.Errorf("response summary: got = %q, want = %q", got, want)
+			}
+		})
+	}
+}
+
+func TestClaudeSubmitRejectsTrailingGarbagePayloadAsRecoverable(t *testing.T) {
 	submit, err := ClaudeToolForResponse[*sampleResult]()
 	if err != nil {
 		t.Fatalf("ClaudeToolForResponse: %v", err)
@@ -82,14 +147,14 @@ func TestClaudeSubmitRejectsTrailingBracePayloadAsRecoverable(t *testing.T) {
 	ctx := t.Context()
 	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
-	block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, trailingBraceInput())}
+	block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, trailingGarbageInput())}
 	outcome := submit.Handler(ctx, block, trace)
 
 	if outcome.Accepted {
-		t.Errorf("trailing-brace payload: got = accepted, want = rejected")
+		t.Errorf("trailing-garbage payload: got = accepted, want = rejected")
 	}
 	if _, ok := outcome.ToolResult["error"]; !ok {
-		t.Errorf("trailing-brace payload: got = %#v, want = error tool result", outcome.ToolResult)
+		t.Errorf("trailing-garbage payload: got = %#v, want = error tool result", outcome.ToolResult)
 	}
 	requireRecoverableRejection(t, trace, "parameter error")
 }
