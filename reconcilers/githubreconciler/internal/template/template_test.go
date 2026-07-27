@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package template
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -159,6 +160,7 @@ func Test_ExtractData(t *testing.T) {
 		wantData        *testData
 		wantErr         bool
 		wantErrContains string
+		wantErrIs       error // sentinel the error must match via errors.Is
 	}{{
 		name: "extract data successfully",
 		body: `This is the body
@@ -233,6 +235,7 @@ func Test_ExtractData(t *testing.T) {
 		entityType:      "entity",
 		wantErr:         true,
 		wantErrContains: "entity",
+		wantErrIs:       ErrNoEmbeddedData,
 	}, {
 		name:            "body without embedded data different marker",
 		body:            "This is another body without embedded data",
@@ -241,6 +244,7 @@ func Test_ExtractData(t *testing.T) {
 		entityType:      "entity",
 		wantErr:         true,
 		wantErrContains: "entity",
+		wantErrIs:       ErrNoEmbeddedData,
 	}, {
 		name:            "body with wrong marker",
 		body:            "<!--wrong-marker-->\n<!--\n{}\n-->\n<!--/wrong-marker-->",
@@ -249,6 +253,7 @@ func Test_ExtractData(t *testing.T) {
 		entityType:      "entity",
 		wantErr:         true,
 		wantErrContains: "entity",
+		wantErrIs:       ErrNoEmbeddedData,
 	}, {
 		name:            "invalid JSON",
 		body:            "Original body\n\n<!--test-bot-data-->\n<!--\nthis is not valid JSON\n-->\n<!--/test-bot-data-->",
@@ -256,7 +261,8 @@ func Test_ExtractData(t *testing.T) {
 		markerSuffix:    "-data",
 		entityType:      "entity",
 		wantErr:         true,
-		wantErrContains: "unmarshaling data",
+		wantErrContains: "unmarshaling embedded data",
+		wantErrIs:       ErrUnmarshalData,
 	}}
 
 	for _, tt := range tests {
@@ -273,6 +279,12 @@ func Test_ExtractData(t *testing.T) {
 					t.Error("Extract() error: got = nil, wanted = error")
 				} else if !strings.Contains(err.Error(), tt.wantErrContains) {
 					t.Errorf("error message: got = %v, wanted to contain %q", err, tt.wantErrContains)
+				}
+				// Pin the exported error contract: callers distinguish absent
+				// from corrupt state via errors.Is, so the wrapping chain must
+				// carry the right sentinel.
+				if tt.wantErrIs != nil && !errors.Is(err, tt.wantErrIs) {
+					t.Errorf("error sentinel: got = %v, wanted errors.Is %v", err, tt.wantErrIs)
 				}
 			} else {
 				// Test success cases
@@ -292,4 +304,94 @@ func Test_ExtractData(t *testing.T) {
 			}
 		})
 	}
+}
+
+// assertData fails the test unless every field of got equals want.
+func assertData(t *testing.T, got, want *testData) {
+	t.Helper()
+	if got.Foo != want.Foo {
+		t.Errorf("Foo: got = %q, wanted = %q", got.Foo, want.Foo)
+	}
+	if got.Bar != want.Bar {
+		t.Errorf("Bar: got = %q, wanted = %q", got.Bar, want.Bar)
+	}
+	if got.Baz != want.Baz {
+		t.Errorf("Baz: got = %q, wanted = %q", got.Baz, want.Baz)
+	}
+}
+
+// Test_ExtractLastMarker covers the marker-injection defense: Extract must
+// return the payload of the LAST marker for its identity, because Embed always
+// appends the producer's genuine marker at the very end. An attacker who can
+// influence the visible body (e.g. LLM output or finding text written into a
+// check summary) can plant a forged marker earlier in the body; a first-match
+// read would return the forgery.
+func Test_ExtractLastMarker(t *testing.T) {
+	executor, err := New[testData]("test-bot", "-data", "entity")
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	genuine := &testData{
+		Foo: fmt.Sprintf("foo-%d", rand.Int63()),
+		Bar: fmt.Sprintf("bar-%d", rand.Int63()),
+		Baz: fmt.Sprintf("baz-%d", rand.Int63()),
+	}
+
+	t.Run("forged marker before genuine appended marker loses", func(t *testing.T) {
+		// The attacker-influenced visible body carries a forged marker with
+		// attacker JSON. Embed then appends the genuine marker after it.
+		forged := "Attacker text\n\n" +
+			"<!--test-bot-data-->\n<!--\n" +
+			`{"Foo":"attacker","Bar":"attacker","Baz":"attacker"}` +
+			"\n-->\n<!--/test-bot-data-->\n"
+
+		body, err := executor.Embed(forged, genuine)
+		if err != nil {
+			t.Fatalf("Embed() failed: %v", err)
+		}
+
+		extracted, err := executor.Extract(body)
+		if err != nil {
+			t.Fatalf("Extract() failed: %v", err)
+		}
+		assertData(t, extracted, genuine)
+		if extracted.Foo == "attacker" {
+			t.Errorf("Extract() returned the forged marker; got Foo = %q", extracted.Foo)
+		}
+	})
+
+	t.Run("single marker round-trip unchanged", func(t *testing.T) {
+		body, err := executor.Embed("This is the body", genuine)
+		if err != nil {
+			t.Fatalf("Embed() failed: %v", err)
+		}
+		extracted, err := executor.Extract(body)
+		if err != nil {
+			t.Fatalf("Extract() failed: %v", err)
+		}
+		assertData(t, extracted, genuine)
+	})
+
+	t.Run("body-only forged marker with no genuine marker still parses", func(t *testing.T) {
+		// A real producer always appends a genuine marker, so a body carrying
+		// only a forged marker is not something Extract can distinguish from a
+		// legitimate single marker — it is the last (and only) marker, so it
+		// wins. Last-match alone makes the appended marker win WHENEVER the
+		// producer wrote one; defense against a body that never gets a genuine
+		// marker appended must come from producer-side stripping. This test
+		// pins that documented behavior.
+		bodyOnly := "Attacker text\n\n" +
+			"<!--test-bot-data-->\n<!--\n" +
+			`{"Foo":"attacker","Bar":"x","Baz":"y"}` +
+			"\n-->\n<!--/test-bot-data-->"
+
+		extracted, err := executor.Extract(bodyOnly)
+		if err != nil {
+			t.Fatalf("Extract() failed: %v", err)
+		}
+		if extracted.Foo != "attacker" {
+			t.Errorf("Foo: got = %q, wanted = %q (last-and-only marker wins)", extracted.Foo, "attacker")
+		}
+	})
 }

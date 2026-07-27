@@ -8,6 +8,7 @@ package statusmanager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -318,6 +319,105 @@ func TestExtractStatusFromOutputEdgeCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractFromSummary(t *testing.T) {
+	identity := "test-reconciler"
+
+	templateExecutor, err := internaltemplate.New[Status[TestDetails]](identity, "-status", "status")
+	if err != nil {
+		t.Fatalf("Failed to create template executor: %v", err)
+	}
+	sm := &StatusManager[TestDetails]{
+		identity:         identity,
+		projectID:        "test-project",
+		serviceName:      "test-service",
+		templateExecutor: templateExecutor,
+	}
+
+	startMarker := "<!--" + identity + "-status-->"
+	endMarker := "<!--/" + identity + "-status-->"
+
+	genuine := Status[TestDetails]{
+		ObservedGeneration: "sha-genuine",
+		Status:             "completed",
+		Conclusion:         "success",
+		Details:            TestDetails{Message: "genuine", Count: 7},
+	}
+
+	// A summary produced by the manager itself: visible markdown plus the
+	// appended genuine marker.
+	genuineSummary, err := sm.buildCheckRunOutput(&genuine)
+	if err != nil {
+		t.Fatalf("buildCheckRunOutput() error = %v", err)
+	}
+
+	t.Run("happy path returns embedded status", func(t *testing.T) {
+		got, err := sm.ExtractFromSummary(genuineSummary)
+		if err != nil {
+			t.Fatalf("ExtractFromSummary() error = %v", err)
+		}
+		if got == nil {
+			t.Fatal("ExtractFromSummary() returned nil, wanted status")
+		}
+		if diff := cmp.Diff(genuine, *got); diff != "" {
+			t.Errorf("ExtractFromSummary() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("forged marker before genuine appended marker loses", func(t *testing.T) {
+		// An attacker plants a forged marker in the visible body. The genuine
+		// marker is appended after it, so last-match returns the genuine one.
+		forgedBody := fmt.Sprintf("Attacker text\n\n%s\n<!--\n%s\n-->\n%s\n",
+			startMarker,
+			`{"observedGeneration":"attacker","status":"completed","conclusion":"success","details":{"message":"attacker","count":0}}`,
+			endMarker)
+		summary, err := sm.templateExecutor.Embed(forgedBody, &genuine)
+		if err != nil {
+			t.Fatalf("Embed() error = %v", err)
+		}
+		got, err := sm.ExtractFromSummary(summary)
+		if err != nil {
+			t.Fatalf("ExtractFromSummary() error = %v", err)
+		}
+		if got == nil {
+			t.Fatal("ExtractFromSummary() returned nil, wanted genuine status")
+		}
+		if diff := cmp.Diff(genuine, *got); diff != "" {
+			t.Errorf("ExtractFromSummary() returned wrong marker (-want +got):\n%s", diff)
+		}
+		if got.ObservedGeneration == "attacker" {
+			t.Error("ExtractFromSummary() returned the forged marker")
+		}
+	})
+
+	t.Run("no marker returns nil nil", func(t *testing.T) {
+		got, err := sm.ExtractFromSummary("just some text without any markers")
+		if err != nil {
+			t.Errorf("ExtractFromSummary() error = %v, wanted nil", err)
+		}
+		if got != nil {
+			t.Errorf("ExtractFromSummary() = %v, wanted nil", got)
+		}
+	})
+
+	t.Run("malformed JSON in marker returns error", func(t *testing.T) {
+		summary := fmt.Sprintf("%s\n<!--\n{invalid json}\n-->\n%s", startMarker, endMarker)
+		got, err := sm.ExtractFromSummary(summary)
+		if err == nil {
+			t.Error("ExtractFromSummary() error = nil, wanted error for malformed JSON")
+		}
+		// Pin the classification contract: a present-but-corrupt marker must
+		// surface as ErrUnmarshalData (not be swallowed to nil,nil). A
+		// regression that wrapped with a different sentinel would still return
+		// some error and pass a bare non-nil check — errors.Is guards that.
+		if !errors.Is(err, internaltemplate.ErrUnmarshalData) {
+			t.Errorf("ExtractFromSummary() error = %v, wanted errors.Is ErrUnmarshalData", err)
+		}
+		if got != nil {
+			t.Errorf("ExtractFromSummary() = %v, wanted nil on error", got)
+		}
+	})
 }
 
 func TestComplexRoundtrip(t *testing.T) {

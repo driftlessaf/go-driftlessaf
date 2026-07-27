@@ -6,9 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 package issuemanager
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"text/template"
+
+	internaltemplate "chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/template"
 )
 
 type testData struct {
@@ -254,8 +257,8 @@ this is not valid JSON
 		t.Error("Extract() should have failed for invalid JSON")
 	}
 
-	if !strings.Contains(err.Error(), "unmarshaling data") {
-		t.Errorf("error should mention unmarshaling: %v", err)
+	if !errors.Is(err, internaltemplate.ErrUnmarshalData) {
+		t.Errorf("error should be ErrUnmarshalData: %v", err)
 	}
 }
 

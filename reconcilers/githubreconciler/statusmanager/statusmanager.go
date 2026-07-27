@@ -424,6 +424,35 @@ func (sm *StatusManager[T]) buildCheckRunOutput(status *Status[T]) (string, erro
 	return sm.templateExecutor.Embed(markdown, status)
 }
 
+// ExtractFromSummary decodes the embedded status from a check run summary the
+// caller already holds, without making an API call to fetch the check run.
+// Consumers that read another reconciler's embedded state (e.g. an approver
+// inspecting a review bot's check summary) should use this shared decoder rather
+// than hand-rolling the marker regex: it applies the authoritative last-marker
+// parse for this manager's identity, so a forged marker planted earlier in the
+// attacker-influenced visible body cannot win over the producer's genuine
+// appended marker.
+//
+// A summary that carries no parseable marker for this identity yields
+// (nil, nil), mirroring extractStatusFromOutput's "no observed state" contract.
+// A marker whose payload is present but malformed returns an error, so callers
+// can distinguish "no status embedded" from "a status was embedded but is
+// corrupt".
+func (sm *StatusManager[T]) ExtractFromSummary(summary string) (*Status[T], error) {
+	status, err := sm.templateExecutor.Extract(summary)
+	if err != nil {
+		// A present-but-corrupt marker surfaces the error; a summary with no
+		// marker at all is "no status embedded" (nil, nil). Matched on the
+		// template package's sentinel via errors.Is, not the error string, so a
+		// reworded message cannot silently reclassify corrupt state as absent.
+		if errors.Is(err, internaltemplate.ErrUnmarshalData) {
+			return nil, err
+		}
+		return nil, nil //nolint:nilerr // no parseable marker means "no observed state"
+	}
+	return status, nil
+}
+
 // extractStatusFromOutput extracts the embedded status from a check run's output.
 // A nil output, or one whose summary carries no parseable embedded status — e.g.
 // cleared by a re-run reset, or otherwise corrupt — yields a nil status, which
@@ -431,6 +460,13 @@ func (sm *StatusManager[T]) buildCheckRunOutput(status *Status[T]) (string, erro
 // status self-healing. The error result is retained for symmetry with the
 // Observed* callers; extraction failures are deliberately reported as "no
 // observed state" rather than surfaced.
+//
+// This deliberately differs from ExtractFromSummary, which surfaces a
+// corrupt-marker error (ErrUnmarshalData) instead of swallowing it: the two
+// decoders are not interchangeable on a corrupt summary (this one returns "no
+// state", that one returns an error). The self-heal contract is why the
+// reconciler's own read path swallows; a cross-identity reader wants to know
+// the state was present but unreadable.
 //
 //nolint:unparam // see above: error is always nil by design
 func (sm *StatusManager[T]) extractStatusFromOutput(output *github.CheckRunOutput) (*Status[T], error) {

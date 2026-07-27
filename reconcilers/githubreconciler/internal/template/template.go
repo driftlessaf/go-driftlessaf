@@ -8,9 +8,20 @@ package template
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"text/template"
+)
+
+// ErrNoEmbeddedData is returned by Extract when the body carries no marker for
+// this identity. ErrUnmarshalData is returned when a marker is present but its
+// payload is not valid JSON. Callers (e.g. StatusManager.ExtractFromSummary)
+// distinguish "no state" from "corrupt state" via errors.Is rather than
+// matching error strings.
+var (
+	ErrNoEmbeddedData = errors.New("embedded data not found")
+	ErrUnmarshalData  = errors.New("unmarshaling embedded data")
 )
 
 // Template provides template execution and data embedding/extraction capabilities.
@@ -68,15 +79,26 @@ func (t *Template[T]) Embed(body string, data *T) (string, error) {
 
 // Extract extracts embedded data from the body text.
 // Returns an error if the data cannot be found or parsed.
+//
+// When the body contains more than one marker for this identity, Extract uses
+// the LAST one. Embed always appends its marker at the very end of the body and
+// nothing is appended after it, so the final marker is the authoritative one
+// written by the producer. In normal operation there is exactly one marker
+// (first == last), so callers are unaffected; the behavior only differs under
+// injection, where an attacker plants a forged marker earlier in the
+// attacker-influenced visible body. A first-match read would return that
+// forgery; taking the last match returns the producer's genuine marker instead.
 func (t *Template[T]) Extract(body string) (*T, error) {
-	matches := t.regex.FindStringSubmatch(body)
-	if len(matches) < 2 {
-		return nil, fmt.Errorf("embedded data not found in %s body", t.entityType)
+	matches := t.regex.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("%w in %s body", ErrNoEmbeddedData, t.entityType)
 	}
 
+	last := matches[len(matches)-1]
+
 	var data T
-	if err := json.Unmarshal([]byte(matches[1]), &data); err != nil {
-		return nil, fmt.Errorf("unmarshaling data: %w", err)
+	if err := json.Unmarshal([]byte(last[1]), &data); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnmarshalData, err)
 	}
 
 	return &data, nil
