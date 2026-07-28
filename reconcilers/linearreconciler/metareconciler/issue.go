@@ -366,9 +366,10 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 		LinearIssueID:    issue.ID,
 		LinearIdentifier: issue.Identifier,
 		DescriptionHash:  sha256.Sum256([]byte(issue.Description)),
+		DesignDoc:        target.DesignDoc,
 		Request:          request,
 	}
-	prURL, err := changeSession.Upsert(ctx, prData, false, r.prLabels, func(ctx context.Context, branchName string) error {
+	prURL, err := changeSession.Upsert(ctx, prData, false, upsertLabelsFor(r.prLabels, r.docDrivenLabel, target.DesignDoc), func(ctx context.Context, branchName string) error {
 		// Tee the agent's completed trace so the PR body template can render
 		// a rationale summary via {{.ReasoningSummary}} (see
 		// ReasoningSummarySnippet): per-action tool-call reasoning when
@@ -787,6 +788,17 @@ func findingsEqual(a, b []FindingRef) bool {
 	slices.SortFunc(aSorted, cmp)
 	slices.SortFunc(bSorted, cmp)
 	return slices.Equal(aSorted, bSorted)
+}
+
+// upsertLabelsFor returns the label set for a PR upsert: the static base
+// labels plus the doc-driven label when both it and a design-doc path are
+// present. Always returns a fresh slice — base is shared across reconciles.
+func upsertLabelsFor(base []string, docDrivenLabel, designDoc string) []string {
+	labels := append([]string(nil), base...)
+	if docDrivenLabel != "" && designDoc != "" {
+		labels = append(labels, docDrivenLabel)
+	}
+	return labels
 }
 
 // descriptionHashChanged reports whether the issue's current description

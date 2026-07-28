@@ -50,6 +50,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 	// to read repo target information from its state attachment.
 	upstreamPrefix string
 
+	// docDrivenLabel, when non-empty, is added to the PR label set whenever
+	// the resolved repo target carries a DesignDoc path. Empty disables
+	// doc-driven stamping entirely (the default).
+	docDrivenLabel string
+
 	// repoTargetResolver is an optional fallback for resolving repo targets
 	// when no upstream bot state attachment is available.
 	repoTargetResolver RepoTargetResolver
@@ -83,6 +88,7 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 type options struct {
 	requiredLabel         string
 	upstreamPrefix        string
+	docDrivenLabel        string
 	repoTargetResolver    RepoTargetResolver
 	saveCallback          SaveCallback
 	stateTransitionClient cloudevents.Client
@@ -106,6 +112,14 @@ func WithRequiredLabel(label string) Option {
 func WithUpstreamPrefix(prefix string) Option {
 	return func(o *options) {
 		o.upstreamPrefix = prefix
+	}
+}
+
+// WithDocDrivenLabel sets the label added to PRs whose upstream repo
+// target names a design doc. Leave unset to disable doc-driven stamping.
+func WithDocDrivenLabel(label string) Option {
+	return func(o *options) {
+		o.docDrivenLabel = label
 	}
 }
 
@@ -192,6 +206,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT StateConstra
 		prLabels:           prLabels,
 		requiredLabel:      o.requiredLabel,
 		upstreamPrefix:     o.upstreamPrefix,
+		docDrivenLabel:     o.docDrivenLabel,
 		repoTargetResolver: o.repoTargetResolver,
 		agent:              agent,
 		buildRequest:       buildRequest,

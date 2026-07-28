@@ -44,6 +44,11 @@ type PRData[Req any] struct {
 	// DescriptionHash is the SHA-256 of the Linear issue description; used
 	// to detect description edits and trigger agent re-runs.
 	DescriptionHash [32]byte `json:"description_hash"`
+	// DesignDoc is the design-doc path from the upstream repo target,
+	// rendered into the PR body as a `Design-Doc:` trailer by body
+	// templates that opt in. Included in the marker so downstream
+	// consumers can recover it from the PR body alone.
+	DesignDoc string `json:"design_doc,omitempty"`
 	// Request is the agent input. Excluded from JSON because it's
 	// reconstructed from the issue on each reconciliation; embedding it
 	// would bloat the PR-body marker without adding value.
@@ -64,6 +69,10 @@ type PRData[Req any] struct {
 type RepoTarget struct {
 	Repo string `json:"repo"`           // "owner/repo" format
 	Path string `json:"path,omitempty"` // optional subdirectory scope
+	// DesignDoc is the repo-relative path of the design document governing
+	// this issue's work (e.g. "docs/some-team/thing.md"), when the upstream
+	// bot knows one. Optional; empty means no doc-driven markers are stamped.
+	DesignDoc string `json:"design_doc,omitempty"`
 }
 
 // RepoTargetResolver resolves a repo target from a Linear issue.
