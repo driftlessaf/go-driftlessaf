@@ -19,8 +19,22 @@ import (
 //   - https://github.com/org/repo/pull/123
 //   - https://github.com/org/repo/blob/ref/path/to/file
 //   - https://github.com/org/repo/tree/ref/path/to/dir
+//
+// A scheme-relative key (e.g. "github.com/org/repo/tree/ref/dir", with no
+// "https://") is also accepted: the default scheme is assumed for parsing so
+// workqueue keys stored without a scheme resolve to the same resource. The
+// original string is preserved verbatim in Resource.URL so the key round-trips.
 func ParseURL(uri string) (*Resource, error) {
-	parsed, err := url.Parse(uri)
+	// Assume https when the key carries no scheme. url.Parse only populates Host
+	// when a scheme (and thus "//" authority) is present, so a bare
+	// "github.com/…" would otherwise land entirely in Path and fail the host
+	// check below.
+	parseTarget := uri
+	if !hasScheme(uri) {
+		parseTarget = "https://" + uri
+	}
+
+	parsed, err := url.Parse(parseTarget)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URL: %w", err)
 	}
@@ -83,4 +97,12 @@ func ParseURL(uri string) (*Resource, error) {
 	default:
 		return nil, fmt.Errorf("unknown resource type: %s", resourceType)
 	}
+}
+
+// hasScheme reports whether uri begins with a URL scheme (e.g. "https://"). It is
+// deliberately strict: the text before "://" must contain no "/" or "." so a
+// scheme-relative key like "github.com/org/repo" is not mistaken for one.
+func hasScheme(uri string) bool {
+	i := strings.Index(uri, "://")
+	return i > 0 && !strings.ContainsAny(uri[:i], "/.")
 }

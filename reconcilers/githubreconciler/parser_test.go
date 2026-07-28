@@ -176,6 +176,33 @@ func TestParseURL(t *testing.T) {
 			Number: 123,
 			URL:    "http://github.com/owner/repo/issues/123",
 		},
+	}, {
+		name: "scheme-relative tree key",
+		url:  "github.com/owner/repo/tree/HEAD/.github/workflows",
+		want: &Resource{
+			Owner: "owner",
+			Repo:  "repo",
+			Type:  ResourceTypePath,
+			Ref:   "HEAD",
+			Path:  ".github/workflows",
+			// URL preserves the original scheme-relative key verbatim so it
+			// round-trips back to the workqueue.
+			URL: "github.com/owner/repo/tree/HEAD/.github/workflows",
+		},
+	}, {
+		name: "scheme-relative issue key",
+		url:  "github.com/owner/repo/issues/123",
+		want: &Resource{
+			Owner:  "owner",
+			Repo:   "repo",
+			Type:   ResourceTypeIssue,
+			Number: 123,
+			URL:    "github.com/owner/repo/issues/123",
+		},
+	}, {
+		name:    "scheme-relative wrong host",
+		url:     "gitlab.com/owner/repo/issues/123",
+		wantErr: true,
 	}}
 
 	for _, tt := range tests {
@@ -189,6 +216,41 @@ func TestParseURL(t *testing.T) {
 				t.Errorf("ParseURL(): got = %v, wanted = %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseURL_SchemeRelativeBackwardCompatible proves the migration of migrate
+// workqueue keys to drop the "https://" scheme is backward compatible at the
+// consume boundary: the legacy scheme-ful key and the new scheme-relative key
+// resolve to the same resource (owner, repo, type, ref, path), differing only in
+// the verbatim-preserved URL field. In-flight legacy keys therefore route
+// identically while they drain.
+func TestParseURL_SchemeRelativeBackwardCompatible(t *testing.T) {
+	const (
+		legacy = "https://github.com/owner/repo/tree/HEAD/.github/workflows"
+		modern = "github.com/owner/repo/tree/HEAD/.github/workflows"
+	)
+
+	legacyRes, err := ParseURL(legacy)
+	if err != nil {
+		t.Fatalf("ParseURL(legacy) error: %v", err)
+	}
+	modernRes, err := ParseURL(modern)
+	if err != nil {
+		t.Fatalf("ParseURL(modern) error: %v", err)
+	}
+
+	// URL is preserved verbatim so each key round-trips to the workqueue; assert
+	// that, then clear it before comparing the resolved resource identity.
+	if legacyRes.URL != legacy {
+		t.Errorf("legacy URL not preserved: got %q, want %q", legacyRes.URL, legacy)
+	}
+	if modernRes.URL != modern {
+		t.Errorf("modern URL not preserved: got %q, want %q", modernRes.URL, modern)
+	}
+	legacyRes.URL, modernRes.URL = "", ""
+	if !reflect.DeepEqual(legacyRes, modernRes) {
+		t.Errorf("legacy and modern keys resolved to different resources:\n legacy = %+v\n modern = %+v", legacyRes, modernRes)
 	}
 }
 
