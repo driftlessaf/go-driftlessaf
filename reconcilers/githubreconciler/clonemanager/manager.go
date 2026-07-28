@@ -58,6 +58,22 @@ func WithCommitDepth(depth int) LeaseOption {
 // function to repoURL.
 var repoURL = defaultRemoteURL
 
+// Option configures a Manager.
+type Option func(*Manager)
+
+// WithMaxFetches sets how many pack-transferring fetches a clone serves before
+// it is discarded and replaced by a fresh clone. Every such fetch permanently
+// grows a clone's object store — go-git appends a packfile per fetch and never
+// prunes — so on a fast-moving repository a pooled clone grows without bound.
+// The bound caps that growth at the amortized cost of one re-clone every n
+// fetches. Fetches that find the ref already up to date transfer nothing and
+// don't count. Zero or negative (the default) disables the bound.
+func WithMaxFetches(n int) Option {
+	return func(m *Manager) {
+		m.maxFetches = n
+	}
+}
+
 // Manager owns a pool of git clones that can be leased to callers for a single
 // reconciliation. Each lease is dedicated to a GitHub resource and ensures the
 // working tree is reset before being returned to the pool.
@@ -65,6 +81,7 @@ type Manager struct {
 	tokenSource oauth2.TokenSource
 	identity    string
 	signer      git.Signer
+	maxFetches  int
 
 	mu        sync.Mutex
 	available []*clone
@@ -73,6 +90,9 @@ type Manager struct {
 type clone struct {
 	path string
 	repo *git.Repository
+	// fetches counts fetches that transferred a pack, i.e. the ones that
+	// grew the object store.
+	fetches int
 }
 
 // Lease represents an acquired clone prepared for a specific GitHub resource.
@@ -107,7 +127,7 @@ type UpdateFunc func(context.Context, *git.Worktree) (string, error)
 // and pushing to the targeted repository. Identity is used as the commit author
 // name (and, when it lacks a domain, suffixed with @chainguard.dev). The signer
 // may be nil when Gitsign-style signing is not required.
-func New(_ context.Context, tokenSource oauth2.TokenSource, identity string, signer git.Signer) (*Manager, error) {
+func New(_ context.Context, tokenSource oauth2.TokenSource, identity string, signer git.Signer, opts ...Option) (*Manager, error) {
 	if tokenSource == nil {
 		return nil, errors.New("token source cannot be nil")
 	}
@@ -117,11 +137,15 @@ func New(_ context.Context, tokenSource oauth2.TokenSource, identity string, sig
 		return nil, errors.New("identity cannot be empty")
 	}
 
-	return &Manager{
+	m := &Manager{
 		tokenSource: tokenSource,
 		identity:    identity,
 		signer:      signer,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m, nil
 }
 
 // Lease hydrates a clone for the supplied GitHub resource and returns a Lease
@@ -308,9 +332,13 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	// [remote "origin"] url in an earlier lease could otherwise redirect this
 	// credentialed fetch.
 	clog.InfoContextf(ctx, "Fetching ref %s", ref)
-	if err := trustedRemote(repo, fetchURL).FetchContext(ctx, fetchOpts); err != nil &&
-		!errors.Is(err, git.NoErrAlreadyUpToDate) {
+	switch err := trustedRemote(repo, fetchURL).FetchContext(ctx, fetchOpts); {
+	case errors.Is(err, git.NoErrAlreadyUpToDate):
+		// No pack transferred; the clone did not grow.
+	case err != nil:
 		return "", false, fmt.Errorf("fetching ref %s: %w", ref, err)
+	default:
+		cl.fetches++
 	}
 
 	remoteRef, err := repo.Reference(dst, true)
@@ -651,8 +679,20 @@ func (l *Lease) BaseCommit() plumbing.Hash {
 }
 
 // Return resets the working tree and places the clone back into the manager's
-// pool. Once Return succeeds, the lease should be considered invalid.
+// pool. Clones that have served the manager's fetch bound are discarded
+// instead, so a replacement is cloned fresh on a later lease. Once Return
+// succeeds, the lease should be considered invalid.
 func (l *Lease) Return(ctx context.Context) error {
+	if max := l.manager.maxFetches; max > 0 && l.clone.fetches >= max {
+		clog.InfoContextf(ctx, "Discarding clone %s after %d fetches", filepath.Base(l.clone.path), l.clone.fetches)
+		l.manager.discardClone(l.clone)
+		l.clone = nil
+		l.manager = nil
+		l.sha = ""
+		l.pathExists = false
+		return nil
+	}
+
 	if err := l.manager.resetClone(l.clone); err != nil {
 		l.manager.discardClone(l.clone)
 		l.clone = nil

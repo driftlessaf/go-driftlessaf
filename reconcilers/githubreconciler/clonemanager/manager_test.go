@@ -464,6 +464,122 @@ func TestFIFOPoolBehavior(t *testing.T) {
 	_ = reacquired3.Return(ctx)
 }
 
+// commitToTestRepo advances the test repo's master branch with a new commit.
+func commitToTestRepo(t *testing.T, repoDir, name string) {
+	t.Helper()
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	rel := filepath.ToSlash(filepath.Join("packages", name))
+	if err := os.WriteFile(filepath.Join(repoDir, rel), []byte("name: "+name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := wt.Add(rel); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := wt.Commit("add "+name, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func TestMaxFetchesDiscardsClone(t *testing.T) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, WithMaxFetches(2))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Leases whose fetch finds the ref already up to date don't consume the
+	// bound: the clone survives arbitrarily many of them.
+	dir := ""
+	for i := range 3 {
+		lease, err := mgr.Lease(ctx, res)
+		if err != nil {
+			t.Fatalf("Lease %d: %v", i, err)
+		}
+		if dir == "" {
+			dir = lease.WorkingTree()
+		} else if got := lease.WorkingTree(); got != dir {
+			t.Fatalf("Lease %d working tree: got %s, want %s (reused clone)", i, got, dir)
+		}
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return %d: %v", i, err)
+		}
+	}
+
+	// Advancing the remote makes the next lease's fetch transfer a pack,
+	// consuming one of the two budgeted fetches. The clone survives: the
+	// counter accumulates across leases rather than tracking only the most
+	// recent one.
+	commitToTestRepo(t, repoDir, "bar.yaml")
+	lease, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease after first update: %v", err)
+	}
+	if got := lease.WorkingTree(); got != dir {
+		t.Fatalf("Lease after first update working tree: got %s, want %s (reused clone)", got, dir)
+	}
+	if err := lease.Return(ctx); err != nil {
+		t.Fatalf("Return after first update: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("expected clone to survive first transferring fetch, got err=%v", err)
+	}
+
+	// A second remote advance exhausts the bound and discards the clone on
+	// return.
+	commitToTestRepo(t, repoDir, "baz.yaml")
+	lease, err = mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease after second update: %v", err)
+	}
+	if got := lease.WorkingTree(); got != dir {
+		t.Fatalf("Lease after second update working tree: got %s, want %s (reused clone)", got, dir)
+	}
+	if err := lease.Return(ctx); err != nil {
+		t.Fatalf("Return after second update: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected discarded clone dir to be removed, got err=%v", err)
+	}
+
+	// The next lease gets a fresh clone.
+	lease, err = mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease after discard: %v", err)
+	}
+	if got := lease.WorkingTree(); got == dir {
+		t.Fatalf("Lease after discard working tree: got reused %s, want a fresh clone", got)
+	}
+	_ = lease.Return(ctx)
+}
+
 // BenchmarkLease measures the cost of a Lease/Return cycle against a real
 // remote repository. It uses golang/go at master as a representative large
 // repository (~15k files, ~400MB). Set GITHUB_TOKEN to run.
