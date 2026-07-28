@@ -257,6 +257,9 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 		SingleBranch: true,
 		Depth:        gitFetchDepth,
 		Auth:         auth,
+		// Tag refs pin their objects in the clone forever (nothing ever prunes
+		// the object store) and go-git defaults to AllTags, so skip them.
+		Tags: git.NoTags,
 	}
 	// Only set ReferenceName for branch refs. Non-branch refs (e.g.
 	// refs/pull/N/head) are not advertised during clone negotiation, so we
@@ -296,6 +299,7 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 		RefSpecs:   []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+%s:%s", resolveRefName(ref), dst))},
 		Auth:       auth,
 		Depth:      depth,
+		Tags:       git.NoTags,
 	}
 
 	// Fetch from the trusted URL (see trustedRemote), never from the clone's
