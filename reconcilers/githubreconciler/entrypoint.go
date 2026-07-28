@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -164,8 +165,8 @@ func OrgMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error
 // applyMiddleware wraps rec with each layer in order, so that the first layer
 // in the slice is outermost. An empty slice returns rec unchanged.
 func applyMiddleware(rec ReconcilerFunc, layers []Middleware) ReconcilerFunc {
-	for i := len(layers) - 1; i >= 0; i-- {
-		rec = layers[i](rec)
+	for _, layer := range slices.Backward(layers) {
+		rec = layer(rec)
 	}
 	return rec
 }

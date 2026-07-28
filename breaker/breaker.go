@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 package breaker
 
 import (
-	"math/rand/v2"
 	"sync"
 	"time"
+
+	"chainguard.dev/driftlessaf/internal/jitter"
 )
 
 // Defaults for New.
@@ -131,15 +132,5 @@ func (b *Breaker) backoff(failures int) time.Duration {
 	for i := 1; i < failures && d < b.maxDelay; i++ {
 		d *= 2
 	}
-	return addJitter(min(d, b.maxDelay))
-}
-
-// addJitter adds 0% to +100% random jitter to avoid thundering herd.
-//
-//nolint:gosec // Using weak random for jitter is fine, not cryptographic
-func addJitter(d time.Duration) time.Duration {
-	if d <= 0 {
-		return d
-	}
-	return d + rand.N(d)
+	return jitter.Add(min(d, b.maxDelay))
 }

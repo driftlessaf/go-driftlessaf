@@ -9,10 +9,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"slices"
 	"time"
 
+	"chainguard.dev/driftlessaf/internal/jitter"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 )
@@ -182,7 +182,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 	if err != nil {
 		var rateLimitErr *RateLimitError
 		if errors.As(err, &rateLimitErr) {
-			return workqueue.RequeueAfter(addJitter(rateLimitErr.RetryAfter))
+			return workqueue.RequeueAfter(jitter.Add(rateLimitErr.RetryAfter))
 		}
 		return fmt.Errorf("fetching issue: %w", err)
 	}
@@ -219,7 +219,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 		if errors.As(err, &rateLimitErr) {
 			log.With("retry_after", rateLimitErr.RetryAfter).
 				Warn("Rate limited, requeueing after retry period")
-			return workqueue.RequeueAfter(addJitter(rateLimitErr.RetryAfter))
+			return workqueue.RequeueAfter(jitter.Add(rateLimitErr.RetryAfter))
 		}
 	}
 	return err
@@ -265,12 +265,4 @@ func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest)
 
 	clog.InfoContextf(ctx, "Successfully reconciled Linear issue: %s", req.Key)
 	return &workqueue.ProcessResponse{}, nil
-}
-
-// addJitter adds random jitter to a duration to avoid thundering herd.
-//
-//nolint:gosec // Using weak random for jitter is fine, not cryptographic
-func addJitter(d time.Duration) time.Duration {
-	jitter := time.Duration(rand.Int63n(int64(d)))
-	return d + jitter
 }
