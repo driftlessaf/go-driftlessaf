@@ -150,8 +150,11 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) reconcileIssue(ctx context.Context, i
 		return fmt.Errorf("get GitHub client: %w", err)
 	}
 
-	// Create a change session which queries PR state via GraphQL.
-	changeSession, err := r.changeManager.NewSession(ctx, gh, res)
+	// Create a change session which queries PR state via GraphQL. Targets
+	// the branch-prefix resolver matches get its prefix instead of the
+	// identity so prefix-subscribed downstream bots receive their PR
+	// events; all other targets keep identity branches.
+	changeSession, err := r.changeManager.NewSession(ctx, gh, res, branchPrefixSessionOpts(r.branchPrefixResolver, target)...)
 	if err != nil {
 		return fmt.Errorf("create change session: %w", err)
 	}
@@ -793,6 +796,20 @@ func findingsEqual(a, b []FindingRef) bool {
 // upsertLabelsFor returns the label set for a PR upsert: the static base
 // labels plus the doc-driven label when both it and a design-doc path are
 // present. Always returns a fresh slice — base is shared across reconciles.
+// branchPrefixSessionOpts returns the change-session options for a resolved
+// target: a branch-prefix override when the resolver is set and returns a
+// non-empty prefix for the target, nothing otherwise.
+func branchPrefixSessionOpts(resolver BranchPrefixResolver, target *RepoTarget) []changemanager.SessionOption {
+	if resolver == nil {
+		return nil
+	}
+	prefix := resolver(target)
+	if prefix == "" {
+		return nil
+	}
+	return []changemanager.SessionOption{changemanager.WithBranchPrefix(prefix)}
+}
+
 func upsertLabelsFor(base []string, docDrivenLabel, designDoc string) []string {
 	labels := append([]string(nil), base...)
 	if docDrivenLabel != "" && designDoc != "" {

@@ -323,6 +323,44 @@ func (cm *CM[T]) render(tmpl *template.Template, data *T) (string, error) {
 	return buf.String(), nil
 }
 
+// SessionOption customizes a single NewSession call without affecting the
+// CM's other sessions.
+type SessionOption func(*sessionConfig)
+
+type sessionConfig struct {
+	branchPrefix string
+}
+
+// WithBranchPrefix overrides the CM identity as the head-branch prefix for
+// this session only. Downstream systems that subscribe to PR events by
+// head-branch prefix (e.g. an approver watching "doc-driven/") use this to
+// route a subset of a bot's PRs without renaming every branch the bot
+// manages. The prefix replaces the identity in branch construction only;
+// the identity is still used for PR-body markers and templates.
+//
+// Note that an open PR created under a different prefix will not be found
+// by a session using this one — the session queries PRs by head branch — so
+// changing the prefix for an in-flight resource orphans its existing PR.
+func WithBranchPrefix(prefix string) SessionOption {
+	return func(sc *sessionConfig) {
+		sc.branchPrefix = prefix
+	}
+}
+
+// branchNameFor constructs the head-branch name and base ref for a resource:
+// Path resources get {prefix}/{path-suffix} on the resource's ref, Issue
+// resources get {prefix}/issue-{number} on main.
+func branchNameFor(prefix string, res *githubreconciler.Resource) (branchName, ref string, err error) {
+	switch res.Type {
+	case githubreconciler.ResourceTypePath:
+		return prefix + "/" + githubreconciler.PathToBranchSuffix(res.Path), res.Ref, nil
+	case githubreconciler.ResourceTypeIssue:
+		return prefix + "/issue-" + strconv.Itoa(res.Number), "main", nil // Issues don't have a ref, default to main
+	default:
+		return "", "", fmt.Errorf("change manager only supports Path and Issue resources, got: %v", res.Type)
+	}
+}
+
 // NewSession creates a new Session for the given resource.
 // It supports Path and Issue resources, constructing branch names as:
 // - Path resources: {identity}/{path}
@@ -334,7 +372,13 @@ func (cm *CM[T]) NewSession(
 	ctx context.Context,
 	client *github.Client,
 	res *githubreconciler.Resource,
+	opts ...SessionOption,
 ) (*Session[T], error) {
+	sc := sessionConfig{branchPrefix: cm.identity}
+	for _, opt := range opts {
+		opt(&sc)
+	}
+
 	// Determine which owner/repo to use
 	owner := res.Owner
 	repo := res.Repo
@@ -346,16 +390,9 @@ func (cm *CM[T]) NewSession(
 	}
 
 	// Construct branch name and ref based on resource type
-	var branchName, ref string
-	switch res.Type {
-	case githubreconciler.ResourceTypePath:
-		branchName = cm.identity + "/" + githubreconciler.PathToBranchSuffix(res.Path)
-		ref = res.Ref
-	case githubreconciler.ResourceTypeIssue:
-		branchName = cm.identity + "/issue-" + strconv.Itoa(res.Number)
-		ref = "main" // Issues don't have a ref, default to main
-	default:
-		return nil, fmt.Errorf("change manager only supports Path and Issue resources, got: %v", res.Type)
+	branchName, ref, err := branchNameFor(sc.branchPrefix, res)
+	if err != nil {
+		return nil, err
 	}
 
 	// Use GraphQL to fetch PR + check runs in a single query

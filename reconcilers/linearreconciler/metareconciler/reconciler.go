@@ -55,6 +55,14 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 	// doc-driven stamping entirely (the default).
 	docDrivenLabel string
 
+	// branchPrefixResolver, when non-nil, is consulted per resolved repo
+	// target for a head-branch prefix that replaces the identity, so
+	// downstream subscribers that filter PR events by head-branch prefix
+	// receive the matching subset of this bot's PRs. Returning "" keeps
+	// the identity-prefixed branch for that target. Nil disables the
+	// override (the default).
+	branchPrefixResolver BranchPrefixResolver
+
 	// repoTargetResolver is an optional fallback for resolving repo targets
 	// when no upstream bot state attachment is available.
 	repoTargetResolver RepoTargetResolver
@@ -89,6 +97,7 @@ type options struct {
 	requiredLabel         string
 	upstreamPrefix        string
 	docDrivenLabel        string
+	branchPrefixResolver  BranchPrefixResolver
 	repoTargetResolver    RepoTargetResolver
 	saveCallback          SaveCallback
 	stateTransitionClient cloudevents.Client
@@ -120,6 +129,21 @@ func WithUpstreamPrefix(prefix string) Option {
 func WithDocDrivenLabel(label string) Option {
 	return func(o *options) {
 		o.docDrivenLabel = label
+	}
+}
+
+// BranchPrefixResolver returns the head-branch prefix to use instead of
+// the bot identity for PRs created for the given repo target, or "" to
+// keep the identity-prefixed branch.
+type BranchPrefixResolver func(*RepoTarget) string
+
+// WithBranchPrefixResolver sets a per-target head-branch prefix override,
+// so prefix-subscribed downstream bots receive the matching subset of this
+// bot's PR events. Leave unset to keep identity-prefixed branches for all
+// targets.
+func WithBranchPrefixResolver(resolver BranchPrefixResolver) Option {
+	return func(o *options) {
+		o.branchPrefixResolver = resolver
 	}
 }
 
@@ -200,21 +224,22 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT StateConstra
 		opt(o)
 	}
 	return &Reconciler[Req, Resp, CB, T, PT]{
-		identity:           identity,
-		changeManager:      changeManager,
-		cloneMeta:          cloneMeta,
-		prLabels:           prLabels,
-		requiredLabel:      o.requiredLabel,
-		upstreamPrefix:     o.upstreamPrefix,
-		docDrivenLabel:     o.docDrivenLabel,
-		repoTargetResolver: o.repoTargetResolver,
-		agent:              agent,
-		buildRequest:       buildRequest,
-		buildCallbacks:     buildCallbacks,
-		linearClient:       linearClient,
-		githubClients:      githubClients,
-		saveCallback:       o.saveCallback,
-		transitionEmitter:  statemachine.NewEmitter(identity, o.stateTransitionClient),
+		identity:             identity,
+		changeManager:        changeManager,
+		cloneMeta:            cloneMeta,
+		prLabels:             prLabels,
+		requiredLabel:        o.requiredLabel,
+		upstreamPrefix:       o.upstreamPrefix,
+		docDrivenLabel:       o.docDrivenLabel,
+		branchPrefixResolver: o.branchPrefixResolver,
+		repoTargetResolver:   o.repoTargetResolver,
+		agent:                agent,
+		buildRequest:         buildRequest,
+		buildCallbacks:       buildCallbacks,
+		linearClient:         linearClient,
+		githubClients:        githubClients,
+		saveCallback:         o.saveCallback,
+		transitionEmitter:    statemachine.NewEmitter(identity, o.stateTransitionClient),
 	}
 }
 

@@ -91,3 +91,32 @@ func TestUpsertLabelsFor(t *testing.T) {
 		})
 	}
 }
+
+func TestBranchPrefixSessionOpts(t *testing.T) {
+	// A resolver in the shape bots use it: prefix targets that name a
+	// design doc, keep identity branches for the rest.
+	docResolver := func(target *RepoTarget) string {
+		if target.DesignDoc != "" {
+			return "doc-driven"
+		}
+		return ""
+	}
+	tests := []struct {
+		name     string
+		resolver BranchPrefixResolver
+		target   *RepoTarget
+		wantOpts int
+	}{
+		{"resolver matches target", docResolver, &RepoTarget{Repo: "org/repo", DesignDoc: "docs/some-team/thing.md"}, 1},
+		{"resolver declines target", docResolver, &RepoTarget{Repo: "org/repo"}, 0},
+		{"nil resolver", nil, &RepoTarget{Repo: "org/repo", DesignDoc: "docs/some-team/thing.md"}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := branchPrefixSessionOpts(tt.resolver, tt.target)
+			if len(got) != tt.wantOpts {
+				t.Fatalf("len = %d, want %d", len(got), tt.wantOpts)
+			}
+		})
+	}
+}
