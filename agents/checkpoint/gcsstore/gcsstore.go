@@ -22,8 +22,8 @@ import (
 // KMS-envelope implementation, tests pass IdentitySealer. Seal is applied just
 // before an envelope is written to GCS; Open is applied just after it is read.
 type Sealer interface {
-	Seal(plaintext []byte) ([]byte, error)
-	Open(ciphertext []byte) ([]byte, error)
+	Seal(ctx context.Context, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, ciphertext []byte) ([]byte, error)
 }
 
 // IdentitySealer is a no-op Sealer that returns its input unchanged. It is for
@@ -31,10 +31,14 @@ type Sealer interface {
 type IdentitySealer struct{}
 
 // Seal returns plaintext unchanged.
-func (IdentitySealer) Seal(plaintext []byte) ([]byte, error) { return plaintext, nil }
+func (IdentitySealer) Seal(_ context.Context, plaintext []byte) ([]byte, error) {
+	return plaintext, nil
+}
 
 // Open returns ciphertext unchanged.
-func (IdentitySealer) Open(ciphertext []byte) ([]byte, error) { return ciphertext, nil }
+func (IdentitySealer) Open(_ context.Context, ciphertext []byte) ([]byte, error) {
+	return ciphertext, nil
+}
 
 // Store is a GCS-backed checkpoint.Store. The zero value is not usable; call
 // New. It is safe for concurrent use (all state is in GCS and the immutable
@@ -91,7 +95,7 @@ func (s *Store) Save(ctx context.Context, key string, env *checkpoint.Envelope) 
 	if err != nil {
 		return fmt.Errorf("marshaling envelope: %w", err)
 	}
-	sealed, err := s.sealer.Seal(raw)
+	sealed, err := s.sealer.Seal(ctx, raw)
 	if err != nil {
 		return fmt.Errorf("sealing envelope: %w", err)
 	}
@@ -116,7 +120,7 @@ func (s *Store) Load(ctx context.Context, key string) (*checkpoint.Envelope, che
 	if !ok {
 		return nil, checkpoint.Token{}, false, nil
 	}
-	raw, err := s.sealer.Open(sealed)
+	raw, err := s.sealer.Open(ctx, sealed)
 	if err != nil {
 		return nil, checkpoint.Token{}, false, fmt.Errorf("opening envelope %q: %w", name, err)
 	}

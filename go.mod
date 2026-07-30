@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	chainguard.dev/apko v1.2.23
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.163
+	chainguard.dev/sdk v0.1.94
 	cloud.google.com/go/aiplatform v1.125.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.31.0
@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.51.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chainguard-dev/terraform-infra-common v1.26.4
+	github.com/chainguard-dev/terraform-infra-common v1.0.12
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.11
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.19.0
@@ -23,6 +23,7 @@ require (
 	github.com/google/go-containerregistry v0.21.7
 	github.com/google/go-github/v88 v88.0.0
 	github.com/google/uuid v1.6.0
+	github.com/googleapis/gax-go/v2 v2.22.0
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3
 	github.com/invopop/jsonschema v0.14.0
 	github.com/octo-sts/app v0.7.2
@@ -169,7 +170,6 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/trillian v1.7.3 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.16 // indirect
-	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect
@@ -301,3 +301,7 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common

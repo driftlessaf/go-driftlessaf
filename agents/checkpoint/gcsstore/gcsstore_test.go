@@ -176,12 +176,12 @@ func TestNonPositiveTokenDeleteFailsClosed(t *testing.T) {
 // bytes on the backend are the sealed form, not the plaintext envelope.
 type countingSealer struct{ seals, opens int }
 
-func (c *countingSealer) Seal(b []byte) ([]byte, error) {
+func (c *countingSealer) Seal(_ context.Context, b []byte) ([]byte, error) {
 	c.seals++
 	return append([]byte("SEALED:"), b...), nil
 }
 
-func (c *countingSealer) Open(b []byte) ([]byte, error) {
+func (c *countingSealer) Open(_ context.Context, b []byte) ([]byte, error) {
 	c.opens++
 	return b[len("SEALED:"):], nil
 }
@@ -210,8 +210,8 @@ func TestSealerAppliedToStoredBytes(t *testing.T) {
 // failingSealer returns a fixed error from both operations.
 type failingSealer struct{ err error }
 
-func (f failingSealer) Seal([]byte) ([]byte, error) { return nil, f.err }
-func (f failingSealer) Open([]byte) ([]byte, error) { return nil, f.err }
+func (f failingSealer) Seal(context.Context, []byte) ([]byte, error) { return nil, f.err }
+func (f failingSealer) Open(context.Context, []byte) ([]byte, error) { return nil, f.err }
 
 func TestSealerErrorsSurface(t *testing.T) {
 	sentinel := errors.New("kms unavailable")
