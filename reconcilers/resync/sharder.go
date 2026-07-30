@@ -24,6 +24,7 @@ const defaultConcurrency = 32
 type Option func(*options)
 
 type options struct {
+	priority    int64
 	now         func() time.Time
 	concurrency int
 }
@@ -32,6 +33,15 @@ type options struct {
 // Process call. n must be positive. Default is 32.
 func WithConcurrency(n int) Option {
 	return func(o *options) { o.concurrency = n }
+}
+
+// WithPriority sets the workqueue priority stamped on every enqueue this
+// Sharder produces. The default (zero) is the lowest priority; producers
+// whose work should outrank others (or be outranked) set an explicit
+// level, letting the queue order resync backfill against event-driven
+// and reconciler-driven enqueues.
+func WithPriority(p int64) Option {
+	return func(o *options) { o.priority = p }
 }
 
 // WithNow overrides the wall-clock function used by the Sharder. It is
@@ -55,6 +65,7 @@ type Sharder struct {
 	tick        time.Duration
 	wq          workqueue.Client
 	concurrency int
+	priority    int64
 }
 
 // New configures a Sharder.
@@ -79,6 +90,7 @@ func New(tick time.Duration, wq workqueue.Client, opts ...Option) (*Sharder, err
 		now:         time.Now,
 		concurrency: defaultConcurrency,
 	}
+
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -94,6 +106,7 @@ func New(tick time.Duration, wq workqueue.Client, opts ...Option) (*Sharder, err
 		tick:        tick,
 		wq:          wq,
 		concurrency: o.concurrency,
+		priority:    o.priority,
 	}, nil
 }
 
@@ -145,6 +158,7 @@ func (s *Sharder) Process(ctx context.Context, period time.Duration, keys map[st
 			// the wait instead of accumulating onto it.
 			if _, err := s.wq.Process(egCtx, &workqueue.ProcessRequest{
 				Key:          key,
+				Priority:     s.priority,
 				DelaySeconds: max(0, int64(target.Sub(s.now()).Seconds())),
 			}); err != nil {
 				return fmt.Errorf("enqueue %q: %w", key, err)
