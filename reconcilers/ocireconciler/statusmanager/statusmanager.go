@@ -29,10 +29,10 @@ import (
 	crtypes "github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/sigstore/cosign/v3/pkg/cosign"
 	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/verify"
-	"google.golang.org/protobuf/encoding/protojson"
 )
 
 const sigstoreAudience = "sigstore"
@@ -324,9 +324,17 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 
 // verifyAndExtract verifies the bundle, then filters out any whose verified
 // in-toto statement predicate type doesn't match this manager's, returning the
-// parsed Status[T] alongside the verified timestamp. VerifyNewBundle already
-// decodes the DSSE envelope and returns the verified statement, so we read the
-// predicate from there rather than re-parsing the envelope ourselves.
+// parsed Status[T] alongside the verified timestamp.
+//
+// The predicate is decoded directly from the DSSE payload bytes — the exact
+// bytes the verified signature covers — rather than from the verification
+// result's Statement. The Statement's predicate is a structpb tree, and
+// round-tripping a large findings payload through protojson.Marshal and a
+// second json.Unmarshal multiplies its size in allocations several times
+// over; on findings-heavy statuses that churn was the dominant memory cost
+// of a status read. The Statement is still consulted for the predicate
+// type (already parsed by verification, so free) and the verified
+// timestamp.
 func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, co *cosign.CheckOpts, policyOpt verify.ArtifactPolicyOption) (*Status[T], time.Time, bool) {
 	result, err := cosign.VerifyNewBundle(ctx, co, policyOpt, b)
 	if err != nil {
@@ -337,18 +345,32 @@ func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, c
 		return nil, time.Time{}, false
 	}
 
-	predicateBytes, err := protojson.Marshal(result.Statement.Predicate)
-	if err != nil {
-		clog.WarnContextf(ctx, "Skipping bundle with unmarshalable predicate: %v", err)
+	payload, ok := dssePayload(b)
+	if !ok {
+		clog.WarnContext(ctx, "Skipping bundle without a DSSE payload")
 		return nil, time.Time{}, false
 	}
-	var status Status[T]
-	if err := json.Unmarshal(predicateBytes, &status); err != nil {
+	var stmt struct {
+		Predicate Status[T] `json:"predicate"`
+	}
+	if err := json.Unmarshal(payload, &stmt); err != nil {
 		clog.WarnContextf(ctx, "Skipping bundle with unparseable status predicate: %v", err)
 		return nil, time.Time{}, false
 	}
 
-	return &status, bundleTimestamp(result), true
+	return &stmt.Predicate, bundleTimestamp(result), true
+}
+
+// dssePayload returns the raw in-toto statement JSON carried by the
+// bundle's DSSE envelope. It reads the protobuf content directly:
+// sgbundle's Envelope() accessor re-encodes the payload through base64,
+// which is pure allocation overhead at this call site.
+func dssePayload(b *sgbundle.Bundle) ([]byte, bool) {
+	env, ok := b.Content.(*protobundle.Bundle_DsseEnvelope)
+	if !ok || env.DsseEnvelope == nil {
+		return nil, false
+	}
+	return env.DsseEnvelope.GetPayload(), true
 }
 
 func (m *Manager[T]) newCheckOpts(ctx context.Context) *cosign.CheckOpts {
