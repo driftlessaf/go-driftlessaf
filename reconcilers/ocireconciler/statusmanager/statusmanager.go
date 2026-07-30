@@ -31,7 +31,7 @@ import (
 	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
-	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 )
 
@@ -55,13 +55,13 @@ type Status[T any] struct {
 
 // Manager writes and reads reconciliation status as attestations.
 type Manager[T any] struct {
-	identity        string
-	signingIdentity cosign.Identity
-	predicateType   string
-	readOnly        bool
+	identity      string
+	predicateType string
+	readOnly      bool
 
-	signer          *secant.BundleSigner
-	trustedMaterial root.TrustedMaterial
+	signer       *secant.BundleSigner
+	verifier     *verify.Verifier
+	certIdentity verify.CertificateIdentity
 
 	remoteOpts   []remote.Option
 	repoOverride *name.Repository
@@ -165,6 +165,37 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 		}
 	}
 
+	// The verifier and certificate identity are immutable for the life of
+	// the Manager, so build them once here instead of per read. The option
+	// set mirrors what cosign.VerifyNewBundle derives for these settings
+	// (certificate-based verification with SCTs, a transparency log entry,
+	// and a signed timestamp, each at threshold 1). The statement predicate
+	// is omitted from verification results because verifyAndExtract decodes
+	// it directly from the DSSE payload bytes; materializing the predicate
+	// in the result would repeat that work through protojson at several
+	// times the allocation cost.
+	sanMatcher, err := verify.NewSANMatcher(signingIdentity.Subject, signingIdentity.SubjectRegExp)
+	if err != nil {
+		return nil, fmt.Errorf("creating SAN matcher: %w", err)
+	}
+	issuerMatcher, err := verify.NewIssuerMatcher(signingIdentity.Issuer, signingIdentity.IssuerRegExp)
+	if err != nil {
+		return nil, fmt.Errorf("creating issuer matcher: %w", err)
+	}
+	certIdentity, err := verify.NewCertificateIdentity(sanMatcher, issuerMatcher, certificate.Extensions{})
+	if err != nil {
+		return nil, fmt.Errorf("creating certificate identity: %w", err)
+	}
+	verifier, err := verify.NewVerifier(trustedMaterial,
+		verify.WithSignedCertificateTimestamps(1),
+		verify.WithTransparencyLog(1),
+		verify.WithSignedTimestamps(1),
+		verify.WithoutStatementPredicate(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating bundle verifier: %w", err)
+	}
+
 	predicateType := fmt.Sprintf("https://statusmanager.chainguard.dev/%s", identity)
 
 	remoteOpts := slices.Clone(cfg.remoteOpts)
@@ -193,14 +224,14 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 	}
 
 	return &Manager[T]{
-		identity:        identity,
-		signingIdentity: signingIdentity,
-		predicateType:   predicateType,
-		readOnly:        readOnly,
-		signer:          signer,
-		trustedMaterial: trustedMaterial,
-		remoteOpts:      remoteOpts,
-		repoOverride:    cfg.repoOverride,
+		identity:      identity,
+		predicateType: predicateType,
+		readOnly:      readOnly,
+		signer:        signer,
+		verifier:      verifier,
+		certIdentity:  certIdentity,
+		remoteOpts:    remoteOpts,
+		repoOverride:  cfg.repoOverride,
 	}, nil
 }
 
@@ -303,12 +334,13 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 		return nil, fmt.Errorf("decoding subject digest hex: %w", err)
 	}
 
-	checkOpts := m.newCheckOpts(ctx)
-	policyOpt := verify.WithArtifactDigest(subjectHash.Algorithm, subjectHashBytes)
+	policy := verify.NewPolicy(
+		verify.WithArtifactDigest(subjectHash.Algorithm, subjectHashBytes),
+		verify.WithCertificateIdentity(m.certIdentity))
 
 	var latest *statusCandidate[T]
 	for _, b := range bundles {
-		status, ts, ok := m.verifyAndExtract(ctx, b, checkOpts, policyOpt)
+		status, ts, ok := m.verifyAndExtract(ctx, b, policy)
 		if !ok {
 			continue
 		}
@@ -332,11 +364,12 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 // round-tripping a large findings payload through protojson.Marshal and a
 // second json.Unmarshal multiplies its size in allocations several times
 // over; on findings-heavy statuses that churn was the dominant memory cost
-// of a status read. The Statement is still consulted for the predicate
-// type (already parsed by verification, so free) and the verified
-// timestamp.
-func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, co *cosign.CheckOpts, policyOpt verify.ArtifactPolicyOption) (*Status[T], time.Time, bool) {
-	result, err := cosign.VerifyNewBundle(ctx, co, policyOpt, b)
+// of a status read. The manager's verifier is configured with
+// WithoutStatementPredicate, so the result's Statement is a summary carrying
+// only the statement type, subjects, and predicate type — exactly the fields
+// consulted here alongside the verified timestamp.
+func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, policy verify.PolicyBuilder) (*Status[T], time.Time, bool) {
+	result, err := m.verifier.Verify(b, policy)
 	if err != nil {
 		clog.WarnContextf(ctx, "Bundle verification failed: %v", err)
 		return nil, time.Time{}, false
@@ -371,16 +404,6 @@ func dssePayload(b *sgbundle.Bundle) ([]byte, bool) {
 		return nil, false
 	}
 	return env.DsseEnvelope.GetPayload(), true
-}
-
-func (m *Manager[T]) newCheckOpts(ctx context.Context) *cosign.CheckOpts {
-	return &cosign.CheckOpts{
-		RegistryClientOpts:  m.ociremoteOptions(ctx),
-		Identities:          []cosign.Identity{m.signingIdentity},
-		TrustedMaterial:     m.trustedMaterial,
-		NewBundleFormat:     true,
-		UseSignedTimestamps: true,
-	}
 }
 
 type statusCandidate[T any] struct {
