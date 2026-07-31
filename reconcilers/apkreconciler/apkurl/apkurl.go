@@ -9,14 +9,21 @@ SPDX-License-Identifier: Apache-2.0
 // where repo-path can have multiple path components, and do NOT include the scheme
 // (https://). This matches the format of the apkurl CloudEvents extension.
 //
+// Keys carry a required "@{alg}:{hex}" suffix pinning the APK's control
+// section checksum (the "C:" field in APKINDEX and /lib/apk/db/installed),
+// mirroring how image keys pin a digest. The pinned checksum is the APK's
+// identity: it lets consumers derive the status identity (see StatusDigest)
+// without fetching the APK, and Parse rejects keys without it.
+//
 // Examples:
-//   - "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk"
-//   - "apk.cgr.dev/9a2552c399fb9e7ebb42c63c2c7e7984207eb31c/x86_64/glibc-2.42-r0.apk"
+//   - "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk@sha1:9a378af1ca9dc9afeb27acefee7953b8c6fcda1d"
+//   - "apk.cgr.dev/9a2552c399fb9e7ebb42c63c2c7e7984207eb31c/x86_64/glibc-2.42-r0.apk@sha1:9a378af1ca9dc9afeb27acefee7953b8c6fcda1d"
 package apkurl
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -55,10 +62,63 @@ func init() {
 	}
 }
 
+// Checksum suffix algorithms, keyed by the byte length of the decoded sum.
+// APK control checksums are SHA-1 ("Q1" entries in APKINDEX); SHA-256 ("Q2")
+// is recognized for forward compatibility.
+const (
+	sha1Size   = 20
+	sha256Size = 32
+)
+
+var checksumSizes = map[string]int{
+	"sha1":   sha1Size,
+	"sha256": sha256Size,
+}
+
+// ErrMissingChecksum reports an APK key lacking the required "@{alg}:{hex}"
+// control-checksum suffix. Callers can detect it with errors.Is to
+// distinguish legacy-form keys from other malformations.
+var ErrMissingChecksum = errors.New(`missing required control-checksum suffix ("@{alg}:{hex}")`)
+
+// splitChecksum splits an optional "@{alg}:{hex}" control-checksum suffix
+// from a key, returning the remaining key and the decoded checksum (nil when
+// no suffix is present).
+func splitChecksum(key string) (string, []byte, error) {
+	rest, suffix, found := strings.Cut(key, "@")
+	if !found {
+		return key, nil, nil
+	}
+	alg, hexsum, found := strings.Cut(suffix, ":")
+	if !found {
+		return "", nil, fmt.Errorf("invalid APK key %q: checksum suffix %q is not {alg}:{hex}", key, suffix)
+	}
+	size, ok := checksumSizes[alg]
+	if !ok {
+		return "", nil, fmt.Errorf("invalid APK key %q: unsupported checksum algorithm %q", key, alg)
+	}
+	sum, err := hex.DecodeString(hexsum)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid APK key %q: decoding checksum: %w", key, err)
+	}
+	if len(sum) != size {
+		return "", nil, fmt.Errorf("invalid APK key %q: %s checksum must be %d bytes, got %d", key, alg, size, len(sum))
+	}
+	return rest, sum, nil
+}
+
 // Parse parses an APK URL key into its components.
 // Keys are of the form "{host}/{repo-path...}/{arch}/{package}-{version}.apk"
-// where repo-path can have multiple path components, and do not include the scheme.
+// with a required "@{alg}:{hex}" control-checksum suffix; they do not
+// include the scheme.
 func Parse(key string) (*Key, error) {
+	key, checksum, err := splitChecksum(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(checksum) == 0 {
+		return nil, fmt.Errorf("invalid APK key %q: %w", key, ErrMissingChecksum)
+	}
+
 	// Split into all parts
 	parts := strings.Split(key, "/")
 
@@ -103,9 +163,10 @@ func Parse(key string) (*Key, error) {
 			URI: repoURI,
 		},
 		Package: &apk.Package{
-			Name:    pkgName,
-			Version: version,
-			Arch:    arch,
+			Name:     pkgName,
+			Version:  version,
+			Arch:     arch,
+			Checksum: checksum,
 		},
 	}, nil
 }
@@ -152,9 +213,21 @@ func (k *Key) URL() *url.URL {
 	}
 }
 
-// String returns the key in its canonical form (without scheme).
+// String returns the key in its canonical form (without scheme). When the
+// package carries a control checksum of a recognized algorithm, it is pinned
+// as an "@{alg}:{hex}" suffix so consumers can derive the status identity
+// without fetching the APK; unrecognized checksum shapes are omitted rather
+// than emitting a suffix Parse would reject.
 func (k *Key) String() string {
-	return fmt.Sprintf("%s/%s/%s/%s", k.Host, k.RepoPath, k.Package.Arch, k.Package.Filename())
+	base := fmt.Sprintf("%s/%s/%s/%s", k.Host, k.RepoPath, k.Package.Arch, k.Package.Filename())
+	switch len(k.Package.Checksum) {
+	case sha1Size:
+		return fmt.Sprintf("%s@sha1:%s", base, hex.EncodeToString(k.Package.Checksum))
+	case sha256Size:
+		return fmt.Sprintf("%s@sha256:%s", base, hex.EncodeToString(k.Package.Checksum))
+	default:
+		return base
+	}
 }
 
 // FetchablePackage returns an apk.FetchablePackage for use with apko's APK client.
@@ -181,14 +254,18 @@ func (k *Key) FetchablePackage() apk.FetchablePackage {
 //
 // The checksum uniquely identifies APK content regardless of which repository it
 // came from, enabling status reuse across different repository paths.
-//
-// The pkg parameter should be the parsed APK package with its Checksum field
-// populated from the control section.
-func StatusDigest(pkg *apk.Package) (name.Digest, error) {
-	if len(pkg.Checksum) == 0 {
-		return name.Digest{}, fmt.Errorf("package %s has no checksum", pkg.Name)
+func StatusDigest(checksum []byte) (name.Digest, error) {
+	if len(checksum) == 0 {
+		return name.Digest{}, errors.New("empty control checksum")
 	}
-	checksumHex := hex.EncodeToString(pkg.Checksum)
+	checksumHex := hex.EncodeToString(checksum)
 	syntheticHash := sha256.Sum256([]byte(checksumHex))
 	return name.NewDigest(fmt.Sprintf("apk.cgr.dev/__@sha256:%s", hex.EncodeToString(syntheticHash[:])))
+}
+
+// StatusDigest returns the status identity pinned by this key's control
+// checksum. Parse guarantees the checksum is present, so this cannot fail
+// for parsed keys.
+func (k *Key) StatusDigest() (name.Digest, error) {
+	return StatusDigest(k.Package.Checksum)
 }

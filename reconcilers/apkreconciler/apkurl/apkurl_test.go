@@ -8,9 +8,10 @@ package apkurl
 import (
 	"encoding/hex"
 	"testing"
-
-	"chainguard.dev/apko/pkg/apk/apk"
 )
+
+// testPin is a well-formed control-checksum suffix shared by fixtures.
+const testPin = "@sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709"
 
 func TestParse(t *testing.T) {
 	// Valid UIDP components for testing:
@@ -36,7 +37,7 @@ func TestParse(t *testing.T) {
 		// Wolfi-style paths (friendly names)
 		{
 			name:         "wolfi os repository",
-			key:          "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
+			key:          "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantHost:     "packages.wolfi.dev",
 			wantRepoPath: "os",
 			wantArch:     "x86_64",
@@ -46,7 +47,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:         "wolfi aarch64",
-			key:          "packages.wolfi.dev/os/aarch64/busybox-1.36.1-r0.apk",
+			key:          "packages.wolfi.dev/os/aarch64/busybox-1.36.1-r0.apk" + testPin,
 			wantHost:     "packages.wolfi.dev",
 			wantRepoPath: "os",
 			wantArch:     "aarch64",
@@ -56,7 +57,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:         "friendly name repo path",
-			key:          "apk.cgr.dev/chainguard/x86_64/glibc-2.42-r0.apk",
+			key:          "apk.cgr.dev/chainguard/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: "chainguard",
 			wantArch:     "x86_64",
@@ -67,7 +68,7 @@ func TestParse(t *testing.T) {
 		// UIDP-style paths (for private registries)
 		{
 			name:         "UIDP (root only)",
-			key:          "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk",
+			key:          "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: validRoot,
 			wantArch:     "x86_64",
@@ -77,7 +78,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:         "UIDP with one child",
-			key:          "apk.cgr.dev/" + validRoot + "/" + validChild1 + "/x86_64/glibc-2.42-r0.apk",
+			key:          "apk.cgr.dev/" + validRoot + "/" + validChild1 + "/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: validRoot + "/" + validChild1,
 			wantArch:     "x86_64",
@@ -87,7 +88,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:         "UIDP with two children",
-			key:          "apk.cgr.dev/" + validRoot + "/" + validChild1 + "/" + validChild2 + "/aarch64/openssl-3.1.0-r5.apk",
+			key:          "apk.cgr.dev/" + validRoot + "/" + validChild1 + "/" + validChild2 + "/aarch64/openssl-3.1.0-r5.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: validRoot + "/" + validChild1 + "/" + validChild2,
 			wantArch:     "aarch64",
@@ -98,7 +99,7 @@ func TestParse(t *testing.T) {
 		// Package name edge cases
 		{
 			name:         "package name with dashes",
-			key:          "apk.cgr.dev/" + validRoot + "/x86_64/kubectl-bash-completion-1.29.5-r0.apk",
+			key:          "apk.cgr.dev/" + validRoot + "/x86_64/kubectl-bash-completion-1.29.5-r0.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: validRoot,
 			wantArch:     "x86_64",
@@ -108,7 +109,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:         "package name with many dashes",
-			key:          "apk.cgr.dev/" + validRoot + "/x86_64/some-very-long-package-name-1.0.0-r0.apk",
+			key:          "apk.cgr.dev/" + validRoot + "/x86_64/some-very-long-package-name-1.0.0-r0.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: validRoot,
 			wantArch:     "x86_64",
@@ -118,7 +119,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:         "version with epoch",
-			key:          "apk.cgr.dev/" + validRoot + "/x86_64/python-3.11-3.11.8-r0.apk",
+			key:          "apk.cgr.dev/" + validRoot + "/x86_64/python-3.11-3.11.8-r0.apk" + testPin,
 			wantHost:     "apk.cgr.dev",
 			wantRepoPath: validRoot,
 			wantArch:     "x86_64",
@@ -127,6 +128,11 @@ func TestParse(t *testing.T) {
 			wantRepoURI:  "https://apk.cgr.dev/" + validRoot + "/x86_64",
 		},
 		// Error cases
+		{
+			name:    "missing checksum suffix",
+			key:     "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
+			wantErr: true,
+		},
 		{
 			name:    "empty key",
 			key:     "",
@@ -328,22 +334,22 @@ func TestKey_URL(t *testing.T) {
 	}{
 		{
 			name:    "wolfi",
-			key:     "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
+			key:     "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantURL: "https://packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
 		},
 		{
 			name:    "UIDP",
-			key:     "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk",
+			key:     "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantURL: "https://apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk",
 		},
 		{
 			name:    "multi-part repo path",
-			key:     "apk.cgr.dev/" + validRoot + "/" + validChild + "/x86_64/glibc-2.42-r0.apk",
+			key:     "apk.cgr.dev/" + validRoot + "/" + validChild + "/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantURL: "https://apk.cgr.dev/" + validRoot + "/" + validChild + "/x86_64/glibc-2.42-r0.apk",
 		},
 		{
 			name:    "aarch64",
-			key:     "packages.wolfi.dev/os/aarch64/busybox-1.36.1-r0.apk",
+			key:     "packages.wolfi.dev/os/aarch64/busybox-1.36.1-r0.apk" + testPin,
 			wantURL: "https://packages.wolfi.dev/os/aarch64/busybox-1.36.1-r0.apk",
 		},
 	}
@@ -375,19 +381,19 @@ func TestKey_String(t *testing.T) {
 	}{
 		{
 			name: "wolfi",
-			key:  "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
+			key:  "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin,
 		},
 		{
 			name: "UIDP",
-			key:  "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk",
+			key:  "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk" + testPin,
 		},
 		{
 			name: "multi-part repo path",
-			key:  "apk.cgr.dev/" + validRoot + "/" + validChild + "/x86_64/glibc-2.42-r0.apk",
+			key:  "apk.cgr.dev/" + validRoot + "/" + validChild + "/x86_64/glibc-2.42-r0.apk" + testPin,
 		},
 		{
 			name: "complex package name",
-			key:  "packages.wolfi.dev/os/x86_64/kubectl-bash-completion-1.29.5-r0.apk",
+			key:  "packages.wolfi.dev/os/x86_64/kubectl-bash-completion-1.29.5-r0.apk" + testPin,
 		},
 	}
 
@@ -408,7 +414,7 @@ func TestKey_String(t *testing.T) {
 }
 
 func TestKey_FetchablePackage(t *testing.T) {
-	key := "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk"
+	key := "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin
 	k, err := Parse(key)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
@@ -435,12 +441,12 @@ func TestKey_PackageFilename(t *testing.T) {
 	}{
 		{
 			name:         "simple",
-			key:          "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
+			key:          "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin,
 			wantFilename: "glibc-2.42-r0.apk",
 		},
 		{
 			name:         "complex package",
-			key:          "packages.wolfi.dev/os/x86_64/kubectl-bash-completion-1.29.5-r0.apk",
+			key:          "packages.wolfi.dev/os/x86_64/kubectl-bash-completion-1.29.5-r0.apk" + testPin,
 			wantFilename: "kubectl-bash-completion-1.29.5-r0.apk",
 		},
 	}
@@ -471,15 +477,15 @@ func TestRoundTrip(t *testing.T) {
 	// Test that parsing and then String() returns the original key
 	keys := []string{
 		// Wolfi-style paths
-		"packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk",
-		"packages.wolfi.dev/os/aarch64/openssl-3.1.0-r5.apk",
+		"packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin,
+		"packages.wolfi.dev/os/aarch64/openssl-3.1.0-r5.apk" + testPin,
 		// UIDP-style paths
-		"apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk",
-		"apk.cgr.dev/" + validRoot + "/" + validChild1 + "/x86_64/glibc-2.42-r0.apk",
-		"apk.cgr.dev/" + validRoot + "/" + validChild1 + "/" + validChild2 + "/aarch64/openssl-3.1.0-r5.apk",
+		"apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk" + testPin,
+		"apk.cgr.dev/" + validRoot + "/" + validChild1 + "/x86_64/glibc-2.42-r0.apk" + testPin,
+		"apk.cgr.dev/" + validRoot + "/" + validChild1 + "/" + validChild2 + "/aarch64/openssl-3.1.0-r5.apk" + testPin,
 		// Mixed
-		"apk.cgr.dev/chainguard/x86_64/curl-8.5.0-r0.apk",
-		"packages.wolfi.dev/os/x86_64/python-3.11-3.11.8-r0.apk",
+		"apk.cgr.dev/chainguard/x86_64/curl-8.5.0-r0.apk" + testPin,
+		"packages.wolfi.dev/os/x86_64/python-3.11-3.11.8-r0.apk" + testPin,
 	}
 
 	for _, key := range keys {
@@ -506,27 +512,20 @@ func TestStatusDigest(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		pkg     *apk.Package
-		wantErr bool
+		name     string
+		checksum []byte
+		wantErr  bool
 	}{{
-		name: "valid checksum",
-		pkg: &apk.Package{
-			Name:     "glibc",
-			Checksum: checksum,
-		},
+		name:     "valid checksum",
+		checksum: checksum,
 	}, {
-		name: "empty checksum",
-		pkg: &apk.Package{
-			Name: "glibc",
-			// No checksum
-		},
+		name:    "empty checksum",
 		wantErr: true,
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			digest, err := StatusDigest(tt.pkg)
+			digest, err := StatusDigest(tt.checksum)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("StatusDigest() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -562,17 +561,12 @@ func TestStatusDigest_Deterministic(t *testing.T) {
 		t.Fatalf("failed to decode test checksum: %v", err)
 	}
 
-	pkg := &apk.Package{
-		Name:     "glibc",
-		Checksum: checksum,
-	}
-
-	digest1, err := StatusDigest(pkg)
+	digest1, err := StatusDigest(checksum)
 	if err != nil {
 		t.Fatalf("first StatusDigest() error = %v", err)
 	}
 
-	digest2, err := StatusDigest(pkg)
+	digest2, err := StatusDigest(checksum)
 	if err != nil {
 		t.Fatalf("second StatusDigest() error = %v", err)
 	}

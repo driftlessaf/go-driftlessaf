@@ -11,11 +11,13 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Key Format
 //
-// APK keys are of the form "{host}/{uidp}/{arch}/{package}-{version}.apk" and do
+// APK keys are of the form
+// "{host}/{uidp}/{arch}/{package}-{version}.apk@{alg}:{hex}", pinning the
+// APK's control checksum, and do
 // NOT include the scheme (https://). This matches the format of the apkurl CloudEvents
 // extension. Use key.URL() to get the full HTTPS URL for fetching the APK.
 //
-// Example key: "apk.cgr.dev/a1b2c3d4.../x86_64/glibc-2.42-r0.apk"
+// Example key: "apk.cgr.dev/a1b2c3d4.../x86_64/glibc-2.42-r0.apk@sha1:9a37..."
 //
 // # Basic Usage
 //

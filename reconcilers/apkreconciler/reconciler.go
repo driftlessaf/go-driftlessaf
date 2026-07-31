@@ -42,8 +42,13 @@ func New(opts ...Option) *Reconciler {
 }
 
 // Reconcile parses the APK key and invokes the configured reconciliation func.
-// Keys are of the form "{host}/{uidp}/{arch}/{package}-{version}.apk" and do
-// not include the scheme. Use key.URL() to get the full HTTPS URL for fetching.
+// Keys are of the form
+// "{host}/{uidp}/{arch}/{package}-{version}.apk@{alg}:{hex}", pinning the
+// APK's control checksum, and do not include the scheme. Use key.URL() to get
+// the full HTTPS URL for fetching. Malformed keys — including keys missing
+// the required checksum pin — are logged and completed without retrying:
+// they can never become parseable, and the enqueuers re-offer every live APK
+// under a well-formed key.
 //
 // Errors wrapping a *breaker.Error (transient host failures reported by
 // breaker.Transport) requeue with the breaker's backoff, floored so periodic
@@ -56,7 +61,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 	// Parse the APK key into its components
 	apkKey, err := apkurl.Parse(key)
 	if err != nil {
-		return workqueue.NonRetriableError(fmt.Errorf("parsing APK key %q: %w", key, err), "invalid APK key")
+		reason := "malformed APK key"
+		if errors.Is(err, apkurl.ErrMissingChecksum) {
+			reason = "APK key missing control-checksum pin"
+		}
+		return workqueue.NonRetriableError(fmt.Errorf("parsing APK key %q: %w", key, err), reason)
 	}
 
 	var berr *breaker.Error

@@ -16,9 +16,10 @@ import (
 )
 
 const (
+	testPin    = "@sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709"
 	validRoot  = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	validChild = "1234567890abcdef"
-	validKey   = "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk"
+	validKey   = "apk.cgr.dev/" + validRoot + "/x86_64/glibc-2.42-r0.apk" + testPin
 )
 
 func TestNew(t *testing.T) {
@@ -99,7 +100,7 @@ func TestReconcile(t *testing.T) {
 	})
 
 	t.Run("valid key with multi-part repo path", func(t *testing.T) {
-		key := "apk.cgr.dev/" + validRoot + "/" + validChild + "/aarch64/openssl-3.1.0-r5.apk"
+		key := "apk.cgr.dev/" + validRoot + "/" + validChild + "/aarch64/openssl-3.1.0-r5.apk" + testPin
 		var receivedKey *apkurl.Key
 		r := New(WithReconciler(func(ctx context.Context, key *apkurl.Key) error {
 			receivedKey = key
@@ -120,7 +121,7 @@ func TestReconcile(t *testing.T) {
 	})
 
 	t.Run("valid key with friendly name repo path", func(t *testing.T) {
-		key := "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk"
+		key := "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk" + testPin
 		var receivedKey *apkurl.Key
 		r := New(WithReconciler(func(ctx context.Context, key *apkurl.Key) error {
 			receivedKey = key
@@ -154,6 +155,32 @@ func TestReconcile(t *testing.T) {
 		// Should be a non-retriable error
 		if details := workqueue.GetNonRetriableDetails(err); details == nil {
 			t.Error("invalid key should return non-retriable error")
+		}
+	})
+
+	t.Run("invalid key - missing checksum pin", func(t *testing.T) {
+		r := New(WithReconciler(func(ctx context.Context, key *apkurl.Key) error {
+			t.Error("reconcileFunc should not be called for a key without a checksum pin")
+			return nil
+		}))
+
+		// A well-formed legacy key lacking the required checksum suffix is
+		// completed without retrying: it can never become parseable, and the
+		// enqueuers re-offer every live APK under a pinned key.
+		err := r.Reconcile(context.Background(), "apk.cgr.dev/"+validRoot+"/x86_64/glibc-2.42-r0.apk")
+		if err == nil {
+			t.Fatal("Reconcile() should error for a key without a checksum pin")
+		}
+		// The non-retriable wrapper crosses a gRPC status boundary, so the
+		// sentinel is not visible through errors.Is here; the classified
+		// reason carries the distinction instead (the sentinel itself is
+		// pinned by the apkurl package's tests).
+		details := workqueue.GetNonRetriableDetails(err)
+		if details == nil {
+			t.Fatal("missing checksum pin should return non-retriable error")
+		}
+		if want := "APK key missing control-checksum pin"; details.Message != want {
+			t.Errorf("reason: got = %q, want = %q", details.Message, want)
 		}
 	})
 
