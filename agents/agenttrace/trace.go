@@ -277,7 +277,6 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 	spanAttrs := []oteltrace.SpanStartOption{
 		oteltrace.WithSpanKind(oteltrace.SpanKindClient),
 		oteltrace.WithAttributes(
-			attribute.String("agent.prompt", prompt),
 			attribute.String("gen_ai.operation.name", "invoke_agent"),
 		),
 	}
@@ -296,13 +295,18 @@ func newTrace[T any](ctx context.Context, prompt string, opts ...StartTraceOptio
 		}
 	}
 
-	// Payload emission (gen_ai.prompt + gen_ai.input.messages) is gated on
-	// the WithPayloadsEnabled ctx opt-in. Staging can opt in; prod stays off
-	// pending security review because prompts may contain build-log tokens
-	// and internal URLs. Both gen_ai.prompt and gen_ai.input.messages are
-	// emitted so backends that read either OTel-semconv variant of the
-	// payload attribute pick it up.
+	// Payload emission (agent.prompt, gen_ai.prompt + gen_ai.input.messages)
+	// is gated on the WithPayloadsEnabled ctx opt-in. Staging can opt in;
+	// prod stays off pending security review because prompts may contain
+	// build-log tokens, internal URLs, and customer-confidential submission
+	// text. Both gen_ai.prompt and gen_ai.input.messages are emitted so
+	// backends that read either OTel-semconv variant of the payload
+	// attribute pick it up; agent.prompt rides the same gate because it
+	// carries the identical rendered prompt.
 	if payloadsEnabledFrom(ctx) && prompt != "" {
+		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(
+			attribute.String("agent.prompt", prompt),
+		))
 		if payload, err := json.Marshal([]map[string]string{{"role": "user", "content": prompt}}); err == nil {
 			payloadStr, truncated := truncatePayload(string(payload))
 			spanAttrs = append(spanAttrs, oteltrace.WithAttributes(

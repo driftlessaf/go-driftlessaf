@@ -157,11 +157,12 @@ func TestPayloadsEnabled(t *testing.T) {
 }
 
 // TestPayloadsDisabled verifies that with no WithPayloadsEnabled opt-in on
-// the ctx, the root span has no prompt/completion payload attributes,
-// only the agent name and the invocation label. As in TestPayloadsEnabled,
-// no token usage attrs land on the root — token usage is per-call and
-// belongs on the turn span. Absence of the payload keys and the token
-// attrs falls out of the whole-map comparison.
+// the ctx, the root span has no prompt/completion payload attributes —
+// including agent.prompt, which carries the identical rendered prompt and
+// must ride the same gate — only the agent name and the invocation label.
+// As in TestPayloadsEnabled, no token usage attrs land on the root — token
+// usage is per-call and belongs on the turn span. Absence of the payload
+// keys and the token attrs falls out of the whole-map comparison.
 func TestPayloadsDisabled(t *testing.T) {
 	sr := setupRecorder(t)
 
@@ -178,7 +179,6 @@ func TestPayloadsDisabled(t *testing.T) {
 	}
 
 	wantRoot := map[string]any{
-		"agent.prompt":                 "analyze these logs",
 		"gen_ai.operation.name":        "invoke_agent",
 		"gen_ai.agent.name":            "loganalyzer",
 		"driftlessaf.invocation.label": "autofix: pr:chainguard-dev/mono/38632",
@@ -290,8 +290,9 @@ func TestDefaultAgentNameFromContext(t *testing.T) {
 	if root == nil {
 		t.Fatalf("root invoke_agent span not found; got %d spans", len(spans))
 	}
+	// No agent.prompt: prompt-bearing span attributes are gated behind the
+	// payload opt-in (WithPayloadsEnabled), which this context does not set.
 	wantRoot := map[string]any{
-		"agent.prompt":                 "prompt",
 		"gen_ai.operation.name":        "invoke_agent",
 		"gen_ai.agent.name":            "judge",
 		"driftlessaf.invocation.label": "autofix: pr:foo/bar/1",
