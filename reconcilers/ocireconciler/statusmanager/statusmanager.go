@@ -299,12 +299,14 @@ func (s *Session[T]) SetActualState(ctx context.Context, status *Status[T]) erro
 	}
 	// SkipSame short-circuits before signing when an existing bundle carries a
 	// byte-identical payload, so re-persisting an unchanged status costs a
-	// referrer read instead of a Fulcio certificate, a Rekor upload, a
-	// referrer write, and a delete of the prior bundle. When the payload
-	// differs the new bundle is written alongside the old one rather than
-	// replacing it: readers pick the latest verified bundle (see
-	// fetchLatestStatus) and superseded bundles are reaped by the status
-	// repository's untagged-referrer cleanup policy.
+	// referrer read instead of a Fulcio certificate, a Rekor upload, and a
+	// referrer write. When the payload differs, superseded bundles are
+	// deleted before the replacement is written, so each status digest
+	// converges on a single bundle; a reader racing the swap still verifies
+	// whichever bundles remain visible and picks the latest (see
+	// fetchLatestStatus). Registry retention cannot be relied on here:
+	// Artifact Registry cleanup policies operate on versions, and referrer
+	// manifests are not versions.
 	if err := transient.Retry(ctx, "writing attestation bundle", retryable, func(ctx context.Context) error {
 		return secant.AttestBundle(ctx, secant.SkipSame, []*types.Statement{stmt}, s.manager.signer, s.manager.remoteOptions(ctx))
 	}); err != nil {

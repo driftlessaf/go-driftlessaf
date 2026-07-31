@@ -268,8 +268,11 @@ type LargeTestStatus struct {
 // TestStatusManagerSkipsIdenticalStatus pins the SKIPSAME write semantics:
 // re-persisting a byte-identical status is a registry no-op (the original
 // bundle remains the only referrer, and nothing is signed or uploaded),
-// while a changed status is written alongside the superseded bundle and
-// wins on read.
+// while a changed status supersedes the prior bundle — the write deletes
+// it, so every status digest converges on a single bundle. Registry
+// retention cannot be relied on for that convergence: Artifact Registry
+// cleanup policies operate on versions, and referrer manifests are not
+// versions.
 func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
 	ctx := context.Background()
 
@@ -309,8 +312,8 @@ func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
 	require.NoError(t, session.SetActualState(ctx, status), "identical write")
 	require.Equal(t, 1, referrerCount(), "identical write should be skipped")
 
-	// A changed payload is written alongside the superseded bundle rather
-	// than replacing it; readers resolve the newest verified bundle.
+	// A changed payload supersedes the prior bundle: the write deletes it
+	// and the replacement remains the only referrer.
 	updated := &statusmanager.Status[TestStatus]{
 		Details: TestStatus{
 			Message:   "reconciliation complete again",
@@ -318,7 +321,7 @@ func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
 		},
 	}
 	require.NoError(t, session.SetActualState(ctx, updated), "changed write")
-	require.Equal(t, 2, referrerCount(), "changed write should add a bundle without deleting the superseded one")
+	require.Equal(t, 1, referrerCount(), "changed write should supersede the prior bundle")
 
 	observed, err := session.ObservedState(ctx)
 	require.NoError(t, err, "reading status after changed write")
