@@ -32,6 +32,12 @@ The core types compose into a suspend/park/wake/resume lifecycle:
   - FrameAnswer / FramedAnswers: wrap friend answers in distinctive
     delimiters, substitute a placeholder for empty answers, and cap length
     on a UTF-8 boundary before they are injected as tool results.
+    StripAnswerDelimiters and CapText are the same boundaries for the text
+    AROUND a frame: a caller rendering a transcript must strip the delimiters
+    out of every agent-authored string it interpolates — or the agent can
+    forge a frame of its own and manufacture an authorization no human gave —
+    and should cap those strings too, because the agent-authored half of a
+    turn is the half whose length nothing else bounds.
 
 # Fail-Closed Validation
 
