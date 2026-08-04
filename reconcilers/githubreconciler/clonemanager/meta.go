@@ -21,6 +21,7 @@ type Meta struct {
 	tokenSourceFor githubreconciler.TokenSourceFunc
 	identity       string
 	signer         git.Signer
+	opts           []Option
 
 	mu       sync.RWMutex
 	managers map[string]*Manager
@@ -28,13 +29,15 @@ type Meta struct {
 
 // NewMeta creates a Meta that caches Manager instances per owner/repo.
 // The tokenSourceFor function is called to obtain credentials when a new
-// Manager is needed for a repository.
-func NewMeta(ctx context.Context, tokenSourceFor githubreconciler.TokenSourceFunc, identity string, signer git.Signer) *Meta {
+// Manager is needed for a repository. The options are applied to every
+// Manager it creates.
+func NewMeta(ctx context.Context, tokenSourceFor githubreconciler.TokenSourceFunc, identity string, signer git.Signer, opts ...Option) *Meta {
 	return &Meta{
 		ctx:            ctx,
 		tokenSourceFor: tokenSourceFor,
 		identity:       identity,
 		signer:         signer,
+		opts:           opts,
 		managers:       make(map[string]*Manager),
 	}
 }
@@ -67,7 +70,7 @@ func (m *Meta) Get(owner, repo string) (*Manager, error) {
 		return nil, fmt.Errorf("create token source: %w", err)
 	}
 
-	mgr, err = New(m.ctx, tokenSource, m.identity, m.signer)
+	mgr, err = New(m.ctx, tokenSource, m.identity, m.signer, m.opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create clone manager: %w", err)
 	}
