@@ -92,7 +92,7 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 			Description: "Read content from a file starting at a byte offset. Returns the content, next_offset to continue reading, and remaining bytes. Use list_directory to check file size before reading large files.",
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file to read (relative to repository root)", Required: true},
-				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0)", Required: false},
+				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0)", Required: false, Minimum: Ptr[float64](0)},
 				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). Pass -1 to read the entire file, but avoid this if you don't know the file size as it may be very large.", Required: false},
 			},
 			Annotations: &ToolAnnotations{
@@ -110,6 +110,10 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 
 			offset, _ := OptionalParam[int64](call, "offset", 0)
 			limit, _ := OptionalParam[int](call, "limit", 20000)
+
+			if errResp := rejectNegativeOffset(call, trace, offset); errResp != nil {
+				return errResp
+			}
 
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path, "offset": offset, "limit": limit})
 
@@ -429,7 +433,7 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the directory to list (relative to repository root, use '.' for root)", Required: true},
 				{Name: "filter", Type: "string", Description: "Filter entries by glob pattern (e.g., \"*.go\") or exact filename (e.g., \"main.go\"). Only * wildcards are supported.", Required: false},
-				{Name: "offset", Type: "integer", Description: "Number of entries to skip (default: 0)", Required: false},
+				{Name: "offset", Type: "integer", Description: "Number of entries to skip (default: 0)", Required: false, Minimum: Ptr[float64](0)},
 				{Name: "limit", Type: "integer", Description: "Maximum entries to return (default: 50)", Required: false},
 			},
 			Annotations: &ToolAnnotations{
@@ -448,6 +452,10 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 			filter, _ := OptionalParam[string](call, "filter", "")
 			offset, _ := OptionalParam[int](call, "offset", 0)
 			limit, _ := OptionalParam[int](call, "limit", 50)
+
+			if errResp := rejectNegativeOffset(call, trace, int64(offset)); errResp != nil {
+				return errResp
+			}
 
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path, "filter": filter, "offset": offset, "limit": limit})
 
@@ -472,7 +480,7 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 				{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
 				{Name: "path", Type: "string", Description: "Directory to search within (relative to repository root, default: \".\")", Required: false},
 				{Name: "filter", Type: "string", Description: "File filter — glob with * wildcards (e.g., \"*.go\") or exact filename (e.g., \"Makefile\")", Required: false},
-				{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false},
+				{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false, Minimum: Ptr[float64](0)},
 				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 50)", Required: false},
 			},
 			Annotations: &ToolAnnotations{
@@ -493,6 +501,10 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 			offset, _ := OptionalParam[int](call, "offset", 0)
 			limit, _ := OptionalParam[int](call, "limit", 50)
 
+			if errResp := rejectNegativeOffset(call, trace, int64(offset)); errResp != nil {
+				return errResp
+			}
+
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": searchPath, "pattern": pattern, "filter": filter, "offset": offset, "limit": limit})
 
 			result, err := searchCodebase(ctx, searchPath, pattern, filter, offset, limit)
@@ -508,6 +520,20 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 }
 
 // Shared helpers
+
+// rejectNegativeOffset returns an error response when a model supplied a
+// negative pagination offset. Offsets feed slice expressions in the worktree
+// callbacks, where a negative value panics and takes down the whole process, so
+// the call is rejected with a hint the model can act on. Returns nil when the
+// offset is usable.
+func rejectNegativeOffset[Resp any](call ToolCall, trace *agenttrace.Trace[Resp], offset int64) map[string]any {
+	if offset >= 0 {
+		return nil
+	}
+	err := fmt.Errorf("offset must be >= 0, got %d", offset)
+	trace.BadToolCall(call.ID, call.Name, call.Args, err)
+	return params.ErrorWithContext(err, map[string]any{"offset": offset})
+}
 
 // formatListResult converts a ListResult into the JSON response map.
 func formatListResult(path string, result callbacks.ListResult) map[string]any {

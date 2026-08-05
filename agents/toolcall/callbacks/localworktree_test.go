@@ -544,6 +544,51 @@ func TestLocalWorktree_SearchCodebase(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("negative limit returns every match", func(t *testing.T) {
+		all, err := cb.SearchCodebase(ctx, ".", `func Foo`, "", 0, -1)
+		if err != nil {
+			t.Fatalf("SearchCodebase: %v", err)
+		}
+		if len(all.Matches) == 0 {
+			t.Error("matches: got = 0, want > 0")
+		}
+		if all.HasMore {
+			t.Error("has_more: got = true, want = false")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Pagination offset validation
+// ---------------------------------------------------------------------------
+
+// TestLocalWorktree_NegativeOffset is a regression test: offsets arrive from
+// model-generated tool calls and index slices directly, so a negative offset
+// must return an error instead of panicking and killing the process.
+func TestLocalWorktree_NegativeOffset(t *testing.T) {
+	r := openTestRoot(t, map[string]string{"foo.go": "package foo\n\nfunc Foo() {}\n"})
+	cb := callbacks.LocalWorktree(r)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"ReadFile", func() error { _, err := cb.ReadFile(ctx, "foo.go", -1, 20000); return err }},
+		{"ListDirectory", func() error { _, err := cb.ListDirectory(ctx, ".", "", -1, 50); return err }},
+		{"SearchCodebase", func() error { _, err := cb.SearchCodebase(ctx, ".", `func Foo`, "", -1, 50); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("want error for negative offset, got nil")
+			}
+			if !strings.Contains(err.Error(), "offset must be >= 0") {
+				t.Errorf("error: got = %q, want it to mention the offset bound", err)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -93,6 +93,7 @@ type EditResult struct {
 type WorktreeCallbacks struct {
 	// ReadFile reads content from a file starting at the given byte offset,
 	// returning up to limit bytes. Pass limit=-1 to read the entire file.
+	// A negative offset is invalid and must return an error.
 	ReadFile func(ctx context.Context, path string, offset int64, limit int) (ReadResult, error)
 
 	// WriteFile creates or overwrites a file with the given content and mode.
@@ -115,7 +116,8 @@ type WorktreeCallbacks struct {
 
 	// ListDirectory lists directory entries with metadata. The filter
 	// parameter supports glob patterns (with * wildcards) or exact name
-	// matching. Results are paginated by offset and limit.
+	// matching. Results are paginated by offset and limit. A negative offset
+	// is invalid and must return an error.
 	ListDirectory func(ctx context.Context, path, filter string, offset, limit int) (ListResult, error)
 
 	// EditFile replaces occurrences of oldString with newString in the file
@@ -125,7 +127,8 @@ type WorktreeCallbacks struct {
 
 	// SearchCodebase searches for a regex pattern across files. The filter
 	// parameter supports glob patterns (with * wildcards) or exact filename
-	// matching. Results are paginated by offset and limit. Match results
-	// contain byte offsets into files (no content).
+	// matching. Results are paginated by offset and limit. A negative offset
+	// is invalid and must return an error. Match results contain byte offsets
+	// into files (no content).
 	SearchCodebase func(ctx context.Context, path, pattern, filter string, offset, limit int) (SearchResult, error)
 }

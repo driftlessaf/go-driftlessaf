@@ -21,6 +21,9 @@ import (
 func LocalWorktree(r *os.Root) WorktreeCallbacks {
 	return WorktreeCallbacks{
 		ReadFile: func(_ context.Context, path string, offset int64, limit int) (ReadResult, error) {
+			if err := checkOffset(offset); err != nil {
+				return ReadResult{}, err
+			}
 			data, err := r.ReadFile(path)
 			if err != nil {
 				return ReadResult{}, err
@@ -110,6 +113,9 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 		},
 
 		ListDirectory: func(_ context.Context, path, filter string, offset, limit int) (ListResult, error) {
+			if err := checkOffset(int64(offset)); err != nil {
+				return ListResult{}, err
+			}
 			entries, err := fs.ReadDir(r.FS(), path)
 			if err != nil {
 				return ListResult{}, err
@@ -161,6 +167,9 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 		},
 
 		SearchCodebase: func(_ context.Context, path, pattern, filter string, offset, limit int) (SearchResult, error) {
+			if err := checkOffset(int64(offset)); err != nil {
+				return SearchResult{}, err
+			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				return SearchResult{}, fmt.Errorf("invalid pattern: %w", err)
@@ -192,6 +201,16 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			return SearchResult{Matches: allMatches}, nil
 		},
 	}
+}
+
+// checkOffset rejects a negative pagination offset. Offsets reach these
+// callbacks from model-generated tool calls and feed slice expressions below, so
+// a negative value has to surface as an error rather than a panic.
+func checkOffset(offset int64) error {
+	if offset < 0 {
+		return fmt.Errorf("offset must be >= 0, got %d", offset)
+	}
+	return nil
 }
 
 // localWalkDir recursively walks the directory tree under r starting at dir
