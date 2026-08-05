@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os/signal"
@@ -42,10 +43,7 @@ func New(ctx context.Context, identity string, cc *githubreconciler.ClientCache,
 	if err != nil {
 		return nil, fmt.Errorf("get zone from metadata: %w", err)
 	}
-	modelRegion := cfg.ModelRegion
-	if modelRegion == "" {
-		modelRegion = zone[:strings.LastIndex(zone, "-")]
-	}
+	modelRegion := cmp.Or(cfg.ModelRegion, zone[:strings.LastIndex(zone, "-")])
 
 	signer, err := gitsign.NewSigner(ctx)
 	if err != nil {
