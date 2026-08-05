@@ -6,9 +6,18 @@ SPDX-License-Identifier: Apache-2.0
 package changemanager
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"text/template"
+
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
+	"github.com/google/go-github/v88/github"
 )
 
 type testData struct {
@@ -199,5 +208,180 @@ func TestExtractFromBody_RealisticPRBody(t *testing.T) {
 	}
 	if got.PackageName != want.PackageName || got.Nested == nil || got.Nested.Field2 != want.Nested.Field2 {
 		t.Errorf("Extract = %+v, want %+v", got, want)
+	}
+}
+
+// TestCollectFindings locks in the client-side classification of statusCheckRollup
+// contexts that replaced the server-side checkSuites filterBy: a FAILURE conclusion
+// becomes a finding, a not-yet-complete status becomes a pending check, and
+// success/neutral/cancelled runs plus non-CheckRun contexts are ignored. The
+// cancelled case matters — the old query used filterBy:{conclusions:[FAILURE]},
+// so only FAILURE (not CANCELLED/TIMED_OUT/etc.) was ever treated as a failure.
+func TestCollectFindings(t *testing.T) {
+	cr := func(id int64, name, status, conclusion string) gqlStatusCheckRollupContext {
+		return gqlStatusCheckRollupContext{
+			Typename: "CheckRun",
+			CheckRun: gqlCheckRunNode{
+				DatabaseId: id,
+				Name:       name,
+				Status:     status,
+				Conclusion: conclusion,
+				DetailsUrl: "https://ci/" + name,
+			},
+		}
+	}
+
+	contexts := gqlRollupContextsConnection{
+		Nodes: []gqlStatusCheckRollupContext{
+			cr(1, "build", "COMPLETED", "FAILURE"),
+			cr(2, "unit-tests", "IN_PROGRESS", ""),
+			cr(3, "lint", "QUEUED", ""),
+			cr(4, "vet", "COMPLETED", "SUCCESS"),
+			cr(5, "sbom", "COMPLETED", "NEUTRAL"),
+			cr(6, "flaky", "COMPLETED", "CANCELLED"), // not FAILURE -> not a finding
+			{Typename: "StatusContext"},              // legacy commit status -> ignored
+		},
+		// PageInfo.HasNextPage is false, so paginateRollupContexts is never called
+		// and the nil gqlClient is safe.
+	}
+
+	findings, pending, err := collectFindings(t.Context(), nil, "owner", "repo", "sha", contexts)
+	if err != nil {
+		t.Fatalf("collectFindings: %v", err)
+	}
+
+	if len(findings) != 1 {
+		t.Fatalf("findings: got %d, want 1 (%+v)", len(findings), findings)
+	}
+	if f := findings[0]; f.Name != "build" || f.Identifier != "1" ||
+		f.Kind != callbacks.FindingKindCICheck || f.DetailsURL != "https://ci/build" {
+		t.Errorf("unexpected finding: %+v", f)
+	}
+
+	if want := []string{"unit-tests", "lint"}; !slices.Equal(pending, want) {
+		t.Errorf("pendingChecks: got %v, want %v", pending, want)
+	}
+}
+
+// handlerRoundTripper serves every request from an http.Handler, letting a
+// test intercept the GraphQL calls the shurcooL client sends to api.github.com.
+type handlerRoundTripper struct {
+	handler http.Handler
+}
+
+func (rt handlerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	rt.handler.ServeHTTP(rec, req)
+	return rec.Result(), nil
+}
+
+func newTestGraphQLClient(t *testing.T, handler http.Handler) *graphqlclient.GraphQLClient {
+	t.Helper()
+	gh, err := github.NewClient(github.WithHTTPClient(&http.Client{
+		Transport: handlerRoundTripper{handler: handler},
+	}))
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
+	return graphqlclient.NewGraphQLClient(gh)
+}
+
+// TestCollectFindings_PaginatesRollupContexts drives collectFindings through
+// two pagination requests (three pages total) and verifies that findings and
+// pending checks merge across all pages and that each request carries the
+// previous page's end cursor.
+func TestCollectFindings_PaginatesRollupContexts(t *testing.T) {
+	pages := []string{
+		`{"data": {"repository": {"object": {"statusCheckRollup": {"contexts": {
+		   "pageInfo": {"hasNextPage": true, "endCursor": "cursor-2"},
+		   "nodes": [
+		     {"__typename": "CheckRun", "databaseId": 3, "name": "integration",
+		      "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://ci/integration", "title": "", "summary": "", "text": ""},
+		     {"__typename": "CheckRun", "databaseId": 4, "name": "docs",
+		      "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "", "title": "", "summary": "", "text": ""}
+		   ]
+		 }}}}}}`,
+		`{"data": {"repository": {"object": {"statusCheckRollup": {"contexts": {
+		   "pageInfo": {"hasNextPage": false, "endCursor": ""},
+		   "nodes": [
+		     {"__typename": "CheckRun", "databaseId": 5, "name": "e2e",
+		      "status": "QUEUED", "conclusion": "", "detailsUrl": "", "title": "", "summary": "", "text": ""}
+		   ]
+		 }}}}}}`,
+	}
+
+	var gotCursors []string
+	gqlClient := newTestGraphQLClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Variables struct {
+				Cursor string `json:"cursor"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		gotCursors = append(gotCursors, body.Variables.Cursor)
+
+		w.Header().Set("Content-Type", "application/json")
+		page := min(len(gotCursors), len(pages)) - 1
+		if _, err := io.WriteString(w, pages[page]); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+
+	initial := gqlRollupContextsConnection{
+		Nodes: []gqlStatusCheckRollupContext{
+			{Typename: "CheckRun", CheckRun: gqlCheckRunNode{DatabaseId: 1, Name: "build", Status: "COMPLETED", Conclusion: "FAILURE"}},
+			{Typename: "CheckRun", CheckRun: gqlCheckRunNode{DatabaseId: 2, Name: "unit-tests", Status: "IN_PROGRESS"}},
+		},
+	}
+	initial.PageInfo.HasNextPage = true
+	initial.PageInfo.EndCursor = "cursor-1"
+
+	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial)
+	if err != nil {
+		t.Fatalf("collectFindings: %v", err)
+	}
+
+	var findingNames []string
+	for _, f := range findings {
+		findingNames = append(findingNames, f.Name)
+	}
+	if want := []string{"build", "integration"}; !slices.Equal(findingNames, want) {
+		t.Errorf("findings: got %v, want %v", findingNames, want)
+	}
+	if want := []string{"unit-tests", "e2e"}; !slices.Equal(pending, want) {
+		t.Errorf("pendingChecks: got %v, want %v", pending, want)
+	}
+	if want := []string{"cursor-1", "cursor-2"}; !slices.Equal(gotCursors, want) {
+		t.Errorf("request cursors: got %v, want %v", gotCursors, want)
+	}
+}
+
+// TestCollectFindings_PaginationErrorPropagates verifies that a failed
+// pagination request fails collectFindings instead of silently truncating
+// findings, which would let a red or pending PR read as green downstream.
+func TestCollectFindings_PaginationErrorPropagates(t *testing.T) {
+	gqlClient := newTestGraphQLClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+
+	initial := gqlRollupContextsConnection{
+		Nodes: []gqlStatusCheckRollupContext{
+			{Typename: "CheckRun", CheckRun: gqlCheckRunNode{DatabaseId: 1, Name: "build", Status: "COMPLETED", Conclusion: "FAILURE"}},
+		},
+	}
+	initial.PageInfo.HasNextPage = true
+	initial.PageInfo.EndCursor = "cursor-1"
+
+	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial)
+	if err == nil {
+		t.Fatal("collectFindings: got nil error, want pagination error")
+	}
+	if want := "paginating status check rollup contexts"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error: got %q, want containing %q", err, want)
+	}
+	if findings != nil || pending != nil {
+		t.Errorf("partial results returned alongside error: findings=%v pending=%v", findings, pending)
 	}
 }

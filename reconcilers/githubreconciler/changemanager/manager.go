@@ -187,30 +187,35 @@ type gqlCheckRunNode struct {
 	Text       string
 }
 
-type gqlCheckRunsConnection struct {
+// gqlStatusCheckRollupContext is one node of a commit's statusCheckRollup.contexts
+// union connection. Only CheckRun contexts are consumed; StatusContext (legacy
+// commit statuses) are ignored, matching the prior checkSuites-based behavior.
+//
+// The flat rollup replaces the old checkSuites(100) × checkRuns(100) nesting,
+// which billed 3 GraphQL points; the rollup bills 1. Failed and pending runs are
+// derived client-side from each run's conclusion/status (see collectFindings)
+// rather than via the server-side filterBy the suite query used.
+type gqlStatusCheckRollupContext struct {
+	Typename string          `graphql:"__typename"`
+	CheckRun gqlCheckRunNode `graphql:"... on CheckRun"`
+}
+
+type gqlRollupContextsConnection struct {
 	PageInfo struct {
 		HasNextPage bool
 		EndCursor   string
 	}
-	Nodes []gqlCheckRunNode
+	Nodes []gqlStatusCheckRollupContext
 }
 
-// gqlCheckSuiteNode contains filtered check runs for failures and pending checks.
-// Using two separate filtered queries is more efficient than fetching all runs.
-type gqlCheckSuiteNode struct {
-	Id string
-	// FailedRuns contains only check runs that concluded with FAILURE
-	FailedRuns gqlCheckRunsConnection `graphql:"failedRuns: checkRuns(first: 100, filterBy: {conclusions: [FAILURE]})"`
-	// PendingRuns contains check runs that are not yet complete
-	PendingRuns gqlCheckRunsConnection `graphql:"pendingRuns: checkRuns(first: 100, filterBy: {statuses: [QUEUED, IN_PROGRESS, WAITING, PENDING, REQUESTED]})"`
-}
-
-type gqlCheckSuitesConnection struct {
-	PageInfo struct {
-		HasNextPage bool
-		EndCursor   string
-	}
-	Nodes []gqlCheckSuiteNode
+// pendingCheckStatuses is the set of CheckRun status values (uppercase GraphQL
+// enums) that count as "not yet complete". Mirrors the prior pendingRuns filterBy.
+var pendingCheckStatuses = map[string]struct{}{
+	"QUEUED":      {},
+	"IN_PROGRESS": {},
+	"WAITING":     {},
+	"PENDING":     {},
+	"REQUESTED":   {},
 }
 
 // GraphQL types for querying review threads
@@ -431,7 +436,9 @@ func (cm *CM[T]) NewSession(
 						TotalCount int
 						Nodes      []struct {
 							Commit struct {
-								CheckSuites gqlCheckSuitesConnection `graphql:"checkSuites(first: 100)"`
+								StatusCheckRollup struct {
+									Contexts gqlRollupContextsConnection `graphql:"contexts(first: 100)"`
+								} `graphql:"statusCheckRollup"`
 							}
 						}
 					} `graphql:"commits(last: 1)"`
@@ -489,7 +496,11 @@ func (cm *CM[T]) NewSession(
 		// Collect all check runs, handling pagination
 		if len(pr.Commits.Nodes) > 0 {
 			commit := pr.Commits.Nodes[0].Commit
-			findings, pendingChecks = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.CheckSuites)
+			var err error
+			findings, pendingChecks, err = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.StatusCheckRollup.Contexts)
+			if err != nil {
+				return nil, fmt.Errorf("collecting findings: %w", err)
+			}
 		}
 
 		// Collect unresolved review thread findings from trusted authors
@@ -614,221 +625,99 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 	return findings
 }
 
-// collectFindings extracts findings and pending checks from check suites, handling pagination.
-// Returns findings (failed checks) and pendingChecks (names of checks not yet complete).
-// The check runs are pre-filtered by the GraphQL query to only include failures and pending runs.
+// collectFindings extracts findings and pending checks from the head commit's
+// statusCheckRollup contexts, handling pagination. Returns findings (failed
+// checks) and pendingChecks (names of checks not yet complete). Failed and
+// pending runs are classified client-side from each CheckRun's conclusion/status,
+// since the flat rollup is not pre-filtered like the old per-suite checkRuns
+// queries were.
 func collectFindings(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha string,
-	initialSuites gqlCheckSuitesConnection,
-) (findings []callbacks.Finding, pendingChecks []string) {
-	// Process failed check runs into findings
-	processFailedRuns := func(runs []gqlCheckRunNode) {
-		for _, run := range runs {
-			findings = append(findings, callbacks.Finding{
-				Kind:       callbacks.FindingKindCICheck,
-				Identifier: fmt.Sprintf("%d", run.DatabaseId),
-				Name:       run.Name,
-				Details:    formatCheckRunDetails(run.Name, run.Status, run.Conclusion, run.Title, run.Summary, run.Text, run.DetailsUrl),
-				DetailsURL: run.DetailsUrl,
-			})
+	initialContexts gqlRollupContextsConnection,
+) (findings []callbacks.Finding, pendingChecks []string, err error) {
+	processContexts := func(nodes []gqlStatusCheckRollupContext) {
+		for _, n := range nodes {
+			// StatusContext (legacy commit statuses) and any other non-CheckRun
+			// contexts are ignored, matching the prior checkSuites behavior.
+			if n.Typename != "CheckRun" {
+				continue
+			}
+			run := n.CheckRun
+			_, pending := pendingCheckStatuses[run.Status]
+			switch {
+			case run.Conclusion == "FAILURE":
+				findings = append(findings, callbacks.Finding{
+					Kind:       callbacks.FindingKindCICheck,
+					Identifier: fmt.Sprintf("%d", run.DatabaseId),
+					Name:       run.Name,
+					Details:    formatCheckRunDetails(run.Name, run.Status, run.Conclusion, run.Title, run.Summary, run.Text, run.DetailsUrl),
+					DetailsURL: run.DetailsUrl,
+				})
+			case pending:
+				pendingChecks = append(pendingChecks, run.Name)
+			}
 		}
 	}
 
-	// Process pending check runs into pendingChecks list
-	processPendingRuns := func(runs []gqlCheckRunNode) {
-		for _, run := range runs {
-			pendingChecks = append(pendingChecks, run.Name)
+	processContexts(initialContexts.Nodes)
+
+	// Paginate through remaining contexts if the head commit has >100 checks.
+	// A pagination failure is fatal (see paginateRollupContexts): returning
+	// truncated findings would let a red/pending PR read as green downstream.
+	if initialContexts.PageInfo.HasNextPage {
+		if err := paginateRollupContexts(ctx, gqlClient, owner, repo, sha, initialContexts.PageInfo.EndCursor, processContexts); err != nil {
+			return nil, nil, err
 		}
 	}
 
-	// Track suites that need pagination for failed/pending runs
-	type suitePagination struct {
-		id     string
-		cursor string
-	}
-	var failedRunsPagination, pendingRunsPagination []suitePagination
-
-	for _, suite := range initialSuites.Nodes {
-		processFailedRuns(suite.FailedRuns.Nodes)
-		processPendingRuns(suite.PendingRuns.Nodes)
-
-		if suite.FailedRuns.PageInfo.HasNextPage {
-			failedRunsPagination = append(failedRunsPagination, suitePagination{
-				id:     suite.Id,
-				cursor: suite.FailedRuns.PageInfo.EndCursor,
-			})
-		}
-		if suite.PendingRuns.PageInfo.HasNextPage {
-			pendingRunsPagination = append(pendingRunsPagination, suitePagination{
-				id:     suite.Id,
-				cursor: suite.PendingRuns.PageInfo.EndCursor,
-			})
-		}
-	}
-
-	// Paginate through remaining failed runs within suites
-	for _, sp := range failedRunsPagination {
-		paginateFailedRuns(ctx, gqlClient, sp.id, sp.cursor, processFailedRuns)
-	}
-
-	// Paginate through remaining pending runs within suites
-	for _, sp := range pendingRunsPagination {
-		paginatePendingRuns(ctx, gqlClient, sp.id, sp.cursor, processPendingRuns)
-	}
-
-	// Paginate through remaining check suites if needed
-	if initialSuites.PageInfo.HasNextPage {
-		paginateCheckSuites(ctx, gqlClient, owner, repo, sha, initialSuites.PageInfo.EndCursor, processFailedRuns, processPendingRuns)
-	}
-
-	return findings, pendingChecks
+	return findings, pendingChecks, nil
 }
 
-// paginateFailedRuns fetches additional failed check runs for a suite.
-func paginateFailedRuns(
-	ctx context.Context,
-	gqlClient *graphqlclient.GraphQLClient,
-	suiteID, cursor string,
-	processRuns func([]gqlCheckRunNode),
-) {
-	for {
-		var query struct {
-			Node struct {
-				CheckSuite struct {
-					FailedRuns struct {
-						PageInfo struct {
-							HasNextPage bool
-							EndCursor   string
-						}
-						Nodes []gqlCheckRunNode
-					} `graphql:"failedRuns: checkRuns(first: 100, after: $cursor, filterBy: {conclusions: [FAILURE]})"`
-				} `graphql:"... on CheckSuite"`
-			} `graphql:"node(id: $suiteId)"`
-		}
-
-		if err := gqlClient.Query(ctx, "PaginateFailedRuns", &query, map[string]any{
-			"suiteId": githubv4.ID(suiteID),
-			"cursor":  githubv4.String(cursor),
-		}); err != nil {
-			clog.WarnContextf(ctx, "failed to paginate failed check runs: %v", err)
-			return // Skip on error
-		}
-
-		processRuns(query.Node.CheckSuite.FailedRuns.Nodes)
-
-		if !query.Node.CheckSuite.FailedRuns.PageInfo.HasNextPage {
-			break
-		}
-		cursor = query.Node.CheckSuite.FailedRuns.PageInfo.EndCursor
-	}
-}
-
-// paginatePendingRuns fetches additional pending check runs for a suite.
-func paginatePendingRuns(
-	ctx context.Context,
-	gqlClient *graphqlclient.GraphQLClient,
-	suiteID, cursor string,
-	processRuns func([]gqlCheckRunNode),
-) {
-	for {
-		var query struct {
-			Node struct {
-				CheckSuite struct {
-					PendingRuns struct {
-						PageInfo struct {
-							HasNextPage bool
-							EndCursor   string
-						}
-						Nodes []gqlCheckRunNode
-					} `graphql:"pendingRuns: checkRuns(first: 100, after: $cursor, filterBy: {statuses: [QUEUED, IN_PROGRESS, WAITING, PENDING, REQUESTED]})"`
-				} `graphql:"... on CheckSuite"`
-			} `graphql:"node(id: $suiteId)"`
-		}
-
-		if err := gqlClient.Query(ctx, "PaginatePendingRuns", &query, map[string]any{
-			"suiteId": githubv4.ID(suiteID),
-			"cursor":  githubv4.String(cursor),
-		}); err != nil {
-			clog.WarnContextf(ctx, "failed to paginate pending check runs: %v", err)
-			return // Skip on error
-		}
-
-		processRuns(query.Node.CheckSuite.PendingRuns.Nodes)
-
-		if !query.Node.CheckSuite.PendingRuns.PageInfo.HasNextPage {
-			break
-		}
-		cursor = query.Node.CheckSuite.PendingRuns.PageInfo.EndCursor
-	}
-}
-
-// paginateCheckSuites fetches additional check suites for a commit.
-func paginateCheckSuites(
+// paginateRollupContexts fetches additional statusCheckRollup contexts for a
+// commit, when the head commit has more than 100 checks.
+func paginateRollupContexts(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha, cursor string,
-	processFailedRuns, processPendingRuns func([]gqlCheckRunNode),
-) {
+	process func([]gqlStatusCheckRollupContext),
+) error {
 	for {
 		var query struct {
 			Repository struct {
 				Object struct {
 					Commit struct {
-						CheckSuites struct {
-							PageInfo struct {
-								HasNextPage bool
-								EndCursor   string
-							}
-							Nodes []struct {
-								Id         string
-								FailedRuns struct {
-									PageInfo struct {
-										HasNextPage bool
-										EndCursor   string
-									}
-									Nodes []gqlCheckRunNode
-								} `graphql:"failedRuns: checkRuns(first: 100, filterBy: {conclusions: [FAILURE]})"`
-								PendingRuns struct {
-									PageInfo struct {
-										HasNextPage bool
-										EndCursor   string
-									}
-									Nodes []gqlCheckRunNode
-								} `graphql:"pendingRuns: checkRuns(first: 100, filterBy: {statuses: [QUEUED, IN_PROGRESS, WAITING, PENDING, REQUESTED]})"`
-							}
-						} `graphql:"checkSuites(first: 100, after: $cursor)"`
+						StatusCheckRollup struct {
+							Contexts gqlRollupContextsConnection `graphql:"contexts(first: 100, after: $cursor)"`
+						} `graphql:"statusCheckRollup"`
 					} `graphql:"... on Commit"`
 				} `graphql:"object(oid: $sha)"`
 			} `graphql:"repository(owner: $owner, name: $repo)"`
 		}
 
-		if err := gqlClient.Query(ctx, "PaginateCheckSuites", &query, map[string]any{
+		// Do NOT swallow this error. A failed page (transient 502, rate-limit
+		// throttle, etc.) would otherwise leave findings/pendingChecks truncated
+		// to the pages fetched so far; if the failing runs live beyond page 1, a
+		// red/pending PR reads as green downstream. Propagating the error fails
+		// the reconcile so the workqueue retries — matching the prior shape, where
+		// a failed initial query was always fatal.
+		if err := gqlClient.Query(ctx, "PaginateRollupContexts", &query, map[string]any{
 			"owner":  githubv4.String(owner),
 			"repo":   githubv4.String(repo),
 			"sha":    githubv4.GitObjectID(sha),
 			"cursor": githubv4.String(cursor),
 		}); err != nil {
-			return // Skip on error
+			return fmt.Errorf("paginating status check rollup contexts: %w", err)
 		}
 
-		for _, suite := range query.Repository.Object.Commit.CheckSuites.Nodes {
-			processFailedRuns(suite.FailedRuns.Nodes)
-			processPendingRuns(suite.PendingRuns.Nodes)
+		contexts := query.Repository.Object.Commit.StatusCheckRollup.Contexts
+		process(contexts.Nodes)
 
-			// Handle nested check run pagination
-			if suite.FailedRuns.PageInfo.HasNextPage {
-				paginateFailedRuns(ctx, gqlClient, suite.Id, suite.FailedRuns.PageInfo.EndCursor, processFailedRuns)
-			}
-			if suite.PendingRuns.PageInfo.HasNextPage {
-				paginatePendingRuns(ctx, gqlClient, suite.Id, suite.PendingRuns.PageInfo.EndCursor, processPendingRuns)
-			}
-		}
-
-		if !query.Repository.Object.Commit.CheckSuites.PageInfo.HasNextPage {
+		if !contexts.PageInfo.HasNextPage {
 			break
 		}
-		cursor = query.Repository.Object.Commit.CheckSuites.PageInfo.EndCursor
+		cursor = contexts.PageInfo.EndCursor
 	}
+	return nil
 }
