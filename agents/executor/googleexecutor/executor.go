@@ -43,6 +43,14 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // tools without converging on a result.
 const DefaultMaxTurns = 200
 
+// maxEmptyResponseRetries bounds how many consecutive empty turns (no text, no
+// tool call) the executor will nudge the model through before giving up.
+//
+// Three is enough to absorb the observed transient rate while still failing
+// fast when a model is genuinely stuck: the enricher golden suite measured a
+// ~5% per-call empty rate, which three attempts drives to ~0.01%.
+const maxEmptyResponseRetries = 3
+
 // DefaultToolCallConcurrency is the default bound on how many of a single
 // turn's tool calls run concurrently. Models routinely emit several
 // independent function calls in one turn (parallel function calling);
@@ -471,6 +479,11 @@ func (e *executor[Request, Response]) Execute(
 	// it at function exit. Every error path must use `return ..., err` (or set
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
+	// emptyTurns counts consecutive turns where the model returned neither text
+	// nor a tool call. See the empty-response branch at the bottom of
+	// executeTurn for why that is retried rather than treated as terminal.
+	emptyTurns := 0
+
 	executeTurn := func(turn int, response *genai.GenerateContentResponse) (_ Response, _ *genai.GenerateContentResponse, _ bool, err error) {
 		var zero Response
 		llmTurn := trace.BeginTurn(turn, agenttrace.SystemGoogleVertex, e.model)
@@ -597,7 +610,50 @@ func (e *executor[Request, Response]) Execute(
 			return zero, retryResp, false, nil
 		}
 
+		// retryDegenerateTurn nudges the model after a turn that produced nothing
+		// usable, and reports whether it handled the case.
+		//
+		// A turn with no content, no parts, or neither text nor a tool call is a
+		// degenerate turn rather than a judgement, and it is transient: it was
+		// the most common non-deterministic CI failure across the model-backed
+		// suites. Nudging matches the max-tokens and malformed-function-call
+		// branches above.
+		//
+		// Only unset/STOP finish reasons are retried. An explicit blocking reason
+		// (safety, recitation) is a decision, not noise, and must keep failing
+		// immediately rather than burning three more calls to say the same thing.
+		retryDegenerateTurn := func(what string) (*genai.GenerateContentResponse, bool, error) {
+			switch candidate.FinishReason {
+			case "", genai.FinishReasonStop:
+			default:
+				return nil, false, nil
+			}
+			emptyTurns++
+			if emptyTurns > maxEmptyResponseRetries {
+				clog.ErrorContext(ctx, "Model returned an unusable response repeatedly",
+					"reason", what, "attempts", emptyTurns, "turn", turn)
+				return nil, true, fmt.Errorf(
+					"unexpected response format from model (%s) after %d attempts", what, emptyTurns)
+			}
+			clog.WarnContext(ctx, "Model returned an unusable response, asking it to continue",
+				"reason", what, "attempt", emptyTurns, "turn", turn)
+			retryMsg := genai.Part{Text: "Your last response was empty. Please continue: either call one of the available functions or provide your answer as text."}
+			resp, err := e.sendWithRetry(ctx, turnCfg, "send_empty_response_retry", "failed to send retry message after an empty response", func() (*genai.GenerateContentResponse, error) {
+				return chat.SendMessage(ctx, retryMsg)
+			})
+			if err != nil {
+				return nil, true, err
+			}
+			return resp, true, nil
+		}
+
 		if candidate.Content == nil {
+			if resp, handled, err := retryDegenerateTurn("candidate content is nil"); handled {
+				if err != nil {
+					return zero, nil, true, err
+				}
+				return zero, resp, false, nil
+			}
 			clog.ErrorContext(ctx, "Gemini returned nil content",
 				"finish_reason", candidate.FinishReason,
 				"finish_message", candidate.FinishMessage)
@@ -606,6 +662,12 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		if len(candidate.Content.Parts) == 0 {
+			if resp, handled, err := retryDegenerateTurn("no parts in candidate"); handled {
+				if err != nil {
+					return zero, nil, true, err
+				}
+				return zero, resp, false, nil
+			}
 			clog.ErrorContext(ctx, "Gemini returned empty parts",
 				"finish_reason", candidate.FinishReason,
 				"finish_message", candidate.FinishMessage)
@@ -734,7 +796,13 @@ func (e *executor[Request, Response]) Execute(
 			return extractedResponse, nil, true, nil
 		}
 
-		// Unexpected state
+		// Neither text nor a tool call: same degenerate turn, same handling.
+		if resp, handled, err := retryDegenerateTurn("no text and no tool calls"); handled {
+			if err != nil {
+				return zero, nil, true, err
+			}
+			return zero, resp, false, nil
+		}
 		clog.ErrorContext(ctx, "Unexpected response format - no text and no tool calls")
 		return zero, nil, true, errors.New("unexpected response format from model")
 	}
