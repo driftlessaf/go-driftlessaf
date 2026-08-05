@@ -186,11 +186,16 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 	if err != nil {
 		return nil, fmt.Errorf("creating certificate identity: %w", err)
 	}
+	// WithoutStatementPredicate would skip materializing the predicate as a
+	// structpb tree (see verifyAndExtract), but it only exists in sigstore-go
+	// v1.3.0+, and sigstore-go is held at v1.2.2 until gitsign moves off it —
+	// gitsign's validatingRekorClient does not satisfy the v1.3.0 sign.RekorClient
+	// interface. Restore the option once sigstore/gitsign#861 lands and the pin
+	// in this module's go.mod goes away.
 	verifier, err := verify.NewVerifier(trustedMaterial,
 		verify.WithSignedCertificateTimestamps(1),
 		verify.WithTransparencyLog(1),
 		verify.WithSignedTimestamps(1),
-		verify.WithoutStatementPredicate(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating bundle verifier: %w", err)
@@ -366,10 +371,10 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 // round-tripping a large findings payload through protojson.Marshal and a
 // second json.Unmarshal multiplies its size in allocations several times
 // over; on findings-heavy statuses that churn was the dominant memory cost
-// of a status read. The manager's verifier is configured with
-// WithoutStatementPredicate, so the result's Statement is a summary carrying
-// only the statement type, subjects, and predicate type — exactly the fields
-// consulted here alongside the verified timestamp.
+// of a status read. Only the statement type, subjects, and predicate type are
+// read from the result, alongside the verified timestamp, so decoding the
+// payload directly avoids that cost regardless of whether the verifier
+// materialized a predicate.
 func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, policy verify.PolicyBuilder) (*Status[T], time.Time, bool) {
 	result, err := m.verifier.Verify(b, policy)
 	if err != nil {
