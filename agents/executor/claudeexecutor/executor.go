@@ -479,7 +479,7 @@ func (e *executor[Request, Response]) runConversation(
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)
 			trace.BadToolCall(toolUse.ID, toolUse.Name,
 				map[string]any{"input": toolUse.Input},
-				fmt.Errorf("unknown tool: %q", toolUse.Name))
+				fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, toolUse.Name))
 
 			result = map[string]any{
 				"error": fmt.Sprintf("unknown tool: %q", toolUse.Name),

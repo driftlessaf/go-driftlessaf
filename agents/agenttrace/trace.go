@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -91,14 +92,29 @@ type ToolCall[T any] struct {
 	// recoverable records. Producers may set it only on paths where a run
 	// that never recovers cannot complete cleanly (e.g. a rejected terminal
 	// submit: the run either lands an accepted submission later or fails
-	// with a trace-level error).
-	Recoverable bool       `json:"recoverable,omitempty"`
-	StartTime   time.Time  `json:"start_time"`
-	EndTime     time.Time  `json:"end_time"`
-	trace       *Trace[T]  // Parent trace for auto-adding on completion
-	mu          sync.Mutex // Protects mutable fields
-	ctx         context.Context
-	span        oteltrace.Span
+	// with a trace-level error). That restriction is what makes skipping
+	// safe, and it is narrower than it looks: it holds for a rejected
+	// terminal submit because committing a result IS the accepted submit, so
+	// the model cannot submit its way past the rejection. It does not hold
+	// for an ordinary work tool, where the executors steer a stuck model to
+	// submit a degraded result and the run ends clean having done nothing.
+	// Mark a work-tool rejection recoverable and the no-errors scorer stops
+	// seeing that run.
+	Recoverable bool `json:"recoverable,omitempty"`
+	// Terminal marks the call that committed the run's final result: the
+	// accepted terminal submit, recorded by at most one call per run. It is
+	// not an outcome flag. The call succeeded, but committing a result is no
+	// evidence that any work succeeded, because the executors steer a stuck
+	// model to submit a degraded result. Consumers that judge whether an
+	// agent worked past its tool-call errors (e.g. the no-errors eval
+	// scorer) exclude it when counting successful calls.
+	Terminal  bool       `json:"terminal,omitempty"`
+	StartTime time.Time  `json:"start_time"`
+	EndTime   time.Time  `json:"end_time"`
+	trace     *Trace[T]  // Parent trace for auto-adding on completion
+	mu        sync.Mutex // Protects mutable fields
+	ctx       context.Context
+	span      oteltrace.Span
 }
 
 // LLMTurn represents a single LLM call within a trace.
@@ -623,6 +639,14 @@ func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCa
 	}
 }
 
+// ErrUnknownTool marks a tool call naming a tool the executor has no handler
+// for: a hallucinated or unregistered name. Executors wrap it into the error
+// they record with BadToolCall so consumers can single out the class with
+// errors.Is rather than matching the model-controlled tool name in the
+// message. Unlike an ordinary tool-call error, this is a protocol violation
+// with no recovered reading, so the no-errors eval scorer fails on it.
+var ErrUnknownTool = errors.New("unknown tool")
+
 // BadToolCall records a tool call that failed due to bad arguments or unknown tool
 func (t *Trace[T]) BadToolCall(id, name string, params map[string]any, err error) {
 	t.badToolCall(id, name, params, err, false)
@@ -718,6 +742,21 @@ func (tc *ToolCall[T]) CompleteRejected(err error) {
 	tc.mu.Unlock()
 
 	tc.Complete(nil, err)
+}
+
+// CompleteTerminal marks the tool call as complete and as the call that
+// committed the run's final result: the accepted terminal submit. Only that
+// path may use it. See ToolCall.Terminal for why consumers single the call
+// out rather than counting it as ordinary work.
+func (tc *ToolCall[T]) CompleteTerminal(result any) {
+	tc.mu.Lock()
+	tc.Terminal = true
+	if tc.span != nil {
+		tc.span.SetAttributes(attribute.Bool("driftlessaf.tool.terminal", true))
+	}
+	tc.mu.Unlock()
+
+	tc.Complete(result, nil)
 }
 
 // AttachToolCallReasoning merges the model-supplied reasoning for the tool

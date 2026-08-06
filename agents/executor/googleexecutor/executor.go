@@ -421,8 +421,11 @@ func (e *executor[Request, Response]) Execute(
 			clog.ErrorContext(ctx, "Unknown function call requested by model", "function", call.Name)
 			toolResponse = googletool.Error(call, "Unknown function: %s", call.Name)
 
-			// Record bad tool call for unknown function
-			trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown function: %q", call.Name))
+			// Record bad tool call for unknown function. The wrapped sentinel
+			// lets consumers single out the class with errors.Is instead of
+			// matching the model-controlled function name in the message; the
+			// no-errors eval scorer gates on it.
+			trace.BadToolCall(call.ID, call.Name, call.Args, fmt.Errorf("unknown function %q: %w", call.Name, agenttrace.ErrUnknownTool))
 		}
 
 		return &genai.Part{FunctionResponse: toolResponse}, committed, nil

@@ -17,9 +17,11 @@ import (
 
 // mockObserver implements Observer for testing
 type mockObserver struct {
-	failures []string
-	logs     []string
-	count    int64
+	failures     []string
+	logs         []string
+	grades       []float64
+	gradeReasons []string
+	count        int64
 }
 
 func (m *mockObserver) Fail(msg string) {
@@ -31,7 +33,8 @@ func (m *mockObserver) Log(msg string) {
 }
 
 func (m *mockObserver) Grade(score float64, reasoning string) {
-	m.logs = append(m.logs, fmt.Sprintf("Grade: %.2f - %s", score, reasoning))
+	m.grades = append(m.grades, score)
+	m.gradeReasons = append(m.gradeReasons, reasoning)
 }
 
 func (m *mockObserver) Increment() {
@@ -217,7 +220,7 @@ func TestRequiredToolCalls(t *testing.T) {
 }
 
 func TestNoErrors(t *testing.T) {
-	// Test with no errors
+	// A clean run neither fails nor grades.
 	obs := &mockObserver{}
 	trace := &agenttrace.Trace[string]{
 		ToolCalls: []*agenttrace.ToolCall[string]{
@@ -231,8 +234,11 @@ func TestNoErrors(t *testing.T) {
 	if len(obs.failures) > 0 {
 		t.Errorf("unexpected failure with no errors: %v", obs.failures)
 	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade with no errors: %v", obs.gradeReasons)
+	}
 
-	// Test with trace error
+	// A trace-level error fails: the run died before reaching a result.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		Error: errors.New("trace failed"),
@@ -242,19 +248,30 @@ func TestNoErrors(t *testing.T) {
 		t.Errorf("expected failure for trace error")
 	}
 
-	// Test with tool call error
+	// A tool-call error on a completed run is a recovered transient: no
+	// failure, but a Grade carrying the error in its reasoning.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		ToolCalls: []*agenttrace.ToolCall[string]{
 			{Name: "read_logs", Error: errors.New("read failed")},
+			{Name: "read_logs"},
 		},
 	}
 	callback(obs, trace)
-	if len(obs.failures) == 0 {
-		t.Errorf("expected failure for tool call error")
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for recovered tool call error: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if obs.grades[0] != 1.0 {
+		t.Errorf("grade score: got = %v, wanted = 1.0", obs.grades[0])
+	}
+	if !strings.Contains(obs.gradeReasons[0], "read_logs: read failed") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains 'read_logs: read failed'", obs.gradeReasons[0])
 	}
 
-	// Test with ignored tool call error
+	// An ignored tool-call error is skipped entirely: no failure, no grade.
 	obs = &mockObserver{}
 	ignoreRead := func(err error) bool {
 		return strings.Contains(err.Error(), "read failed")
@@ -264,8 +281,39 @@ func TestNoErrors(t *testing.T) {
 	if len(obs.failures) > 0 {
 		t.Errorf("unexpected failure with ignored error: %v", obs.failures)
 	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade with ignored error: %v", obs.gradeReasons)
+	}
 
-	// Test with ignored trace error
+	// An ignore function filters the Grade reasoning, not just the failure:
+	// on a trace mixing an ignored error with a reported one, the reasoning
+	// names only the reported one and the count excludes the ignored call.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_logs", Error: errors.New("read failed")},
+			{Name: "write_file", Error: errors.New("permission denied")},
+		},
+	}
+	callbackWithIgnore(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure with one ignored error: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	reason := obs.gradeReasons[0]
+	if !strings.Contains(reason, "recovered from 1 tool-call error(s)") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains 'recovered from 1 tool-call error(s)'", reason)
+	}
+	if !strings.Contains(reason, "write_file: permission denied") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains 'write_file: permission denied'", reason)
+	}
+	if strings.Contains(reason, "read failed") {
+		t.Errorf("grade reasoning: got = %q, wanted = 'read failed' suppressed by the ignore func", reason)
+	}
+
+	// An ignored trace error does not fail.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		Error: errors.New("read failed"),
@@ -275,22 +323,50 @@ func TestNoErrors(t *testing.T) {
 		t.Errorf("unexpected failure with ignored trace error: %v", obs.failures)
 	}
 
-	// Test that non-matching errors still fail with ignore
+	// A non-ignored trace error still fails with an ignore func present.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
-		ToolCalls: []*agenttrace.ToolCall[string]{
-			{Name: "write_file", Error: errors.New("write failed")},
-		},
+		Error: errors.New("write failed"),
 	}
 	callbackWithIgnore(obs, trace)
 	if len(obs.failures) == 0 {
-		t.Errorf("expected failure for non-ignored error")
+		t.Errorf("expected failure for non-ignored trace error")
+	}
+
+	// The Grade reasoning caps the listed errors and reports the total. One
+	// clean call keeps this on the recovered path rather than the
+	// no-successful-call failure below.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "edit_file", Error: errors.New("miss 1")},
+			{Name: "edit_file", Error: errors.New("miss 2")},
+			{Name: "edit_file", Error: errors.New("miss 3")},
+			{Name: "edit_file", Error: errors.New("miss 4")},
+			{Name: "edit_file", Error: errors.New("miss 5")},
+			{Name: "edit_file"},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	reason = obs.gradeReasons[0]
+	if !strings.Contains(reason, "recovered from 5 tool-call error(s)") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains 'recovered from 5 tool-call error(s)'", reason)
+	}
+	if !strings.Contains(reason, "and 2 more") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains 'and 2 more'", reason)
+	}
+	if strings.Contains(reason, "miss 4") {
+		t.Errorf("grade reasoning: got = %q, wanted = 'miss 4' elided by the cap", reason)
 	}
 
 	// A recoverable rejection (a handler declined the call but returned a
-	// corrective hint the model acted on — e.g. a resubmitted terminal
-	// submit) must not fail an otherwise-clean trace, even with no ignore
-	// functions configured. This is the shape that failed the
+	// corrective hint the model acted on, e.g. a resubmitted terminal submit)
+	// is a designed correction, not tool misuse. It must not fail an
+	// otherwise-clean trace and must not appear in the Grade reasoning, even
+	// with no ignore functions configured. This is the case that failed the
 	// skillup-skillfixer eval gate on 2026-07-20: a stringified submit
 	// payload rejected with "parameter error", then resubmitted cleanly.
 	obs = &mockObserver{}
@@ -304,9 +380,32 @@ func TestNoErrors(t *testing.T) {
 	if len(obs.failures) > 0 {
 		t.Errorf("unexpected failure for recovered rejection: %v", obs.failures)
 	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for recovered rejection: %v", obs.gradeReasons)
+	}
+
+	// A no-tool agent records the same two calls and nothing else.
+	// cve-advisor and conformance run on toolcall.EmptyTools, so excluding
+	// the terminal submit leaves succeeded at zero for every run they make.
+	// Such a run must clear the gate on having no reportable error, never on
+	// a successful call it cannot make.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "submit_result", Error: errors.New("parameter error"), Recoverable: true},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for a no-tool agent's recovered submit: %v", obs.failures)
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for a no-tool agent's recovered submit: %v", obs.gradeReasons)
+	}
 
 	// An UNRECOVERED rejection still fails: a run whose model never lands an
-	// accepted submission cannot complete cleanly — it exhausts the turn
+	// accepted submission cannot complete cleanly. It exhausts the turn
 	// budget, which surfaces as a trace-level error the recoverable mark
 	// does not shield.
 	obs = &mockObserver{}
@@ -321,10 +420,10 @@ func TestNoErrors(t *testing.T) {
 		t.Errorf("expected failure for unrecovered rejection (trace error)")
 	}
 
-	// Semantic freeze for every unmarked error: a recovered-in-conversation
-	// blip that the producer did NOT mark recoverable (e.g. an edit_file
-	// old-string miss) fails exactly as before — the recoverable mark is a
-	// producer-scoped contract, not a fleet-wide loosening.
+	// An unmarked tool-call error is reported, not failed. A recovered blip
+	// the producer did NOT mark recoverable (e.g. an edit_file old-string
+	// miss) is still tool-misuse signal, so the Grade reasoning names it,
+	// but it no longer gates the run.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		ToolCalls: []*agenttrace.ToolCall[string]{
@@ -333,16 +432,160 @@ func TestNoErrors(t *testing.T) {
 		},
 	}
 	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for unmarked tool call error: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if want := "edit_file: old string appears 0 times in the file"; !strings.Contains(obs.gradeReasons[0], want) {
+		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], want)
+	}
+
+	// An unknown tool name is the one tool-call error class that stays
+	// terminal: the model named a tool the executor has no handler for, which
+	// is a protocol violation no retry can make legal. Matched through the
+	// sentinel, so the wrapped tool name in the message carries no weight.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs")},
+			{Name: "submit_result"},
+		},
+	}
+	callback(obs, trace)
 	if len(obs.failures) == 0 {
-		t.Errorf("expected failure for unmarked tool call error")
+		t.Errorf("expected failure for unknown tool call")
+	}
+
+	// The failure is the sentinel's doing, not the message's: the same
+	// reasoning text on an ordinary error is reported, not failed.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: errors.New(`unknown tool: "read_the_logs"`)},
+			{Name: "submit_result"},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for unwrapped unknown-tool text: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+
+	// An ignore function still suppresses an unknown-tool error. A consumer
+	// whose agent legitimately expects one owns that decision.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs")},
+		},
+	}
+	evals.NoErrors[string](func(err error) bool {
+		return errors.Is(err, agenttrace.ErrUnknownTool)
+	})(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for ignored unknown tool call: %v", obs.failures)
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for ignored unknown tool call: %v", obs.gradeReasons)
+	}
+
+	// Every work call errored and the run still committed a result: the
+	// executors steer a stuck model to submit a degraded result, so the clean
+	// completion proves nothing. The terminal submit is not a success, so
+	// this fails rather than grades.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_logs", Error: errors.New("read failed")},
+			{Name: "edit_file", Error: errors.New("old string appears 0 times in the file")},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if want := "no tool call succeeded; 2 tool-call error(s)"; !strings.Contains(obs.failures[0], want) {
+		t.Errorf("failure message: got = %q, wanted = contains %q", obs.failures[0], want)
+	}
+	if !strings.Contains(obs.failures[0], "read_logs: read failed") {
+		t.Errorf("failure message: got = %q, wanted = contains 'read_logs: read failed'", obs.failures[0])
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade with no successful tool call: %v", obs.gradeReasons)
+	}
+
+	// One work call errored and another succeeded: the agent worked past the
+	// error, so the recovered path still grades. The terminal submit alongside
+	// it changes nothing.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "edit_file", Error: errors.New("old string appears 0 times in the file")},
+			{Name: "edit_file"},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for recovered tool call error: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if obs.grades[0] != 1.0 {
+		t.Errorf("grade score: got = %v, wanted = 1.0", obs.grades[0])
+	}
+
+	// A call whose error an ignore function suppresses counts as a success:
+	// the ignore func declares that answer usable, so the reported error
+	// alongside it grades rather than fails.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_logs", Error: errors.New("read failed")},
+			{Name: "write_file", Error: errors.New("permission denied")},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callbackWithIgnore(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure when an ignored error is the only success: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+
+	// A recoverable rejection is not a success: the handler declined the
+	// call. A run whose only other call errored has worked past nothing, so
+	// it fails even though the rejection itself goes unreported.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "edit_file", Error: errors.New("old string appears 0 times in the file")},
+			{Name: "submit_result", Error: errors.New("parameter error"), Recoverable: true},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if want := "no tool call succeeded; 1 tool-call error(s)"; !strings.Contains(obs.failures[0], want) {
+		t.Errorf("failure message: got = %q, wanted = contains %q", obs.failures[0], want)
 	}
 
 	// A suspended trace (halted mid-run to await a human answer) is a
-	// non-error terminal state: NoErrors must not fail it even when an error
-	// surfaced through the tool-call channel (the suspension sentinel is
-	// error-shaped). The same tool-call error on a non-suspended trace fails
-	// NoErrors — see the read_logs case above — so this proves the Suspended
-	// short-circuit does the suppressing, not the absence of errors.
+	// non-error terminal state: NoErrors neither fails nor grades it, even
+	// when an error surfaced through the tool-call channel (the suspension
+	// sentinel is error-shaped). The same unmarked tool-call error on a
+	// non-suspended trace does produce a Grade (see the read_logs case
+	// above), so the absent grade here proves the Suspended short-circuit
+	// does the suppressing, not the absence of errors.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		Suspended:        true,
@@ -354,6 +597,9 @@ func TestNoErrors(t *testing.T) {
 	callback(obs, trace)
 	if len(obs.failures) > 0 {
 		t.Errorf("unexpected failure for suspended trace: %v", obs.failures)
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for suspended trace: %v", obs.gradeReasons)
 	}
 }
 

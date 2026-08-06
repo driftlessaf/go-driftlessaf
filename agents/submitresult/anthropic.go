@@ -34,7 +34,10 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata
 	handler := func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
 		var args map[string]any
 		if err := json.Unmarshal(toolUse.Input, &args); err != nil {
-			trace.BadToolCall(toolUse.ID, toolUse.Name, map[string]any{
+			// Recoverable, like every other submit rejection: the parse error
+			// goes back to the model as a corrective hint, and a run that
+			// never lands a parseable submit cannot commit a result at all.
+			trace.RejectedToolCall(toolUse.ID, toolUse.Name, map[string]any{
 				"input": toolUse.Input,
 			}, errors.New("parameter error"))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool input: %v", err)}

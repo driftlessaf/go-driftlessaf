@@ -60,6 +60,8 @@ func GateSubmission[Response any](
 	}
 
 	*resultPtr = outcome.Response
-	tc.Complete(outcome.ToolResult, nil)
+	// Marked terminal, not merely successful: this call commits the result,
+	// so consumers counting successful work must not count it.
+	tc.CompleteTerminal(outcome.ToolResult)
 	return outcome.ToolResult, true, nil
 }

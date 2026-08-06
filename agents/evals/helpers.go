@@ -6,10 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 package evals
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
 	"sort"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 )
@@ -93,21 +95,48 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 	}
 }
 
-// NoErrors returns an ObservableTraceCallback that validates no tool calls resulted in errors.
-// Optional ignore functions can be provided to filter out expected errors (e.g., file not found).
-// If any ignore function returns true for a given error, that error is skipped.
+// maxReportedToolErrors caps how many recovered tool-call errors NoErrors
+// lists in its Grade reasoning, so the reasoning stays a readable size in
+// score sinks (BigQuery rows, gate comments).
+const maxReportedToolErrors = 3
+
+// NoErrors returns an ObservableTraceCallback that validates the run reached a
+// terminal result without an unrecovered error. It fails only when the trace
+// itself carries an error (executor failure, turn budget exhausted, requeue).
 //
-// Tool calls marked Recoverable are skipped: they record a designed
-// correction loop — a handler rejected the call but returned a corrective
-// hint the model acted on (e.g. a resubmitted terminal submit) — not a
-// failure. The gate still catches the bad outcomes: an unrecovered
-// rejection surfaces as a trace-level error (with a submit tool configured
-// the executor's only clean exit is a committed result, so a model that
-// never lands one exhausts the turn budget), and every unmarked tool-call
-// error fails exactly as before.
+// Tool-call errors do not fail the metric on their own. An errored call the
+// agent worked past, by retrying, by taking another route, or by treating a
+// not-found answer to a probe as the answer, is a recovered transient. This
+// mirrors how agenttrace.RecordedTurn records transient errors without
+// marking the turn Failed. Recovered tool-call errors reach score sinks
+// through Grade with a reasoning string listing them, so the signal survives
+// without gating on it.
 //
-// A suspended trace (Trace.Suspended) never fails: suspension is an
-// intentional mid-run halt awaiting an out-of-band signal, not a failure,
+// A completed run is not by itself proof the agent worked past those errors.
+// The executors steer a stuck model to submit anyway, so a run whose every
+// call failed can still commit a degraded result and leave Trace.Error nil.
+// So a completed run that recorded tool-call errors and no successful tool
+// call fails. The terminal submit (agenttrace.ToolCall.Terminal) is not a
+// success for this count: committing a result is not work.
+//
+// One tool-call error class still fails: a call carrying
+// agenttrace.ErrUnknownTool named a tool the executor has no handler for. That
+// is a protocol violation rather than exploration, and no retry makes the call
+// legal, so it has no recovered reading.
+//
+// Tool calls marked Recoverable stay out of that reasoning. They record a
+// designed correction loop, where a handler rejected the call but returned a
+// corrective hint the model acted on (e.g. a resubmitted terminal submit), so
+// there is no tool misuse to report.
+//
+// Optional ignore functions can be provided to filter out expected errors
+// (e.g., file not found). If any ignore function returns true for a given
+// error, that error is skipped: it neither fails the metric nor appears in
+// the Grade reasoning. This holds for an unknown-tool error too, so an agent
+// that legitimately expects one can say so.
+//
+// A suspended trace (Trace.Suspended) neither fails nor grades. Suspension is
+// an intentional mid-run halt awaiting an out-of-band signal, not a failure,
 // and the resumed run is graded on its own trace.
 func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 	shouldIgnore := func(err error) bool {
@@ -121,25 +150,54 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 	return func(o Observer, trace *agenttrace.Trace[T]) {
 		// Short-circuit before the error checks: the suspension sentinel is
 		// error-shaped and can surface through the trace's error channels
-		// (e.g. recorded on the intercepted suspend tool call), and grading
-		// a half-run's errors is premature — the resumed run completes on
-		// its own trace.
+		// (e.g. recorded on the intercepted suspend tool call), and grading a
+		// half-run's errors is premature. The resumed run completes on its
+		// own trace.
 		if trace.Suspended {
 			return
 		}
 
-		// Check trace error
+		// A trace-level error means the run died before reaching a result.
 		if trace.Error != nil && !shouldIgnore(trace.Error) {
 			o.Fail(fmt.Sprintf("trace error: got = %v, wanted = nil", trace.Error))
 			return
 		}
 
-		// Check tool call errors
+		// Tool-call errors on a completed run are recovered transients as
+		// long as some call succeeded: report those without failing.
+		var recovered []string
+		succeeded := 0
 		for _, tc := range trace.ToolCalls {
-			if tc.Error != nil && !tc.Recoverable && !shouldIgnore(tc.Error) {
+			if tc.Error == nil || shouldIgnore(tc.Error) {
+				// The terminal submit commits the result rather than doing
+				// work, so it cannot stand as the run's only success.
+				if !tc.Terminal {
+					succeeded++
+				}
+				continue
+			}
+			// A call naming a tool the executor has no handler for is the one
+			// error class no retry can make legal, so it stays terminal.
+			// Matched through the sentinel, never the message: the tool name
+			// in it is model-controlled text.
+			if errors.Is(tc.Error, agenttrace.ErrUnknownTool) {
 				o.Fail(fmt.Sprintf("tool call %s error: got = %v, wanted = nil", tc.Name, tc.Error))
 				return
 			}
+			if !tc.Recoverable {
+				recovered = append(recovered, fmt.Sprintf("%s: %v", tc.Name, tc.Error))
+			}
+		}
+		if n := len(recovered); n > 0 {
+			if n > maxReportedToolErrors {
+				recovered = append(recovered[:maxReportedToolErrors], fmt.Sprintf("and %d more", n-maxReportedToolErrors))
+			}
+			detail := strings.Join(recovered, "; ")
+			if succeeded == 0 {
+				o.Fail(fmt.Sprintf("no tool call succeeded; %d tool-call error(s): %s", n, detail))
+				return
+			}
+			o.Grade(1.0, fmt.Sprintf("run completed; recovered from %d tool-call error(s): %s", n, detail))
 		}
 	}
 }

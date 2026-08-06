@@ -35,7 +35,10 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 	handler := func(ctx context.Context, tc openai.ChatCompletionMessageToolCall, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			trace.BadToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, errors.New("parameter error"))
+			// Recoverable, like every other submit rejection: the parse error
+			// goes back to the model as a corrective hint, and a run that
+			// never lands a parseable submit cannot commit a result at all.
+			trace.RejectedToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, errors.New("parameter error"))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool arguments: %v", err)}
 		}
 		return buildOutcome(ctx, opts, trace, tc.ID, tc.Function.Name, args)

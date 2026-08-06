@@ -364,6 +364,53 @@ func TestOpenAISubmitRejectsMalformedPayload(t *testing.T) {
 	}
 }
 
+// TestSubmitRejectsUnparseableArgumentsAsRecoverable covers the one submit
+// rejection that never reaches buildOutcome: the provider hands over
+// arguments that are not JSON at all. Google is absent because its arguments
+// arrive already decoded. The record must be recoverable like its siblings,
+// or a no-tool agent (cve-advisor, conformance) that fumbles one submit and
+// then submits cleanly fails no-errors, having no other call to count as
+// work.
+func TestSubmitRejectsUnparseableArgumentsAsRecoverable(t *testing.T) {
+	t.Run("claude", func(t *testing.T) {
+		submit, err := ClaudeToolForResponse[*sampleResult]()
+		if err != nil {
+			t.Fatalf("ClaudeToolForResponse: %v", err)
+		}
+
+		ctx := t.Context()
+		trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+
+		block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: []byte(`{"reasoning":`)}
+		outcome := submit.Handler(ctx, block, trace)
+
+		if outcome.Accepted {
+			t.Errorf("unparseable input: got = accepted, want = rejected")
+		}
+		requireRecoverableRejection(t, trace, "parameter error")
+	})
+
+	t.Run("openai", func(t *testing.T) {
+		submit, err := OpenAIToolForResponse[*sampleResult]()
+		if err != nil {
+			t.Fatalf("OpenAIToolForResponse: %v", err)
+		}
+
+		ctx := t.Context()
+		trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+
+		call := openai.ChatCompletionMessageToolCall{ID: "s1"}
+		call.Function.Name = submit.Definition.Function.Name
+		call.Function.Arguments = `{"reasoning":`
+		outcome := submit.Handler(ctx, call, trace)
+
+		if outcome.Accepted {
+			t.Errorf("unparseable arguments: got = accepted, want = rejected")
+		}
+		requireRecoverableRejection(t, trace, "parameter error")
+	})
+}
+
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

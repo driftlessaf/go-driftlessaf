@@ -262,6 +262,29 @@ func TestGateSubmissionRejectionKinds(t *testing.T) {
 		}
 	})
 
+	t.Run("accepted submission records a terminal call", func(t *testing.T) {
+		ctx := t.Context()
+		trace, _ := agenttrace.StartTrace[reviewResult](ctx, "prompt")
+
+		var result reviewResult
+		_, committed, err := GateSubmission(ctx, outcome, trace, "call-1", "submit_result",
+			map[string]any{"verdict": "pass"}, nil, rec, "submit_result", &result)
+		if err != nil {
+			t.Fatalf("GateSubmission() error = %v, want = nil", err)
+		}
+		if !committed {
+			t.Errorf("committed: got = false, want = true")
+		}
+		if len(trace.ToolCalls) != 1 {
+			t.Fatalf("tool calls length: got = %d, want = 1", len(trace.ToolCalls))
+		}
+		// Terminal, not merely error-free: consumers counting successful work
+		// (the no-errors eval scorer) must not read the commit as work done.
+		if tc := trace.ToolCalls[0]; tc.Error != nil || !tc.Terminal {
+			t.Errorf("tool call record: got = {error: %v, terminal: %t}, want = no error with terminal = true", tc.Error, tc.Terminal)
+		}
+	})
+
 	t.Run("validator error records a genuine failure", func(t *testing.T) {
 		ctx := t.Context()
 		trace, _ := agenttrace.StartTrace[reviewResult](ctx, "prompt")

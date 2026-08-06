@@ -275,7 +275,7 @@ func (e *executor[Request, Response]) Execute(
 			clog.ErrorContext(ctx, "Unknown tool requested", "tool", tc.Function.Name)
 			trace.BadToolCall(tc.ID, tc.Function.Name,
 				map[string]any{"arguments": tc.Function.Arguments},
-				fmt.Errorf("unknown tool: %q", tc.Function.Name))
+				fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, tc.Function.Name))
 			res = map[string]any{"error": fmt.Sprintf("unknown tool: %q", tc.Function.Name)}
 		}
 
