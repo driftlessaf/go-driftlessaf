@@ -8,6 +8,7 @@ package submitresult
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -19,7 +20,10 @@ import (
 func GoogleTool[Response any](opts Options[Response]) (googletool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
-	responseSchema := opts.schemaForResponse()
+	responseSchema, err := opts.schemaForResponse()
+	if err != nil {
+		return googletool.SubmitMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
+	}
 	responseSchema.Description = opts.PayloadDescription
 
 	genaiPayload := schemaToGenai(responseSchema)

@@ -8,6 +8,7 @@ package metaagent
 import (
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 )
@@ -124,6 +125,32 @@ type Config[Resp, CB any] struct {
 	// SuspendToolDescription is the friend-facing description advertised to the
 	// model for the suspend tool. Ignored when SuspendToolName is empty.
 	SuspendToolDescription string
+
+	// OmitResultSchemaFields lists JSON property names the terminal submit
+	// tool withholds from the payload schema it advertises
+	// (submitresult.Options.OmitPayloadFields). Resp is unchanged, which is
+	// the point: an agent whose affordances vary at runtime can hide the
+	// fields of a disabled one instead of swapping Resp for a trimmed mirror
+	// type. Swapping Resp also swaps the type the run's trace is recorded
+	// under — agenttrace keys the context tracer by result type — so every
+	// consumer that installed a Tracer[Resp] (eval scorers, CloudEvent
+	// emission) would silently stop receiving traces.
+	//
+	// A withheld field still decodes if a model invents it, so a caller for
+	// which that matters must also ignore it on the returned result. Every
+	// name must match a property of Resp's reflected schema; an unmatched
+	// name fails construction.
+	OmitResultSchemaFields []string
+}
+
+// submitOptions builds the terminal submit tool's options: the metadata
+// reflected from Resp's annotations, plus the config's schema-level field
+// omissions. Shared by every backend so the tool a run advertises does not
+// depend on which provider serves it.
+func submitOptions[Resp, CB any](config Config[Resp, CB]) submitresult.Options[Resp] {
+	opts := submitresult.OptionsForResponse[Resp]()
+	opts.OmitPayloadFields = config.OmitResultSchemaFields
+	return opts
 }
 
 // suspendQuestionProperty is the single input property the suspend tool schema

@@ -23,7 +23,10 @@ import (
 func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
-	responseSchema := opts.schemaForResponse()
+	responseSchema, err := opts.schemaForResponse()
+	if err != nil {
+		return claudetool.SubmitMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
+	}
 	responseSchema.Description = opts.PayloadDescription
 
 	payloadSchema, err := schemaToMap(responseSchema)

@@ -65,7 +65,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	// Build the terminal submit_result tool. The executor gates accepted
 	// submissions on the configured result validators before committing them
 	// as the run's final result.
-	submitTool, err := submitresult.ClaudeToolForResponse[Resp]()
+	submitTool, err := submitresult.ClaudeTool(submitOptions(config))
 	if err != nil {
 		return nil, fmt.Errorf("building submit tool: %w", err)
 	}

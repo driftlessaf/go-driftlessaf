@@ -24,7 +24,10 @@ import (
 func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
-	responseSchema := opts.schemaForResponse()
+	responseSchema, err := opts.schemaForResponse()
+	if err != nil {
+		return openaistool.SubmitMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
+	}
 	responseSchema.Description = opts.PayloadDescription
 
 	payloadSchema, err := schemaToMap(responseSchema)

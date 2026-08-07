@@ -7,7 +7,9 @@ package submitresult
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/schema"
 	"github.com/invopop/jsonschema"
@@ -22,6 +24,23 @@ type Options[Response any] struct {
 	PayloadFieldName   string
 	PayloadDescription string
 	Generator          *schema.Generator
+
+	// OmitPayloadFields lists JSON property names to withhold from the payload
+	// schema advertised to the model, and from that schema's required list.
+	// Response itself is untouched: decoding, the result the agent returns, and
+	// the type its trace is recorded under all stay the same, so a caller can
+	// hide an affordance behind a runtime dial without maintaining a mirror of
+	// the response type for the hidden shape.
+	//
+	// Withholding a field from the schema is not the same as rejecting it: a
+	// model that invents the property anyway still decodes into Response.
+	// Callers for whom the hidden field is load-bearing must also ignore it on
+	// the way out.
+	//
+	// Every name must match a property of the reflected schema; an unmatched
+	// name fails tool construction rather than leaving the field advertised,
+	// so a later json-tag rename cannot silently re-expose it.
+	OmitPayloadFields []string
 }
 
 func (o *Options[Response]) setDefaults() {
@@ -51,8 +70,37 @@ func (o *Options[Response]) setDefaults() {
 	}
 }
 
-func (o *Options[Response]) schemaForResponse() *jsonschema.Schema {
-	return o.Generator.Reflect(newResponseValue[Response]())
+func (o *Options[Response]) schemaForResponse() (*jsonschema.Schema, error) {
+	reflected := o.Generator.Reflect(newResponseValue[Response]())
+	if len(o.OmitPayloadFields) == 0 {
+		return reflected, nil
+	}
+	if err := omitProperties(reflected, o.OmitPayloadFields); err != nil {
+		return nil, err
+	}
+	return reflected, nil
+}
+
+// omitProperties deletes the named properties from a reflected payload schema
+// and drops them from its required list. An unmatched name is an error: the
+// caller asked for the property to be hidden, and reporting nothing would
+// advertise a field the deployment meant to withhold.
+func omitProperties(s *jsonschema.Schema, names []string) error {
+	if s == nil {
+		return errors.New("omitting payload fields: no reflected schema")
+	}
+	for _, name := range names {
+		if s.Properties == nil {
+			return fmt.Errorf("omitting payload field %q: the reflected schema has no properties", name)
+		}
+		if _, ok := s.Properties.Delete(name); !ok {
+			return fmt.Errorf("omitting payload field %q: the reflected schema has no such property", name)
+		}
+	}
+	s.Required = slices.DeleteFunc(s.Required, func(field string) bool {
+		return slices.Contains(names, field)
+	})
+	return nil
 }
 
 func schemaToMap(s *jsonschema.Schema) (map[string]any, error) {
