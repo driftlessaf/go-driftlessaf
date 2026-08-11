@@ -285,12 +285,14 @@ func (e *executor[Request, Response]) Execute(
 	// When using CachedContent, SystemInstruction and Tools MUST NOT be set
 	// on GenerateContentConfig — they are already in the cache.
 	usedCache := false
+	var cacheCreationTokens int64
 	if e.cacheControl && (systemInstruction != nil || len(genaiTools) > 0) {
-		cacheName, err := e.getOrCreateCache(ctx, systemInstruction, genaiTools)
+		cacheName, createdTokens, err := e.getOrCreateCache(ctx, systemInstruction, genaiTools)
 		if err != nil {
 			clog.WarnContext(ctx, "Failed to create cached content, falling back to non-cached mode", "error", err)
 		} else {
 			config.CachedContent = cacheName
+			cacheCreationTokens = createdTokens
 			usedCache = true
 		}
 	}
@@ -513,20 +515,23 @@ func (e *executor[Request, Response]) Execute(
 		// iteration's response at the top of the next turn — so for turn 0
 		// this captures the initial API call, and for later turns it captures
 		// the response from the preceding tool/redirect call.
+		var cacheReadTokens int64
 		if response != nil && response.UsageMetadata != nil {
-			llmTurn.RecordTokens(
-				int64(response.UsageMetadata.PromptTokenCount),
-				int64(response.UsageMetadata.CandidatesTokenCount),
-			)
-			// Vertex reports cache hits via CachedContentTokenCount; cache
-			// writes are not separately billed for Gemini (see cost view),
-			// so CacheCreationTokens stays 0 here. A future "cache write
-			// events" metric would have to source from getOrCreateCache
-			// (the only place a Gemini cache create actually happens) —
-			// turns[] sees only the read-side hits.
-			if e.cacheControl && response.UsageMetadata.CachedContentTokenCount > 0 {
-				llmTurn.RecordCacheTokens(int64(response.UsageMetadata.CachedContentTokenCount), 0)
-			}
+			inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
+			llmTurn.RecordTokens(inputTokens, outputTokens)
+			cacheReadTokens = int64(response.UsageMetadata.CachedContentTokenCount)
+		}
+
+		// Cache creation prepares the context for the first model request, so
+		// its token count belongs to that request's turn. The cost view prices
+		// Gemini cache creation at zero while retaining the count for usage
+		// accounting.
+		createdTokens := int64(0)
+		if turn == 0 {
+			createdTokens = cacheCreationTokens
+		}
+		if e.cacheControl && (cacheReadTokens > 0 || createdTokens > 0) {
+			llmTurn.RecordCacheTokens(cacheReadTokens, createdTokens)
 		}
 
 		clog.InfoContext(ctx, "Received response from model", "candidates_count", len(response.Candidates))
@@ -832,10 +837,8 @@ func (e *executor[Request, Response]) Execute(
 	// them off would silently undercount maxTurns-exhausted runs.
 	if response != nil && response.UsageMetadata != nil {
 		llmTurn := trace.BeginTurn(e.maxTurns, agenttrace.SystemGoogleVertex, e.model)
-		llmTurn.RecordTokens(
-			int64(response.UsageMetadata.PromptTokenCount),
-			int64(response.UsageMetadata.CandidatesTokenCount),
-		)
+		inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
+		llmTurn.RecordTokens(inputTokens, outputTokens)
 		if e.cacheControl && response.UsageMetadata.CachedContentTokenCount > 0 {
 			llmTurn.RecordCacheTokens(int64(response.UsageMetadata.CachedContentTokenCount), 0)
 		}
@@ -901,10 +904,11 @@ func (e *executor[Request, Response]) sendWithRetry(
 	return response, nil
 }
 
-// getOrCreateCache returns the name of a valid CachedContent, creating one if
-// needed. It is safe for concurrent use. On cache creation it records
-// cache_creation metrics so the cost of the write is visible in dashboards.
-func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, systemInstruction *genai.Content, tools []*genai.Tool) (string, error) {
+// getOrCreateCache returns the name of a valid CachedContent and the number of
+// tokens used when this call creates it. On cache creation it records
+// cache_creation metrics so the write is visible in dashboards. It is safe
+// for concurrent use.
+func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, systemInstruction *genai.Content, tools []*genai.Tool) (string, int64, error) {
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
 
@@ -912,7 +916,7 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	// Callers must ensure a stable tool set for the lifetime of this executor;
 	// use WithoutCacheControl() if the tool set varies per call.
 	if e.cachedContentName != "" && time.Now().Add(time.Minute).Before(e.cachedContentExpiry) {
-		return e.cachedContentName, nil
+		return e.cachedContentName, 0, nil
 	}
 
 	cached, err := e.client.Caches.Create(ctx, e.model, &genai.CreateCachedContentConfig{
@@ -926,7 +930,7 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	// shows up on the rate-limit dashboard alongside chat-send 429s.
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
-		return "", fmt.Errorf("creating cached content: %w", err)
+		return "", 0, fmt.Errorf("creating cached content: %w", err)
 	}
 
 	e.cachedContentName = cached.Name
@@ -947,7 +951,7 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 		"total_token_count", totalTokenCount,
 	)
 
-	return cached.Name, nil
+	return cached.Name, int64(totalTokenCount), nil
 }
 
 // ptr is a helper function to create a pointer to a value
@@ -965,11 +969,21 @@ func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, us
 		return
 	}
 
-	e.telemetry.RecordTokens(ctx, int64(usage.PromptTokenCount), int64(usage.CandidatesTokenCount))
+	inputTokens, outputTokens := inputOutputTokenCounts(usage)
+	e.telemetry.RecordTokens(ctx, inputTokens, outputTokens)
 
 	if e.cacheControl && usage.CachedContentTokenCount > 0 {
 		e.telemetry.RecordCacheTokens(ctx, int64(usage.CachedContentTokenCount), 0)
 		clog.DebugContext(ctx, "Prompt cache metrics",
 			"cache_read_tokens", usage.CachedContentTokenCount)
 	}
+}
+
+// inputOutputTokenCounts normalises Gemini's usage categories into the input
+// and output totals used by traces and metrics.
+func inputOutputTokenCounts(usage *genai.GenerateContentResponseUsageMetadata) (int64, int64) {
+	inputTokens := int64(usage.PromptTokenCount) + int64(usage.ToolUsePromptTokenCount)
+	outputTokens := int64(usage.CandidatesTokenCount) + int64(usage.ThoughtsTokenCount)
+
+	return inputTokens, outputTokens
 }

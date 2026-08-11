@@ -21,6 +21,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 )
 
@@ -249,7 +251,10 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 		},
 	}
 
-	resp, err := exec.Execute(t.Context(), errCapRequest{}, tools)
+	tracer := &recordingTracer{}
+	ctx := agenttrace.WithTracer[errCapResponse](t.Context(), tracer)
+
+	resp, err := exec.Execute(ctx, errCapRequest{}, tools)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -258,6 +263,30 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 	}
 	if cacheReqs == 0 {
 		t.Error("fake cachedContents endpoint was never called; context cache path not exercised")
+	}
+
+	if got, want := len(tracer.traces), 1; got != want {
+		t.Fatalf("recorded traces: got = %d, want = %d", got, want)
+	}
+	wantTurns := []agenttrace.RecordedTurn{
+		{
+			Index:               0,
+			Model:               "gemini-2.5-flash",
+			System:              agenttrace.SystemGoogleVertex,
+			InputTokens:         1,
+			OutputTokens:        1,
+			CacheCreationTokens: 5,
+		},
+		{
+			Index:        1,
+			Model:        "gemini-2.5-flash",
+			System:       agenttrace.SystemGoogleVertex,
+			InputTokens:  1,
+			OutputTokens: 1,
+		},
+	}
+	if diff := cmp.Diff(wantTurns, tracer.traces[0].Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime")); diff != "" {
+		t.Errorf("trace turns (-want +got):\n%s", diff)
 	}
 }
 
