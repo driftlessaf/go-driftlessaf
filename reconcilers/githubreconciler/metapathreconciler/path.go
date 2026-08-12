@@ -31,17 +31,26 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	if err != nil {
 		return fmt.Errorf("create change session: %w", err)
 	}
-	state := session.State()
-	var usePRBranch bool
-	switch {
-	case session.ShouldSkip():
+	if session.ShouldSkip() {
 		if session.HasSkipLabel() {
 			clog.InfoContext(ctx, "PR has skip label, not updating to preserve manual changes", "pr", session.PRNumber())
 		} else {
 			clog.InfoContext(ctx, "PR is assigned to humans, not updating to avoid stomping their work", "pr", session.PRNumber(), "assignees", session.Assignees())
 		}
 		return nil
+	}
 
+	// Converge the static labels here rather than leaving it to Upsert, which
+	// every early return below skips: a PR created by a run that died between
+	// PullRequests.Create and its label call would otherwise stay unlabeled for
+	// its whole life. No API call when the labels are already present.
+	if err := session.AddLabels(ctx, r.labels); err != nil {
+		return fmt.Errorf("apply static labels: %w", err)
+	}
+
+	state := session.State()
+	var usePRBranch bool
+	switch {
 	// If the PR is not mergeable, ignore everything about the existing PR
 	// and start from scratch on the default branch.
 	case state.NeedsRebase():
