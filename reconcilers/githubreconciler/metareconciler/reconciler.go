@@ -31,6 +31,13 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// to only process issues managed by a specific identity.
 	requiredLabel string
 
+	// draftLabel, when set and present on the issue, opens the generated PR as a
+	// draft. Empty (the default) always opens ready-for-review PRs. The draft
+	// state only takes effect at PR creation — GitHub's REST edit endpoint
+	// ignores the draft field — so a human remains in control of promoting the
+	// PR out of draft afterward.
+	draftLabel string
+
 	// prLabelsFromResult derives extra labels to stamp on the generated PR from
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
@@ -73,6 +80,16 @@ func WithRequiredLabel[Req promptbuilder.Bindable, Resp Result, CB any](label st
 	}
 }
 
+// WithDraftLabel configures the reconciler to open the generated PR as a draft
+// when the source issue carries the given label. Off by default (empty label):
+// PRs open ready for review. The draft state is applied at PR creation only, so
+// promoting the PR out of draft afterward is left to humans.
+func WithDraftLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.draftLabel = label
+	}
+}
+
 // WithPRLabelsFromResult configures the reconciler to stamp extra labels on the
 // generated PR, derived from the agent result. The labels are added after Upsert
 // succeeds, when the PR number is known. A nil or empty return adds nothing.
@@ -87,7 +104,9 @@ func WithPRLabelsFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn 
 // situationally — by labeling the issue — rather than always (which is what
 // passing them in prLabels does). The issue labels are merged with prLabels on
 // every Upsert, so adding a label to an issue propagates it to an already-open
-// PR on the next reconcile. Off by default.
+// PR on the next reconcile. The configured draft label (WithDraftLabel) is
+// never copied: it is a directive to the bot, not a label the PR should wear.
+// Off by default.
 func WithCopyIssueLabels[Req promptbuilder.Bindable, Resp Result, CB any]() Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.copyIssueLabels = true

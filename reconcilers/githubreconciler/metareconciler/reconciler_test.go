@@ -178,6 +178,144 @@ func TestWithRequiredLabel(t *testing.T) {
 	}
 }
 
+func TestWithDraftLabel(t *testing.T) {
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		&fakeAgent{},
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithDraftLabel[*testRequest, *testResult, testCallbacks]("test-identity/draft"),
+	)
+
+	if rec == nil {
+		t.Fatal("New() returned nil with WithDraftLabel option")
+	}
+	if rec.draftLabel != "test-identity/draft" {
+		t.Errorf("reconciler.draftLabel = %q, wanted = %q", rec.draftLabel, "test-identity/draft")
+	}
+}
+
+func TestDraftForIssue(t *testing.T) {
+	issue := func(labels ...string) *github.Issue {
+		i := &github.Issue{}
+		for _, l := range labels {
+			i.Labels = append(i.Labels, &github.Label{Name: github.Ptr(l)})
+		}
+		return i
+	}
+
+	tests := []struct {
+		name       string
+		draftLabel string
+		issue      *github.Issue
+		want       bool
+	}{
+		{
+			name:       "no label configured is never draft",
+			draftLabel: "",
+			issue:      issue("test-identity/draft"),
+			want:       false,
+		},
+		{
+			name:       "configured label present opens draft",
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/managed", "test-identity/draft"),
+			want:       true,
+		},
+		{
+			name:       "configured label absent is not draft",
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/managed"),
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Reconciler[*testRequest, *testResult, testCallbacks]{draftLabel: tt.draftLabel}
+			if got := r.draftForIssue(tt.issue); got != tt.want {
+				t.Errorf("draftForIssue() = %v, want = %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldClearDraftLabel(t *testing.T) {
+	issue := func(labels ...string) *github.Issue {
+		i := &github.Issue{}
+		for _, l := range labels {
+			i.Labels = append(i.Labels, &github.Label{Name: github.Ptr(l)})
+		}
+		return i
+	}
+
+	tests := []struct {
+		name       string
+		draftLabel string
+		issue      *github.Issue
+		hasPR      bool
+		prIsDraft  bool
+		want       bool
+	}{
+		{
+			name:       "promoted PR with label still present clears it",
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/managed", "test-identity/draft"),
+			hasPR:      true,
+			prIsDraft:  false,
+			want:       true,
+		},
+		{
+			name:       "PR still draft keeps the label",
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/draft"),
+			hasPR:      true,
+			prIsDraft:  true,
+			want:       false,
+		},
+		{
+			name:       "label already absent is a no-op",
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/managed"),
+			hasPR:      true,
+			prIsDraft:  false,
+			want:       false,
+		},
+		{
+			name:       "no PR yet is a no-op",
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/draft"),
+			hasPR:      false,
+			prIsDraft:  false,
+			want:       false,
+		},
+		{
+			name:       "unconfigured label never clears",
+			draftLabel: "",
+			issue:      issue("test-identity/draft"),
+			hasPR:      true,
+			prIsDraft:  false,
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Reconciler[*testRequest, *testResult, testCallbacks]{draftLabel: tt.draftLabel}
+			if got := r.shouldClearDraftLabel(tt.issue, tt.hasPR, tt.prIsDraft); got != tt.want {
+				t.Errorf("shouldClearDraftLabel() = %v, want = %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWithPRLabelsFromResult(t *testing.T) {
 	agent := &fakeAgent{}
 	fn := func(*testResult) []string { return []string{"team/example"} }
@@ -342,11 +480,12 @@ func TestPRLabelsForIssue(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		prLabels []string
-		copy     bool
-		issue    *github.Issue
-		want     []string
+		name       string
+		prLabels   []string
+		copy       bool
+		draftLabel string
+		issue      *github.Issue
+		want       []string
 	}{
 		{
 			name:     "copy off returns fixed labels only",
@@ -376,6 +515,22 @@ func TestPRLabelsForIssue(t *testing.T) {
 			issue:    issue(),
 			want:     []string{"test-identity/managed"},
 		},
+		{
+			name:       "copy on never copies the draft label",
+			prLabels:   []string{"test-identity/managed"},
+			copy:       true,
+			draftLabel: "test-identity/draft",
+			issue:      issue("test-identity/draft", "ai-review"),
+			want:       []string{"test-identity/managed", "ai-review"},
+		},
+		{
+			name:       "draft label unconfigured copies all issue labels",
+			prLabels:   []string{"test-identity/managed"},
+			copy:       true,
+			draftLabel: "",
+			issue:      issue("test-identity/draft", "ai-review"),
+			want:       []string{"test-identity/managed", "test-identity/draft", "ai-review"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -383,6 +538,7 @@ func TestPRLabelsForIssue(t *testing.T) {
 			r := &Reconciler[*testRequest, *testResult, testCallbacks]{
 				prLabels:        tt.prLabels,
 				copyIssueLabels: tt.copy,
+				draftLabel:      tt.draftLabel,
 			}
 			got := r.prLabelsForIssue(tt.issue)
 			if !slices.Equal(got, tt.want) {

@@ -409,6 +409,7 @@ func (cm *CM[T]) NewSession(
 		prBody        string
 		prHeadSHA     string
 		prMergeable   *bool
+		prDraft       bool
 		prLabels      []string
 		prAssignees   []string
 		commitCount   int
@@ -426,6 +427,7 @@ func (cm *CM[T]) NewSession(
 					Url        string
 					Body       string
 					Mergeable  string // MERGEABLE, CONFLICTING, UNKNOWN
+					IsDraft    bool
 					HeadRefOid string
 					Labels     struct {
 						Nodes []struct {
@@ -471,6 +473,7 @@ func (cm *CM[T]) NewSession(
 		prURL = pr.Url
 		prBody = pr.Body
 		prHeadSHA = pr.HeadRefOid
+		prDraft = pr.IsDraft
 		// Map GraphQL mergeable status to bool pointer
 		switch pr.Mergeable {
 		case "MERGEABLE":
@@ -535,6 +538,7 @@ func (cm *CM[T]) NewSession(
 		prBody:        prBody,
 		prHeadSHA:     prHeadSHA,
 		prMergeable:   prMergeable,
+		prDraft:       prDraft,
 		prLabels:      prLabels,
 		prAssignees:   prAssignees,
 		commitCount:   commitCount,

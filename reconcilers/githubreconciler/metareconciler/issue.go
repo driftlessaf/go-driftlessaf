@@ -42,20 +42,37 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	creator := issue.GetUser().GetLogin()
 
 	state := changeSession.State()
-	var usePRBranch bool
-	switch {
-	case changeSession.ShouldSkip(creator):
+
+	// A human has taken over: honor the skip contract and leave the PR and the
+	// issue completely untouched, labels included.
+	if changeSession.ShouldSkip(creator) {
 		if changeSession.HasSkipLabel() {
 			clog.InfoContext(ctx, "PR has skip label, not updating to preserve manual changes", "pr", changeSession.PRNumber())
 		} else {
 			clog.InfoContext(ctx, "PR is assigned to humans, not updating to avoid stomping their work", "pr", changeSession.PRNumber(), "assignees", changeSession.Assignees())
 		}
 		return nil
-
-	case changeSession.IssueHasSkipLabel(issue):
+	}
+	if changeSession.IssueHasSkipLabel(issue) {
 		clog.InfoContext(ctx, "Issue has skip label, leaving it and any PR alone")
 		return nil
+	}
 
+	// Keep the issue's draft label in sync with the PR. The draft flag only takes
+	// effect at PR creation, so once a human promotes the PR out of draft, the
+	// label no longer reflects reality — drop it so it stops implying the PR is a
+	// draft. This is one-directional (PR state -> label): the bot never re-drafts
+	// a PR, so it never re-adds the label. Runs after the skip checks above (a
+	// takeover means hands off the issue too) but before the switch so it still
+	// covers the green-PR path, which returns early.
+	if r.shouldClearDraftLabel(issue, state.HasPR(), changeSession.IsDraft()) {
+		if _, err := gh.Issues.RemoveLabelForIssue(ctx, res.Owner, res.Repo, res.Number, r.draftLabel); err != nil {
+			log.With("error", err).Warn("Failed to remove draft label from issue after PR was promoted out of draft")
+		}
+	}
+
+	var usePRBranch bool
+	switch {
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		clog.InfoContext(ctx, "Issue missing required label, closing any outstanding PRs", "required_label", r.requiredLabel)
 		r.giveUp.Clear(ctx, changeSession)
@@ -178,6 +195,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	// both is stamped once.
 	prLabels := r.prLabelsForIssue(issue)
 
+	// Open the PR as a draft when the issue opts in via the configured draft
+	// label. Only meaningful at creation; GitHub ignores draft on REST edits.
+	draft := r.draftForIssue(issue)
+
 	// Create/update the PR with the changes. prData is passed by pointer and
 	// the body template renders only after the closure below runs, so fields
 	// set post-execution (ReasoningSummary) are visible to the template.
@@ -188,7 +209,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		IssueBodyHash: sha256.Sum256([]byte(issue.GetBody())),
 		Request:       request,
 	}
-	prURL, err := changeSession.Upsert(ctx, prData, false, prLabels, func(ctx context.Context, branchName string) error {
+	prURL, err := changeSession.Upsert(ctx, prData, draft, prLabels, func(ctx context.Context, branchName string) error {
 		// Tee the agent's completed trace so the PR body template can render
 		// a rationale summary via {{.ReasoningSummary}} (see
 		// ReasoningSummarySnippet): per-action tool-call reasoning when
@@ -316,7 +337,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 // prLabelsForIssue returns the labels to stamp on the PR for this issue: the
 // fixed prLabels, plus every label on the issue when copyIssueLabels is set.
 // Duplicates are collapsed so a label present in both is returned once. When
-// copyIssueLabels is off it returns the fixed prLabels unchanged.
+// copyIssueLabels is off it returns the fixed prLabels unchanged. The draft
+// label is never copied from the issue: it is a directive to the bot, already
+// honored via the draft flag at PR creation, and nothing removes it from the
+// PR after promotion — it would misrepresent a ready PR as draft over there.
 func (r *Reconciler[Req, Resp, CB]) prLabelsForIssue(issue *github.Issue) []string {
 	if !r.copyIssueLabels {
 		return r.prLabels
@@ -337,9 +361,25 @@ func (r *Reconciler[Req, Resp, CB]) prLabelsForIssue(issue *github.Issue) []stri
 		add(l)
 	}
 	for _, l := range issue.Labels {
-		add(l.GetName())
+		if name := l.GetName(); name != r.draftLabel {
+			add(name)
+		}
 	}
 	return labels
+}
+
+// draftForIssue reports whether the generated PR should open as a draft: only
+// when a draft label is configured and the issue carries it. Off by default.
+func (r *Reconciler[Req, Resp, CB]) draftForIssue(issue *github.Issue) bool {
+	return r.draftLabel != "" && hasLabel(issue, r.draftLabel)
+}
+
+// shouldClearDraftLabel reports whether the source issue's draft label should be
+// removed to stay in sync with the PR: the label is configured and present, a PR
+// exists, and that PR is no longer a draft (a human promoted it for review).
+// Keeping the label after promotion would misrepresent a ready PR as still draft.
+func (r *Reconciler[Req, Resp, CB]) shouldClearDraftLabel(issue *github.Issue, hasPR, prIsDraft bool) bool {
+	return r.draftLabel != "" && hasPR && !prIsDraft && hasLabel(issue, r.draftLabel)
 }
 
 // hasLabel checks if an issue has a specific label.

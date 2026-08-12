@@ -89,6 +89,7 @@ type Session[T any] struct {
 	prBody      string   // Body text of existing PR
 	prHeadSHA   string   // Head commit SHA of existing PR
 	prMergeable *bool    // nil if GitHub is still computing
+	prDraft     bool     // whether the existing PR is a draft
 	prLabels    []string // Label names on existing PR
 	prAssignees []string // Login names of PR assignees
 
@@ -208,6 +209,11 @@ func (s *Session[T]) PRNumber() int {
 // HeadSHA returns the head commit SHA of the existing PR, or "" if none exists.
 func (s *Session[T]) HeadSHA() string {
 	return s.prHeadSHA
+}
+
+// IsDraft reports whether the existing PR is a draft. False when no PR exists.
+func (s *Session[T]) IsDraft() bool {
+	return s.prDraft
 }
 
 // Assignees returns the login names of users assigned to the existing PR.
