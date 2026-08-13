@@ -7,6 +7,7 @@ package linearreconciler
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,39 @@ const (
 	maxAttachmentSize = 10 << 20
 	// maxErrorBodySize caps error response bodies included in error messages (1 KB).
 	maxErrorBodySize = 1 << 10
+
+	// attachmentsSelection is the attachments connection for a single-issue
+	// query, at Linear's per-page maximum.
+	//
+	// Reconciler state lives in an attachment (see StateManager), and the issue
+	// queries are documented as returning enough for a caller to load it. Left
+	// implicit, Linear's default page size of 50 applies and silently truncates
+	// the connection: an issue that accumulates more attachments than that can
+	// have its state attachment fall outside the page, where a reconciler reads
+	// "no state" and redoes work it already did, on every reconcile,
+	// permanently. So the page size is always explicit here.
+	//
+	// It is a bound, not pagination: an issue past the page size can still
+	// truncate. Reconcilers whose repeat action is expensive or externally
+	// visible should carry a second, authoritative dedup signal rather than
+	// rely on state alone.
+	attachmentsSelection = `attachments(first: ` + attachmentsPageSize + `) { nodes { id title subtitle url createdAt } }`
+
+	// listAttachmentsSelection is the same connection for the list query, which
+	// asks for a page of issues rather than one. A nested connection multiplies
+	// out: at issuesPageSize issues it requests issuesPageSize × its own page
+	// size nodes, and GraphQL cost is scored on what a query *asks for*, not on
+	// what comes back — so the "costs nothing when the data is not there"
+	// reasoning behind the wide single-issue page does not carry over. It keeps
+	// the narrower page size to hold that product down, and accepts a lower
+	// truncation threshold in exchange; the caveat above applies with more
+	// force.
+	listAttachmentsSelection = `attachments(first: ` + listAttachmentsPageSize + `) { nodes { id title subtitle url createdAt } }`
+
+	// Page sizes, as strings because they are concatenated into query literals.
+	attachmentsPageSize     = "250" // Linear's per-page maximum.
+	listAttachmentsPageSize = "50"
+	issuesPageSize          = "100"
 
 	// maxTokenCacheTTL caps how long an issued access token is cached
 	// locally before getToken() forces a refresh, regardless of the
@@ -180,6 +214,23 @@ func (c *Client) WithTokenURL(tokenURL string) *Client {
 // WithHTTPClient sets a custom HTTP client.
 func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	c.httpClient = httpClient
+	return c
+}
+
+// WithStatePrefix sets the prefix for the state-attachment titles created by
+// NewStateManager — e.g. "tidy-upper" produces attachments titled
+// "tidy-upper_state". Give each bot a distinct prefix so multiple reconcilers
+// can persist independent state on the same issue without clobbering one
+// another. Defaults to "reconciler". (linearreconciler.New's WithStatePrefix
+// option sets the same field for the workqueue-server path.)
+//
+// An empty prefix is ignored rather than applied. Taking it literally would
+// title the attachment "_state", which reads as "no state" against anything
+// already written under a real prefix — so a caller passing an unset
+// environment variable would quietly orphan its own state and redo work on
+// every reconcile.
+func (c *Client) WithStatePrefix(prefix string) *Client {
+	c.statePrefix = cmp.Or(prefix, c.statePrefix)
 	return c
 }
 
@@ -352,7 +403,7 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 			creator { id name app }
 			labels { nodes { name } }
 			documents { nodes { id slugId title url } }
-			attachments { nodes { id title subtitle url createdAt } }
+			` + attachmentsSelection + `
 			comments(first: 100, orderBy: createdAt) {
 				nodes {
 					id body createdAt
@@ -378,6 +429,86 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 	})
 
 	return result.Issue, nil
+}
+
+// closedStateTypes are the Linear workflow-state types that mean an issue is no
+// longer actionable. ListTeamIssues excludes them so a sweep only sees open work.
+var closedStateTypes = []string{"completed", "canceled"}
+
+// ListTeamIssuesOptions filters ListTeamIssues. The zero value lists every open
+// issue in the team.
+type ListTeamIssuesOptions struct {
+	// TitleContains, when set, restricts results to issues whose title
+	// contains this substring. Applied server-side by Linear.
+	TitleContains string
+}
+
+// ListTeamIssues returns the open issues belonging to the team identified by
+// teamKey (e.g. "SEC"), paginating through the full result set. "Open" excludes
+// the completed and canceled workflow-state types (see closedStateTypes).
+//
+// The returned issues carry what eligibility and state handling need — title,
+// description, workflow state, labels, and attachments — so a caller can filter
+// issues and load reconciler state (NewStateManager) without a per-issue
+// GetIssue round-trip. Assignee, creator, comments, and documents are NOT
+// fetched: those fields are nil or empty on every issue returned here, so
+// dereferencing Assignee or Creator panics. Use GetIssue when they are needed.
+//
+// Results are ordered by createdAt. That matters for the cursor: under Linear's
+// default updatedAt ordering, an issue touched while a later page is in flight
+// jumps ahead of the cursor and shifts the tail down, so an issue at the page
+// boundary is silently never returned — and something writing a state
+// attachment mid-sweep is enough to trigger it. createdAt is stable under
+// concurrent edits.
+func (c *Client) ListTeamIssues(ctx context.Context, teamKey string, opts ListTeamIssuesOptions) ([]*Issue, error) {
+	const query = `query($filter: IssueFilter, $after: String) {
+		issues(filter: $filter, first: ` + issuesPageSize + `, after: $after, orderBy: createdAt) {
+			nodes {
+				id identifier title description updatedAt url
+				state { name type }
+				team { id key name }
+				labels { nodes { name } }
+				` + listAttachmentsSelection + `
+			}
+			pageInfo { hasNextPage endCursor }
+		}
+	}`
+
+	filter := map[string]any{
+		"team":  map[string]any{"key": map[string]any{"eq": teamKey}},
+		"state": map[string]any{"type": map[string]any{"nin": closedStateTypes}},
+	}
+	if opts.TitleContains != "" {
+		filter["title"] = map[string]any{"contains": opts.TitleContains}
+	}
+
+	var issues []*Issue
+	var after string
+	for {
+		variables := map[string]any{"filter": filter}
+		if after != "" {
+			variables["after"] = after
+		}
+
+		var result struct {
+			Issues struct {
+				Nodes    []*Issue `json:"nodes"`
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+			} `json:"issues"`
+		}
+		if err := c.graphql(ctx, query, variables, &result); err != nil {
+			return nil, err
+		}
+
+		issues = append(issues, result.Issues.Nodes...)
+		if !result.Issues.PageInfo.HasNextPage || result.Issues.PageInfo.EndCursor == "" {
+			return issues, nil
+		}
+		after = result.Issues.PageInfo.EndCursor
+	}
 }
 
 // CreateComment posts a comment on an issue.

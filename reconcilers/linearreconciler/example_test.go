@@ -6,10 +6,28 @@ SPDX-License-Identifier: Apache-2.0
 package linearreconciler_test
 
 import (
+	"context"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
 )
+
+// ExampleClient_ListTeamIssues demonstrates sweeping the open issues of a team,
+// restricted to those whose title carries a given prefix.
+func ExampleClient_ListTeamIssues() {
+	client := linearreconciler.NewClientWithAPIKey("lin_api_...")
+
+	issues, err := client.ListTeamIssues(context.Background(), "SEC", linearreconciler.ListTeamIssuesOptions{
+		TitleContains: "[depthfirst]",
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	for _, issue := range issues {
+		fmt.Println(issue.Identifier)
+	}
+}
 
 // ExampleIssue_HasLabel demonstrates checking whether an issue has a specific label.
 func ExampleIssue_HasLabel() {
