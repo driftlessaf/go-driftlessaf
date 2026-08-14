@@ -28,26 +28,13 @@ import (
 )
 
 // Environment variables that ConfigFromEnv reads to configure the
-// Anthropic-direct (first-party API + WIF) backend. See package doc and
-// DEV-1839.
+// Anthropic-direct (first-party API + WIF) backend. The stable federation IDs
+// — organization, workspace, service account, federation rule, and an
+// optional identity-token file path — are deliberately NOT configurable
+// through the environment: they live in a baked, non-secret SDK config
+// profile named by EnvProfile, so every deployment's federation identity is
+// reviewable in one place. See package doc and DEV-1839.
 const (
-	// EnvIdentityTokenFile is the path to a file containing the OIDC identity
-	// token (JWT) to exchange for an Anthropic access token, for environments
-	// where a sidecar keeps the file fresh (SourceFile). CI and Cloud Run do
-	// not need it: they mint fresh tokens per exchange (SourceGitHubActions /
-	// SourceGoogle). The file is re-read on every token exchange.
-	EnvIdentityTokenFile = "ANTHROPIC_IDENTITY_TOKEN_FILE" //nolint:gosec // G101: env var name, not a credential
-	// EnvFederationRuleID is the Anthropic OidcFederationRule ID (fdrl_*).
-	EnvFederationRuleID = "ANTHROPIC_FEDERATION_RULE_ID"
-	// EnvOrganizationID is the Anthropic organization UUID the rule belongs to.
-	EnvOrganizationID = "ANTHROPIC_ORGANIZATION_ID"
-	// EnvServiceAccountID is the optional expected-target service account
-	// (svac_*) for target_type=SERVICE_ACCOUNT rules.
-	EnvServiceAccountID = "ANTHROPIC_SERVICE_ACCOUNT_ID"
-	// EnvWorkspaceID is the optional workspace (wrkspc_* or "default") to scope
-	// the minted token to.
-	EnvWorkspaceID = "ANTHROPIC_WORKSPACE_ID"
-
 	// EnvActionsIDTokenRequestURL and EnvActionsIDTokenRequestToken are the
 	// GitHub Actions OIDC endpoint and its bearer, ambient in any workflow job
 	// with `id-token: write`. When present (and no source is forced), the
@@ -64,13 +51,12 @@ const (
 	// EnvProfile names an SDK config profile (configs/<name>.json under the
 	// config dir) that carries the stable federation IDs — organization,
 	// workspace, service account, federation rule — so a deployment ships one
-	// baked, non-secret profile instead of four opaque-ID env vars. When set,
-	// ConfigFromEnv loads the profile first, then overlays any ANTHROPIC_* env
-	// vars on top; naming a profile commits the deployment to the
-	// Anthropic-direct backend (see ConfigFromEnv). This reuses the SDK's own
-	// ANTHROPIC_PROFILE name; the SDK's auto-load is bypassed (the federation
-	// client passes option.WithoutEnvironmentDefaults), so anthropicauth owns
-	// resolution.
+	// baked, non-secret profile instead of opaque-ID env vars. The profile is
+	// the only way to supply those IDs; naming one commits the deployment to
+	// the Anthropic-direct backend (see ConfigFromEnv). This reuses the SDK's
+	// own ANTHROPIC_PROFILE name; the SDK's auto-load is bypassed (the
+	// federation client passes option.WithoutEnvironmentDefaults), so
+	// anthropicauth owns resolution.
 	EnvProfile = "ANTHROPIC_PROFILE" //nolint:gosec // G101: env var name, not a credential
 	// EnvConfigDir is the directory holding configs/<profile>.json. Empty falls
 	// back to the SDK default (~/.config/anthropic). On Cloud Run, set it to
@@ -195,8 +181,9 @@ func (c Config) fingerprint() string {
 // ANTHROPIC_FEDERATION_RULE_ID / ANTHROPIC_SERVICE_ACCOUNT_ID /
 // ANTHROPIC_IDENTITY_TOKEN_FILE env vars, per the cross-SDK
 // credential-precedence contract; fields present in the profile always win
-// over the environment here. (ConfigFromEnv then overlays non-empty env vars
-// on top, so through that entrypoint the environment wins either way.)
+// over the environment. anthropicauth itself never reads those env vars, so
+// ship complete profiles (the SDK back-fill is inert when every field is
+// present in the file).
 func ConfigFromProfile(dir, name string) (Config, error) {
 	if dir == "" {
 		dir = config.DefaultDir()
@@ -224,58 +211,43 @@ func ConfigFromProfile(dir, name string) (Config, error) {
 // constructor (NewClient) takes Config by value so it stays configurable and
 // testable rather than reading the environment itself.
 //
-// When EnvProfile is set, the named profile supplies the stable federation IDs
-// and the ANTHROPIC_* env vars overlay it, so a single value (typically the
-// rule ID) can vary per deployment without a per-service profile. A named
-// profile that fails to load — or that, after the env overlay, still lacks
-// the federation rule ID or organization ID — is a hard error: falling
-// through to the pure-env path would silently select the Vertex zero-value
-// backend on a deployment that explicitly asked for a profile, and nothing
-// downstream would flag the downgrade. Naming a profile therefore commits the
-// deployment to the Anthropic-direct backend; the rollout lever is setting or
-// unsetting EnvProfile itself, not shipping a partial profile. With no
-// profile set, every field comes from its env var and the returned error is
-// always nil.
+// The profile named by EnvProfile is the only way to select the
+// Anthropic-direct backend: it supplies the stable federation IDs
+// (organization, workspace, service account, federation rule, optional
+// identity-token file path); raw ANTHROPIC_* ID env vars are not read. A
+// named profile that fails to load — or that resolves without the federation
+// rule ID or organization ID — is a hard error: falling through would
+// silently select the Vertex zero-value backend on a deployment that
+// explicitly asked for a profile, and nothing downstream would flag the
+// downgrade. Naming a profile therefore commits the deployment to the
+// Anthropic-direct backend; the rollout lever is setting or unsetting
+// EnvProfile itself. With no profile set, the zero-value Config (Vertex) is
+// returned and the error is always nil.
+//
+// Two ambient inputs are read alongside the profile: the identity-token
+// source override (EnvIdentityTokenSource — the SDK profile schema models
+// only a file source, whereas anthropicauth also mints github-actions and
+// google tokens, so the source stays an environment concern) and the GitHub
+// Actions OIDC endpoint (ACTIONS_ID_TOKEN_REQUEST_*, injected by the runner
+// and never carried in a profile).
 func ConfigFromEnv() (Config, error) {
-	var cfg Config
 	name := os.Getenv(EnvProfile)
-	if name != "" {
-		loaded, err := ConfigFromProfile(os.Getenv(EnvConfigDir), name)
-		if err != nil {
-			return Config{}, err
-		}
-		cfg = loaded
+	if name == "" {
+		return Config{}, nil
 	}
-	overlayEnv(&cfg)
-	if name != "" && !cfg.Configured() {
-		return Config{}, fmt.Errorf("anthropic profile %q resolved without a federation rule ID and/or organization ID (after env overlay); a named profile must select the Anthropic-direct backend — unset %s to use Vertex", name, EnvProfile)
+	cfg, err := ConfigFromProfile(os.Getenv(EnvConfigDir), name)
+	if err != nil {
+		return Config{}, err
 	}
-	return cfg, nil
-}
-
-// overlayEnv applies ANTHROPIC_* env vars on top of cfg, overriding only the
-// fields whose env var is non-empty so an unset var can't blank a profile
-// value. ACTIONS_* are always read from the ambient CI environment (never
-// carried in a profile).
-func overlayEnv(cfg *Config) {
-	setStringFromEnv(&cfg.IdentityTokenFile, EnvIdentityTokenFile)
-	setStringFromEnv(&cfg.FederationRuleID, EnvFederationRuleID)
-	setStringFromEnv(&cfg.OrganizationID, EnvOrganizationID)
-	setStringFromEnv(&cfg.ServiceAccountID, EnvServiceAccountID)
-	setStringFromEnv(&cfg.WorkspaceID, EnvWorkspaceID)
 	if v := os.Getenv(EnvIdentityTokenSource); v != "" {
 		cfg.Source = IdentityTokenSource(v)
 	}
 	cfg.ActionsIDTokenRequestURL = os.Getenv(EnvActionsIDTokenRequestURL)
 	cfg.ActionsIDTokenRequestToken = os.Getenv(EnvActionsIDTokenRequestToken)
-}
-
-// setStringFromEnv overwrites *dst with the env var's value only when that
-// value is non-empty.
-func setStringFromEnv(dst *string, env string) {
-	if v := os.Getenv(env); v != "" {
-		*dst = v
+	if !cfg.Configured() {
+		return Config{}, fmt.Errorf("anthropic profile %q resolved without a federation rule ID and/or organization ID; a named profile must select the Anthropic-direct backend — unset %s to use Vertex", name, EnvProfile)
 	}
+	return cfg, nil
 }
 
 // NewClient builds the anthropic.Client for the given Vertex projectID/region

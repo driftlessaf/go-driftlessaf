@@ -29,8 +29,8 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	// API + WIF backend when configured (see anthropicauth). Selection is
 	// env-driven: ANY binary embedding this package — production reconcilers
 	// included, not just evals — switches to Anthropic-direct when
-	// ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_IDENTITY_TOKEN_FILE are present
-	// in its environment. That is the intended per-deployment rollout lever
+	// ANTHROPIC_PROFILE names a baked federation profile (loaded from
+	// ANTHROPIC_CONFIG_DIR). That is the intended per-deployment rollout lever
 	// (DEV-1839); anthropicauth logs which backend it picked.
 	authCfg, err := anthropicauth.ConfigFromEnv()
 	if err != nil {

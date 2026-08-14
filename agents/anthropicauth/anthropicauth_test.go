@@ -66,47 +66,31 @@ func TestConfigFromEnv(t *testing.T) {
 		want anthropicauth.Config
 	}{{
 		name: "empty environment yields zero value",
-		env: map[string]string{
-			anthropicauth.EnvIdentityTokenFile:          "",
-			anthropicauth.EnvFederationRuleID:           "",
-			anthropicauth.EnvOrganizationID:             "",
-			anthropicauth.EnvServiceAccountID:           "",
-			anthropicauth.EnvWorkspaceID:                "",
-			anthropicauth.EnvActionsIDTokenRequestURL:   "",
-			anthropicauth.EnvActionsIDTokenRequestToken: "",
-			anthropicauth.EnvIdentityTokenSource:        "",
-			anthropicauth.EnvProfile:                    "",
-			anthropicauth.EnvConfigDir:                  "",
-		},
+		env:  map[string]string{},
 		want: anthropicauth.Config{},
 	}, {
-		name: "all variables map to their fields",
+		// Federation IDs come only from a profile: without ANTHROPIC_PROFILE,
+		// raw ID env vars are ignored and the zero-value (Vertex) Config is
+		// returned. This pins the retirement of the pure-env configuration
+		// mode — a deployment that still exports the raw IDs gets Vertex, not
+		// a half-configured federation backend.
+		name: "raw federation ID env vars are ignored without a profile",
 		env: map[string]string{
-			anthropicauth.EnvIdentityTokenFile:          "/run/oidc/token",
-			anthropicauth.EnvFederationRuleID:           "fdrl_0123456789",
-			anthropicauth.EnvOrganizationID:             "12345678-1234-1234-1234-123456789012",
-			anthropicauth.EnvServiceAccountID:           "svac_0123456789",
-			anthropicauth.EnvWorkspaceID:                "wrkspc_0123456789",
+			"ANTHROPIC_IDENTITY_TOKEN_FILE":             "/run/oidc/token",
+			"ANTHROPIC_FEDERATION_RULE_ID":              "fdrl_0123456789",
+			"ANTHROPIC_ORGANIZATION_ID":                 "12345678-1234-1234-1234-123456789012",
+			"ANTHROPIC_SERVICE_ACCOUNT_ID":              "svac_0123456789",
+			"ANTHROPIC_WORKSPACE_ID":                    "wrkspc_0123456789",
 			anthropicauth.EnvActionsIDTokenRequestURL:   "https://token.invalid/?api-version=2",
 			anthropicauth.EnvActionsIDTokenRequestToken: "reqtok",
 			anthropicauth.EnvIdentityTokenSource:        "file",
-			anthropicauth.EnvProfile:                    "",
-			anthropicauth.EnvConfigDir:                  "",
 		},
-		want: anthropicauth.Config{
-			IdentityTokenFile:          "/run/oidc/token",
-			FederationRuleID:           "fdrl_0123456789",
-			OrganizationID:             "12345678-1234-1234-1234-123456789012",
-			ServiceAccountID:           "svac_0123456789",
-			WorkspaceID:                "wrkspc_0123456789",
-			ActionsIDTokenRequestURL:   "https://token.invalid/?api-version=2",
-			ActionsIDTokenRequestToken: "reqtok",
-			Source:                     anthropicauth.SourceFile,
-		},
+		want: anthropicauth.Config{},
 	}}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			blankAnthropicEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -228,15 +212,17 @@ func TestModelID(t *testing.T) {
 // are hermetic against the ambient environment: CI jobs with id-token:write
 // always carry the ACTIONS_ID_TOKEN_REQUEST_* endpoint vars, and dev machines
 // may export ANTHROPIC_* vars. Both readers treat an empty value as unset.
-// Tests re-set the specific vars they exercise after calling this.
+// Tests re-set the specific vars they exercise after calling this. The raw ID
+// vars are spelled as literals: anthropicauth does not read them, but the
+// SDK loader does for fields a profile omits.
 func blankAnthropicEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		anthropicauth.EnvIdentityTokenFile,
-		anthropicauth.EnvFederationRuleID,
-		anthropicauth.EnvOrganizationID,
-		anthropicauth.EnvServiceAccountID,
-		anthropicauth.EnvWorkspaceID,
+		"ANTHROPIC_IDENTITY_TOKEN_FILE",
+		"ANTHROPIC_FEDERATION_RULE_ID",
+		"ANTHROPIC_ORGANIZATION_ID",
+		"ANTHROPIC_SERVICE_ACCOUNT_ID",
+		"ANTHROPIC_WORKSPACE_ID",
 		anthropicauth.EnvActionsIDTokenRequestURL,
 		anthropicauth.EnvActionsIDTokenRequestToken,
 		anthropicauth.EnvIdentityTokenSource,
@@ -302,7 +288,7 @@ func TestConfigFromProfileMissing(t *testing.T) {
 	}
 }
 
-func TestConfigFromEnvProfileWithOverride(t *testing.T) {
+func TestConfigFromEnvProfileIgnoresIDEnvVars(t *testing.T) {
 	blankAnthropicEnv(t)
 	dir := t.TempDir()
 	writeProfile(t, dir, `{
@@ -317,21 +303,23 @@ func TestConfigFromEnvProfileWithOverride(t *testing.T) {
 }`)
 	t.Setenv(anthropicauth.EnvConfigDir, dir)
 	t.Setenv(anthropicauth.EnvProfile, testProfileName)
-	// A single env var overrides just the rule ID; the rest come from the profile.
-	t.Setenv(anthropicauth.EnvFederationRuleID, "fdrl_from_env")
+	// Raw ID env vars do not override profile values: the profile is the
+	// single source of federation IDs. (The SDK loader back-fills only fields
+	// a profile omits; this profile sets the rule ID, so the env var is inert.)
+	t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_from_env")
 
 	got, err := anthropicauth.ConfigFromEnv()
 	if err != nil {
 		t.Fatalf("ConfigFromEnv() error = %v", err)
 	}
 	want := anthropicauth.Config{
-		FederationRuleID: "fdrl_from_env",                        // env overrides profile
-		OrganizationID:   "12345678-1234-1234-1234-123456789012", // from profile
-		ServiceAccountID: "svac_0123456789",                      // from profile
-		WorkspaceID:      "wrkspc_0123456789",                    // from profile
+		FederationRuleID: "fdrl_from_profile",
+		OrganizationID:   "12345678-1234-1234-1234-123456789012",
+		ServiceAccountID: "svac_0123456789",
+		WorkspaceID:      "wrkspc_0123456789",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("ConfigFromEnv() with profile+override mismatch (-want, +got):\n%s", diff)
+		t.Errorf("ConfigFromEnv() with profile + ignored ID env var mismatch (-want, +got):\n%s", diff)
 	}
 }
 
@@ -350,10 +338,10 @@ func TestConfigFromEnvProfileLoadFailure(t *testing.T) {
 }
 
 func TestConfigFromEnvProfileUnconfigured(t *testing.T) {
-	// A named profile that loads but still lacks the federation rule ID after
-	// the env overlay is the same silent Vertex downgrade as a profile that
-	// fails to load — the SDK loader validates only that authentication is
-	// present, not the federation fields — so it must be a hard error too.
+	// A named profile that loads but lacks the federation rule ID is the same
+	// silent Vertex downgrade as a profile that fails to load — the SDK
+	// loader validates only that authentication is present, not the
+	// federation fields — so it must be a hard error.
 	blankAnthropicEnv(t)
 	dir := t.TempDir()
 	writeProfile(t, dir, `{
@@ -370,15 +358,55 @@ func TestConfigFromEnvProfileUnconfigured(t *testing.T) {
 		t.Error("ConfigFromEnv() with a named profile lacking a federation rule ID: got nil error, want an error")
 	}
 
-	// The env overlay can still legitimately complete the profile: the rule
-	// ID is the value expected to vary per deployment.
-	t.Setenv(anthropicauth.EnvFederationRuleID, "fdrl_from_env")
+	// Documented caveat (see ConfigFromProfile): the SDK loader back-fills
+	// fields the profile OMITS from the SDK's own ANTHROPIC_* env vars, so an
+	// incomplete profile plus that env var still resolves. anthropicauth does
+	// not read the var itself; complete profiles make the back-fill inert.
+	// This pins the caveat so an SDK behavior change is noticed here.
+	t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_from_env")
 	got, err := anthropicauth.ConfigFromEnv()
 	if err != nil {
-		t.Fatalf("ConfigFromEnv() with the rule ID supplied by env: error = %v", err)
+		t.Fatalf("ConfigFromEnv() with the rule ID back-filled by the SDK loader: error = %v", err)
 	}
 	if !got.Configured() {
-		t.Error("ConfigFromEnv() with the rule ID supplied by env: not Configured(); want federation backend selected")
+		t.Error("ConfigFromEnv() with the rule ID back-filled by the SDK loader: not Configured(); want federation backend selected")
+	}
+}
+
+func TestConfigFromEnvProfileSourceOverride(t *testing.T) {
+	// EnvIdentityTokenSource is one of the two ambient inputs read alongside
+	// the profile: it forces the identity-token source, winning over
+	// ResolveSource's auto-detection — here, over the file source the
+	// profile's identity_token.path would otherwise select.
+	blankAnthropicEnv(t)
+	dir := t.TempDir()
+	writeProfile(t, dir, `{
+  "version": "1.0",
+  "organization_id": "12345678-1234-1234-1234-123456789012",
+  "workspace_id": "wrkspc_0123456789",
+  "authentication": {
+    "type": "oidc_federation",
+    "federation_rule_id": "fdrl_0123456789",
+    "service_account_id": "svac_0123456789",
+    "identity_token": {
+      "source": "file",
+      "path": "/var/run/secrets/oidc/token"
+    }
+  }
+}`)
+	t.Setenv(anthropicauth.EnvConfigDir, dir)
+	t.Setenv(anthropicauth.EnvProfile, testProfileName)
+	t.Setenv(anthropicauth.EnvIdentityTokenSource, string(anthropicauth.SourceGoogle))
+
+	got, err := anthropicauth.ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+	if got.Source != anthropicauth.SourceGoogle {
+		t.Errorf("Config.Source: got = %q, want = %q", got.Source, anthropicauth.SourceGoogle)
+	}
+	if src := got.ResolveSource(); src != anthropicauth.SourceGoogle {
+		t.Errorf("ResolveSource() = %q, want %q (explicit source override wins over the profile's file path)", src, anthropicauth.SourceGoogle)
 	}
 }
 
@@ -387,9 +415,9 @@ func TestConfigFromEnvProfileWithAmbientActionsEnv(t *testing.T) {
 	// ambient ACTIONS_ID_TOKEN_REQUEST_* endpoint vars that GitHub injects on
 	// any job with id-token:write. The profile supplies the stable IDs and an
 	// identity-token file path; the ACTIONS_* vars must still be picked up
-	// off the environment (overlayEnv assigns them unconditionally) and must
-	// win source auto-detection over the profile's file path, per
-	// ResolveSource's documented precedence.
+	// off the ambient environment (ConfigFromEnv assigns them alongside the
+	// profile) and must win source auto-detection over the profile's file
+	// path, per ResolveSource's documented precedence.
 	blankAnthropicEnv(t)
 	dir := t.TempDir()
 	writeProfile(t, dir, `{
