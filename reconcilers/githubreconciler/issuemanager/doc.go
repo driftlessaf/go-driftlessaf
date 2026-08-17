@@ -107,6 +107,23 @@ SPDX-License-Identifier: Apache-2.0
 //	    issuemanager.WithMaxDesiredIssuesPerPath(1), // default, increase with caution
 //	)
 //
+// # Label Ownership
+//
+// On update, labels rendered from label templates (which carry the
+// "identity:" prefix) are replaced wholesale; every other label on the issue
+// is preserved as human-added — including an extra label from a previous
+// Reconcile call that the current call no longer passes. For dynamic extra
+// labels (e.g. a priority that moves between calls) declare every value the
+// label can take with WithManagedLabels so stale values are removed instead
+// of preserved:
+//
+//	im := issuemanager.New[IssueData]("my-reconciler", titleTmpl, bodyTmpl,
+//	    issuemanager.WithManagedLabels[IssueData]("prio:high", "prio:medium", "prio:low"),
+//	)
+//
+// A change in the resulting label set alone triggers an issue update, so
+// labels converge even when the embedded data is unchanged.
+//
 // Start a reconciliation session to discover current state:
 //
 //	session, err := im.NewSession(ctx, ghClient, "owner/repo")

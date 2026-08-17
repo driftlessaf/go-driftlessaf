@@ -8,6 +8,7 @@ package issuemanager
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -124,7 +125,7 @@ func (s *IssueSession[T]) Reconcile(
 			}
 
 			// Check if update is needed
-			if !s.needsUpdate(ctx, existing, data) {
+			if !s.needsUpdate(ctx, existing, data, extralabels) {
 				log.Infof("Issue #%d is up to date, no refresh needed", existing.issue.GetNumber())
 				issueURLs[i] = existing.issue.GetHTMLURL()
 				continue
@@ -195,8 +196,12 @@ func (s *IssueSession[T]) findMatchingIssue(data *T) *existingIssue[T] {
 }
 
 // needsUpdate determines if an existing issue needs to be updated.
-// Returns true if the embedded data differs from expected.
-func (s *IssueSession[T]) needsUpdate(ctx context.Context, existing *existingIssue[T], expected *T) bool {
+// Returns true if the embedded data differs from expected, or if reconciling
+// the labels would change the issue's label set. The latter catches drift
+// that is invisible to the data comparison: extra labels can change between
+// Reconcile calls (e.g. a priority label moving) without the embedded data
+// changing.
+func (s *IssueSession[T]) needsUpdate(ctx context.Context, existing *existingIssue[T], expected *T, extralabels []string) bool {
 	log := clog.FromContext(ctx)
 
 	// Compare data for equality
@@ -205,7 +210,30 @@ func (s *IssueSession[T]) needsUpdate(ctx context.Context, existing *existingIss
 		return true
 	}
 
+	merged := s.mergeLabels(existing.issue.Labels, s.pathLabel, s.generateLabels(ctx, expected), extralabels)
+	if !labelSetsEqual(existing.issue.Labels, merged) {
+		log.Infof("Issue #%d labels differ, update needed", existing.issue.GetNumber())
+		return true
+	}
+
 	return false
+}
+
+// labelSetsEqual reports whether the issue's current labels and the desired
+// merged labels name the same set, ignoring order and duplicates. Names are
+// compared case-folded because GitHub treats label names case-insensitively
+// and returns its own canonical casing — an exact comparison would report
+// perpetual drift and update the issue on every reconciliation.
+func labelSetsEqual(current []*github.Label, desired []string) bool {
+	currentSet := make(map[string]struct{}, len(current))
+	for _, l := range current {
+		currentSet[strings.ToLower(l.GetName())] = struct{}{}
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, l := range desired {
+		desiredSet[strings.ToLower(l)] = struct{}{}
+	}
+	return maps.Equal(currentSet, desiredSet)
 }
 
 // generateLabels generates labels from label templates by executing them with the provided data.
@@ -244,13 +272,17 @@ func (s *IssueSession[T]) mergeLabels(currentLabels []*github.Label, pathLabel s
 	identityPrefix := s.manager.identity + ":"
 
 	// user-generated labels are labels that are not the path label,
-	// without our identity prefix, and are not an extra label
+	// without our identity prefix, not an extra label, and not declared
+	// managed by the reconciler
 	userLabels := make([]string, 0)
 	for _, label := range currentLabels {
 		labelName := label.GetName()
 		if strings.HasPrefix(labelName, identityPrefix) ||
 			slices.Contains(extraLabels, labelName) ||
 			labelName == pathLabel {
+			continue
+		}
+		if _, managed := s.manager.managedLabels[strings.ToLower(labelName)]; managed {
 			continue
 		}
 		userLabels = append(userLabels, labelName)

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"text/template"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -51,6 +52,7 @@ type IM[T Comparable[T]] struct {
 	titleTemplate    *template.Template
 	bodyTemplate     *template.Template
 	labelTemplates   []*template.Template
+	managedLabels    map[string]struct{}
 	templateExecutor *internaltemplate.Template[T]
 	owner            string
 	repo             string
@@ -61,6 +63,25 @@ type IM[T Comparable[T]] struct {
 func WithLabelTemplates[T Comparable[T]](templates ...*template.Template) Option[T] {
 	return func(im *IM[T]) {
 		im.labelTemplates = templates
+	}
+}
+
+// WithManagedLabels declares the set of labels this reconciler owns in
+// addition to its identity-prefixed ones. A managed label found on an issue
+// is never preserved as human-added: on update it is dropped unless the
+// current Reconcile call passes it again (as an extra label or a rendered
+// label template). Declare every value a dynamic label can take (e.g. all
+// priority levels) so stale values are removed when the label moves between
+// updates.
+func WithManagedLabels[T Comparable[T]](labels ...string) Option[T] {
+	return func(im *IM[T]) {
+		// Keyed case-folded: GitHub treats label names case-insensitively
+		// and may return a canonical casing that differs from the declared
+		// value.
+		im.managedLabels = make(map[string]struct{}, len(labels))
+		for _, l := range labels {
+			im.managedLabels[strings.ToLower(l)] = struct{}{}
+		}
 	}
 }
 
