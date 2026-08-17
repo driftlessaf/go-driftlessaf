@@ -47,6 +47,10 @@ into a delayed requeue:
 	}
 	return err
 
+The requeue is marked as an infrastructure failure and keeps the provider error
+in its chain, so workqueue.IsInfrastructureError reports it as one and callers
+can still match the provider error with errors.Is and errors.As.
+
 # Configuration
 
 RetryConfig controls retry behavior:

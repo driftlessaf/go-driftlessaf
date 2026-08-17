@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
@@ -231,6 +232,17 @@ func (e *executor[Request, Response]) Execute(
 		return ok
 	}
 
+	// availableTools names every tool the model can call, for the unknown-tool
+	// result. The tool set is fixed for the run, so it is built once here
+	// rather than per bad call. isSubmit gates the held-out submit name, so a
+	// name that no option configured, or that a caller-registered tool
+	// shadows, is not listed as its own entry.
+	heldOutNames := make([]string, 0, 1)
+	if isSubmit(submitToolName) {
+		heldOutNames = append(heldOutNames, submitToolName)
+	}
+	availableTools := availableToolNames(tools, heldOutNames...)
+
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
 	// turn gets its own slot so concurrent handlers never race on the same
@@ -276,7 +288,10 @@ func (e *executor[Request, Response]) Execute(
 			trace.BadToolCall(tc.ID, tc.Function.Name,
 				map[string]any{"arguments": tc.Function.Arguments},
 				fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, tc.Function.Name))
-			res = map[string]any{"error": fmt.Sprintf("unknown tool: %q", tc.Function.Name)}
+			res = map[string]any{
+				"error":           fmt.Sprintf("unknown tool: %q", tc.Function.Name),
+				"available_tools": availableTools,
+			}
 		}
 
 		resBytes, err := json.Marshal(res)
@@ -487,4 +502,20 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, tc, trace),
 		trace, tc.ID, tc.Function.Name, args,
 		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
+}
+
+// availableToolNames returns the sorted names of every tool the model can
+// call: the registered tools, plus the heldOut names that dispatch outside
+// the tool map (the terminal submit tool). Callers pass a held-out name only
+// while it routes, so a shadowed or unconfigured name never reaches the list.
+// The unknown-tool result carries the list, so a model that misspells or
+// invents a tool name can correct the call.
+func availableToolNames[Meta any](tools map[string]Meta, heldOut ...string) []string {
+	names := make([]string, 0, len(tools)+len(heldOut))
+	for name := range tools {
+		names = append(names, name)
+	}
+	names = append(names, heldOut...)
+	slices.Sort(names)
+	return slices.Compact(names)
 }

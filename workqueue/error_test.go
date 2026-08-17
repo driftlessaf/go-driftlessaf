@@ -350,6 +350,26 @@ func TestIsInfrastructureError(t *testing.T) {
 		name: "requeue sentinel",
 		err:  RequeueAfter(time.Minute),
 		want: false,
+	}, {
+		name: "marked requeue sentinel",
+		err:  InfrastructureError(RequeueAfter(time.Minute)),
+		want: true,
+	}, {
+		name: "marked plain error",
+		err:  InfrastructureError(errors.New("boom")),
+		want: true,
+	}, {
+		name: "marked plain error with causes",
+		err:  InfrastructureError(errors.New("boom"), errors.New("dial tcp: connection refused")),
+		want: true,
+	}, {
+		name: "wrapped marked error",
+		err:  fmt.Errorf("calling Process: %w", InfrastructureError(errors.New("boom"))),
+		want: true,
+	}, {
+		name: "marker of nil error",
+		err:  InfrastructureError(nil),
+		want: false,
 	}}
 
 	for _, tt := range tests {
@@ -358,5 +378,142 @@ func TestIsInfrastructureError(t *testing.T) {
 				t.Errorf("IsInfrastructureError: got = %t, want = %t", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHasInfrastructureMarker(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{{
+		name: "nil error",
+		err:  nil,
+		want: false,
+	}, {
+		name: "plain error",
+		err:  errors.New("boom"),
+		want: false,
+	}, {
+		// The status-code class is where the two predicates differ:
+		// IsInfrastructureError reports true here, this one does not.
+		name: "unavailable status",
+		err:  status.Error(codes.Unavailable, "upstream connect error or disconnect/reset before headers"),
+		want: false,
+	}, {
+		name: "wrapped unavailable status",
+		err:  fmt.Errorf("calling Process: %w", status.Error(codes.Unavailable, "connection termination")),
+		want: false,
+	}, {
+		name: "requeue sentinel",
+		err:  RequeueAfter(time.Minute),
+		want: false,
+	}, {
+		name: "marked requeue sentinel",
+		err:  InfrastructureError(RequeueAfter(time.Minute)),
+		want: true,
+	}, {
+		name: "marked plain error",
+		err:  InfrastructureError(errors.New("boom")),
+		want: true,
+	}, {
+		name: "wrapped marked error",
+		err:  fmt.Errorf("calling Process: %w", InfrastructureError(errors.New("boom"))),
+		want: true,
+	}, {
+		name: "marker of nil error",
+		err:  InfrastructureError(nil),
+		want: false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasInfrastructureMarker(tt.err); got != tt.want {
+				t.Errorf("HasInfrastructureMarker: got = %t, want = %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInfrastructureErrorIsTransparent(t *testing.T) {
+	cause := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+	err := InfrastructureError(RequeueAfter(5*time.Minute), cause)
+
+	if got, want := err.Error(), "requeue after 5m0s (floor=false)"; got != want {
+		t.Errorf("Error(): got = %q, want = %q", got, want)
+	}
+
+	delay, floor, ok := GetRequeueOptions(err)
+	if !ok || floor {
+		t.Fatalf("GetRequeueOptions(%v): got = (%v, %t, %t), want floor = false, ok = true", err, delay, floor, ok)
+	}
+	if want := 5 * time.Minute; delay != want {
+		t.Errorf("delay: got = %v, want = %v", delay, want)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Errorf("errors.Is(err, cause): got = false, want = true")
+	}
+	if !IsInfrastructureError(err) {
+		t.Errorf("IsInfrastructureError: got = false, want = true")
+	}
+}
+
+func TestInfrastructureCauses(t *testing.T) {
+	first := errors.New("overloaded_error: server is overloaded")
+	second := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+
+	tests := []struct {
+		name string
+		err  error
+		want []error
+	}{{
+		name: "nil error",
+		err:  nil,
+		want: nil,
+	}, {
+		name: "unmarked error",
+		err:  errors.New("boom"),
+		want: nil,
+	}, {
+		name: "marked without causes",
+		err:  InfrastructureError(RequeueAfter(5 * time.Minute)),
+		want: nil,
+	}, {
+		name: "marked with one cause",
+		err:  InfrastructureError(RequeueAfter(5*time.Minute), first),
+		want: []error{first},
+	}, {
+		name: "marked with several causes",
+		err:  InfrastructureError(RequeueAfter(5*time.Minute), first, second),
+		want: []error{first, second},
+	}, {
+		name: "marked with a nil cause",
+		err:  InfrastructureError(RequeueAfter(5*time.Minute), nil, first),
+		want: []error{first},
+	}, {
+		name: "wrapped marked error",
+		err:  fmt.Errorf("calling Process: %w", InfrastructureError(errors.New("boom"), first)),
+		want: []error{first},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := InfrastructureCauses(tt.err)
+			if len(got) != len(tt.want) {
+				t.Fatalf("InfrastructureCauses: got = %v, want = %v", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if !errors.Is(got[i], want) {
+					t.Errorf("cause %d: got = %v, want = %v", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestInfrastructureErrorNil(t *testing.T) {
+	if err := InfrastructureError(nil, errors.New("cause")); err != nil {
+		t.Errorf("InfrastructureError(nil): got = %v, want = nil", err)
 	}
 }

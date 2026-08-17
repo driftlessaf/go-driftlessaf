@@ -251,19 +251,35 @@ func TestRetryWithBackoff_ZeroRetries(t *testing.T) {
 
 func TestRequeueIfRetryable_RetryableError(t *testing.T) {
 	t.Parallel()
-	retryableErr := errors.New("429 rate limit")
-	isRetryable := func(err error) bool { return errors.Is(err, retryableErr) }
+	// providerErr stands in for the provider's rate limit error, wrapped the way
+	// RetryWithBackoff wraps it once the inner retries are exhausted.
+	providerErr := errors.New("429 rate limit")
+	exhaustedErr := fmt.Errorf("generate failed after 3 retries: %w", providerErr)
+	isRetryable := func(err error) bool { return errors.Is(err, providerErr) }
 
-	got := retry.RequeueIfRetryable(t.Context(), retryableErr, isRetryable, "TestProvider")
+	got := retry.RequeueIfRetryable(t.Context(), exhaustedErr, isRetryable, "TestProvider")
 	if got == nil {
 		t.Fatal("RequeueIfRetryable() = nil, want RequeueAfter error")
 	}
-	delay, ok := workqueue.GetRequeueDelay(got)
+	delay, floor, ok := workqueue.GetRequeueOptions(got)
 	if !ok {
-		t.Fatal("GetRequeueDelay() ok = false, want true")
+		t.Fatal("GetRequeueOptions() ok = false, want true")
 	}
 	if delay != retry.LLMBackoffDelay {
 		t.Errorf("RequeueAfter delay = %v, want %v", delay, retry.LLMBackoffDelay)
+	}
+	// RequeueAfter, not RequeueNotBefore: a fresh event may pull the key forward.
+	if floor {
+		t.Errorf("RequeueAfter floor = true, want false")
+	}
+	// The dispatcher classifies the requeue as infrastructure churn rather than
+	// an application verdict, which keeps the failure-rate dashboards readable.
+	if !workqueue.IsInfrastructureError(got) {
+		t.Errorf("IsInfrastructureError() = false, want true")
+	}
+	// The marker must not hide the provider cause: callers still match it.
+	if !errors.Is(got, providerErr) {
+		t.Errorf("errors.Is(got, providerErr) = false, want true")
 	}
 }
 
@@ -275,6 +291,11 @@ func TestRequeueIfRetryable_NonRetryableError(t *testing.T) {
 	got := retry.RequeueIfRetryable(t.Context(), permErr, isRetryable, "TestProvider")
 	if got != nil {
 		t.Errorf("RequeueIfRetryable() = %v, want nil", got)
+	}
+	// A non-retryable error is an application verdict, so nothing it returns may
+	// carry the infrastructure marker.
+	if workqueue.IsInfrastructureError(got) {
+		t.Errorf("IsInfrastructureError() = true, want false")
 	}
 }
 

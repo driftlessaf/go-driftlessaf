@@ -422,6 +422,20 @@ func (e *executor[Request, Response]) runConversation(
 		return response, perr
 	}
 
+	// availableTools names every tool the model can call, for the unknown-tool
+	// result. The tool set is fixed for the run, so it is built once here
+	// rather than per bad call. isSubmit and isSuspend gate the two held-out
+	// names, so a name that no option configured, or that a caller-registered
+	// tool shadows, is not listed as its own entry.
+	heldOutNames := make([]string, 0, 2)
+	if isSubmit(submitToolName) {
+		heldOutNames = append(heldOutNames, submitToolName)
+	}
+	if isSuspend(suspendToolName) {
+		heldOutNames = append(heldOutNames, suspendToolName)
+	}
+	availableTools := availableToolNames(tools, heldOutNames...)
+
 	// executeToolCall handles executing a single tool call and returning the
 	// result. The handler writes any terminal result into resultPtr; the
 	// sequential path passes the shared finalResultPtr, while the concurrent
@@ -482,7 +496,8 @@ func (e *executor[Request, Response]) runConversation(
 				fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, toolUse.Name))
 
 			result = map[string]any{
-				"error": fmt.Sprintf("unknown tool: %q", toolUse.Name),
+				"error":           fmt.Sprintf("unknown tool: %q", toolUse.Name),
+				"available_tools": availableTools,
 			}
 		}
 
@@ -1228,4 +1243,20 @@ func effortForModel(modelName string, level anthropic.OutputConfigEffort) anthro
 	default:
 		return level
 	}
+}
+
+// availableToolNames returns the sorted names of every tool the model can
+// call: the registered tools, plus the heldOut names that dispatch outside
+// the tool map (the terminal submit tool, the suspend tool). Callers pass a
+// held-out name only while it routes, so a shadowed or unconfigured name
+// never reaches the list. The unknown-tool result carries the list, so a
+// model that misspells or invents a tool name can correct the call.
+func availableToolNames[Meta any](tools map[string]Meta, heldOut ...string) []string {
+	names := make([]string, 0, len(tools)+len(heldOut))
+	for name := range tools {
+		names = append(names, name)
+	}
+	names = append(names, heldOut...)
+	slices.Sort(names)
+	return slices.Compact(names)
 }

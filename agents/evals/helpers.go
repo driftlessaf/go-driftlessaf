@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/workqueue"
 )
 
 // ExactToolCalls returns an ObservableTraceCallback that validates the trace has exactly n tool calls.
@@ -135,6 +136,20 @@ const maxReportedToolErrors = 3
 // the Grade reasoning. This holds for an unknown-tool error too, so an agent
 // that legitimately expects one can say so.
 //
+// A trace error that carries the workqueue.InfrastructureError marker is
+// exempt: it grades 1.0 rather than failing. A provider outage (an unreachable
+// model endpoint, a broken connection mid-call) is a failure of the
+// infrastructure the run depends on, not an agent error, and scoring it as one
+// turns an outage into a fleet-wide quality regression. The exemption keys on
+// the marker (workqueue.HasInfrastructureMarker), not on
+// workqueue.IsInfrastructureError, so only a failure the shared provider retry
+// path marked is exempt: a bare codes.Unavailable the run produced itself still
+// fails. The reasoning carries the error text and the marked causes, so the
+// outage and the provider failure behind it still reach score sinks. An
+// ordinary requeue is not exempt and still fails.
+// The exemption never overrides an unknown-tool error: a trace that recorded
+// one fails even when the trace error is infrastructure-marked.
+//
 // A suspended trace (Trace.Suspended) neither fails nor grades. Suspension is
 // an intentional mid-run halt awaiting an out-of-band signal, not a failure,
 // and the resumed run is graded on its own trace.
@@ -146,6 +161,12 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 			}
 		}
 		return false
+	}
+	// A call naming a tool the executor has no handler for is the one error
+	// class no retry can make legal. Matched through the sentinel, never the
+	// message: the tool name in it is model-controlled text.
+	isUnknownTool := func(tc *agenttrace.ToolCall[T]) bool {
+		return tc.Error != nil && !shouldIgnore(tc.Error) && errors.Is(tc.Error, agenttrace.ErrUnknownTool)
 	}
 	return func(o Observer, trace *agenttrace.Trace[T]) {
 		// Short-circuit before the error checks: the suspension sentinel is
@@ -159,6 +180,35 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 
 		// A trace-level error means the run died before reaching a result.
 		if trace.Error != nil && !shouldIgnore(trace.Error) {
+			// A provider outage is not an agent error, so grade it a pass and
+			// keep the error text in the reasoning, where score sinks show it.
+			// Matched through the marker, never the message: the text is
+			// provider-controlled. The marker alone, so a bare codes.Unavailable
+			// the run produced itself keeps failing.
+			if workqueue.HasInfrastructureMarker(trace.Error) {
+				// An outage does not make an unknown-tool call legal, so the
+				// exemption never covers a trace that recorded one.
+				for _, tc := range trace.ToolCalls {
+					if isUnknownTool(tc) {
+						o.Fail(fmt.Sprintf("tool call %s error: got = %v, wanted = nil", tc.Name, tc.Error))
+						return
+					}
+				}
+				reasoning := fmt.Sprintf("infrastructure error, not an agent error: %v", trace.Error)
+				// The marker's message is the wrapped error's, which for a
+				// requeue says only when the key comes back. The causes name
+				// the provider failure, so append them or the outage signal
+				// stops at the marker.
+				if causes := workqueue.InfrastructureCauses(trace.Error); len(causes) > 0 {
+					texts := make([]string, 0, len(causes))
+					for _, cause := range causes {
+						texts = append(texts, cause.Error())
+					}
+					reasoning += fmt.Sprintf(" (cause: %s)", strings.Join(texts, "; "))
+				}
+				o.Grade(1.0, reasoning)
+				return
+			}
 			o.Fail(fmt.Sprintf("trace error: got = %v, wanted = nil", trace.Error))
 			return
 		}
@@ -176,11 +226,7 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 				}
 				continue
 			}
-			// A call naming a tool the executor has no handler for is the one
-			// error class no retry can make legal, so it stays terminal.
-			// Matched through the sentinel, never the message: the tool name
-			// in it is model-controlled text.
-			if errors.Is(tc.Error, agenttrace.ErrUnknownTool) {
+			if isUnknownTool(tc) {
 				o.Fail(fmt.Sprintf("tool call %s error: got = %v, wanted = nil", tc.Name, tc.Error))
 				return
 			}

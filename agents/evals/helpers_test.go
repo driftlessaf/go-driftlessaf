@@ -10,9 +10,14 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
+	"chainguard.dev/driftlessaf/workqueue"
 )
 
 // mockObserver implements Observer for testing
@@ -246,6 +251,142 @@ func TestNoErrors(t *testing.T) {
 	callback(obs, trace)
 	if len(obs.failures) == 0 {
 		t.Errorf("expected failure for trace error")
+	}
+
+	// An infrastructure-marked trace error grades a pass instead of failing. A
+	// provider outage is a failure of the infrastructure the run depends on, so
+	// scoring it as an agent error turns an outage into a fleet-wide quality
+	// regression. The reasoning carries the error text, so the outage still
+	// reaches score sinks.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: workqueue.InfrastructureError(workqueue.RequeueAfter(5*time.Minute), errors.New("overloaded_error: connection reset by peer")),
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for infrastructure-marked trace error: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if obs.grades[0] != 1.0 {
+		t.Errorf("grade score: got = %v, wanted = 1.0", obs.grades[0])
+	}
+	// The infrastructure marker is transparent, so its own text is the wrapped
+	// requeue's message. The reasoning appends the marked causes, so the
+	// provider failure behind the requeue reaches score sinks too.
+	if want := "infrastructure error, not an agent error: requeue after 5m0s"; !strings.Contains(obs.gradeReasons[0], want) {
+		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], want)
+	}
+	if want := "(cause: overloaded_error: connection reset by peer)"; !strings.Contains(obs.gradeReasons[0], want) {
+		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], want)
+	}
+
+	// A marked error with no cause reports the wrapped text alone, with no
+	// empty cause clause.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: workqueue.InfrastructureError(workqueue.RequeueAfter(5 * time.Minute)),
+	}
+	callback(obs, trace)
+	if len(obs.gradeReasons) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.gradeReasons))
+	}
+	if strings.Contains(obs.gradeReasons[0], "cause:") {
+		t.Errorf("grade reasoning: got = %q, wanted = no cause clause", obs.gradeReasons[0])
+	}
+
+	// An unknown-tool call outranks the infrastructure exemption. A provider
+	// outage does not make the protocol violation legal, so the mixed trace
+	// fails rather than grading a pass.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: workqueue.InfrastructureError(workqueue.RequeueAfter(5*time.Minute), errors.New("overloaded_error: connection reset by peer")),
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs")},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if want := "tool call read_the_logs error"; !strings.Contains(obs.failures[0], want) {
+		t.Errorf("failure message: got = %q, wanted = contains %q", obs.failures[0], want)
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for unknown tool call under infrastructure error: %v", obs.gradeReasons)
+	}
+
+	// An ignore function suppresses the unknown-tool error, so the same mixed
+	// trace keeps the infrastructure exemption.
+	obs = &mockObserver{}
+	evals.NoErrors[string](func(err error) bool {
+		return errors.Is(err, agenttrace.ErrUnknownTool)
+	})(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for ignored unknown tool call under infrastructure error: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if obs.grades[0] != 1.0 {
+		t.Errorf("grade score: got = %v, wanted = 1.0", obs.grades[0])
+	}
+
+	// An ordinary requeue carries no infrastructure mark, so it stays a
+	// failure: the run died before it reached a result.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: workqueue.RequeueAfter(5 * time.Minute),
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for ordinary requeue: %v", obs.gradeReasons)
+	}
+
+	// A bare codes.Unavailable carries no marker, so it fails. Only the shared
+	// provider retry path marks a failure as infrastructure, and a status code
+	// the run produced itself is not proof of an outage.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: status.Error(codes.Unavailable, "connection termination"),
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for unmarked unavailable status: %v", obs.gradeReasons)
+	}
+
+	// An agent-produced trace error, an executor failure, fails.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: errors.New("executor: model returned no content"),
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for executor failure: %v", obs.gradeReasons)
+	}
+
+	// An exhausted turn budget fails. The executors build that error with
+	// fmt.Errorf and export no sentinel for it, so this reproduces its text.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		Error: errors.New("agent exceeded maximum conversation turns (200)"),
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for exhausted turn budget: %v", obs.gradeReasons)
 	}
 
 	// A tool-call error on a completed run is a recovered transient: no

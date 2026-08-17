@@ -24,13 +24,16 @@ const LLMBackoffDelay = 5 * time.Minute
 
 // RequeueIfRetryable checks whether err is a retryable LLM API error and,
 // if so, returns a workqueue.RequeueAfter to signal the workqueue to back off
-// instead of immediately retrying. If the error is not retryable, it returns nil
+// instead of immediately retrying. The requeue is marked as an infrastructure
+// failure, so workqueue.IsInfrastructureError reports it as one, and it keeps
+// err in its chain, so callers can still match the original provider error with
+// errors.Is and errors.As. If the error is not retryable, it returns nil
 // and the caller should handle the error normally.
 func RequeueIfRetryable(ctx context.Context, err error, isRetryable func(error) bool, provider string) error {
 	if isRetryable(err) {
 		clog.FromContext(ctx).With("error", err).
 			Warnf("%s error exhausted retries, requeueing with backoff", provider)
-		return workqueue.RequeueAfter(LLMBackoffDelay)
+		return workqueue.InfrastructureError(workqueue.RequeueAfter(LLMBackoffDelay), err)
 	}
 	return nil
 }
