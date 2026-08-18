@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	chainguard.dev/apko v1.2.33
 	chainguard.dev/go-grpc-kit v0.18.0
-	chainguard.dev/sdk v0.1.201
+	chainguard.dev/sdk v0.1.164
 	cloud.google.com/go/aiplatform v1.126.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.33.0
@@ -13,7 +13,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.63.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chainguard-dev/terraform-infra-common v1.30.4
+	github.com/chainguard-dev/terraform-infra-common v1.25.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.13
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.20.0
@@ -36,7 +36,7 @@ require (
 	github.com/sigstore/cosign/v3 v3.1.2
 	github.com/sigstore/gitsign v0.17.1
 	github.com/sigstore/protobuf-specs v0.5.1
-	github.com/sigstore/sigstore v1.10.9-0.20260728171319-05a1d9750eaf
+	github.com/sigstore/sigstore v1.10.9
 	github.com/sigstore/sigstore-go v1.3.0
 	github.com/stretchr/testify v1.11.1
 	github.com/waigani/diffparser v0.0.0-20190828052634-7391f219313d
@@ -292,13 +292,17 @@ require (
 	golang.org/x/tools v0.48.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto v0.0.0-20260622175928-b703f567277d // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260720211330-0afa2a65878a // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260727163830-6c54dddc4772 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260724162435-b2f20204f0df // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
 
 // TEMPORARY: sigstore-go v1.3.0 added GetLogEntryByUUID to sign.RekorClient,
 // which gitsign's validatingRekorClient does not implement, so every module
