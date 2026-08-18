@@ -13,8 +13,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"chainguard.dev/driftlessaf/workqueue"
 )
+
+// triggerCount reads the current value of the trigger counter for the given
+// result, so tests can assert deltas against the process-global metric.
+func triggerCount(t *testing.T, result string) float64 {
+	t.Helper()
+	c, err := mTriggers.GetMetricWithLabelValues(metricServiceName, metricRevisionName, result)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues(%q): %v", result, err)
+	}
+	return testutil.ToFloat64(c)
+}
 
 // blockingQueue is a workqueue whose Enumerate blocks until released,
 // counting calls, so tests can hold dispatch passes in flight.
@@ -49,6 +62,7 @@ func TestHandler_DispatchesEmptyQueue(t *testing.T) {
 	q := &blockingQueue{}
 	h := Handler(q, 1, 10, func(context.Context, string, workqueue.Options) error { return nil }, 0,
 		WithDispatchPeriod(time.Nanosecond))
+	dispatched := triggerCount(t, triggerDispatched)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), "POST", "/", nil))
@@ -59,12 +73,17 @@ func TestHandler_DispatchesEmptyQueue(t *testing.T) {
 	if got := q.enumerations.Load(); got != 1 {
 		t.Errorf("enumerations: got = %d, want = 1", got)
 	}
+	if got, want := triggerCount(t, triggerDispatched)-dispatched, 1.0; got != want {
+		t.Errorf("dispatched triggers: got = %v, want = %v", got, want)
+	}
 }
 
 func TestHandler_ShedsWithinPeriod(t *testing.T) {
 	q := &blockingQueue{}
 	h := Handler(q, 1, 10, func(context.Context, string, workqueue.Options) error { return nil }, 0,
 		WithDispatchPeriod(time.Hour))
+	dispatched := triggerCount(t, triggerDispatched)
+	shed := triggerCount(t, triggerShed)
 
 	// The first trigger consumes the period's admission.
 	rec := httptest.NewRecorder()
@@ -88,6 +107,12 @@ func TestHandler_ShedsWithinPeriod(t *testing.T) {
 	}
 	if got := q.enumerations.Load(); got != 1 {
 		t.Errorf("enumerations after sheds: got = %d, want = 1", got)
+	}
+	if got, want := triggerCount(t, triggerDispatched)-dispatched, 1.0; got != want {
+		t.Errorf("dispatched triggers: got = %v, want = %v", got, want)
+	}
+	if got, want := triggerCount(t, triggerShed)-shed, 3.0; got != want {
+		t.Errorf("shed triggers: got = %v, want = %v", got, want)
 	}
 }
 

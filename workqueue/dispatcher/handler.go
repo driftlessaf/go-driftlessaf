@@ -56,9 +56,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// passes. Passes are deliberately unbounded in flight: a slow pass over
 	// a deep queue must not stop a full sweep from launching each period.
 	if !h.limiter.Allow() {
+		countTrigger(triggerShed)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	countTrigger(triggerDispatched)
 
 	if err := HandleAsync(r.Context(), h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry, h.opts...)(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
