@@ -42,6 +42,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
 
+	// prRenderFromResult derives the render-only PR fields (Headline and
+	// VariantSummary) from the agent result. Opt-in: nil leaves both fields
+	// empty.
+	prRenderFromResult func(Resp) PRRender
+
 	// copyIssueLabels, when true, copies every label from the source issue onto
 	// the generated PR. Opt-in: false means no issue labels are carried over.
 	// Unlike prLabels (a fixed set always stamped), this lets labels be applied
@@ -96,6 +101,17 @@ func WithDraftLabel[Req promptbuilder.Bindable, Resp Result, CB any](label strin
 func WithPRLabelsFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) []string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.prLabelsFromResult = fn
+	}
+}
+
+// WithPRRenderFromResult configures the reconciler to set the render-only
+// PRData fields Headline and VariantSummary from the agent result. The
+// reconciler applies them inside the Upsert closure, after the agent runs and
+// before the PR title and body render, so the templates see them. A zero
+// PRRender return sets nothing. Off by default: both fields stay empty.
+func WithPRRenderFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) PRRender) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.prRenderFromResult = fn
 	}
 }
 

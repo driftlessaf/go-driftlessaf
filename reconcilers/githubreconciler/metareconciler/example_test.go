@@ -221,3 +221,51 @@ func Example_withPRLabelsFromResult() {
 	// Output:
 	// Reconciler created with result-derived PR labels
 }
+
+// Example_withPRRenderFromResult shows the WithPRRenderFromResult option. The
+// reconciler sets PRData.Headline and PRData.VariantSummary from the agent
+// result, so the PR title template and the PR body template can render them.
+func Example_withPRRenderFromResult() {
+	// In practice, these would be created by the calling code
+	var cm *changemanager.CM[metareconciler.PRData[*MyRequest]]
+	var cloneMeta *clonemanager.Meta
+	var agent metaagent.Agent[*MyRequest, *MyResult, baseCallbacks]
+
+	identity := "my-bot"
+
+	// Create the reconciler that titles each PR from the agent result.
+	rec := metareconciler.New(
+		identity,
+		cm,
+		cloneMeta,
+		[]string{},
+		agent,
+		func(_ context.Context, issue *github.Issue, _ *changemanager.Session[metareconciler.PRData[*MyRequest]]) (*MyRequest, error) {
+			return &MyRequest{
+				Title: issue.GetTitle(),
+				Body:  issue.GetBody(),
+			}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[metareconciler.PRData[*MyRequest]], _ *clonemanager.Lease) (baseCallbacks, error) {
+			return toolcall.NewFindingTools(
+				toolcall.NewWorktreeTools(toolcall.EmptyTools{}, callbacks.WorktreeCallbacks{}),
+				callbacks.FindingCallbacks{},
+			), nil
+		},
+		// Derive the PR title and the body annotation from the agent result.
+		metareconciler.WithPRRenderFromResult[*MyRequest, *MyResult, baseCallbacks](
+			func(r *MyResult) metareconciler.PRRender {
+				return metareconciler.PRRender{
+					Headline:       r.CommitMsg,
+					VariantSummary: r.Summary,
+				}
+			},
+		),
+	)
+
+	_ = rec
+	fmt.Println("Reconciler created with result-derived PR render fields")
+
+	// Output:
+	// Reconciler created with result-derived PR render fields
+}

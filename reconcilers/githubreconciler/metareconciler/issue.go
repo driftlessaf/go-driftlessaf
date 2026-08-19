@@ -200,8 +200,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	draft := r.draftForIssue(issue)
 
 	// Create/update the PR with the changes. prData is passed by pointer and
-	// the body template renders only after the closure below runs, so fields
-	// set post-execution (ReasoningSummary) are visible to the template.
+	// the title and body templates render only after the closure below runs, so
+	// the fields that the closure sets after the agent executes
+	// (ReasoningSummary, Headline, VariantSummary) are visible to the templates.
 	prData := &PRData[Req]{
 		Identity:      r.identity,
 		IssueURL:      issue.GetHTMLURL(),
@@ -255,6 +256,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 			}
 			agentRan = true
 			prData.ReasoningSummary = agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars)
+			if r.prRenderFromResult != nil {
+				render := r.prRenderFromResult(result)
+				prData.Headline = render.Headline
+				prData.VariantSummary = render.VariantSummary
+			}
 
 			// Check if the agent left the worktree clean (no file changes).
 			// Return ErrNoChanges so Upsert can propagate it to the caller.

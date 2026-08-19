@@ -348,6 +348,38 @@ func TestWithPRLabelsFromResult(t *testing.T) {
 	}
 }
 
+func TestWithPRRenderFromResult(t *testing.T) {
+	agent := &fakeAgent{}
+	fn := func(r *testResult) PRRender {
+		return PRRender{Headline: r.commitMsg, VariantSummary: "variant 7"}
+	}
+
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		agent,
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithPRRenderFromResult[*testRequest, *testResult, testCallbacks](fn),
+	)
+
+	if rec.prRenderFromResult == nil {
+		t.Fatal("reconciler.prRenderFromResult = nil, wanted the provided function")
+	}
+
+	got := rec.prRenderFromResult(&testResult{commitMsg: "fix(pkg): rename the field"})
+	want := PRRender{Headline: "fix(pkg): rename the field", VariantSummary: "variant 7"}
+	if got != want {
+		t.Errorf("reconciler.prRenderFromResult(...) = %+v, wanted = %+v", got, want)
+	}
+}
+
 func TestWithGiveUpComment(t *testing.T) {
 	rec := New[*testRequest, *testResult, testCallbacks](
 		"test-identity",
