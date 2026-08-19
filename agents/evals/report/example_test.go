@@ -118,9 +118,9 @@ func ExampleByEval_withGrades() {
 	// | readability-score  | ❌ 75.0%      | 90.0%      | 82.5%   |
 	// |    └─ code-quality | ❌ 0.75 (75%) | 0.90 (90%) | 82.5%   |
 	//
-	// readability-score [0.82 avg] (2 results)
-	// └ claude [❌ 0.75 avg] (1 result)
-	//   └ code-quality [❌ 0.75 avg] (1 result)
+	// readability-score [0.82 avg] (2 grades over 2 iterations)
+	// └ claude [❌ 0.75 avg] (1 grade over 1 iteration)
+	//   └ code-quality [❌ 0.75 avg] (1 grade over 1 iteration)
 	//     └ 1 [0.75] Some improvements needed
 }
 
@@ -166,9 +166,9 @@ func ExampleByEval_multipleEvaluations() {
 	// |    └─ stress-test | ❌ 0.65 (65%)  | ❌ 65.0% |
 	// | security-check    | 100.0%         | 100.0%   |
 	//
-	// performance-check [❌ 0.75 avg] (2 results)
-	// └ claude [❌ 0.75 avg] (2 results)
-	//   └ stress-test [❌ 0.65 avg] (1 result)
+	// performance-check [❌ 0.75 avg] (2 grades over 2 iterations)
+	// └ claude [❌ 0.75 avg] (2 grades over 2 iterations)
+	//   └ stress-test [❌ 0.65 avg] (1 grade over 1 iteration)
 	//     └ 1 [0.65] Performance issues under load
 	// security-check [100.0%] (1/1)
 }

@@ -55,12 +55,16 @@ func (s *stats) formatForTree() (string, string) {
 		label := fmt.Sprintf("(%d/%d)", s.iterations-s.failureCount, s.iterations)
 		return value, label
 	case hasGrades:
-		gradeWord := "results"
+		gradeWord := "grades"
 		if s.gradeCount == 1 {
-			gradeWord = "result"
+			gradeWord = "grade"
+		}
+		iterationWord := "iterations"
+		if s.iterations == 1 {
+			iterationWord = "iteration"
 		}
 		value := fmt.Sprintf("%.2f avg", s.avgGrade)
-		label := fmt.Sprintf("(%d %s)", s.gradeCount, gradeWord)
+		label := fmt.Sprintf("(%d %s over %d %s)", s.gradeCount, gradeWord, s.iterations, iterationWord)
 		return value, label
 	default:
 		value := fmt.Sprintf("%.1f%%", s.passRate*100)

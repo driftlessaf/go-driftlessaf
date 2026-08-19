@@ -40,6 +40,28 @@ func (m *mockObserver) Total() int64 {
 	return m.count
 }
 
+// assertRowContains fails unless a single line of the report holds every wanted
+// substring. Asserting per line keeps a tree row distinct from the summary
+// table, which repeats the same names with different numbers.
+func assertRowContains(t *testing.T, reportStr string, want ...string) {
+	t.Helper()
+
+	for line := range strings.SplitSeq(reportStr, "\n") {
+		found := true
+		for _, w := range want {
+			if !strings.Contains(line, w) {
+				found = false
+				break
+			}
+		}
+		if found {
+			return
+		}
+	}
+
+	t.Errorf("reportStr: got = %q, wanted a single line containing all of %q", reportStr, want)
+}
+
 func TestByEval(t *testing.T) {
 	// Create a factory that creates test observers
 	factory := func(name string) *evals.ResultCollector {
@@ -287,9 +309,141 @@ func TestByEvalGradeOnlyResults(t *testing.T) {
 		t.Errorf("reportStr: got = %q, wanted to contain %q", reportStr, "avg")
 	}
 
+	// The row must carry the grade count and the iteration total, both singular here
+	assertRowContains(t, reportStr, "0.60 avg", "(1 grade over 1 iteration)")
+
 	// Should contain details about the low grade
 	if !strings.Contains(reportStr, "below threshold") {
 		t.Errorf("reportStr: got = %q, wanted to contain %q", reportStr, "below threshold")
+	}
+}
+
+// TestByEvalGradeOnlyRowCounts checks the grade-only tree row for the case that
+// motivates the label: an eval that only grades the iterations it considers
+// clean. Without the iteration total, a run of three iterations that recovered
+// from tool-call errors reads as a flawless run.
+func TestByEvalGradeOnlyRowCounts(t *testing.T) {
+	tests := []struct {
+		name     string
+		record   func(evalObs *evals.NamespacedObserver[*evals.ResultCollector])
+		wantRow  []string
+		wantFail bool
+	}{{
+		name: "three grades over three iterations",
+		record: func(evalObs *evals.NamespacedObserver[*evals.ResultCollector]) {
+			for range 3 {
+				evalObs.Grade(1.0, "recovered")
+				evalObs.Increment()
+			}
+		},
+		wantRow:  []string{"1.00 avg", "(3 grades over 3 iterations)"},
+		wantFail: false,
+	}, {
+		name: "one grade over one iteration",
+		record: func(evalObs *evals.NamespacedObserver[*evals.ResultCollector]) {
+			evalObs.Grade(1.0, "recovered")
+			evalObs.Increment()
+		},
+		wantRow:  []string{"1.00 avg", "(1 grade over 1 iteration)"},
+		wantFail: false,
+	}, {
+		// NoErrors emits at most one grade per invocation and none on a clean
+		// invocation, so a recovered-error run grades once over several iterations.
+		name: "one grade over three iterations",
+		record: func(evalObs *evals.NamespacedObserver[*evals.ResultCollector]) {
+			evalObs.Grade(1.0, "recovered")
+			for range 3 {
+				evalObs.Increment()
+			}
+		},
+		wantRow:  []string{"1.00 avg", "(1 grade over 3 iterations)"},
+		wantFail: false,
+	}, {
+		name: "more grades than iterations",
+		record: func(evalObs *evals.NamespacedObserver[*evals.ResultCollector]) {
+			evalObs.Grade(1.0, "first tool call recovered")
+			evalObs.Grade(1.0, "second tool call recovered")
+			evalObs.Grade(1.0, "third tool call recovered")
+			evalObs.Increment()
+		},
+		wantRow:  []string{"1.00 avg", "(3 grades over 1 iteration)"},
+		wantFail: false,
+	}, {
+		name: "grades below threshold over several iterations",
+		record: func(evalObs *evals.NamespacedObserver[*evals.ResultCollector]) {
+			evalObs.Grade(0.5, "half recovered")
+			evalObs.Increment()
+			evalObs.Grade(0.5, "half recovered")
+			evalObs.Increment()
+		},
+		wantRow:  []string{"0.50 avg", "(2 grades over 2 iterations)"},
+		wantFail: true,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a factory that creates test observers
+			factory := func(name string) *evals.ResultCollector {
+				return evals.NewResultCollector(&mockObserver{})
+			}
+
+			// Create root observer
+			obs := evals.NewNamespacedObserver(factory)
+
+			tt.record(obs.Child("claude").Child("test1").Child("eval1"))
+
+			reportStr, hasFailure := report.ByEval(obs, 0.8)
+
+			if hasFailure != tt.wantFail {
+				t.Errorf("hasFailure: got = %v, wanted = %v", hasFailure, tt.wantFail)
+			}
+
+			assertRowContains(t, reportStr, tt.wantRow...)
+		})
+	}
+}
+
+// TestByEvalMixedAndPassRateOnlyRows pins the two non-grade-only tree rows, so a
+// change to the grade-only label cannot leak into them.
+func TestByEvalMixedAndPassRateOnlyRows(t *testing.T) {
+	// Create a factory that creates test observers
+	factory := func(name string) *evals.ResultCollector {
+		return evals.NewResultCollector(&mockObserver{})
+	}
+
+	// Create root observer
+	obs := evals.NewNamespacedObserver(factory)
+
+	// Grades and failures together: 3 of 4 iterations pass, average grade 0.75
+	mixedObs := obs.Child("claude").Child("test1").Child("mixed")
+	for range 3 {
+		mixedObs.Increment()
+	}
+	mixedObs.Fail("tool call error")
+	mixedObs.Increment()
+	mixedObs.Grade(0.75, "acceptable")
+
+	// Failures only: 1 of 2 iterations pass, no grades
+	passRateObs := obs.Child("claude").Child("test1").Child("pass-rate")
+	passRateObs.Increment()
+	passRateObs.Fail("tool call error")
+	passRateObs.Increment()
+
+	reportStr, hasFailure := report.ByEval(obs, 0.8)
+
+	if !hasFailure {
+		t.Error("hasFailure: got = false, wanted = true")
+	}
+
+	// The mixed row keeps both metrics and the pass count label
+	assertRowContains(t, reportStr, "mixed", "75.0% pass, 0.75 avg", "(3/4)")
+
+	// The pass-rate-only row keeps the bare percentage and the pass count label
+	assertRowContains(t, reportStr, "pass-rate", "50.0%", "(1/2)")
+
+	// Neither row mentions grade or iteration counts
+	if strings.Contains(reportStr, "over") {
+		t.Errorf("reportStr: got = %q, wanted no grade-only label", reportStr)
 	}
 }
 
