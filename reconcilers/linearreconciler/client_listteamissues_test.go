@@ -102,6 +102,52 @@ func TestListTeamIssues_PaginatesAndFilters(t *testing.T) {
 	}
 }
 
+// The project option must add a server-side project clause to the filter, and
+// its absence (the zero value) must leave the filter without one — otherwise a
+// sweep meant for a whole team would silently be narrowed to, or by, a project.
+func TestListTeamIssues_ProjectClause(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts ListTeamIssuesOptions
+		want any // nil means the clause must be absent
+	}{{
+		name: "set",
+		opts: ListTeamIssuesOptions{Project: "Depthfirst Q3"},
+		want: map[string]any{"name": map[string]any{"eq": "Depthfirst Q3"}},
+	}, {
+		name: "unset",
+		opts: ListTeamIssuesOptions{},
+		want: nil,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotFilter map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var req struct {
+					Variables map[string]any `json:"variables"`
+				}
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Errorf("unmarshal request: %v", err)
+				}
+				gotFilter, _ = req.Variables["filter"].(map[string]any)
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := io.WriteString(w, listIssuesResponse); err != nil {
+					t.Errorf("write response: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+			if _, err := c.ListTeamIssues(t.Context(), "SEC", tc.opts); err != nil {
+				t.Fatalf("ListTeamIssues: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, gotFilter["project"]); diff != "" {
+				t.Errorf("project clause (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestListTeamIssues_GraphQLError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

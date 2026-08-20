@@ -441,6 +441,12 @@ type ListTeamIssuesOptions struct {
 	// TitleContains, when set, restricts results to issues whose title
 	// contains this substring. Applied server-side by Linear.
 	TitleContains string
+
+	// Project, when set, restricts results to issues belonging to a project
+	// with this name (matched exactly, within the team). Applied server-side
+	// by Linear. Linear does not enforce project-name uniqueness within a team,
+	// so a name shared by two projects narrows to the issues of both.
+	Project string
 }
 
 // ListTeamIssues returns the open issues belonging to the team identified by
@@ -480,6 +486,9 @@ func (c *Client) ListTeamIssues(ctx context.Context, teamKey string, opts ListTe
 	}
 	if opts.TitleContains != "" {
 		filter["title"] = map[string]any{"contains": opts.TitleContains}
+	}
+	if opts.Project != "" {
+		filter["project"] = map[string]any{"name": map[string]any{"eq": opts.Project}}
 	}
 
 	var issues []*Issue
