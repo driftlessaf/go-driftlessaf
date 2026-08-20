@@ -33,7 +33,28 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
-// Key represents a parsed APK URL key with its components.
+// Reference is a parsed APK location with an optional control checksum.
+// References use the same qualified path grammar as Key, but may omit the
+// checksum while a caller resolves it through an APKINDEX.
+type Reference struct {
+	// Host is the APK registry host (e.g., "apk.cgr.dev", "packages.wolfi.dev").
+	Host string
+
+	// RepoPath is the repository path (e.g., "os", "9a2552c399fb9e7ebb42c63c2c7e7984207eb31c").
+	RepoPath string
+
+	// Repository is this APK's repository and architecture.
+	Repository apk.Repository
+
+	// Package contains the parsed APK package metadata and optional checksum.
+	Package *apk.Package
+
+	// ChecksumAlgorithm names the checksum algorithm when Package.Checksum is
+	// present. It is empty for an unpinned reference.
+	ChecksumAlgorithm string
+}
+
+// Key represents a checksum-pinned APK URL key with its components.
 // Keys are of the form "{host}/{repo-path...}/{arch}/{package}-{version}.apk"
 // where repo-path can have multiple path components, and do not include the
 // scheme (https://).
@@ -44,7 +65,7 @@ type Key struct {
 	// RepoPath is the repository path (e.g., "os", "9a2552c399fb9e7ebb42c63c2c7e7984207eb31c").
 	RepoPath string
 
-	// Repository returns a Repository for this APK's location.
+	// Repository is this APK's repository and architecture.
 	Repository apk.Repository
 
 	// Package contains the parsed APK package metadata.
@@ -80,30 +101,42 @@ var checksumSizes = map[string]int{
 // distinguish legacy-form keys from other malformations.
 var ErrMissingChecksum = errors.New(`missing required control-checksum suffix ("@{alg}:{hex}")`)
 
-// splitChecksum splits an optional "@{alg}:{hex}" control-checksum suffix
-// from a key, returning the remaining key and the decoded checksum (nil when
-// no suffix is present).
-func splitChecksum(key string) (string, []byte, error) {
-	rest, suffix, found := strings.Cut(key, "@")
+// SplitChecksum splits an optional "@{alg}:{hex}" control-checksum suffix
+// from a reference. Algorithm and checksum are empty when no suffix is
+// present.
+func SplitChecksum(ref string) (rest, algorithm string, checksum []byte, err error) {
+	rest, suffix, found := strings.Cut(ref, "@")
 	if !found {
-		return key, nil, nil
+		return ref, "", nil, nil
 	}
-	alg, hexsum, found := strings.Cut(suffix, ":")
+	algorithm, hexsum, found := strings.Cut(suffix, ":")
 	if !found {
-		return "", nil, fmt.Errorf("invalid APK key %q: checksum suffix %q is not {alg}:{hex}", key, suffix)
+		return "", "", nil, fmt.Errorf("invalid APK key %q: checksum suffix %q is not {alg}:{hex}", ref, suffix)
 	}
-	size, ok := checksumSizes[alg]
+	size, ok := checksumSizes[algorithm]
 	if !ok {
-		return "", nil, fmt.Errorf("invalid APK key %q: unsupported checksum algorithm %q", key, alg)
+		return "", "", nil, fmt.Errorf("invalid APK key %q: unsupported checksum algorithm %q", ref, algorithm)
 	}
-	sum, err := hex.DecodeString(hexsum)
+	checksum, err = hex.DecodeString(hexsum)
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid APK key %q: decoding checksum: %w", key, err)
+		return "", "", nil, fmt.Errorf("invalid APK key %q: decoding checksum: %w", ref, err)
 	}
-	if len(sum) != size {
-		return "", nil, fmt.Errorf("invalid APK key %q: %s checksum must be %d bytes, got %d", key, alg, size, len(sum))
+	if len(checksum) != size {
+		return "", "", nil, fmt.Errorf("invalid APK key %q: %s checksum must be %d bytes, got %d", ref, algorithm, size, len(checksum))
 	}
-	return rest, sum, nil
+	return rest, algorithm, checksum, nil
+}
+
+// ParseReference parses a qualified APK reference with an optional control
+// checksum. References use the form
+// "{host}/{repo-path...}/{arch}/{package}-{version}.apk[@{alg}:{hex}]" and do
+// not include a URL scheme.
+func ParseReference(ref string) (*Reference, error) {
+	key, algorithm, checksum, err := SplitChecksum(ref)
+	if err != nil {
+		return nil, err
+	}
+	return parseReference(key, algorithm, checksum)
 }
 
 // Parse parses an APK URL key into its components.
@@ -111,15 +144,27 @@ func splitChecksum(key string) (string, []byte, error) {
 // with a required "@{alg}:{hex}" control-checksum suffix; they do not
 // include the scheme.
 func Parse(key string) (*Key, error) {
-	key, checksum, err := splitChecksum(key)
+	unpinned, algorithm, checksum, err := SplitChecksum(key)
 	if err != nil {
 		return nil, err
 	}
 	if len(checksum) == 0 {
-		return nil, fmt.Errorf("invalid APK key %q: %w", key, ErrMissingChecksum)
+		return nil, fmt.Errorf("invalid APK key %q: %w", unpinned, ErrMissingChecksum)
 	}
 
-	// Split into all parts
+	ref, err := parseReference(unpinned, algorithm, checksum)
+	if err != nil {
+		return nil, err
+	}
+	return &Key{
+		Host:       ref.Host,
+		RepoPath:   ref.RepoPath,
+		Repository: ref.Repository,
+		Package:    ref.Package,
+	}, nil
+}
+
+func parseReference(key, algorithm string, checksum []byte) (*Reference, error) {
 	parts := strings.Split(key, "/")
 
 	// Minimum: host / repo-path / arch / filename = 4 parts
@@ -156,7 +201,7 @@ func Parse(key string) (*Key, error) {
 	// Build repository URI: https://{host}/{repo-path}/{arch}
 	repoURI := fmt.Sprintf("https://%s/%s/%s", host, repoPath, arch)
 
-	return &Key{
+	return &Reference{
 		Host:     host,
 		RepoPath: repoPath,
 		Repository: apk.Repository{
@@ -168,6 +213,7 @@ func Parse(key string) (*Key, error) {
 			Arch:     arch,
 			Checksum: checksum,
 		},
+		ChecksumAlgorithm: algorithm,
 	}, nil
 }
 

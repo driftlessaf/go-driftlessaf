@@ -89,6 +89,62 @@ func TestParseChecksum(t *testing.T) {
 	}
 }
 
+func TestSplitChecksum(t *testing.T) {
+	const base = "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk"
+	sum := randomChecksum(t, 20)
+	ref := base + "@sha1:" + hex.EncodeToString(sum)
+
+	gotBase, gotAlgorithm, gotSum, err := SplitChecksum(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBase != base {
+		t.Errorf("SplitChecksum() base = %q, want %q", gotBase, base)
+	}
+	if gotAlgorithm != "sha1" {
+		t.Errorf("SplitChecksum() algorithm = %q, want sha1", gotAlgorithm)
+	}
+	if !bytes.Equal(gotSum, sum) {
+		t.Errorf("SplitChecksum() checksum = %x, want %x", gotSum, sum)
+	}
+}
+
+func TestParseReferenceOptionalChecksum(t *testing.T) {
+	const base = "packages.wolfi.dev/os/x86_64/glibc-2.42-r0.apk"
+
+	unpinned, err := ParseReference(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unpinned.Package.Checksum) != 0 || unpinned.ChecksumAlgorithm != "" {
+		t.Errorf("ParseReference() checksum = %x (%q), want no checksum",
+			unpinned.Package.Checksum, unpinned.ChecksumAlgorithm)
+	}
+
+	pinned, err := ParseReference(base + "@sha256:" + hex.EncodeToString(randomChecksum(t, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pinned.Package.Checksum) != 32 || pinned.ChecksumAlgorithm != "sha256" {
+		t.Errorf("ParseReference() checksum = %x (%q), want sha256 checksum",
+			pinned.Package.Checksum, pinned.ChecksumAlgorithm)
+	}
+}
+
+func TestParseReferenceValidatesQualifiedGrammar(t *testing.T) {
+	for _, ref := range []string{
+		"packages.wolfi.dev/os/not-an-arch/glibc-2.42-r0.apk",
+		"packages.wolfi.dev/x86_64/glibc-2.42-r0.apk",
+		"packages.wolfi.dev/os/x86_64/glibc.apk",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			if _, err := ParseReference(ref); err == nil {
+				t.Errorf("ParseReference(%q) error = nil, want error", ref)
+			}
+		})
+	}
+}
+
 func TestRoundTripChecksum(t *testing.T) {
 	sha1sum := randomChecksum(t, 20)
 	sha256sum := randomChecksum(t, 32)
