@@ -7,8 +7,10 @@ package gcs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
@@ -31,6 +35,7 @@ type gcsCall struct {
 	method string
 	path   string // unescaped URL path
 	query  url.Values
+	body   string
 }
 
 // fakeGCS is an httptest-backed stand-in for the GCS JSON API that records
@@ -42,7 +47,8 @@ type fakeGCS struct {
 }
 
 func (f *fakeGCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	call := gcsCall{method: r.Method, path: r.URL.Path, query: r.URL.Query()}
+	reqBody, _ := io.ReadAll(r.Body)
+	call := gcsCall{method: r.Method, path: r.URL.Path, query: r.URL.Query(), body: string(reqBody)}
 	f.mu.Lock()
 	f.calls = append(f.calls, call)
 	handler := f.handler
@@ -950,5 +956,194 @@ func TestObservedRequeueLeavesTwinOnLostOwnership(t *testing.T) {
 	}
 	if twinDeleted {
 		t.Error("requeue twin: got = deleted, want = left intact (deleting it could drop an enqueue that deduped into it; a duplicate re-run is the safe bias)")
+	}
+}
+
+// rewriteMetadata unmarshals the object metadata from a recorded rewrite
+// request body.
+func rewriteMetadata(t *testing.T, call gcsCall) map[string]string {
+	t.Helper()
+	var obj struct {
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(call.body), &obj); err != nil {
+		t.Fatalf("Unmarshal(%q) = %v", call.body, err)
+	}
+	return obj.Metadata
+}
+
+// copyAndDeleteHandler responds to the rewrite and delete calls Start,
+// Requeue, and Deadletter make.
+func copyAndDeleteHandler(dst string, gen int64) func(call gcsCall) (int, string) {
+	return func(call gcsCall) (int, string) {
+		switch call.method {
+		case "POST":
+			return 200, rewriteJSON(dst, gen)
+		case "DELETE":
+			return 200, ""
+		default:
+			return 500, errorJSON(500)
+		}
+	}
+}
+
+func TestStartRecordsOwner(t *testing.T) {
+	tests := []struct {
+		name      string
+		owner     string
+		metadata  map[string]string
+		wantOwner string
+		wantSet   bool
+	}{{
+		name:      "owner recorded on claim",
+		owner:     "us-test1",
+		wantOwner: "us-test1",
+		wantSet:   true,
+	}, {
+		name:     "no owner configured strips stale owner",
+		owner:    "",
+		metadata: map[string]string{ownerMetadataKey: "stale"},
+		wantSet:  false,
+	}, {
+		name:      "owner overwrites stale owner",
+		owner:     "us-test2",
+		metadata:  map[string]string{ownerMetadataKey: "stale"},
+		wantOwner: "us-test2",
+		wantSet:   true,
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := &fakeGCS{handler: copyAndDeleteHandler("in-progress/test-key", 2)}
+			client := newTestClient(t, f)
+
+			qk := &queuedKey{
+				client: client,
+				attrs: &storage.ObjectAttrs{
+					Name:     queuedPrefix + "test-key",
+					Metadata: test.metadata,
+				},
+				owner: test.owner,
+			}
+			if _, err := qk.Start(t.Context()); err != nil {
+				t.Fatalf("Start() = %v", err)
+			}
+
+			rewrite, ok := findCall(f.recorded(), "POST", "rewriteTo")
+			if !ok {
+				t.Fatal("no rewrite call recorded")
+			}
+			md := rewriteMetadata(t, rewrite)
+			got, set := md[ownerMetadataKey]
+			if set != test.wantSet {
+				t.Errorf("owner metadata set = %v, want %v (metadata: %v)", set, test.wantSet, md)
+			}
+			if set && got != test.wantOwner {
+				t.Errorf("owner = %q, want %q", got, test.wantOwner)
+			}
+		})
+	}
+}
+
+func TestRequeueClearsOwner(t *testing.T) {
+	f := &fakeGCS{handler: copyAndDeleteHandler("queued/test-key", 2)}
+	client := newTestClient(t, f)
+
+	key := newTestKey(t, client, "test-key", 1, 1)
+	key.attrs.Metadata[ownerMetadataKey] = "us-test1"
+
+	if err := key.Requeue(t.Context()); err != nil {
+		t.Fatalf("Requeue() = %v", err)
+	}
+
+	rewrite, ok := findCall(f.recorded(), "POST", "rewriteTo")
+	if !ok {
+		t.Fatal("no rewrite call recorded")
+	}
+	if md := rewriteMetadata(t, rewrite); md[ownerMetadataKey] != "" {
+		t.Errorf("requeued object still carries owner: %v", md)
+	}
+}
+
+func TestDeadletterClearsOwner(t *testing.T) {
+	f := &fakeGCS{handler: copyAndDeleteHandler("dead-letter/test-key", 2)}
+	client := newTestClient(t, f)
+
+	key := newTestKey(t, client, "test-key", 1, 1)
+	key.attrs.Metadata[ownerMetadataKey] = "us-test1"
+
+	if err := key.Deadletter(t.Context()); err != nil {
+		t.Fatalf("Deadletter() = %v", err)
+	}
+
+	rewrite, ok := findCall(f.recorded(), "POST", "rewriteTo")
+	if !ok {
+		t.Fatal("no rewrite call recorded")
+	}
+	if md := rewriteMetadata(t, rewrite); md[ownerMetadataKey] != "" {
+		t.Errorf("dead-lettered object still carries owner: %v", md)
+	}
+}
+
+// listJSON builds an object listing response from (name, owner) pairs, where
+// an empty owner omits the metadata entirely.
+func listJSON(objects ...[2]string) string {
+	items := make([]string, 0, len(objects))
+	for _, obj := range objects {
+		md := ""
+		if obj[1] != "" {
+			md = fmt.Sprintf(`,"metadata":{%q:%q}`, ownerMetadataKey, obj[1])
+		}
+		items = append(items, fmt.Sprintf(`{"kind":"storage#object","bucket":"test-bucket","name":%q,"generation":"1","metageneration":"1"%s}`, obj[0], md))
+	}
+	return fmt.Sprintf(`{"kind":"storage#objects","items":[%s]}`, strings.Join(items, ","))
+}
+
+func TestEnumerateCountsInProgressByOwner(t *testing.T) {
+	f := &fakeGCS{handler: func(call gcsCall) (int, string) {
+		return 200, listJSON(
+			[2]string{"in-progress/a", "us-a"},
+			[2]string{"in-progress/b", "us-a"},
+			[2]string{"in-progress/c", ""},
+			[2]string{"queued/d", ""},
+		)
+	}}
+	wq := NewWorkQueue(newTestClient(t, f), 10, WithName("owner-metric-test"))
+
+	if _, _, _, err := wq.Enumerate(t.Context()); err != nil {
+		t.Fatalf("Enumerate() = %v", err)
+	}
+
+	ownerLabels := func(owner string) prometheus.Labels {
+		return prometheus.Labels{
+			"service_name":  baseServiceName,
+			"revision_name": baseRevisionName,
+			"queue_name":    "owner-metric-test",
+			"owner":         owner,
+		}
+	}
+	if got := testutil.ToFloat64(mInProgressKeysByOwner.With(ownerLabels("us-a"))); got != 2 {
+		t.Errorf("in-progress by owner us-a = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(mInProgressKeysByOwner.With(ownerLabels("unknown"))); got != 1 {
+		t.Errorf("in-progress by owner unknown = %v, want 1", got)
+	}
+
+	// A second enumeration without us-a keys drops its series entirely
+	// (With below recreates it at zero) rather than freezing it at 2.
+	f.mu.Lock()
+	f.handler = func(call gcsCall) (int, string) {
+		return 200, listJSON([2]string{"in-progress/c", ""})
+	}
+	f.mu.Unlock()
+
+	if _, _, _, err := wq.Enumerate(t.Context()); err != nil {
+		t.Fatalf("Enumerate() = %v", err)
+	}
+	if got := testutil.ToFloat64(mInProgressKeysByOwner.With(ownerLabels("us-a"))); got != 0 {
+		t.Errorf("in-progress by owner us-a = %v, want 0 after us-a released its keys", got)
+	}
+	if got := testutil.ToFloat64(mInProgressKeysByOwner.With(ownerLabels("unknown"))); got != 1 {
+		t.Errorf("in-progress by owner unknown = %v, want 1", got)
 	}
 }

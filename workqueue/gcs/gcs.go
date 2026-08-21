@@ -44,6 +44,15 @@ func WithName(name string) Option {
 	return func(w *wq) { w.name = name }
 }
 
+// WithOwner sets the identity recorded on each in-progress object this queue
+// starts, e.g. the region of the dispatcher claiming the key. Because the
+// owner rides on the object, every process enumerating the queue sees who
+// holds what, surfaced via the workqueue_in_progress_keys_by_owner metric.
+// Defaults to "", which records nothing.
+func WithOwner(owner string) Option {
+	return func(w *wq) { w.owner = owner }
+}
+
 // NewWorkQueue creates a new GCS-backed workqueue.
 func NewWorkQueue(client ClientInterface, limit int, opts ...Option) workqueue.Interface {
 	w := &wq{
@@ -62,6 +71,9 @@ type wq struct {
 	// name is the queue_name label value applied to all metrics emitted by
 	// this queue; "" if WithName was not provided.
 	name string
+	// owner is recorded on the in-progress objects this queue starts; "" if
+	// WithOwner was not provided.
+	owner string
 }
 
 // baseLabels returns the {service_name, revision_name, queue_name} labels that
@@ -105,6 +117,7 @@ const (
 	notBeforeFloorValue       = "true"
 	failedTimeMetadataKey     = "failed-time"
 	lastAttemptedKey          = "last-attempted"
+	ownerMetadataKey          = "owner"
 )
 
 var noPriority = fmt.Sprintf("%08d", 0)
@@ -267,6 +280,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 	var dl []workqueue.DeadLetteredKey
 
 	queued, notbefore, deadlettered := 0, 0, 0
+	ownerCounts := map[string]int{}
 	maxAttempts := 0 // Track the maximum number of attempts
 	for {
 		objAttrs, err := iter.Next()
@@ -314,6 +328,14 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 			}
 			wip = append(wip, ipk)
 
+			// Keys started before owner recording existed (or by a queue
+			// without an owner) count as "unknown".
+			if owner, ok := objAttrs.Metadata[ownerMetadataKey]; ok && owner != "" {
+				ownerCounts[owner]++
+			} else {
+				ownerCounts["unknown"]++
+			}
+
 			// Record lease age for active (non-orphaned) keys
 			if !ipk.IsOrphaned() {
 				leaseAge := time.Since(objAttrs.Created)
@@ -345,6 +367,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 				attrs:     objAttrs,
 				priority:  priority,
 				queueName: w.name,
+				owner:     w.owner,
 			})
 			sort.Slice(qd, func(i, j int) bool {
 				if lhs, rhs := qd[i].Priority(), qd[j].Priority(); lhs != rhs {
@@ -378,6 +401,14 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 
 	// Set all metrics
 	mInProgressKeys.With(labels).Set(float64(len(wip)))
+	// Delete before setting so an owner that no longer holds any keys drops
+	// out of the metric instead of freezing at its last value.
+	mInProgressKeysByOwner.DeletePartialMatch(labels)
+	for owner, count := range ownerCounts {
+		l := w.baseLabels()
+		l["owner"] = owner
+		mInProgressKeysByOwner.With(l).Set(float64(count))
+	}
 	mQueuedKeys.With(labels).Set(float64(queued))
 	mNotBeforeKeys.With(labels).Set(float64(notbefore))
 	mDeadLetteredKeys.With(labels).Set(float64(deadlettered))
@@ -644,9 +675,10 @@ func (o *inProgressKey) requeueOnce(ctx context.Context, opts workqueue.Options,
 	if copier.Metadata == nil {
 		copier.Metadata = make(map[string]string)
 	}
-	// Clear the lease expiration when copying the object back to avoid
-	// confusion since the object is no longer in progress.
+	// Clear the lease expiration and owner when copying the object back:
+	// both only apply while the object is in progress.
 	delete(copier.Metadata, expirationMetadataKey)
+	delete(copier.Metadata, ownerMetadataKey)
 	// Set the last attempted time as unix timestamp when requeuing
 	copier.Metadata[lastAttemptedKey] = strconv.FormatInt(time.Now().UTC().Unix(), 10)
 
@@ -858,8 +890,10 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 		copier.Metadata = make(map[string]string)
 	}
 
-	// Clear the lease expiration when copying the object
+	// Clear the lease expiration and owner when copying the object: both only
+	// apply while the object is in progress.
 	delete(copier.Metadata, expirationMetadataKey)
+	delete(copier.Metadata, ownerMetadataKey)
 
 	// Add metadata about when the key was dead-lettered
 	copier.Metadata[failedTimeMetadataKey] = time.Now().UTC().Format(time.RFC3339)
@@ -1038,6 +1072,9 @@ type queuedKey struct {
 	// queueName is the queue_name label value applied to all metrics emitted
 	// when this key is started.
 	queueName string
+	// owner is recorded on the in-progress object when this key is started;
+	// "" records nothing.
+	owner string
 }
 
 // baseLabels returns the labels every metric emitted from this key carries.
@@ -1103,6 +1140,14 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	}
 	// Set the expiration metadata to 3x the refresh interval.
 	copier.Metadata[expirationMetadataKey] = time.Now().UTC().Add(3 * RefreshInterval).Format(time.RFC3339)
+	// Record who claimed the key so observers of the queue can attribute
+	// in-progress work (e.g. per-region accounting). Delete before setting so
+	// an owner recorded by a previous attempt never survives a claim by a
+	// queue configured without one.
+	delete(copier.Metadata, ownerMetadataKey)
+	if q.owner != "" {
+		copier.Metadata[ownerMetadataKey] = q.owner
+	}
 	if att, ok := copier.Metadata[attemptsMetadataKey]; ok {
 		prevAttempts, err := strconv.Atoi(att)
 		if err != nil {

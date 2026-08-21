@@ -40,6 +40,13 @@ var (
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)
+	mInProgressKeysByOwner = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "workqueue_in_progress_keys_by_owner",
+			Help: "The number of in-progress keys grouped by the owner recorded when each key was started (e.g. the claiming dispatcher's region). Keys without a recorded owner count as \"unknown\".",
+		},
+		[]string{"service_name", "revision_name", "queue_name", "owner"},
+	)
 	mQueuedKeys = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "workqueue_queued_keys",
