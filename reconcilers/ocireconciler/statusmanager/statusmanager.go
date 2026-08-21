@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -37,6 +39,42 @@ import (
 
 const sigstoreAudience = "sigstore"
 
+// Predicated is implemented by status payload schemas to declare the in-toto
+// predicate type their attestations carry. The predicate type, not the Go type,
+// is what separates one Manager's attestations from another's on a shared
+// subject: writes replace only referrers carrying a matching type, and reads
+// accept only those. Taking it from T means a Manager cannot write under one
+// type and read under another.
+//
+// Implement it on leaf schemas with a value receiver returning a constant, and
+// instantiate the Manager with the value type. A method on a type meant for
+// embedding would be promoted to every embedder, handing them the same predicate
+// type by default.
+type Predicated interface {
+	PredicateType() string
+}
+
+// predicateTypeOf returns T's predicate type, rejecting values the write path
+// cannot round-trip: secant rewrites cosign's aliases ("spdx", "custom") on
+// write while reads match the literal, and a URI without a scheme is not a
+// predicate type in-toto can carry.
+func predicateTypeOf[T Predicated]() (string, error) {
+	var zero T
+	// A pointer or interface T zeroes to nil, and reaching a value-receiver
+	// method through it panics, so reject the shape before the call.
+	if v := reflect.ValueOf(zero); !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
+		return "", fmt.Errorf("%T cannot declare a predicate type: instantiate the Manager with the value type, not a pointer or interface", zero)
+	}
+	predicateType := zero.PredicateType()
+	if predicateType == "" {
+		return "", fmt.Errorf("%T declares an empty predicate type", zero)
+	}
+	if u, err := url.ParseRequestURI(predicateType); err != nil || u.Scheme == "" {
+		return "", fmt.Errorf("%T declares predicate type %q: must be an absolute URI with a scheme", zero, predicateType)
+	}
+	return predicateType, nil
+}
+
 // transientRekorErrors are the Rekor failure modes known to be transient.
 // The rekor-tiles client returns untyped errors, flattening the HTTP status
 // into the message ("unexpected response: <code> <body>"), so string
@@ -54,8 +92,7 @@ type Status[T any] struct {
 }
 
 // Manager writes and reads reconciliation status as attestations.
-type Manager[T any] struct {
-	identity      string
+type Manager[T Predicated] struct {
 	predicateType string
 	readOnly      bool
 
@@ -68,30 +105,34 @@ type Manager[T any] struct {
 }
 
 // Session represents reconciliation state for a single digest.
-type Session[T any] struct {
+type Session[T Predicated] struct {
 	manager *Manager[T]
 	digest  name.Digest
 	subject name.Digest
 }
 
 // New constructs a Manager capable of mutating attestations.
-func New[T any](ctx context.Context, identity string, opts ...Option) (*Manager[T], error) {
-	return newManager[T](ctx, identity, false, opts...)
+func New[T Predicated](ctx context.Context, opts ...Option) (*Manager[T], error) {
+	return newManager[T](ctx, false, opts...)
 }
 
 // NewReadOnly constructs a Manager that can only read status.
-func NewReadOnly[T any](ctx context.Context, identity string, opts ...Option) (*Manager[T], error) {
-	return newManager[T](ctx, identity, true, opts...)
+func NewReadOnly[T Predicated](ctx context.Context, opts ...Option) (*Manager[T], error) {
+	return newManager[T](ctx, true, opts...)
 }
 
-func newManager[T any](ctx context.Context, identity string, readOnly bool, opts ...Option) (*Manager[T], error) {
-	if strings.TrimSpace(identity) == "" {
-		return nil, errors.New("identity is required")
-	}
+func newManager[T Predicated](ctx context.Context, readOnly bool, opts ...Option) (*Manager[T], error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	// Before any network work, so a bad predicate type fails fast.
+	predicateType, err := predicateTypeOf[T]()
+	if err != nil {
+		return nil, err
+	}
+
 	if cfg.oidcProvider == nil && !readOnly {
 		p, err := newGSAOIDCProvider(ctx, sigstoreAudience)
 		if err != nil {
@@ -201,8 +242,6 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 		return nil, fmt.Errorf("creating bundle verifier: %w", err)
 	}
 
-	predicateType := fmt.Sprintf("https://statusmanager.chainguard.dev/%s", identity)
-
 	remoteOpts := slices.Clone(cfg.remoteOpts)
 	if cfg.repoOverride != nil {
 		// A repository override pins every bundle read and write to a
@@ -229,7 +268,6 @@ func newManager[T any](ctx context.Context, identity string, readOnly bool, opts
 	}
 
 	return &Manager[T]{
-		identity:      identity,
 		predicateType: predicateType,
 		readOnly:      readOnly,
 		signer:        signer,
@@ -305,9 +343,10 @@ func (s *Session[T]) SetActualState(ctx context.Context, status *Status[T]) erro
 	// SkipSame short-circuits before signing when an existing bundle carries a
 	// byte-identical payload, so re-persisting an unchanged status costs a
 	// referrer read instead of a Fulcio certificate, a Rekor upload, and a
-	// referrer write. When the payload differs, superseded bundles are
-	// deleted before the replacement is written, so each status digest
-	// converges on a single bundle; a reader racing the swap still verifies
+	// referrer write. When the payload differs, superseded bundles are deleted
+	// before the replacement is written, scoped to this Manager's predicate
+	// type, so Managers over different schemas can share a subject without
+	// reaping each other's attestations. A reader racing the swap still verifies
 	// whichever bundles remain visible and picks the latest (see
 	// fetchLatestStatus). Registry retention cannot be relied on here:
 	// Artifact Registry cleanup policies operate on versions, and referrer

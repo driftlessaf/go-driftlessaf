@@ -60,7 +60,7 @@ func TestRepositoryOverrideSharesPuller(t *testing.T) {
 			if tc.override {
 				opts = append(opts, statusmanager.WithRepositoryOverride(registryHost+"/reuse-repo"))
 			}
-			mgr, err := statusmanagertesting.NewReadOnly[TestStatus](ctx, t, "test-reconciler", opts...)
+			mgr, err := statusmanagertesting.NewReadOnly[TestStatus](ctx, t, opts...)
 			require.NoError(t, err)
 
 			var afterFirst int32

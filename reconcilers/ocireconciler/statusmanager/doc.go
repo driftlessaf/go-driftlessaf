@@ -13,7 +13,9 @@ SPDX-License-Identifier: Apache-2.0
 // # Key Features
 //
 //   - Keyless signing using Fulcio certificates and Rekor transparency log
-//   - Identity-scoped attestations with predicate type "https://statusmanager.chainguard.dev/{identity}"
+//   - Schema-scoped attestations: the payload type declares its own in-toto
+//     predicate type via Predicated, so a Manager cannot write under one type
+//     and read under another
 //   - SKIPSAME semantics: writing a byte-identical status is a no-op (no
 //     signing or registry write); a changed status is written alongside any
 //     prior bundle, readers resolve the latest verified bundle, and
@@ -23,10 +25,22 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Basic Usage
 //
+// The payload type declares the predicate type its attestations carry:
+//
+//	type MyDetails struct {
+//	    Result string `json:"result"`
+//	}
+//
+//	func (MyDetails) PredicateType() string { return "https://status.example.dev/my-reconciler" }
+//
+// Implement it on leaf schemas with a value receiver returning a constant, and
+// instantiate the Manager with the value type. See Predicated for why a type
+// meant for embedding must not implement it.
+//
 // Create a Manager and use sessions to track reconciliation state:
 //
 //	// Create a manager (requires GCP service account credentials)
-//	mgr, err := statusmanager.New[MyDetails](ctx, "my-reconciler")
+//	mgr, err := statusmanager.New[MyDetails](ctx)
 //	if err != nil {
 //	    return err
 //	}
@@ -65,7 +79,7 @@ SPDX-License-Identifier: Apache-2.0
 // When the subject image is in a registry that doesn't support attestations,
 // or when you want to store attestations separately, use WithRepositoryOverride:
 //
-//	mgr, err := statusmanager.New[MyDetails](ctx, "my-reconciler",
+//	mgr, err := statusmanager.New[MyDetails](ctx,
 //	    statusmanager.WithRepositoryOverride("gcr.io/my-project/attestations"),
 //	)
 //
@@ -76,9 +90,16 @@ SPDX-License-Identifier: Apache-2.0
 // For consumers that only need to read status (not write), use NewReadOnly
 // with WithExpectedIdentity to specify which signing identity to verify:
 //
-//	mgr, err := statusmanager.NewReadOnly[MyDetails](ctx, "my-reconciler",
-//	    statusmanager.WithExpectedIdentity("producer@project.iam.gserviceaccount.com"),
+//	mgr, err := statusmanager.NewReadOnly[MyDetails](ctx,
+//	    statusmanager.WithExpectedIdentity(cosign.Identity{
+//	        Subject: "producer@project.iam.gserviceaccount.com",
+//	        Issuer:  "https://accounts.google.com",
+//	    }),
 //	)
+//
+// A reader may instantiate a narrower type than the writer, so long as it
+// declares the same predicate type: unknown fields are ignored on decode, so a
+// consumer that wants only part of a schema need not depend on all of it.
 //
 // # Authentication
 //
@@ -88,7 +109,7 @@ SPDX-License-Identifier: Apache-2.0
 //
 // Example with registry authentication:
 //
-//	mgr, err := statusmanager.New[MyDetails](ctx, "my-reconciler",
+//	mgr, err := statusmanager.New[MyDetails](ctx,
 //	    statusmanager.WithRemoteOptions(remote.WithAuthFromKeychain(google.Keychain)),
 //	)
 //

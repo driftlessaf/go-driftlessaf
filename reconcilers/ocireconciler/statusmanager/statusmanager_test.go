@@ -42,8 +42,8 @@ func TestStatusManagerSignAndVerify(t *testing.T) {
 	registryHost := setupTestRegistry(t)
 	t.Logf("Using test registry: %s", registryHost)
 
-	// Create a writable manager for signing with explicit identity
-	writer, err := statusmanagertesting.New[TestStatus](ctx, t, "test-reconciler",
+	// Create a writable manager for signing
+	writer, err := statusmanagertesting.New[TestStatus](ctx, t,
 		statusmanager.WithRepositoryOverride(registryHost+"/test-repo"),
 	)
 	require.NoError(t, err, "failed to create writable manager")
@@ -116,8 +116,9 @@ func TestStatusManagerSignAndVerify(t *testing.T) {
 
 	t.Log("Successfully verified updated attestation is different from the original")
 
-	// Test read-only manager: Create a read-only manager with the same identity
-	readOnlyManager, err := statusmanagertesting.NewReadOnly[TestStatus](ctx, t, "test-reconciler",
+	// Test read-only manager: reading back what the writer produced requires
+	// only the same payload type, which carries the predicate type.
+	readOnlyManager, err := statusmanagertesting.NewReadOnly[TestStatus](ctx, t,
 		statusmanager.WithRepositoryOverride(registryHost+"/test-repo"),
 	)
 	require.NoError(t, err, "failed to create read-only manager")
@@ -151,6 +152,8 @@ type TestStatus struct {
 	Timestamp string `json:"timestamp"`
 }
 
+func (TestStatus) PredicateType() string { return "https://status.test/statusmanager/test" }
+
 // TestStatusManagerWithoutRepositoryOverride tests that the manager works without
 // WithRepositoryOverride by deriving the attestation repository from the digest.
 func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
@@ -160,7 +163,7 @@ func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
 	t.Logf("Using test registry: %s", registryHost)
 
 	// Create manager WITHOUT WithRepositoryOverride
-	manager, err := statusmanagertesting.New[TestStatus](ctx, t, "no-override-test")
+	manager, err := statusmanagertesting.New[TestStatus](ctx, t)
 	require.NoError(t, err, "failed to create manager without repository override")
 
 	// Use a digest that references the test registry
@@ -224,7 +227,7 @@ func TestStatusManagerLargePayload(t *testing.T) {
 	registryHost := setupTestRegistry(t)
 	t.Logf("Using test registry: %s", registryHost)
 
-	manager, err := statusmanagertesting.New[LargeTestStatus](ctx, t, "large-payload-test",
+	manager, err := statusmanagertesting.New[LargeTestStatus](ctx, t,
 		statusmanager.WithRepositoryOverride(registryHost+"/large-payload-repo"),
 	)
 	require.NoError(t, err, "failed to create manager")
@@ -265,6 +268,8 @@ type LargeTestStatus struct {
 	Data string `json:"data"`
 }
 
+func (LargeTestStatus) PredicateType() string { return "https://status.test/statusmanager/large" }
+
 // TestStatusManagerSkipsIdenticalStatus pins the SKIPSAME write semantics:
 // re-persisting a byte-identical status is a registry no-op (the original
 // bundle remains the only referrer, and nothing is signed or uploaded),
@@ -278,7 +283,7 @@ func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
 
 	registryHost := setupTestRegistry(t)
 
-	writer, err := statusmanagertesting.New[TestStatus](ctx, t, "skip-same-reconciler",
+	writer, err := statusmanagertesting.New[TestStatus](ctx, t,
 		statusmanager.WithRepositoryOverride(registryHost+"/skip-same-repo"),
 	)
 	require.NoError(t, err, "failed to create writable manager")

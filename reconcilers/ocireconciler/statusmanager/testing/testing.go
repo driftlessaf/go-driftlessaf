@@ -74,9 +74,9 @@ func setupProviderAndIdentity(t *testing.T, ctx context.Context) (fulcio.OIDCPro
 
 // New creates a new writable statusmanager for testing using chainctl authentication.
 // It automatically sets up the OIDC provider and extracts the signing identity.
-// The identity parameter is the statusmanager identity string (e.g., "test-reconciler").
-// Additional options can be passed (e.g., WithRepositoryOverride).
-func New[T any](ctx context.Context, t *testing.T, identity string, opts ...statusmanager.Option) (*statusmanager.Manager[T], error) {
+// The predicate type comes from T. Additional options can be passed (e.g.,
+// WithRepositoryOverride).
+func New[T statusmanager.Predicated](ctx context.Context, t *testing.T, opts ...statusmanager.Option) (*statusmanager.Manager[T], error) {
 	t.Helper()
 
 	provider, cosignIdentity := setupProviderAndIdentity(t, ctx)
@@ -88,14 +88,14 @@ func New[T any](ctx context.Context, t *testing.T, identity string, opts ...stat
 	}
 	allOpts = append(allOpts, opts...)
 
-	return statusmanager.New[T](ctx, identity, allOpts...)
+	return statusmanager.New[T](ctx, allOpts...)
 }
 
 // NewReadOnly creates a new read-only statusmanager for testing using chainctl authentication.
 // It automatically sets up the OIDC provider and extracts the signing identity.
-// The identity parameter is the statusmanager identity string (e.g., "test-reconciler").
-// Additional options can be passed (e.g., WithRepositoryOverride).
-func NewReadOnly[T any](ctx context.Context, t *testing.T, identity string, opts ...statusmanager.Option) (*statusmanager.Manager[T], error) {
+// The predicate type comes from T. Additional options can be passed (e.g.,
+// WithRepositoryOverride).
+func NewReadOnly[T statusmanager.Predicated](ctx context.Context, t *testing.T, opts ...statusmanager.Option) (*statusmanager.Manager[T], error) {
 	t.Helper()
 
 	provider, cosignIdentity := setupProviderAndIdentity(t, ctx)
@@ -107,5 +107,5 @@ func NewReadOnly[T any](ctx context.Context, t *testing.T, identity string, opts
 	}
 	allOpts = append(allOpts, opts...)
 
-	return statusmanager.NewReadOnly[T](ctx, identity, allOpts...)
+	return statusmanager.NewReadOnly[T](ctx, allOpts...)
 }
