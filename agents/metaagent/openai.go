@@ -27,6 +27,52 @@ type openAICompatAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	config   Config[Resp, CB]
 }
 
+// OpenAICompatibleProvider configures an external OpenAI-compatible backend.
+// APIKey is used only to construct the authenticated client; it is not added
+// to logs, traces, metrics, or resource labels.
+type OpenAICompatibleProvider struct {
+	BaseURL             string
+	APIKey              string
+	Provider            openaiexecutor.Provider
+	TokenLimitParameter openaiexecutor.TokenLimitParameter
+}
+
+// NewOpenAICompatible creates an agent for an explicitly configured external
+// OpenAI-compatible backend. Callers must provide the serving provider and
+// token-limit parameter rather than relying on model-name routing.
+func NewOpenAICompatible[Req promptbuilder.Bindable, Resp, CB any](
+	provider OpenAICompatibleProvider,
+	model string,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
+	if strings.TrimSpace(provider.BaseURL) == "" {
+		return nil, fmt.Errorf("creating OpenAI-compatible executor: base URL cannot be empty")
+	}
+	if strings.TrimSpace(provider.APIKey) == "" {
+		return nil, fmt.Errorf("creating OpenAI-compatible executor: API key cannot be empty")
+	}
+	if strings.TrimSpace(model) == "" {
+		return nil, fmt.Errorf("creating OpenAI-compatible executor: model cannot be empty")
+	}
+	if err := validateOpenAICompatibleConfig(config); err != nil {
+		return nil, err
+	}
+
+	client := openai.NewClient(
+		option.WithBaseURL(provider.BaseURL),
+		option.WithAPIKey(provider.APIKey),
+	)
+
+	return newOpenAICompatibleAgentWithClient[Req, Resp, CB](
+		client,
+		model,
+		provider.Provider,
+		provider.TokenLimitParameter,
+		map[string]string{"model_name": strings.ToLower(model)},
+		config,
+	)
+}
+
 // newOpenAICompatAgent creates an agent using Vertex AI's OpenAI-compatible endpoint.
 // Model names use publisher/model format (e.g. "google/gemini-2.5-pro").
 func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
@@ -34,18 +80,8 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 	projectID, region, model string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
-	// Validate config before making network calls.
-	if config.UserPrompt == nil {
-		return nil, fmt.Errorf("creating OpenAI-compatible executor: prompt cannot be nil")
-	}
-	// Suspend/resume is not wired for this backend yet: openaiexecutor has no
-	// suspend tool option, so a set SuspendToolName would otherwise be silently
-	// dropped and the advertised pause lifecycle could never fire. Fail closed
-	// with a clear error until the openaiexecutor suspend/resume slice lands
-	// (DEV-2247). openAICompatAgent likewise does not implement Resumer, so
-	// AsResumer reports false for agents built here.
-	if config.SuspendToolName != "" {
-		return nil, fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the OpenAI-compatible backend; it lands with the openaiexecutor suspend/resume slice", config.SuspendToolName)
+	if err := validateOpenAICompatibleConfig(config); err != nil {
+		return nil, err
 	}
 
 	// Use GCP Application Default Credentials for authentication.
@@ -79,6 +115,28 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		}),
 	)
 
+	return newOpenAICompatibleAgentWithClient[Req, Resp, CB](
+		client,
+		model,
+		openaiexecutor.ProviderOpenAICompatible,
+		openaiexecutor.TokenLimitMaxCompletionTokens,
+		map[string]string{
+			"projectID":  projectID,
+			"region":     region,
+			"model_name": strings.ToLower(model),
+		},
+		config,
+	)
+}
+
+func newOpenAICompatibleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
+	client openai.Client,
+	model string,
+	provider openaiexecutor.Provider,
+	tokenLimitParameter openaiexecutor.TokenLimitParameter,
+	resourceLabels map[string]string,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
 	// Build the terminal submit_result tool. The executor gates accepted
 	// submissions on the configured result validators before committing them
 	// as the run's final result.
@@ -91,12 +149,10 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		openaiexecutor.WithModel[Req, Resp](model),
 		openaiexecutor.WithTemperature[Req, Resp](0.2),
 		openaiexecutor.WithMaxTokens[Req, Resp](32768),
+		openaiexecutor.WithProvider[Req, Resp](provider),
+		openaiexecutor.WithTokenLimitParameter[Req, Resp](tokenLimitParameter),
 		openaiexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.SubmitMetadata[Resp], error) { return submitTool, nil }),
-		openaiexecutor.WithResourceLabels[Req, Resp](map[string]string{
-			"projectID":  projectID,
-			"region":     region,
-			"model_name": strings.ToLower(model),
-		}),
+		openaiexecutor.WithResourceLabels[Req, Resp](resourceLabels),
 	}
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, openaiexecutor.WithResultValidator[Req, Resp](v))
@@ -134,6 +190,22 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executor: exec,
 		config:   config,
 	}, nil
+}
+
+func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error {
+	if config.UserPrompt == nil {
+		return fmt.Errorf("creating OpenAI-compatible executor: prompt cannot be nil")
+	}
+	// Suspend/resume is not wired for this backend yet: openaiexecutor has no
+	// suspend tool option, so a set SuspendToolName would otherwise be silently
+	// dropped and the advertised pause lifecycle could never fire. Fail closed
+	// with a clear error until the openaiexecutor suspend/resume slice lands
+	// (DEV-2247). openAICompatAgent likewise does not implement Resumer, so
+	// AsResumer reports false for agents built here.
+	if config.SuspendToolName != "" {
+		return fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the OpenAI-compatible backend; it lands with the openaiexecutor suspend/resume slice", config.SuspendToolName)
+	}
+	return nil
 }
 
 func (a *openAICompatAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {

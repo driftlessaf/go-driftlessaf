@@ -35,6 +35,7 @@ const maxPayloadBytes = 64 * 1024
 // exact spelling.
 const (
 	SystemAnthropic    = "anthropic"
+	SystemBaseten      = "baseten"
 	SystemGoogleVertex = "google.vertex"
 	SystemOpenAI       = "openai"
 )

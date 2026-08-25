@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -79,6 +80,74 @@ func WithMaxTokens[Request promptbuilder.Bindable, Response any](tokens int64) O
 		}
 		e.maxTokens = tokens
 		return nil
+	}
+}
+
+// Provider identifies the backend serving an OpenAI-compatible request.
+// Provider attribution is explicit because model slugs are not sufficient to
+// distinguish Vertex-hosted models from external OpenAI-compatible services.
+type Provider string
+
+const (
+	// ProviderOpenAICompatible preserves the executor's existing generic
+	// OpenAI-compatible telemetry attribution.
+	ProviderOpenAICompatible Provider = "openai-compatible"
+	// ProviderBaseten identifies Baseten Model APIs.
+	ProviderBaseten Provider = "baseten"
+)
+
+func (p Provider) metricName() string {
+	if p == ProviderBaseten {
+		return "baseten"
+	}
+	return "openai-compat"
+}
+
+func (p Provider) traceSystem() string {
+	if p == ProviderBaseten {
+		return agenttrace.SystemBaseten
+	}
+	return agenttrace.SystemOpenAI
+}
+
+// WithProvider declares which backend serves the executor's requests so
+// metrics and trace turns remain attributable. The default is
+// ProviderOpenAICompatible, preserving existing behavior.
+func WithProvider[Request promptbuilder.Bindable, Response any](provider Provider) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		switch provider {
+		case ProviderOpenAICompatible, ProviderBaseten:
+			e.provider = provider
+			return nil
+		default:
+			return fmt.Errorf("unknown provider %q", provider)
+		}
+	}
+}
+
+// TokenLimitParameter selects the request field used to cap output tokens.
+// OpenAI recommends max_completion_tokens, while some compatible providers,
+// including Baseten Model APIs, require max_tokens.
+type TokenLimitParameter string
+
+const (
+	// TokenLimitMaxCompletionTokens sends the OpenAI max_completion_tokens field.
+	TokenLimitMaxCompletionTokens TokenLimitParameter = "max_completion_tokens"
+	// TokenLimitMaxTokens sends the legacy-compatible max_tokens field.
+	TokenLimitMaxTokens TokenLimitParameter = "max_tokens"
+)
+
+// WithTokenLimitParameter selects the token-limit request field. The default
+// is TokenLimitMaxCompletionTokens, preserving existing behavior.
+func WithTokenLimitParameter[Request promptbuilder.Bindable, Response any](parameter TokenLimitParameter) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		switch parameter {
+		case TokenLimitMaxCompletionTokens, TokenLimitMaxTokens:
+			e.tokenLimitParam = parameter
+			return nil
+		default:
+			return fmt.Errorf("unknown token limit parameter %q", parameter)
+		}
 	}
 }
 

@@ -6,19 +6,28 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/effort"
+	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 )
 
 type testRequest struct{}
@@ -28,6 +37,28 @@ func (r *testRequest) Bind(p *promptbuilder.Prompt) (*promptbuilder.Prompt, erro
 }
 
 type testResponse struct{}
+
+type basetenTestResponse struct {
+	Answer string `json:"answer"`
+}
+
+type basetenRecordingTracer struct {
+	traces []*agenttrace.Trace[*basetenTestResponse]
+}
+
+func (r *basetenRecordingTracer) NewTrace(ctx context.Context, prompt string, opts ...agenttrace.StartTraceOption) *agenttrace.Trace[*basetenTestResponse] {
+	return agenttrace.NewDefaultTracer[*basetenTestResponse](ctx).NewTrace(ctx, prompt, opts...)
+}
+
+func (r *basetenRecordingTracer) RecordTrace(trace *agenttrace.Trace[*basetenTestResponse]) {
+	r.traces = append(r.traces, trace)
+}
+
+type failingToolsProvider struct{}
+
+func (failingToolsProvider) Tools(context.Context, toolcall.EmptyTools) (map[string]toolcall.Tool[*testResponse], error) {
+	return nil, errors.New("building test tools")
+}
 
 // testCallbacks is the standard tool composition: Empty -> Worktree -> Finding
 type testCallbacks = toolcall.FindingTools[toolcall.WorktreeTools[toolcall.EmptyTools]]
@@ -156,14 +187,200 @@ func TestUserPromptSuffixAcceptedOnOpenAIBackend(t *testing.T) {
 				toolcall.NewEmptyToolsProvider[*testResponse]())),
 	}
 
-	if _, err := New[*testRequest](t.Context(), "test-project", "us-central1", "google/gemini-2.5-pro", config); err != nil {
-		t.Fatalf("New() without suffix: got = %v, want = nil", err)
+	for _, region := range []string{"us-central1", "global"} {
+		config.UserPromptSuffix = nil
+		if _, err := New[*testRequest](t.Context(), "test-project", region, "google/gemini-2.5-pro", config); err != nil {
+			t.Fatalf("New() without suffix in %s: got = %v, want = nil", region, err)
+		}
+
+		config.UserPromptSuffix = suffix
+		if _, err := New[*testRequest](t.Context(), "test-project", region, "google/gemini-2.5-pro", config); err != nil {
+			t.Errorf("New() with suffix in %s: got = %v, want = nil", region, err)
+		}
+	}
+}
+
+func TestNewOpenAICompatibleBaseten(t *testing.T) {
+	const apiKey = "temporary-baseten-test-key"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/v1/chat/completions"; got != want {
+			t.Errorf("request path: got = %q, want = %q", got, want)
+		}
+		if got, want := r.Header.Get("Authorization"), "Bearer "+apiKey; got != want {
+			t.Errorf("Authorization: got = %q, want = %q", got, want)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "reading request", http.StatusBadRequest)
+			return
+		}
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "decoding request", http.StatusBadRequest)
+			return
+		}
+		if got, ok := request["max_tokens"]; !ok || got != float64(32768) {
+			t.Errorf("max_tokens: got = %v, want = 32768", got)
+		}
+		if _, ok := request["max_completion_tokens"]; ok {
+			t.Error("request contains max_completion_tokens, want only max_tokens")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "chatcmpl-baseten-test",
+			"object":  "chat.completion",
+			"created": 1,
+			"model":   "openai/gpt-oss-120b",
+			"choices": []any{map[string]any{
+				"index":         0,
+				"finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "",
+					"tool_calls": []any{map[string]any{
+						"id":   "call-submit",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "submit_result",
+							"arguments": `{"reasoning":"complete","result":{"answer":"done"}}`,
+						},
+					}},
+				},
+			}},
+			"usage": map[string]any{
+				"prompt_tokens":     4,
+				"completion_tokens": 2,
+				"total_tokens":      6,
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	prompt, err := promptbuilder.NewPrompt("review this change")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+	config := Config[*basetenTestResponse, toolcall.EmptyTools]{
+		SystemInstructions:  prompt,
+		UserPrompt:          prompt,
+		Tools:               toolcall.NewEmptyToolsProvider[*basetenTestResponse](),
+		MaxTurns:            1,
+		ToolCallConcurrency: 1,
+		ResultValidators: []callbacks.ResultValidator[*basetenTestResponse]{
+			func(context.Context, *basetenTestResponse, string) ([]callbacks.Finding, error) { return nil, nil },
+		},
+	}
+	agent, err := NewOpenAICompatible[*testRequest](OpenAICompatibleProvider{
+		BaseURL:             srv.URL + "/v1",
+		APIKey:              apiKey,
+		Provider:            openaiexecutor.ProviderBaseten,
+		TokenLimitParameter: openaiexecutor.TokenLimitMaxTokens,
+	}, "openai/gpt-oss-120b", config)
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
 	}
 
-	config.UserPromptSuffix = suffix
-	if _, err := New[*testRequest](t.Context(), "test-project", "us-central1", "google/gemini-2.5-pro", config); err != nil {
-		t.Errorf("New() with suffix: got = %v, want = nil", err)
+	tracer := &basetenRecordingTracer{}
+	ctx := agenttrace.WithTracer[*basetenTestResponse](t.Context(), tracer)
+	response, err := agent.Execute(ctx, &testRequest{}, toolcall.EmptyTools{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
+	if got, want := response.Answer, "done"; got != want {
+		t.Errorf("response.Answer: got = %q, want = %q", got, want)
+	}
+	if got, want := len(tracer.traces), 1; got != want {
+		t.Fatalf("recorded traces: got = %d, want = %d", got, want)
+	}
+	if got, want := len(tracer.traces[0].Turns), 1; got != want {
+		t.Fatalf("trace turns: got = %d, want = %d", got, want)
+	}
+	if got, want := tracer.traces[0].Turns[0].System, agenttrace.SystemBaseten; got != want {
+		t.Errorf("trace system: got = %q, want = %q", got, want)
+	}
+}
+
+func TestNewOpenAICompatibleValidatesExplicitConfiguration(t *testing.T) {
+	prompt, err := promptbuilder.NewPrompt("review this change")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+	config := Config[*basetenTestResponse, toolcall.EmptyTools]{
+		UserPrompt: prompt,
+		Tools:      toolcall.NewEmptyToolsProvider[*basetenTestResponse](),
+	}
+	valid := OpenAICompatibleProvider{
+		BaseURL:             "https://example.invalid/v1",
+		APIKey:              "secret-value-that-must-not-leak",
+		Provider:            openaiexecutor.ProviderBaseten,
+		TokenLimitParameter: openaiexecutor.TokenLimitMaxTokens,
+	}
+
+	tests := []struct {
+		name     string
+		provider OpenAICompatibleProvider
+		model    string
+	}{
+		{name: "empty base URL", provider: OpenAICompatibleProvider{APIKey: valid.APIKey}, model: "model"},
+		{name: "empty API key", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL}, model: "model"},
+		{name: "empty model", provider: valid},
+		{name: "unknown provider", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL, APIKey: valid.APIKey, Provider: openaiexecutor.Provider("unknown"), TokenLimitParameter: valid.TokenLimitParameter}, model: "model"},
+		{name: "unknown token parameter", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL, APIKey: valid.APIKey, Provider: valid.Provider, TokenLimitParameter: openaiexecutor.TokenLimitParameter("unknown")}, model: "model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewOpenAICompatible[*testRequest](tt.provider, tt.model, config)
+			if err == nil {
+				t.Fatal("NewOpenAICompatible: got nil error, want validation error")
+			}
+			if strings.Contains(err.Error(), valid.APIKey) {
+				t.Errorf("error contains API key: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentWrappersPropagateToolProviderErrors(t *testing.T) {
+	config := Config[*testResponse, toolcall.EmptyTools]{Tools: failingToolsProvider{}}
+	assertBuildError := func(t *testing.T, execute func() error) {
+		t.Helper()
+		if err := execute(); err == nil || !strings.Contains(err.Error(), "building tools: building test tools") {
+			t.Errorf("agent error: got = %v, want wrapped tool-provider error", err)
+		}
+	}
+
+	t.Run("OpenAI compatible", func(t *testing.T) {
+		agent := &openAICompatAgent[*testRequest, *testResponse, toolcall.EmptyTools]{config: config}
+		assertBuildError(t, func() error {
+			_, err := agent.Execute(t.Context(), &testRequest{}, toolcall.EmptyTools{})
+			return err
+		})
+	})
+	t.Run("Google", func(t *testing.T) {
+		agent := &googleAgent[*testRequest, *testResponse, toolcall.EmptyTools]{config: config}
+		assertBuildError(t, func() error {
+			_, err := agent.Execute(t.Context(), &testRequest{}, toolcall.EmptyTools{})
+			return err
+		})
+	})
+	t.Run("Claude execute", func(t *testing.T) {
+		agent := &claudeAgent[*testRequest, *testResponse, toolcall.EmptyTools]{config: config}
+		assertBuildError(t, func() error {
+			_, err := agent.Execute(t.Context(), &testRequest{}, toolcall.EmptyTools{})
+			return err
+		})
+	})
+	t.Run("Claude resume", func(t *testing.T) {
+		agent := &claudeAgent[*testRequest, *testResponse, toolcall.EmptyTools]{config: config}
+		assertBuildError(t, func() error {
+			_, err := agent.Resume(t.Context(), checkpoint.Envelope{}, nil, toolcall.EmptyTools{})
+			return err
+		})
+	})
 }
 
 // fakeGoogleCredentials writes a syntactically valid service-account key with

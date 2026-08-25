@@ -61,6 +61,8 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxTurns        int
 	temperature     float64
 	reasoningEffort shared.ReasoningEffort // "" = unset; omitted from requests
+	provider        Provider
+	tokenLimitParam TokenLimitParameter
 	submitTool      openaistool.SubmitMetadata[Response]
 	telemetry       *telemetry.Recorder
 	retryConfig     retry.RetryConfig
@@ -103,6 +105,8 @@ func New[Request promptbuilder.Bindable, Response any](
 		maxTokens:           8192,
 		maxTurns:            DefaultMaxTurns,
 		temperature:         0.1,
+		provider:            ProviderOpenAICompatible,
+		tokenLimitParam:     TokenLimitMaxCompletionTokens,
 		retryConfig:         retry.DefaultRetryConfig(),
 		toolCallConcurrency: DefaultToolCallConcurrency,
 
@@ -122,7 +126,7 @@ func New[Request promptbuilder.Bindable, Response any](
 	// resource labels. codeFromError is nil because this executor does not
 	// record genai.api.requests: it has no error→code mapping yet, and wiring
 	// one up is a behavior change tracked separately.
-	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, "openai-compat", e.resourceLabels, nil)
+	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, e.provider.metricName(), e.resourceLabels, nil)
 
 	return e, nil
 }
@@ -196,14 +200,18 @@ func (e *executor[Request, Response]) Execute(
 	}
 
 	reqParams := openai.ChatCompletionNewParams{
-		Model:               e.modelName,
-		Messages:            messages,
-		Tools:               toolDefs,
-		MaxCompletionTokens: param.NewOpt(e.maxTokens),
-		Temperature:         param.NewOpt(e.temperature),
+		Model:       e.modelName,
+		Messages:    messages,
+		Tools:       toolDefs,
+		Temperature: param.NewOpt(e.temperature),
 		// The zero value is omitted from the request (omitzero), so this only
 		// takes effect when WithEffort configured it.
 		ReasoningEffort: e.reasoningEffort,
+	}
+	if e.tokenLimitParam == TokenLimitMaxTokens {
+		reqParams.MaxTokens = param.NewOpt(e.maxTokens)
+	} else {
+		reqParams.MaxCompletionTokens = param.NewOpt(e.maxTokens)
 	}
 
 	// isSubmit reports whether a call routes to the terminal submit tool. It
@@ -306,7 +314,7 @@ func (e *executor[Request, Response]) Execute(
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
-		llmTurn := trace.BeginTurn(turn, agenttrace.SystemOpenAI, e.modelName)
+		llmTurn := trace.BeginTurn(turn, e.provider.traceSystem(), e.modelName)
 		defer func() {
 			if err != nil {
 				llmTurn.Fail(err)

@@ -7,6 +7,7 @@ package openaiexecutor_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -50,6 +51,57 @@ func fastRetry(maxRetries int) retry.RetryConfig {
 		BaseBackoff: time.Microsecond,
 		MaxBackoff:  time.Microsecond,
 		MaxJitter:   0,
+	}
+}
+
+// The default token-limit option must preserve the established OpenAI wire
+// format: max_completion_tokens is present and max_tokens is omitted. The
+// Baseten path has the symmetric max_tokens assertion in metaagent tests.
+func TestExecutorDefaultTokenLimitField(t *testing.T) {
+	requests := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "decoding request", http.StatusBadRequest)
+			return
+		}
+		requests <- body
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"stop after request capture","type":"invalid_request_error"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := openai.NewClient(
+		option.WithBaseURL(srv.URL),
+		option.WithAPIKey("test"),
+		option.WithMaxRetries(0),
+	)
+	prompt, err := promptbuilder.NewPrompt("hello")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+
+	const maxTokens = int64(123)
+	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+		client,
+		prompt,
+		openaiexecutor.WithMaxTokens[errCapRequest, errCapResponse](maxTokens),
+		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := exec.Execute(t.Context(), errCapRequest{}, nil); err == nil {
+		t.Fatal("Execute: got nil error, want upstream 401")
+	}
+
+	request := <-requests
+	if got, ok := request["max_completion_tokens"]; !ok || got != float64(maxTokens) {
+		t.Errorf("max_completion_tokens: got = %v, want = %d", got, maxTokens)
+	}
+	if _, ok := request["max_tokens"]; ok {
+		t.Error("request contains max_tokens, want only max_completion_tokens")
 	}
 }
 

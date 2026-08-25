@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"github.com/openai/openai-go"
@@ -128,6 +129,118 @@ func TestWithMaxTokens(t *testing.T) {
 				t.Errorf("WithMaxTokens(%d): got = %v, wanted = nil", tt.tokens, err)
 			}
 		})
+	}
+}
+
+func TestWithProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		provider        Provider
+		wantMetricName  string
+		wantTraceSystem string
+		wantErr         bool
+	}{
+		{
+			name:            "generic OpenAI-compatible",
+			provider:        ProviderOpenAICompatible,
+			wantMetricName:  "openai-compat",
+			wantTraceSystem: agenttrace.SystemOpenAI,
+		},
+		{
+			name:            "Baseten",
+			provider:        ProviderBaseten,
+			wantMetricName:  "baseten",
+			wantTraceSystem: agenttrace.SystemBaseten,
+		},
+		{
+			name:     "unknown provider",
+			provider: Provider("bedrock"),
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := &executor[*testRequest, testResponse]{}
+			err := WithProvider[*testRequest, testResponse](tt.provider)(e)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("WithProvider: got nil error, wanted validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WithProvider: %v", err)
+			}
+			if got := e.provider.metricName(); got != tt.wantMetricName {
+				t.Errorf("metricName: got = %q, want = %q", got, tt.wantMetricName)
+			}
+			if got := e.provider.traceSystem(); got != tt.wantTraceSystem {
+				t.Errorf("traceSystem: got = %q, want = %q", got, tt.wantTraceSystem)
+			}
+		})
+	}
+}
+
+func TestWithTokenLimitParameter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		parameter TokenLimitParameter
+		wantErr   bool
+	}{
+		{name: "max completion tokens", parameter: TokenLimitMaxCompletionTokens},
+		{name: "max tokens", parameter: TokenLimitMaxTokens},
+		{name: "unknown parameter", parameter: TokenLimitParameter("output_tokens"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := &executor[*testRequest, testResponse]{}
+			err := WithTokenLimitParameter[*testRequest, testResponse](tt.parameter)(e)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("WithTokenLimitParameter: got nil error, wanted validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WithTokenLimitParameter: %v", err)
+			}
+			if got := e.tokenLimitParam; got != tt.parameter {
+				t.Errorf("tokenLimitParam: got = %q, want = %q", got, tt.parameter)
+			}
+		})
+	}
+}
+
+func TestNewDefaultsPreserveOpenAICompatibleBehavior(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := promptbuilder.NewPrompt("test prompt")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+	got, err := New[*testRequest, testResponse](openai.Client{}, prompt)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	e, ok := got.(*executor[*testRequest, testResponse])
+	if !ok {
+		t.Fatalf("New returned %T, want *executor", got)
+	}
+	if e.provider != ProviderOpenAICompatible {
+		t.Errorf("provider: got = %q, want = %q", e.provider, ProviderOpenAICompatible)
+	}
+	if e.tokenLimitParam != TokenLimitMaxCompletionTokens {
+		t.Errorf("tokenLimitParam: got = %q, want = %q", e.tokenLimitParam, TokenLimitMaxCompletionTokens)
 	}
 }
 
