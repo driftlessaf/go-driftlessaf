@@ -47,6 +47,7 @@ type StatusManager[T any] struct {
 	isJob            bool
 	readOnly         bool
 	detailsURLFunc   DetailsURLFunc
+	publisherAppID   int64
 	templateExecutor *internaltemplate.Template[Status[T]]
 }
 
@@ -61,7 +62,8 @@ type DetailsURLFunc func(res *githubreconciler.Resource, sha string) string
 type Option func(*config)
 
 type config struct {
-	detailsURL DetailsURLFunc
+	detailsURL     DetailsURLFunc
+	publisherAppID int64
 }
 
 // WithDetailsURL overrides how the check run "Details" link is built. By default
@@ -75,6 +77,18 @@ func WithDetailsURL(fn DetailsURLFunc) Option {
 // accessible to external repositories.
 func WithoutDetailsURL() Option {
 	return WithDetailsURL(func(*githubreconciler.Resource, string) string { return "" })
+}
+
+// WithPublisherAppID scopes ObservedState and ObservedStateAtSHA to check
+// runs published by the given GitHub App ID, ignoring a same-named run from
+// a different App. Without it, two reconciler instances publishing under
+// the same check name against the same repo read back each other's runs as
+// their own, and the second silently skips its own evaluation.
+//
+// Instances sharing one App identity (e.g. the same org-scoped Octo STS app)
+// aren't distinguishable this way; that needs a distinct check name instead.
+func WithPublisherAppID(appID int64) Option {
+	return func(c *config) { c.publisherAppID = appID }
 }
 
 // NewStatusManager creates a new status manager with the given identity
@@ -119,6 +133,7 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 		isJob:            cloudrun.IsJob(),
 		readOnly:         readOnly,
 		detailsURLFunc:   cfg.detailsURL,
+		publisherAppID:   cfg.publisherAppID,
 		templateExecutor: templateExecutor,
 	}, nil
 }
@@ -199,6 +214,32 @@ jsonPayload.sha=%q`,
 	)
 }
 
+// findCheckRun re-checks the App ID client-side even though it's also passed
+// server-side to ListCheckRunsForRef: a run this reconciler doesn't own must
+// never be mistaken for its own observed state (see WithPublisherAppID).
+func findCheckRun(ctx context.Context, client *github.Client, owner, repo, sha, name string, publisherAppID int64) (*github.CheckRun, error) {
+	opts := &github.ListCheckRunsOptions{CheckName: github.Ptr(name)}
+	if publisherAppID != 0 {
+		opts.AppID = github.Ptr(publisherAppID)
+	}
+	checkRuns, _, err := client.Checks.ListCheckRunsForRef(ctx, owner, repo, sha, opts)
+	if err != nil {
+		return nil, fmt.Errorf("listing check runs: %w", err)
+	}
+
+	for _, run := range checkRuns.CheckRuns {
+		if run.GetName() != name {
+			continue
+		}
+		if publisherAppID != 0 && run.GetApp().GetID() != publisherAppID {
+			continue
+		}
+		return run, nil
+	}
+
+	return nil, nil
+}
+
 // ObservedState retrieves the last observed state for the current SHA
 func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 	name, err := checkRunName(s.manager.identity, s.resource)
@@ -206,29 +247,19 @@ func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 		return nil, err
 	}
 
-	// Get check runs for this SHA
-	checkRuns, _, err := s.client.Checks.ListCheckRunsForRef(
-		ctx, s.resource.Owner, s.resource.Repo, s.sha,
-		&github.ListCheckRunsOptions{
-			CheckName: github.Ptr(name),
-		})
-
+	run, err := findCheckRun(ctx, s.client, s.resource.Owner, s.resource.Repo, s.sha, name, s.manager.publisherAppID)
 	if err != nil {
-		return nil, fmt.Errorf("listing check runs: %w", err)
+		return nil, err
+	}
+	if run == nil {
+		return nil, nil // No status found
 	}
 
-	// Find our check run
-	for _, run := range checkRuns.CheckRuns {
-		if run.GetName() == name {
-			// Record the check run ID for potential updates
-			s.setCheckRunID(run.GetID())
+	// Record the check run ID for potential updates
+	s.setCheckRunID(run.GetID())
 
-			// Extract status from output
-			return s.manager.extractStatusFromOutput(run.Output)
-		}
-	}
-
-	return nil, nil // No status found
+	// Extract status from output
+	return s.manager.extractStatusFromOutput(run.Output)
 }
 
 // ObservedStateAtSHA retrieves the status for a specific commit SHA without creating a session.
@@ -244,23 +275,15 @@ func (sm *StatusManager[T]) ObservedStateAtSHA(
 		return nil, err
 	}
 
-	checkRuns, _, err := client.Checks.ListCheckRunsForRef(
-		ctx, res.Owner, res.Repo, sha,
-		&github.ListCheckRunsOptions{
-			CheckName: github.Ptr(name),
-		})
-
+	run, err := findCheckRun(ctx, client, res.Owner, res.Repo, sha, name, sm.publisherAppID)
 	if err != nil {
-		return nil, fmt.Errorf("listing check runs: %w", err)
+		return nil, err
+	}
+	if run == nil {
+		return nil, nil
 	}
 
-	for _, run := range checkRuns.CheckRuns {
-		if run.GetName() == name {
-			return sm.extractStatusFromOutput(run.Output)
-		}
-	}
-
-	return nil, nil
+	return sm.extractStatusFromOutput(run.Output)
 }
 
 // SetActualState updates the state for the current SHA

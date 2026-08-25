@@ -1059,3 +1059,111 @@ func TestResetForRerun(t *testing.T) {
 		t.Errorf("observed state after reset: got = %+v, want = nil", extracted)
 	}
 }
+
+func TestObservedStatePublisherAppIDFilter(t *testing.T) {
+	const (
+		identity   = "doc-alignment"
+		owner      = "test-owner"
+		repo       = "test-repo"
+		headSHA    = "abc123def456"
+		otherAppID = int64(111)
+		selfAppID  = int64(222)
+	)
+
+	templateExecutor, err := internaltemplate.New[Status[TestDetails]](identity, "-status", "status")
+	if err != nil {
+		t.Fatalf("creating template executor: %v", err)
+	}
+
+	// Build a realistic embedded-status summary, as if a different instance
+	// already published a completed run under the same check name.
+	smForOutput := &StatusManager[TestDetails]{identity: identity, templateExecutor: templateExecutor}
+	summary, err := smForOutput.buildCheckRunOutput(&Status[TestDetails]{
+		ObservedGeneration: headSHA,
+		Status:             "completed",
+		Conclusion:         "success",
+		Details:            TestDetails{Message: "published by another instance"},
+	})
+	if err != nil {
+		t.Fatalf("buildCheckRunOutput: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		publisherAppID int64
+		wantObserved   bool
+	}{{
+		name:           "no publisher filter configured: a same-named run from any App is treated as observed",
+		publisherAppID: 0,
+		wantObserved:   true,
+	}, {
+		name:           "publisher filter configured: a same-named run from a different App is ignored",
+		publisherAppID: selfAppID,
+		wantObserved:   false,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotAppIDParam string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAppIDParam = r.URL.Query().Get("app_id")
+				w.Header().Set("Content-Type", "application/json")
+				// The server always returns a run owned by otherAppID: a
+				// filter-bypassing server (or a race) must still not fool
+				// the client-side check when a publisher is configured.
+				body, err := json.Marshal(map[string]any{
+					"total_count": 1,
+					"check_runs": []map[string]any{{
+						"id":   1,
+						"name": identity,
+						"app":  map[string]any{"id": otherAppID},
+						"output": map[string]any{
+							"summary": summary,
+						},
+					}},
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				w.Write(body)
+			}))
+			defer server.Close()
+
+			client, err := github.NewClient(
+				github.WithHTTPClient(server.Client()),
+				github.WithEnterpriseURLs(server.URL, server.URL),
+			)
+			if err != nil {
+				t.Fatalf("creating client: %v", err)
+			}
+
+			sm := &StatusManager[TestDetails]{
+				identity:         identity,
+				templateExecutor: templateExecutor,
+				publisherAppID:   tt.publisherAppID,
+			}
+			res := &githubreconciler.Resource{Owner: owner, Repo: repo, Type: githubreconciler.ResourceTypePullRequest}
+			session := sm.NewSession(client, res, headSHA)
+
+			observed, err := session.ObservedState(t.Context())
+			if err != nil {
+				t.Fatalf("ObservedState() error = %v", err)
+			}
+
+			want := ""
+			if tt.publisherAppID != 0 {
+				want = fmt.Sprintf("%d", tt.publisherAppID)
+			}
+			if gotAppIDParam != want {
+				t.Errorf("app_id query param: got = %q, want = %q", gotAppIDParam, want)
+			}
+
+			if tt.wantObserved && observed == nil {
+				t.Error("ObservedState() = nil, want the foreign run's status")
+			}
+			if !tt.wantObserved && observed != nil {
+				t.Errorf("ObservedState() = %+v, want nil (run belongs to a different App)", observed)
+			}
+		})
+	}
+}
