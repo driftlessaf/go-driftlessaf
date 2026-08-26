@@ -110,8 +110,9 @@ func withReconcilerOptions(opts ...Option) MainOption {
 }
 
 // AppMain is the entrypoint for reconcilers that authenticate using a dedicated
-// GitHub App. It reads GITHUB_APP_ID and GITHUB_APP_KEY (a gcpkms:// URI) from
-// the environment, creates the app token source, and delegates to Main.
+// GitHub App. It reads GITHUB_APP_ID and GITHUB_APP_KEY (a gcpkms:// or
+// file:// URI, per NewApp) from the environment, creates the app token
+// source, and delegates to Main.
 // OCTO_IDENTITY is still required and used as the reconciler identity (e.g.
 // for PR author names and bot display names).
 func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {

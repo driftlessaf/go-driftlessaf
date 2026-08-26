@@ -30,8 +30,9 @@ type App struct {
 	sf     singleflight.Group
 }
 
-// NewApp creates an App from a gcpkms:// key URI. The returned App caches
-// installation ID lookups for the lifetime of the instance.
+// NewApp creates an App from a key URI — gcpkms:// for a Cloud KMS key
+// version, or file:// for a local PEM-encoded private key. The returned App
+// caches installation ID lookups for the lifetime of the instance.
 func NewApp(ctx context.Context, appID int64, keyURI string) (*App, error) {
 	atr, err := newAppTransport(ctx, appID, keyURI)
 	if err != nil {
@@ -110,25 +111,38 @@ func (a *App) newRepoTokenSource(ctx context.Context, org, repo string) (oauth2.
 	return &appTokenSource{ctx: ctx, itr: itr}, nil
 }
 
-// newAppTransport creates a *ghinstallation.AppsTransport from a gcpkms:// key URI.
+// newAppTransport creates a *ghinstallation.AppsTransport from a key URI:
+// gcpkms:// (a Cloud KMS key version, signing remotely so the key never
+// leaves KMS) or file:// (a local PEM-encoded private key, for local runs).
 func newAppTransport(ctx context.Context, appID int64, keyURI string) (*ghinstallation.AppsTransport, error) {
-	parts := strings.SplitN(keyURI, "://", 2)
-	if len(parts) != 2 || parts[0] != "gcpkms" {
-		return nil, fmt.Errorf("unsupported key URI %q: only gcpkms:// is supported", keyURI)
+	scheme, rest, ok := strings.Cut(keyURI, "://")
+	if !ok {
+		return nil, fmt.Errorf("unsupported key URI %q: want gcpkms:// or file://", keyURI)
 	}
-	kmsClient, err := kms.NewKeyManagementClient(ctx)
-	if err != nil {
-		return nil, err
+	switch scheme {
+	case "gcpkms":
+		kmsClient, err := kms.NewKeyManagementClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+		signer, err := gcpkms.New(ctx, kmsClient, rest)
+		if err != nil {
+			return nil, err
+		}
+		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, appID, ghinstallation.WithSigner(signer))
+		if err != nil {
+			return nil, fmt.Errorf("create GitHub App transport: %w", err)
+		}
+		return atr, nil
+	case "file":
+		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, appID, rest)
+		if err != nil {
+			return nil, fmt.Errorf("create GitHub App transport from %q: %w", keyURI, err)
+		}
+		return atr, nil
+	default:
+		return nil, fmt.Errorf("unsupported key URI %q: want gcpkms:// or file://", keyURI)
 	}
-	signer, err := gcpkms.New(ctx, kmsClient, parts[1])
-	if err != nil {
-		return nil, err
-	}
-	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, appID, ghinstallation.WithSigner(signer))
-	if err != nil {
-		return nil, fmt.Errorf("create GitHub App transport: %w", err)
-	}
-	return atr, nil
 }
 
 // appTokenSource adapts a *ghinstallation.Transport to oauth2.TokenSource.
