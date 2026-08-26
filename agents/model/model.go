@@ -81,11 +81,12 @@ var preXHighEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, eff
 // Anthropic API removed the sampling parameters (temperature, top_p, top_k)
 // AND the extended-thinking budget parameter (thinking.type="enabled",
 // budget_tokens=N) in favor of adaptive thinking. Opus 4.7 introduced this
-// surface; Opus 4.8, Sonnet 5, and Fable 5 share it.
+// surface; Opus 4.8, Opus 5, Sonnet 5, and Fable 5 share it.
 // See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
 var samplingParamsRemovedPrefixes = []string{
 	"claude-opus-4-7",
 	"claude-opus-4-8",
+	"claude-opus-5",
 	"claude-fable-5",
 	"claude-sonnet-5",
 }

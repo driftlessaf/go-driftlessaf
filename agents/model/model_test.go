@@ -113,12 +113,10 @@ func TestResolve(t *testing.T) {
 			SamplingParams:         true,
 			ExtendedThinkingBudget: true,
 		}},
-		{"claude-opus-5", model.Info{
-			Backend:                model.BackendClaude,
-			Efforts:                fullScale,
-			SamplingParams:         true,
-			ExtendedThinkingBudget: true,
-		}},
+		// Opus 5 is a known 5-series model: it shares the adaptive-thinking
+		// surface (sampling params and the thinking-budget param removed),
+		// like Opus 4.8, Sonnet 5, and Fable 5.
+		{"claude-opus-5", claudeAdaptive},
 		// Gemini thinking-knob generations.
 		{"gemini-1.5-pro", geminiBudget},
 		{"gemini-2.5-pro", geminiBudget},
