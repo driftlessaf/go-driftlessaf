@@ -20,14 +20,21 @@ func TestWorkQueue(t *testing.T) {
 	// Adjust this to a suitable period for testing things.
 	// The conformance tests own adjusting MaximumBackoffPeriod.
 	workqueue.BackoffPeriod = 1 * time.Second
+	ctor := func(limit int) workqueue.Interface {
+		return NewWorkQueue(limit)
+	}
 
-	conformance.TestSemantics(t, NewWorkQueue)
+	conformance.TestSemantics(t, ctor)
 
-	conformance.TestConcurrency(t, NewWorkQueue)
+	conformance.TestConcurrency(t, ctor)
 
-	conformance.TestMaxRetry(t, NewWorkQueue)
+	conformance.TestOwner(t, func(identity string) workqueue.Interface {
+		return NewWorkQueue(1, WithIdentity(identity))
+	})
 
-	conformance.TestBackoffDelay(t, NewWorkQueue)
+	conformance.TestMaxRetry(t, ctor)
+
+	conformance.TestBackoffDelay(t, ctor)
 }
 
 func Test_Get_KeyNotFound(t *testing.T) {

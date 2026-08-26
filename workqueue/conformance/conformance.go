@@ -84,6 +84,41 @@ func (ct *conformanceTester) scenario(name string, f func(context.Context, *test
 	})
 }
 
+func TestOwner(t *testing.T, ctor func(string) workqueue.Interface) {
+	const identity = "conformance-test"
+	wq := ctor(identity)
+	if wq == nil {
+		t.Fatal("NewWorkQueue returned nil")
+	}
+	if got := wq.Identity(); got != identity {
+		t.Errorf("Identity() = %q, want %q", got, identity)
+	}
+	if err := drain(t, wq); err != nil {
+		t.Fatalf("Drain failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := drain(t, wq); err != nil {
+			t.Fatalf("Drain failed: %v", err)
+		}
+	})
+
+	if err := wq.Queue(t.Context(), "owner-conformance", workqueue.Options{}); err != nil {
+		t.Fatalf("Queue failed: %v", err)
+	}
+	_, queued := checkQueue(t, wq, ExpectedState{Queued: []string{"owner-conformance"}})
+	owned, err := queued[0].Start(t.Context())
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	inProgress, _ := checkQueue(t, wq, ExpectedState{WorkInProgress: []string{"owner-conformance"}})
+	if got := inProgress[0].Owner(); got != identity {
+		t.Errorf("Owner() = %q, want %q", got, identity)
+	}
+	if err := owned.Complete(t.Context()); err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+}
+
 func TestSemantics(t *testing.T, ctor func(int) workqueue.Interface) {
 	ct := &conformanceTester{
 		t:           t,

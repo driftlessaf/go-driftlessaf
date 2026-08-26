@@ -17,19 +17,33 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Option configures an in-memory workqueue created by NewWorkQueue.
+type Option func(*wq)
+
+// WithIdentity sets the identity recorded on each in-progress key this queue
+// starts. Defaults to "", which records nothing.
+func WithIdentity(identity string) Option {
+	return func(w *wq) { w.identity = identity }
+}
+
 // NewWorkQueue creates a new in-memory workqueue.
 // This is intended for testing, and is not suitable for production use.
-func NewWorkQueue(limit int) workqueue.Interface {
-	return &wq{
+func NewWorkQueue(limit int, opts ...Option) workqueue.Interface {
+	w := &wq{
 		limit: limit,
 
 		wip:   make(map[string]queueItem, limit),
 		queue: make(map[string]queueItem, 10),
 	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 type wq struct {
-	limit int
+	limit    int
+	identity string
 
 	// rw guards the key sets.
 	rw    sync.RWMutex
@@ -41,9 +55,15 @@ type queueItem struct {
 	workqueue.Options
 	attempts int
 	queued   time.Time
+	owner    string
 }
 
 var _ workqueue.Interface = (*wq)(nil)
+
+// Identity implements workqueue.Interface.
+func (w *wq) Identity() string {
+	return w.identity
+}
 
 // Queue implements workqueue.Interface.
 func (w *wq) Queue(_ context.Context, key string, opts workqueue.Options) error {
@@ -137,10 +157,11 @@ func (w *wq) Enumerate(_ context.Context) ([]workqueue.ObservedInProgressKey, []
 		ts       time.Time
 	}, 0, w.limit+1)
 
-	for k := range w.wip {
+	for k, item := range w.wip {
 		wip = append(wip, &inProgressKey{
-			wq:  w,
-			key: k,
+			wq:    w,
+			key:   k,
+			owner: item.owner,
 		})
 	}
 
@@ -190,8 +211,9 @@ type inProgressKey struct {
 
 	attempts int
 
-	wq  *wq
-	key string
+	wq    *wq
+	key   string
+	owner string
 
 	ownerCtx    context.Context
 	ownerCancel context.CancelFunc
@@ -208,6 +230,11 @@ func (o *inProgressKey) Name() string {
 // Priority implements workqueue.Key.
 func (o *inProgressKey) Priority() int64 {
 	return o.Options.Priority
+}
+
+// Owner implements workqueue.ObservedInProgressKey.
+func (o *inProgressKey) Owner() string {
+	return o.owner
 }
 
 // Requeue implements workqueue.InProgressKey.
@@ -343,6 +370,7 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 		Options:  q.Options,
 		attempts: q.attempts,
 		queued:   time.Now().UTC(),
+		owner:    q.wq.identity,
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -351,6 +379,7 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 		wq:          q.wq,
 		key:         q.key,
 		attempts:    q.attempts + 1,
+		owner:       q.wq.identity,
 		ownerCtx:    ctx,
 		ownerCancel: cancel,
 	}, nil

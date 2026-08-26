@@ -52,6 +52,10 @@ func TestWorkQueue(t *testing.T) {
 		return NewWorkQueue(client.Bucket(bucket), u)
 	})
 
+	conformance.TestOwner(t, func(identity string) workqueue.Interface {
+		return NewWorkQueue(client.Bucket(bucket), 1, WithIdentity(identity))
+	})
+
 	conformance.TestDurability(t, func(u int) workqueue.Interface {
 		return NewWorkQueue(client.Bucket(bucket), u)
 	})

@@ -80,9 +80,20 @@ func (nopErrorEmitter) drain()                             {}
 type Option func(*config)
 
 type config struct {
-	errors         errorEmitter
-	backoff        func(attempts int) time.Duration
-	dispatchPeriod time.Duration
+	errors           errorEmitter
+	backoff          func(attempts int) time.Duration
+	dispatchPeriod   time.Duration
+	ownerConcurrency int
+}
+
+// WithOwnerConcurrency limits the number of active keys owned by the queue's
+// identity when concurrency is greater than zero. The global concurrency limit
+// still applies, so a dispatcher only launches work when both limits have
+// capacity.
+func WithOwnerConcurrency(concurrency int) Option {
+	return func(c *config) {
+		c.ownerConcurrency = concurrency
+	}
 }
 
 // WithDispatchPeriod sets the minimum interval between dispatch passes for

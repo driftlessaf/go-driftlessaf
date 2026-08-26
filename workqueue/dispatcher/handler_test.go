@@ -38,6 +38,8 @@ type blockingQueue struct {
 
 var _ workqueue.Interface = (*blockingQueue)(nil)
 
+func (b *blockingQueue) Identity() string { return "" }
+
 func (b *blockingQueue) Queue(context.Context, string, workqueue.Options) error {
 	return nil
 }

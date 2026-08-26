@@ -37,6 +37,10 @@ var (
 
 // Interface is the interface that workqueue implementations must implement.
 type Interface interface {
+	// Identity returns the identity recorded as the owner of keys started by
+	// this queue, or an empty string if no identity was configured.
+	Identity() string
+
 	// Queue adds an item to the workqueue.
 	Queue(ctx context.Context, key string, opts Options) error
 
@@ -125,6 +129,10 @@ type InProgressKey interface {
 // but that we are not the owner of.
 type ObservedInProgressKey interface {
 	InProgressKey
+
+	// Owner returns the identity recorded when the key was claimed, or an empty
+	// string if no owner was recorded.
+	Owner() string
 
 	// IsOrphaned checks whether the key has been orphaned by it's owner.
 	IsOrphaned() bool

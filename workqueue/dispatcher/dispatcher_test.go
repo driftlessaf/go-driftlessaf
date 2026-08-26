@@ -23,6 +23,7 @@ import (
 
 type mockKey struct {
 	name     string
+	owner    string
 	orphaned bool
 	startErr error
 	attempts int
@@ -44,6 +45,7 @@ func (m *mockKey) Priority() int64 {
 }
 
 func (m *mockKey) Name() string     { return m.name }
+func (m *mockKey) Owner() string    { return m.owner }
 func (m *mockKey) IsOrphaned() bool { return m.orphaned }
 func (m *mockKey) Start(context.Context) (workqueue.OwnedInProgressKey, error) {
 	m.mu.Lock()
@@ -100,13 +102,16 @@ type queuedItem struct {
 }
 
 type mockQueue struct {
-	mu      sync.Mutex
-	wip     []workqueue.ObservedInProgressKey
-	next    []workqueue.QueuedKey
-	err     error
-	queued  []queuedItem
-	failKey string // If set, Queue will fail for this key
+	mu       sync.Mutex
+	identity string
+	wip      []workqueue.ObservedInProgressKey
+	next     []workqueue.QueuedKey
+	err      error
+	queued   []queuedItem
+	failKey  string // If set, Queue will fail for this key
 }
+
+func (m *mockQueue) Identity() string { return m.identity }
 
 func (m *mockQueue) Enumerate(context.Context) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
 	return m.wip, m.next, nil, m.err
@@ -360,6 +365,74 @@ func TestHandleAsync_RespectsBatchSize(t *testing.T) {
 
 	if launched != 2 {
 		t.Fatalf("expected to launch 2 keys, got %d", launched)
+	}
+}
+
+func TestHandleAsync_RespectsOwnerConcurrency(t *testing.T) {
+	const (
+		identity       = "us-central1"
+		remoteIdentity = "us-east1"
+	)
+	keys := []*mockKey{{name: "k1"}, {name: "k2"}, {name: "k3"}}
+	next := make([]workqueue.QueuedKey, len(keys))
+	for i := range keys {
+		next[i] = keys[i]
+	}
+
+	q := &mockQueue{
+		identity: identity,
+		wip: []workqueue.ObservedInProgressKey{
+			&mockInProgressKey{mockKey: &mockKey{name: "local", owner: identity}},
+			&mockInProgressKey{mockKey: &mockKey{name: "remote-1", owner: remoteIdentity}},
+			&mockInProgressKey{mockKey: &mockKey{name: "remote-2", owner: remoteIdentity}},
+		},
+		next: next,
+	}
+
+	future := HandleAsync(context.Background(), q, 5, 0, func(context.Context, string, workqueue.Options) error {
+		return nil
+	}, 0, WithOwnerConcurrency(2))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	launched := 0
+	for _, k := range keys {
+		launched += k.complete
+	}
+	if launched != 1 {
+		t.Fatalf("expected to launch 1 key, got %d", launched)
+	}
+}
+
+func TestHandleAsync_OwnerConcurrencyAtLimit(t *testing.T) {
+	const identity = "us-central1"
+	next := &mockKey{name: "next"}
+	q := &mockQueue{
+		identity: identity,
+		wip: []workqueue.ObservedInProgressKey{
+			&mockInProgressKey{mockKey: &mockKey{name: "local", owner: identity}},
+		},
+		next: []workqueue.QueuedKey{next},
+	}
+
+	future := HandleAsync(context.Background(), q, 2, 0, func(context.Context, string, workqueue.Options) error {
+		return nil
+	}, 0, WithOwnerConcurrency(1))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.complete != 0 {
+		t.Fatalf("expected no keys to launch, got %d", next.complete)
+	}
+}
+
+func TestHandleAsync_OwnerConcurrencyRequiresIdentity(t *testing.T) {
+	future := HandleAsync(context.Background(), &mockQueue{}, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return nil
+	}, 0, WithOwnerConcurrency(1))
+	if err := future(); err == nil {
+		t.Fatal("expected an error for an empty identity")
 	}
 }
 

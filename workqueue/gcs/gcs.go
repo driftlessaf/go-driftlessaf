@@ -44,13 +44,13 @@ func WithName(name string) Option {
 	return func(w *wq) { w.name = name }
 }
 
-// WithOwner sets the identity recorded on each in-progress object this queue
+// WithIdentity sets the identity recorded on each in-progress object this queue
 // starts, e.g. the region of the dispatcher claiming the key. Because the
 // owner rides on the object, every process enumerating the queue sees who
 // holds what, surfaced via the workqueue_in_progress_keys_by_owner metric.
 // Defaults to "", which records nothing.
-func WithOwner(owner string) Option {
-	return func(w *wq) { w.owner = owner }
+func WithIdentity(identity string) Option {
+	return func(w *wq) { w.identity = identity }
 }
 
 // NewWorkQueue creates a new GCS-backed workqueue.
@@ -71,9 +71,8 @@ type wq struct {
 	// name is the queue_name label value applied to all metrics emitted by
 	// this queue; "" if WithName was not provided.
 	name string
-	// owner is recorded on the in-progress objects this queue starts; "" if
-	// WithOwner was not provided.
-	owner string
+	// identity is recorded as the owner of in-progress objects this queue starts.
+	identity string
 }
 
 // baseLabels returns the {service_name, revision_name, queue_name} labels that
@@ -87,6 +86,11 @@ func (w *wq) baseLabels() prometheus.Labels {
 }
 
 var _ workqueue.Interface = (*wq)(nil)
+
+// Identity implements workqueue.Interface.
+func (w *wq) Identity() string {
+	return w.identity
+}
 
 // RefreshInterval is the period on which we refresh the lease of owned objects
 // It is surfaced as a global, so that it can be mutated by tests and exposed as
@@ -367,7 +371,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 				attrs:     objAttrs,
 				priority:  priority,
 				queueName: w.name,
-				owner:     w.owner,
+				identity:  w.identity,
 			})
 			sort.Slice(qd, func(i, j int) bool {
 				if lhs, rhs := qd[i].Priority(), qd[j].Priority(); lhs != rhs {
@@ -563,6 +567,16 @@ func (o *inProgressKey) Name() string {
 // Priority implements workqueue.Key.
 func (o *inProgressKey) Priority() int64 {
 	return o.priority
+}
+
+// Owner returns the identity recorded when this key was claimed.
+func (o *inProgressKey) Owner() string {
+	o.rw.RLock()
+	defer o.rw.RUnlock()
+	if o.attrs == nil {
+		return ""
+	}
+	return o.attrs.Metadata[ownerMetadataKey]
 }
 
 // GetAttempts implements workqueue.OwnedInProgressKey.
@@ -1072,9 +1086,9 @@ type queuedKey struct {
 	// queueName is the queue_name label value applied to all metrics emitted
 	// when this key is started.
 	queueName string
-	// owner is recorded on the in-progress object when this key is started;
-	// "" records nothing.
-	owner string
+	// identity is recorded as the owner of the in-progress object when this key
+	// is started; "" records nothing.
+	identity string
 }
 
 // baseLabels returns the labels every metric emitted from this key carries.
@@ -1145,8 +1159,8 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	// an owner recorded by a previous attempt never survives a claim by a
 	// queue configured without one.
 	delete(copier.Metadata, ownerMetadataKey)
-	if q.owner != "" {
-		copier.Metadata[ownerMetadataKey] = q.owner
+	if q.identity != "" {
+		copier.Metadata[ownerMetadataKey] = q.identity
 	}
 	if att, ok := copier.Metadata[attemptsMetadataKey]; ok {
 		prevAttempts, err := strconv.Atoi(att)

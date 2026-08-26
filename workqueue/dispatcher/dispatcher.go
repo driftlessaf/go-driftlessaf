@@ -72,6 +72,10 @@ func Handle(ctx context.Context, wq workqueue.Interface, concurrency, batchSize 
 // used to block on the result.
 func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) Future {
 	cfg := applyOptions(opts)
+	identity := wq.Identity()
+	if cfg.ownerConcurrency > 0 && identity == "" {
+		return func() error { return fmt.Errorf("owner concurrency requires a non-empty queue identity") }
+	}
 	// Enumerate the state of the queue.
 	wip, next, _, err := wq.Enumerate(ctx)
 	if err != nil {
@@ -87,9 +91,13 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	// Remove any orphaned work by returning it to the queue.
 	// Use context.WithoutCancel to ensure requeue completes even if parent context is canceled.
 	activeKeys := make(map[string]struct{}, len(wip))
+	ownerWIP := 0
 	for _, x := range wip {
 		if !x.IsOrphaned() {
 			activeKeys[x.Name()] = struct{}{}
+			if cfg.ownerConcurrency > 0 && x.Owner() == identity {
+				ownerWIP++
+			}
 			continue
 		}
 		eg.Go(func() error {
@@ -105,10 +113,16 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	if nWIP >= concurrency {
 		return eg.Wait // Should generally be a no-op.
 	}
+	if cfg.ownerConcurrency > 0 && ownerWIP >= cfg.ownerConcurrency {
+		return eg.Wait
+	}
 
 	// Attempt to launch a new piece of work for each open slot we have available
 	// which is: N - active.
 	openSlots := concurrency - nWIP
+	if cfg.ownerConcurrency > 0 {
+		openSlots = min(openSlots, cfg.ownerConcurrency-ownerWIP)
+	}
 	launchLimit := min(batchSize, openSlots)
 
 	idx, launched := 0, 0

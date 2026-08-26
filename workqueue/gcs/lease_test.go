@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/api/googleapi"
@@ -1023,7 +1024,7 @@ func TestStartRecordsOwner(t *testing.T) {
 					Name:     queuedPrefix + "test-key",
 					Metadata: test.metadata,
 				},
-				owner: test.owner,
+				identity: test.owner,
 			}
 			if _, err := qk.Start(t.Context()); err != nil {
 				t.Fatalf("Start() = %v", err)
@@ -1110,8 +1111,16 @@ func TestEnumerateCountsInProgressByOwner(t *testing.T) {
 	}}
 	wq := NewWorkQueue(newTestClient(t, f), 10, WithName("owner-metric-test"))
 
-	if _, _, _, err := wq.Enumerate(t.Context()); err != nil {
+	wip, _, _, err := wq.Enumerate(t.Context())
+	if err != nil {
 		t.Fatalf("Enumerate() = %v", err)
+	}
+	owners := map[string]string{}
+	for _, key := range wip {
+		owners[key.Name()] = key.Owner()
+	}
+	if diff := cmp.Diff(map[string]string{"a": "us-a", "b": "us-a", "c": ""}, owners); diff != "" {
+		t.Errorf("in-progress owners (-want, +got):\n%s", diff)
 	}
 
 	ownerLabels := func(owner string) prometheus.Labels {
