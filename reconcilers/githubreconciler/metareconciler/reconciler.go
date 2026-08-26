@@ -42,6 +42,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
 
+	// replaceLabelPrefixes lists the label prefixes whose result-derived labels
+	// are replace-managed rather than accumulated. Empty (the default) means
+	// every label accumulates. See WithReplaceLabelPrefixes.
+	replaceLabelPrefixes []string
+
 	// prRenderFromResult derives the render-only PR fields (Headline and
 	// VariantSummary) from the agent result. Opt-in: nil leaves both fields
 	// empty.
@@ -101,6 +106,19 @@ func WithDraftLabel[Req promptbuilder.Bindable, Resp Result, CB any](label strin
 func WithPRLabelsFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) []string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.prLabelsFromResult = fn
+	}
+}
+
+// WithReplaceLabelPrefixes declares label prefixes as replace-managed: when
+// the result-derived label under a declared prefix changes between reconciles,
+// the reconciler removes the stale label from the PR instead of letting both
+// accumulate. Labels under undeclared prefixes accumulate as before. A prefix
+// whose result-derived labels are empty on a round prunes nothing. Only
+// meaningful together with WithPRLabelsFromResult, which supplies the
+// result-derived labels. Off by default: every label accumulates.
+func WithReplaceLabelPrefixes[Req promptbuilder.Bindable, Resp Result, CB any](prefixes ...string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.replaceLabelPrefixes = prefixes
 	}
 }
 

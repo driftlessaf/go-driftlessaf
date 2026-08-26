@@ -222,6 +222,56 @@ func Example_withPRLabelsFromResult() {
 	// Reconciler created with result-derived PR labels
 }
 
+// Example_withReplaceLabelPrefixes demonstrates combining WithPRLabelsFromResult
+// with WithReplaceLabelPrefixes. When the result-derived label under a declared
+// prefix changes between reconciles, the reconciler removes the stale label
+// from the PR instead of letting both accumulate. A prefix with no
+// result-derived label on a round prunes nothing.
+func Example_withReplaceLabelPrefixes() {
+	// In practice, these would be created by the calling code
+	var cm *changemanager.CM[metareconciler.PRData[*MyRequest]]
+	var cloneMeta *clonemanager.Meta
+	var agent metaagent.Agent[*MyRequest, *MyResult, baseCallbacks]
+
+	identity := "my-bot"
+
+	// Create the reconciler that labels each PR with a result-derived value
+	// and replaces the stale label under the declared prefix when the value
+	// changes between reconciles.
+	rec := metareconciler.New(
+		identity,
+		cm,
+		cloneMeta,
+		[]string{},
+		agent,
+		func(_ context.Context, issue *github.Issue, _ *changemanager.Session[metareconciler.PRData[*MyRequest]]) (*MyRequest, error) {
+			return &MyRequest{
+				Title: issue.GetTitle(),
+				Body:  issue.GetBody(),
+			}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[metareconciler.PRData[*MyRequest]], _ *clonemanager.Lease) (baseCallbacks, error) {
+			return toolcall.NewFindingTools(
+				toolcall.NewWorktreeTools(toolcall.EmptyTools{}, callbacks.WorktreeCallbacks{}),
+				callbacks.FindingCallbacks{},
+			), nil
+		},
+		// Derive PR labels from the agent result.
+		metareconciler.WithPRLabelsFromResult[*MyRequest, *MyResult, baseCallbacks](
+			func(r *MyResult) []string { return []string{"bot:pkg:" + r.Summary} },
+		),
+		// Declare the prefix as replace-managed so the previous
+		// "bot:pkg:" label is removed when the derived value changes.
+		metareconciler.WithReplaceLabelPrefixes[*MyRequest, *MyResult, baseCallbacks]("bot:pkg:"),
+	)
+
+	_ = rec
+	fmt.Println("Reconciler created with replace-managed label prefixes")
+
+	// Output:
+	// Reconciler created with replace-managed label prefixes
+}
+
 // Example_withPRRenderFromResult shows the WithPRRenderFromResult option. The
 // reconciler sets PRData.Headline and PRData.VariantSummary from the agent
 // result, so the PR title template and the PR body template can render them.

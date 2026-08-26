@@ -74,6 +74,29 @@ func Example() {
 	}
 }
 
+// ExampleSession_ReplaceLabels demonstrates replace-managed labels on the
+// open PR. The desired labels are added first (like AddLabels), then, for
+// each declared prefix, labels under that prefix that are not in the desired
+// set are removed. A prefix with no desired label under it prunes nothing,
+// and with empty prefixes the call is equivalent to AddLabels.
+func ExampleSession_ReplaceLabels() {
+	ctx := context.Background()
+	var session *changemanager.Session[UpdateData] // from cm.NewSession
+
+	// The PR carries "bot:pkg:foo" from an earlier reconcile. This call adds
+	// "bot:pkg:bar", then removes "bot:pkg:foo" because it is under the
+	// declared prefix but not desired. "automated pr" is under no declared
+	// prefix, so it only accumulates.
+	err := session.ReplaceLabels(ctx,
+		[]string{"automated pr", "bot:pkg:bar"},
+		[]string{"bot:pkg:"},
+	)
+	if err != nil {
+		// handle error
+		return
+	}
+}
+
 // ExampleSession_AppendReasoning demonstrates accumulating a per-commit
 // reasoning log across iterations. Inside the Upsert makeChanges callback,
 // once a commit is certain, record the run's reasoning against the commit's

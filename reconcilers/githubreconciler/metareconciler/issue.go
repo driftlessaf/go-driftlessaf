@@ -327,12 +327,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		}
 	}
 
-	// Stamp result-derived labels on the PR (opt-in via WithPRLabelsFromResult).
-	// Skipped when the agent did not run (PR already up to date): result is the
-	// zero value then, so deriving labels from it would be meaningless.
+	// Stamp result-derived labels on the PR (opt-in via WithPRLabelsFromResult),
+	// pruning stale labels under the replace-managed prefixes (opt-in via
+	// WithReplaceLabelPrefixes). Skipped when the agent did not run (PR already
+	// up to date): result is the zero value then, so deriving labels from it
+	// would be meaningless.
 	if r.prLabelsFromResult != nil && agentRan {
-		if err := changeSession.AddLabels(ctx, r.prLabelsFromResult(result)); err != nil {
-			log.With("error", err).Warn("Failed to add result-derived labels to PR")
+		if err := changeSession.ReplaceLabels(ctx, r.prLabelsFromResult(result), r.replaceLabelPrefixes); err != nil {
+			clog.WarnContext(ctx, "Failed to stamp result-derived labels on PR", "error", err)
 		}
 	}
 

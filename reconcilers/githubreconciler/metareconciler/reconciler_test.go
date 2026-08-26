@@ -348,6 +348,28 @@ func TestWithPRLabelsFromResult(t *testing.T) {
 	}
 }
 
+func TestWithReplaceLabelPrefixes(t *testing.T) {
+	rec := New[*testRequest, *testResult, testCallbacks](
+		"test-identity",
+		nil,
+		nil,
+		nil,
+		&fakeAgent{},
+		func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+			return &testRequest{}, nil
+		},
+		func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+			return testCallbacks{}, nil
+		},
+		WithReplaceLabelPrefixes[*testRequest, *testResult, testCallbacks]("bot:pkg:", "bot:lang:"),
+	)
+
+	want := []string{"bot:pkg:", "bot:lang:"}
+	if !slices.Equal(rec.replaceLabelPrefixes, want) {
+		t.Errorf("reconciler.replaceLabelPrefixes: got = %v, want = %v", rec.replaceLabelPrefixes, want)
+	}
+}
+
 func TestWithPRRenderFromResult(t *testing.T) {
 	agent := &fakeAgent{}
 	fn := func(r *testResult) PRRender {

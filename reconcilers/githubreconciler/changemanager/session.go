@@ -448,6 +448,61 @@ func (s *Session[T]) AddLabels(ctx context.Context, labels []string) error {
 	return nil
 }
 
+// ReplaceLabels adds the given labels to the existing PR (like AddLabels) and
+// then, for each prefix in prefixes, removes labels under that prefix that are
+// not in labels. Membership is per set, not one label per prefix: when labels
+// contains several entries under one prefix, all of them stay. Labels under
+// prefixes not listed in prefixes are never touched. With empty prefixes this
+// is equivalent to AddLabels.
+//
+// The add happens before the remove so that a failure between the two steps
+// leaves the PR with a duplicate label (repaired on the next reconcile) rather
+// than with no label at all.
+//
+// A prefix with no desired label under it is skipped entirely: the caller's
+// label derivation can legitimately produce nothing for a key on a given
+// round, and that absence must not prune labels applied earlier.
+// A failed removal does not stop the remaining removals, and the joined
+// error reports every failure.
+// This is a no-op if no PR exists.
+func (s *Session[T]) ReplaceLabels(ctx context.Context, labels []string, prefixes []string) error {
+	if s.prNumber == 0 {
+		return nil
+	}
+	if err := s.AddLabels(ctx, labels); err != nil {
+		return err
+	}
+	desired := make(map[string]struct{}, len(labels))
+	for _, l := range labels {
+		desired[l] = struct{}{}
+	}
+	var errs []error
+	for _, prefix := range prefixes {
+		if !slices.ContainsFunc(labels, func(l string) bool { return strings.HasPrefix(l, prefix) }) {
+			continue
+		}
+		var stale []string
+		for _, l := range s.prLabels {
+			if !strings.HasPrefix(l, prefix) {
+				continue
+			}
+			if _, ok := desired[l]; !ok {
+				stale = append(stale, l)
+			}
+		}
+		for _, l := range stale {
+			clog.InfoContext(ctx, "Removing stale label", "pr", s.prNumber, "label", l)
+			if _, err := s.client.Issues.RemoveLabelForIssue(ctx, s.owner, s.repo, s.prNumber, l); err != nil {
+				// Keep the label cached: it is still on the PR.
+				errs = append(errs, fmt.Errorf("removing label %q: %w", l, err))
+				continue
+			}
+			s.prLabels = slices.DeleteFunc(s.prLabels, func(cached string) bool { return cached == l })
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // CloseAnyOutstanding closes the existing PR if one exists.
 // If message is non-empty, it posts the message as a comment before closing.
 // This is a no-op if no PR exists.
