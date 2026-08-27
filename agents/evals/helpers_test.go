@@ -161,14 +161,17 @@ func TestOnlyToolCalls(t *testing.T) {
 		},
 	}
 
-	// Test with allowed tools
+	// Test with allowed tools: no failure, no grade.
 	callback := evals.OnlyToolCalls[string]("read_logs", "analyze", "summarize")
 	callback(obs, trace)
 	if len(obs.failures) > 0 {
 		t.Errorf("unexpected failure with allowed tools: %v", obs.failures)
 	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade with allowed tools: %v", obs.gradeReasons)
+	}
 
-	// Test with disallowed tool
+	// Test with disallowed tool carrying no error: the call ran, so it fails.
 	obs = &mockObserver{}
 	callback = evals.OnlyToolCalls[string]("read_logs", "analyze")
 	callback(obs, trace)
@@ -176,6 +179,108 @@ func TestOnlyToolCalls(t *testing.T) {
 		t.Errorf("expected failure for disallowed tool")
 	} else if !strings.Contains(obs.failures[0], "summarize") {
 		t.Errorf("failure message: got = %q, wanted = contains 'summarize'", obs.failures[0])
+	}
+
+	// A disallowed call the executor rejected (its error matches the
+	// ErrUnknownTool sentinel) never ran, so it skips rather than fails. The
+	// successful non-terminal read_logs call alongside it proves the agent
+	// worked past the rejection, so the skip grades 1.0 with the call named
+	// in the reasoning, and the signal reaches score sinks.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_logs"},
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs")},
+		},
+	}
+	callback = evals.OnlyToolCalls[string]("read_logs")
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for rejected unknown tool call: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if obs.grades[0] != 1.0 {
+		t.Errorf("grade score: got = %v, wanted = 1.0", obs.grades[0])
+	}
+	if !strings.Contains(obs.gradeReasons[0], "read_the_logs") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], "read_the_logs")
+	}
+
+	// A disallowed call with an error that does not match the sentinel ran
+	// and failed on its own terms, so it still fails the metric.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "rm_rf", Error: errors.New("permission denied")},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) == 0 {
+		t.Errorf("expected failure for disallowed tool with non-sentinel error")
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for disallowed tool with non-sentinel error: %v", obs.gradeReasons)
+	}
+
+	// A skipped call whose only companion is the terminal submit fails: the
+	// terminal submit commits the result rather than doing work, so no call
+	// proves the agent worked past the rejection. Without this safeguard an
+	// eval map that omits NoErrors would pass a trace whose only activity was
+	// rejected invented calls plus the steered submit.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs")},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callback = evals.OnlyToolCalls[string]("read_logs", "submit_result")
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if want := "no tool call succeeded"; !strings.Contains(obs.failures[0], want) {
+		t.Errorf("failure message: got = %q, wanted = contains %q", obs.failures[0], want)
+	}
+	if !strings.Contains(obs.failures[0], "read_the_logs") {
+		t.Errorf("failure message: got = %q, wanted = contains %q", obs.failures[0], "read_the_logs")
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for skipped call with no successful call: %v", obs.gradeReasons)
+	}
+
+	// More skipped calls than the reporting cap: the reasoning lists the
+	// capped calls and closes with the overflow count. One successful
+	// non-terminal call keeps this on the Grade path.
+	obs = &mockObserver{}
+	callback = evals.OnlyToolCalls[string]("read_logs")
+	unknown := func(name string) *agenttrace.ToolCall[string] {
+		return &agenttrace.ToolCall[string]{Name: name, Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, name)}
+	}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			unknown("tool_a"),
+			unknown("tool_b"),
+			unknown("tool_c"),
+			unknown("tool_d"),
+			unknown("tool_e"),
+			{Name: "read_logs"},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for rejected unknown tool calls: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if !strings.Contains(obs.gradeReasons[0], "and 2 more") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], "and 2 more")
+	}
+	if strings.Contains(obs.gradeReasons[0], "tool_d") {
+		t.Errorf("grade reasoning: got = %q, wanted = %q elided by the cap", obs.gradeReasons[0], "tool_d")
 	}
 }
 
@@ -583,10 +688,12 @@ func TestNoErrors(t *testing.T) {
 		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], want)
 	}
 
-	// An unknown tool name is the one tool-call error class that stays
-	// terminal: the model named a tool the executor has no handler for, which
-	// is a protocol violation no retry can make legal. Matched through the
-	// sentinel, so the wrapped tool name in the message carries no weight.
+	// An unknown-tool call on a completed run the agent worked past joins the
+	// recovered transients: the executor rejected the call (matched through
+	// the sentinel, so the invented tool name in the message carries no
+	// weight), and the successful non-terminal call alongside it proves the
+	// agent moved on. The run grades 1.0 with the invented tool in the
+	// reasoning, so the protocol violation still reaches score sinks.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		ToolCalls: []*agenttrace.ToolCall[string]{
@@ -595,12 +702,63 @@ func TestNoErrors(t *testing.T) {
 		},
 	}
 	callback(obs, trace)
-	if len(obs.failures) == 0 {
-		t.Errorf("expected failure for unknown tool call")
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for recovered unknown tool call: %v", obs.failures)
+	}
+	if len(obs.grades) != 1 {
+		t.Fatalf("grade count: got = %d, wanted = 1", len(obs.grades))
+	}
+	if obs.grades[0] != 1.0 {
+		t.Errorf("grade score: got = %v, wanted = 1.0", obs.grades[0])
+	}
+	if !strings.Contains(obs.gradeReasons[0], "read_the_logs") {
+		t.Errorf("grade reasoning: got = %q, wanted = contains %q", obs.gradeReasons[0], "read_the_logs")
 	}
 
-	// The failure is the sentinel's doing, not the message's: the same
-	// reasoning text on an ordinary error is reported, not failed.
+	// The same unknown-tool call where the only other call is the terminal
+	// submit still fails: committing a result is not work, so no call proves
+	// the agent worked past the rejection.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs")},
+			{Name: "submit_result", Terminal: true},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) != 1 {
+		t.Fatalf("failure count: got = %d, wanted = 1", len(obs.failures))
+	}
+	if want := "no tool call succeeded"; !strings.Contains(obs.failures[0], want) {
+		t.Errorf("failure message: got = %q, wanted = contains %q", obs.failures[0], want)
+	}
+	if len(obs.grades) > 0 {
+		t.Errorf("unexpected grade for unknown tool call with no successful call: %v", obs.gradeReasons)
+	}
+
+	// An unknown-tool call marked Recoverable records a designed correction
+	// the model acted on, so it stays out of the Grade reasoning entirely.
+	obs = &mockObserver{}
+	trace = &agenttrace.Trace[string]{
+		ToolCalls: []*agenttrace.ToolCall[string]{
+			{Name: "read_the_logs", Error: fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, "read_the_logs"), Recoverable: true},
+			{Name: "read_logs"},
+		},
+	}
+	callback(obs, trace)
+	if len(obs.failures) > 0 {
+		t.Errorf("unexpected failure for recoverable unknown tool call: %v", obs.failures)
+	}
+	for _, reason := range obs.gradeReasons {
+		if strings.Contains(reason, "read_the_logs") {
+			t.Errorf("grade reasoning: got = %q, wanted = no unknown-tool text", reason)
+		}
+	}
+
+	// Classification runs through errors.Is on the sentinel, never the
+	// message text: an ordinary error whose text mimics the sentinel's
+	// message is a plain recovered transient. See the infrastructure-marked
+	// case above for where the sentinel changes the outcome.
 	obs = &mockObserver{}
 	trace = &agenttrace.Trace[string]{
 		ToolCalls: []*agenttrace.ToolCall[string]{

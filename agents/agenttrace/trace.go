@@ -645,8 +645,10 @@ func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCa
 // for: a hallucinated or unregistered name. Executors wrap it into the error
 // they record with BadToolCall so consumers can single out the class with
 // errors.Is rather than matching the model-controlled tool name in the
-// message. Unlike an ordinary tool-call error, this is a protocol violation
-// with no recovered reading, so the no-errors eval scorer fails on it.
+// message. The executor still rejects the call as a protocol violation, but
+// the eval scorers (evals.NoErrors, evals.OnlyToolCalls) treat it as a
+// recovered transient when the run worked past it: they fail only when the
+// trace carries an error or when no non-terminal call succeeded.
 var ErrUnknownTool = errors.New("unknown tool")
 
 // BadToolCall records a tool call that failed due to bad arguments or unknown tool

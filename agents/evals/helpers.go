@@ -50,6 +50,21 @@ func NoToolCalls[T any]() ObservableTraceCallback[T] {
 }
 
 // OnlyToolCalls returns an ObservableTraceCallback that validates the trace only uses the specified tool names.
+//
+// A call outside the allowed set whose error matches agenttrace.ErrUnknownTool
+// is skipped rather than failed: the executor rejected the call, so it never
+// ran. When at least one call was skipped, the metric grades 1.0 with a
+// reasoning string naming the skipped calls, so the signal reaches score
+// sinks. A call outside the set with no error, or with an error that does not
+// match the sentinel, still fails.
+//
+// Skipping is justified only when the run demonstrably worked past the
+// rejection. A success is a call with no error that is not the terminal
+// submit, the same rule NoErrors applies: committing a result is not work.
+// When calls were skipped and no call succeeded as work, the run's only
+// activity was rejected invented calls plus the steered terminal submit, so
+// the metric fails naming the skipped calls instead of grading 1.0. Without
+// this safeguard an eval map that omits NoErrors would pass such a trace.
 func OnlyToolCalls[T any](toolNames ...string) ObservableTraceCallback[T] {
 	// Precompute the allowed set once when the callback is created
 	allowed := make(map[string]struct{}, len(toolNames))
@@ -58,11 +73,33 @@ func OnlyToolCalls[T any](toolNames ...string) ObservableTraceCallback[T] {
 	}
 
 	return func(o Observer, trace *agenttrace.Trace[T]) {
+		var skipped []string
+		succeeded := false
 		for _, tc := range trace.ToolCalls {
 			if _, ok := allowed[tc.Name]; !ok {
+				if errors.Is(tc.Error, agenttrace.ErrUnknownTool) {
+					skipped = append(skipped, tc.Name)
+					continue
+				}
 				o.Fail(fmt.Sprintf("unexpected tool call %q, only allowed: %v", tc.Name, toolNames))
 				return
 			}
+			// The terminal submit commits the result rather than doing work,
+			// so it cannot stand as the run's only success.
+			if tc.Error == nil && !tc.Terminal {
+				succeeded = true
+			}
+		}
+		if n := len(skipped); n > 0 {
+			if n > maxReportedToolErrors {
+				skipped = append(skipped[:maxReportedToolErrors], fmt.Sprintf("and %d more", n-maxReportedToolErrors))
+			}
+			detail := strings.Join(skipped, "; ")
+			if !succeeded {
+				o.Fail(fmt.Sprintf("no tool call succeeded; executor rejected %d unknown-tool call(s): %s", n, detail))
+				return
+			}
+			o.Grade(1.0, fmt.Sprintf("executor rejected %d unknown-tool call(s): %s", n, detail))
 		}
 	}
 }
@@ -96,9 +133,9 @@ func RequiredToolCalls[T any](toolNames []string) ObservableTraceCallback[T] {
 	}
 }
 
-// maxReportedToolErrors caps how many recovered tool-call errors NoErrors
-// lists in its Grade reasoning, so the reasoning stays a readable size in
-// score sinks (BigQuery rows, gate comments).
+// maxReportedToolErrors caps how many tool-call errors NoErrors and
+// OnlyToolCalls list in their Grade reasoning, so the reasoning stays a
+// readable size in score sinks (BigQuery rows, gate comments).
 const maxReportedToolErrors = 3
 
 // NoErrors returns an ObservableTraceCallback that validates the run reached a
@@ -120,10 +157,13 @@ const maxReportedToolErrors = 3
 // call fails. The terminal submit (agenttrace.ToolCall.Terminal) is not a
 // success for this count: committing a result is not work.
 //
-// One tool-call error class still fails: a call carrying
-// agenttrace.ErrUnknownTool named a tool the executor has no handler for. That
-// is a protocol violation rather than exploration, and no retry makes the call
-// legal, so it has no recovered reading.
+// An unknown-tool call, a call carrying agenttrace.ErrUnknownTool because it
+// named a tool the executor has no handler for, is a protocol violation the
+// executor rejects. On a completed run the agent worked past (no trace error,
+// at least one successful non-terminal call), it joins the recovered
+// transients: the run grades 1.0 with the error in the reasoning. It stays
+// fatal under any trace error, including an infrastructure-marked one, and
+// when no non-terminal call succeeded.
 //
 // Tool calls marked Recoverable stay out of that reasoning. They record a
 // designed correction loop, where a handler rejected the call but returned a
@@ -147,8 +187,8 @@ const maxReportedToolErrors = 3
 // fails. The reasoning carries the error text and the marked causes, so the
 // outage and the provider failure behind it still reach score sinks. An
 // ordinary requeue is not exempt and still fails.
-// The exemption never overrides an unknown-tool error: a trace that recorded
-// one fails even when the trace error is infrastructure-marked.
+// The exemption never overrides an unknown-tool error: a trace error,
+// infrastructure-marked or not, keeps a recorded unknown-tool call fatal.
 //
 // A suspended trace (Trace.Suspended) neither fails nor grades. Suspension is
 // an intentional mid-run halt awaiting an out-of-band signal, not a failure,
@@ -162,9 +202,9 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 		}
 		return false
 	}
-	// A call naming a tool the executor has no handler for is the one error
-	// class no retry can make legal. Matched through the sentinel, never the
-	// message: the tool name in it is model-controlled text.
+	// A call naming a tool the executor has no handler for. Matched through
+	// the sentinel, never the message: the tool name in it is
+	// model-controlled text.
 	isUnknownTool := func(tc *agenttrace.ToolCall[T]) bool {
 		return tc.Error != nil && !shouldIgnore(tc.Error) && errors.Is(tc.Error, agenttrace.ErrUnknownTool)
 	}
@@ -225,10 +265,6 @@ func NoErrors[T any](ignore ...func(error) bool) ObservableTraceCallback[T] {
 					succeeded++
 				}
 				continue
-			}
-			if isUnknownTool(tc) {
-				o.Fail(fmt.Sprintf("tool call %s error: got = %v, wanted = nil", tc.Name, tc.Error))
-				return
 			}
 			if !tc.Recoverable {
 				recovered = append(recovered, fmt.Sprintf("%s: %v", tc.Name, tc.Error))
