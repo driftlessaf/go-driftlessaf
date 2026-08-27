@@ -89,13 +89,13 @@ func TestValidatePR(t *testing.T) {
 			titleValid, descValid, issues := ValidatePR(tt.title, tt.body)
 
 			if titleValid != tt.wantTitleValid {
-				t.Errorf("titleValid: got %v, want %v", titleValid, tt.wantTitleValid)
+				t.Errorf("titleValid: got = %v, want = %v", titleValid, tt.wantTitleValid)
 			}
 			if descValid != tt.wantDescValid {
-				t.Errorf("descValid: got %v, want %v", descValid, tt.wantDescValid)
+				t.Errorf("descValid: got = %v, want = %v", descValid, tt.wantDescValid)
 			}
 			if len(issues) != tt.wantIssueCount {
-				t.Errorf("issue count: got %d, want %d", len(issues), tt.wantIssueCount)
+				t.Errorf("issue count: got = %d, want = %d", len(issues), tt.wantIssueCount)
 			}
 		})
 	}
