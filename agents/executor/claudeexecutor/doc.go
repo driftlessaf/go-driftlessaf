@@ -15,7 +15,7 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Basic Usage
 //
-// Create an executor with a client and prompt template:
+// Create an executor with a Messages service and prompt template:
 //
 //	client := anthropic.NewClient(
 //	    vertex.WithGoogleAuth(ctx, region, projectID, "https://www.googleapis.com/auth/cloud-platform"),
@@ -23,8 +23,8 @@ SPDX-License-Identifier: Apache-2.0
 //
 //	tmpl, _ := template.New("prompt").Parse("Analyze: {{.Input}}")
 //
-//	exec, err := claudeexecutor.New[*Request, *Response](
-//	    client,
+//	exec, err := claudeexecutor.NewWithMessages[*Request, *Response](
+//	    client.Messages,
 //	    tmpl,
 //	    claudeexecutor.WithModel[*Request, *Response]("claude-3-opus@20240229"),
 //	    claudeexecutor.WithMaxTokens[*Request, *Response](16000),
@@ -102,8 +102,8 @@ SPDX-License-Identifier: Apache-2.0
 // Extended thinking allows Claude to show its internal reasoning process before
 // responding. When enabled, reasoning blocks are captured in the trace:
 //
-//	exec, err := claudeexecutor.New[*Request, *Response](
-//	    client,
+//	exec, err := claudeexecutor.NewWithMessages[*Request, *Response](
+//	    client.Messages,
 //	    prompt,
 //	    claudeexecutor.WithThinking[*Request, *Response](2048), // 2048 token budget for thinking
 //	)

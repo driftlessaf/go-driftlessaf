@@ -54,7 +54,7 @@ const DefaultToolCallConcurrency = 10
 
 // executor provides the private implementation
 type executor[Request promptbuilder.Bindable, Response any] struct {
-	client               anthropic.Client
+	messages             anthropic.MessageService
 	modelName            string
 	systemInstructions   *promptbuilder.Prompt
 	prompt               *promptbuilder.Prompt
@@ -175,9 +175,21 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 // See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 const maxCacheBreakpoints = 4
 
-// New creates a new Executor with minimal required configuration
+// New creates a new Executor from an Anthropic client.
+//
+// Callers that already have a Messages service, including clients backed by a
+// provider-specific transport, should use NewWithMessages.
 func New[Request promptbuilder.Bindable, Response any](
 	client anthropic.Client,
+	prompt *promptbuilder.Prompt,
+	opts ...Option[Request, Response],
+) (Interface[Request, Response], error) {
+	return NewWithMessages(client.Messages, prompt, opts...)
+}
+
+// NewWithMessages creates a new Executor from an Anthropic Messages service.
+func NewWithMessages[Request promptbuilder.Bindable, Response any](
+	messages anthropic.MessageService,
 	prompt *promptbuilder.Prompt,
 	opts ...Option[Request, Response],
 ) (Interface[Request, Response], error) {
@@ -191,7 +203,7 @@ func New[Request promptbuilder.Bindable, Response any](
 	genaiMetrics := metrics.NewGenAI("chainguard.ai.agents")
 
 	e := &executor[Request, Response]{
-		client:              client,
+		messages:            messages,
 		modelName:           "claude-sonnet-4@20250514", // Default to Sonnet 4
 		provider:            ProviderVertex,             // matches NewClient's Vertex fallback; anthropicauth callers override
 		prompt:              prompt,
@@ -599,7 +611,7 @@ func (e *executor[Request, Response]) runConversation(
 
 		// Stream response with retry for transient errors
 		message, err := retry.RetryWithBackoff(ctx, turnCfg, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
-			stream := e.client.Messages.NewStreaming(ctx, params)
+			stream := e.messages.NewStreaming(ctx, params)
 			var msg anthropic.Message
 			for stream.Next() {
 				event := stream.Current()

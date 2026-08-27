@@ -86,8 +86,8 @@ func TestExecutorMarksTurnFailedOnAPIError(t *testing.T) {
 		t.Fatalf("NewPrompt: %v", err)
 	}
 
-	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
-		client,
+	exec, err := claudeexecutor.NewWithMessages[errCapRequest, errCapResponse](
+		client.Messages,
 		prompt,
 		// Single attempt: the failure is non-retryable, but pinning MaxRetries=0
 		// keeps the test fast even if the retryability classification regresses.
@@ -151,8 +151,8 @@ func TestExecutorRecordsTransientErrorsViaRetryCallback(t *testing.T) {
 	}
 
 	const maxRetries = 2
-	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
-		client,
+	exec, err := claudeexecutor.NewWithMessages[errCapRequest, errCapResponse](
+		client.Messages,
 		prompt,
 		claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(maxRetries)),
 		claudeexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),

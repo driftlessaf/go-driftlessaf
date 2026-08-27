@@ -60,8 +60,8 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	execOpts = append(execOpts, opts...) // Apply caller-provided options (e.g., enricher)
 	executors := make([]claudeexecutor.Interface[*Request, *Judgement], len(modePrompts))
 	for i, mp := range modePrompts {
-		executor, err := claudeexecutor.New[*Request, *Judgement](
-			client,
+		executor, err := claudeexecutor.NewWithMessages[*Request, *Judgement](
+			client.Messages,
 			mp.prompt,
 			execOpts...,
 		)

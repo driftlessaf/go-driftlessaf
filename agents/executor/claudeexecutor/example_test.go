@@ -10,7 +10,26 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
+
+// ExampleNewWithMessages demonstrates constructing an executor from the
+// Messages service shared by Anthropic SDK transports.
+func ExampleNewWithMessages() {
+	prompt, err := promptbuilder.NewPrompt("Respond to the request.")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	executor, err := claudeexecutor.NewWithMessages[promptbuilder.Noop, *struct{}](
+		anthropic.NewClient(option.WithAPIKey("example")).Messages,
+		prompt,
+	)
+	fmt.Println(executor != nil && err == nil)
+	// Output: true
+}
 
 // ExampleWithModel demonstrates configuring the Claude model used by the
 // executor.

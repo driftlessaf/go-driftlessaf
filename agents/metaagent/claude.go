@@ -119,7 +119,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		}))
 	}
 
-	executor, err := claudeexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
+	executor, err := claudeexecutor.NewWithMessages[Req, Resp](client.Messages, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude executor: %w", err)
 	}
@@ -142,7 +142,7 @@ func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, c
 // Resume implements Resumer by delegating to the concrete Claude executor's
 // resume capability. Resume is deliberately off the executor's exported
 // Interface (see claudeexecutor.Resumer), so the concrete type is reached by
-// type assertion; the executor built by claudeexecutor.New always satisfies
+// type assertion; the executor built by claudeexecutor.NewWithMessages always satisfies
 // it, making the ok-check a guard against a future non-resumable Interface
 // implementation being injected, not an expected runtime path.
 func (a *claudeAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.Envelope, answers map[string]string, callbacks CB) (Resp, error) {
