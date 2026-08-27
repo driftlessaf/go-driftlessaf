@@ -14,6 +14,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/internal/claudebackend"
+	agentmodel "chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
@@ -24,6 +25,10 @@ import (
 // is unset. It matches the historical meta-agent default; agents that need room
 // for extended thinking plus a tool call on the same turn raise it via Config.
 const defaultMaxTokens int64 = 32000
+
+// defaultClaudeTemperature is the meta-agent's sampling temperature on models
+// whose provider surface accepts sampling parameters.
+const defaultClaudeTemperature = 0.2
 
 // claudeAgent implements Agent using the Claude backend selected by
 // claudebackend.
@@ -53,11 +58,11 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
 		claudeexecutor.WithModel[Req, Resp](backend.ModelID),
 		claudeexecutor.WithProvider[Req, Resp](backend.Provider),
-		claudeexecutor.WithTemperature[Req, Resp](0.2),
 		claudeexecutor.WithMaxTokens[Req, Resp](cmp.Or(config.MaxTokens, defaultMaxTokens)),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.SubmitMetadata[Resp], error) { return submitTool, nil }),
 		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(backend.ModelID)}),
 	}
+	executorOpts = append(executorOpts, claudeTemperatureOptions[Req, Resp](backend.ModelID)...)
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, claudeexecutor.WithResultValidator[Req, Resp](v))
 	}
@@ -113,6 +118,18 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executor: executor,
 		config:   config,
 	}, nil
+}
+
+// claudeTemperatureOptions preserves the meta-agent's sampling behavior on
+// models that accept temperature while leaving adaptive-thinking models free
+// of a parameter their API rejects.
+func claudeTemperatureOptions[Req promptbuilder.Bindable, Resp any](modelID string) []claudeexecutor.Option[Req, Resp] {
+	if !agentmodel.Resolve(modelID).SamplingParams {
+		return nil
+	}
+	return []claudeexecutor.Option[Req, Resp]{
+		claudeexecutor.WithTemperature[Req, Resp](defaultClaudeTemperature),
+	}
 }
 
 func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, callbacks CB) (Resp, error) {
