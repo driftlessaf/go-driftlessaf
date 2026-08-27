@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"strings"
 
-	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
+	"chainguard.dev/driftlessaf/agents/internal/claudebackend"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
@@ -25,9 +25,8 @@ import (
 // for extended thinking plus a tool call on the same turn raise it via Config.
 const defaultMaxTokens int64 = 32000
 
-// claudeAgent implements Agent using Claude via Vertex AI (default) or the
-// Anthropic-direct first-party API + WIF backend when configured (see
-// anthropicauth).
+// claudeAgent implements Agent using the Claude backend selected by
+// claudebackend.
 type claudeAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	executor claudeexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
@@ -38,27 +37,9 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	projectID, region, model string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
-	// Backend selection is env-driven: ANY binary embedding this package —
-	// production reconcilers included, not just evals — switches from Vertex to
-	// Anthropic-direct when ANTHROPIC_PROFILE names a baked federation profile
-	// (loaded from ANTHROPIC_CONFIG_DIR). That is the intended per-deployment
-	// rollout lever (DEV-1839); anthropicauth logs which backend it picked.
-	authCfg, err := anthropicauth.ConfigFromEnv()
+	backend, err := claudebackend.Resolve(ctx, projectID, region, model)
 	if err != nil {
-		// A named-but-broken profile is a deploy error; failing here beats
-		// silently serving the Vertex zero-value backend.
-		return nil, fmt.Errorf("resolving anthropic auth config: %w", err)
-	}
-	client := anthropicauth.NewClient(ctx, projectID, region, authCfg)
-	// Stamp the true serving backend on metrics + traces: the same Claude
-	// model bills to GCP on Vertex and to the Anthropic workspace on the
-	// first-party API, so stored telemetry must not infer the backend from
-	// model-ID shape.
-	provider := claudeexecutor.ProviderVertex
-	if authCfg.Configured() {
-		// The first-party API rejects Vertex-style "name@version" model IDs.
-		model = anthropicauth.ModelID(model)
-		provider = claudeexecutor.ProviderAnthropic
+		return nil, err
 	}
 
 	// Build the terminal submit_result tool. The executor gates accepted
@@ -70,12 +51,12 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	}
 
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
-		claudeexecutor.WithModel[Req, Resp](model),
-		claudeexecutor.WithProvider[Req, Resp](provider),
+		claudeexecutor.WithModel[Req, Resp](backend.ModelID),
+		claudeexecutor.WithProvider[Req, Resp](backend.Provider),
 		claudeexecutor.WithTemperature[Req, Resp](0.2),
 		claudeexecutor.WithMaxTokens[Req, Resp](cmp.Or(config.MaxTokens, defaultMaxTokens)),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.SubmitMetadata[Resp], error) { return submitTool, nil }),
-		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
+		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(backend.ModelID)}),
 	}
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, claudeexecutor.WithResultValidator[Req, Resp](v))
@@ -123,7 +104,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		}))
 	}
 
-	executor, err := claudeexecutor.NewWithMessages[Req, Resp](client.Messages, config.UserPrompt, executorOpts...)
+	executor, err := claudeexecutor.NewWithMessages[Req, Resp](backend.Messages, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude executor: %w", err)
 	}
@@ -146,8 +127,8 @@ func (a *claudeAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, c
 // Resume implements Resumer by delegating to the concrete Claude executor's
 // resume capability. Resume is deliberately off the executor's exported
 // Interface (see claudeexecutor.Resumer), so the concrete type is reached by
-// type assertion; the executor built by claudeexecutor.NewWithMessages always satisfies
-// it, making the ok-check a guard against a future non-resumable Interface
+// type assertion; the executor built by claudeexecutor.NewWithMessages always
+// satisfies it, making the ok-check a guard against a non-resumable Interface
 // implementation being injected, not an expected runtime path.
 func (a *claudeAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.Envelope, answers map[string]string, callbacks CB) (Resp, error) {
 	var zero Resp
