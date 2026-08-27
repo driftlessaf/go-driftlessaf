@@ -336,6 +336,36 @@ func WithForceSubmitToolChoice[Request promptbuilder.Bindable, Response any](def
 	}
 }
 
+// WithRefusalNudge enables bounded in-loop recovery when a turn is refused by
+// Anthropic's safety classifier (Message.StopReason == "refusal") instead of
+// failing the run on the first refusal. Each refusal, up to maxRetries times,
+// appends a synthetic user-turn message naming the refusal category and
+// instructing the model to continue via tool calls rather than a
+// natural-language response (see refusalNudgeText), then retries the turn.
+// If a retried turn also refuses and the bound is exhausted, the run fails
+// with a *RefusalError carrying the category and Anthropic's explanation.
+//
+// Off by default (maxRetries must be >= 1 to enable): a refusal fails the
+// run immediately, as it always did, just now as a *RefusalError instead of
+// the generic "no content in Claude's response".
+//
+// This exists because a bare, single-turn completion over content that
+// addresses or manipulates an AI reviewer is refused by Anthropic's `cyber`
+// classifier far more often than the same content read inside a multi-turn
+// agentic tool loop — the loop framing itself is protective. The nudge leans
+// into that: it steers the model back toward tool calls without asking it to
+// explain or repeat whatever triggered the classifier, which would risk
+// tripping it again.
+func WithRefusalNudge[Request promptbuilder.Bindable, Response any](maxRetries int) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if maxRetries < 1 {
+			return fmt.Errorf("refusal nudge max retries must be at least 1, got %d", maxRetries)
+		}
+		e.refusalNudgeMaxRetries = maxRetries
+		return nil
+	}
+}
+
 // Provider identifies the serving backend a Claude request goes to. The same
 // Claude model can be served by two different providers with two different
 // bills: Google Vertex AI (GCP billing) or the Anthropic first-party API via

@@ -159,6 +159,13 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// response to the constraints its jsonschema struct tags declare; callers
 	// append semantic validators via WithResultValidator (repeatable).
 	resultValidators []callbacks.ResultValidator[Response]
+
+	// refusalNudgeMaxRetries bounds the number of times a turn refused by
+	// Anthropic's safety classifier (StopReason "refusal") is retried with a
+	// nudge instead of failing the run immediately. Zero (the default)
+	// disables retrying: a refusal fails the run right away, as a RefusalError.
+	// Set via WithRefusalNudge. See refusal.go.
+	refusalNudgeMaxRetries int
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -407,6 +414,11 @@ func (e *executor[Request, Response]) runConversation(
 	// finalizeNudged records whether the early-finalize instruction has
 	// already been injected, so it fires at most once per execution.
 	finalizeNudged := false
+	// refusalRetries counts turns retried after a safety-classifier refusal,
+	// bounded by refusalNudgeMaxRetries (see WithRefusalNudge). Zero when the
+	// option is unset, since the bound itself is zero and no retry is ever
+	// attempted.
+	refusalRetries := 0
 	// deferredGateResolved records whether the deferral gate tool (when one is
 	// configured via WithForceSubmitToolChoice) has been called at least once.
 	// While a gate tool is registered but unresolved, the first turn was left
@@ -677,6 +689,54 @@ func (e *executor[Request, Response]) runConversation(
 					"cache_read_tokens", cacheRead,
 					"cache_creation_tokens", cacheCreation)
 			}
+		}
+
+		// A refusal means Anthropic's safety classifier intervened, not that
+		// the model chose to produce no content — message.Content is always
+		// empty on this path, so it must be handled before the "no content"
+		// fallback below, which cannot distinguish the two. Without
+		// WithRefusalNudge (refusalNudgeMaxRetries == 0) this fails the run
+		// immediately, same as before, just with a *RefusalError carrying the
+		// category instead of the generic message. With the option enabled,
+		// up to refusalNudgeMaxRetries turns are retried with a nudge first.
+		if message.StopReason == anthropic.StopReasonRefusal {
+			refErr := refusalError(message.StopDetails)
+			clog.WarnContext(ctx, "Claude's safety classifier refused to respond",
+				"category", refErr.Category, "explanation", refErr.Explanation,
+				"turn", turn, "retry", refusalRetries, "max_retries", e.refusalNudgeMaxRetries)
+
+			// A retry is scheduled only while the loop has a turn left to
+			// send it on. A nudge appended on the final turn would never be
+			// sent: the loop would exit and report the generic max-turns
+			// error instead of the typed refusal returned below.
+			if refusalRetries < e.refusalNudgeMaxRetries && turn+1 < startTurn+turnBudget {
+				refusalRetries++
+				e.telemetry.RecordToolCall(ctx, "refusal_nudge")
+				// message.Content is empty, so message.ToParam() cannot stand in
+				// for the assistant's turn here — an assistant message with zero
+				// content blocks is itself an invalid request, which is exactly
+				// why the "no content" fallback below never appends it either.
+				// A placeholder assistant turn takes its place so the nudge that
+				// follows lands as a proper user turn, preserving the API's
+				// required user/assistant alternation, rather than landing right
+				// after the previous user turn with nothing in between.
+				params.Messages = append(params.Messages,
+					anthropic.MessageParam{
+						Role: anthropic.MessageParamRoleAssistant,
+						Content: []anthropic.ContentBlockParamUnion{
+							anthropic.NewTextBlock(refusedTurnPlaceholder),
+						},
+					},
+					anthropic.MessageParam{
+						Role: anthropic.MessageParamRoleUser,
+						Content: []anthropic.ContentBlockParamUnion{
+							anthropic.NewTextBlock(refusalNudgeText(refErr.Category)),
+						},
+					},
+				)
+				return response, false, nil
+			}
+			return response, true, refErr
 		}
 
 		// Strip degenerate empty text blocks (streamed with zero text_delta

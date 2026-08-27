@@ -105,6 +105,10 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
+	if config.RefusalNudgeMaxRetries > 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithRefusalNudge[Req, Resp](config.RefusalNudgeMaxRetries))
+	}
+
 	if config.SuspendToolName != "" {
 		name, desc := config.SuspendToolName, config.SuspendToolDescription
 		executorOpts = append(executorOpts, claudeexecutor.WithSuspendTool[Req, Resp](func() (anthropic.ToolParam, error) {

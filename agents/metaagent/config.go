@@ -104,6 +104,14 @@ type Config[Resp, CB any] struct {
 	// callbacks.ResultValidator.
 	ResultValidators []callbacks.ResultValidator[Resp]
 
+	// RefusalNudgeMaxRetries bounds how many times a turn refused by
+	// Anthropic's safety classifier is retried with a nudge instead of
+	// failing the run immediately. Zero (the default) leaves a refusal fatal,
+	// same as before this field existed, surfaced as a
+	// *claudeexecutor.RefusalError. Claude backend only; no effect on the
+	// Gemini or OpenAI backends. See claudeexecutor.WithRefusalNudge.
+	RefusalNudgeMaxRetries int
+
 	// SuspendToolName, when non-empty, enables the ask-a-friend suspend/resume
 	// capability: the backend advertises a held-out tool by this name, and when
 	// the model calls it, Execute returns a *checkpoint.Suspension (extract it
