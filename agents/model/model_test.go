@@ -60,6 +60,8 @@ func TestResolve(t *testing.T) {
 		// Backend routing shapes, including unknown ids.
 		{"gemini-2.5-flash", geminiBudget},
 		{"claude-fable-5", claudeAdaptive},
+		{"anthropic.claude-sonnet-5", claudeAdaptive},
+		{"anthropic.claude-sonnet-4-6", claudePreXHigh},
 		{"meta/llama-3.3-70b-instruct-maas", openAICompat},
 		{"mistralai/mistral-large", openAICompat},
 		{"gpt-4o", model.Info{}},

@@ -8,12 +8,12 @@ package claudeexecutor
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
@@ -127,12 +127,12 @@ func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt
 }
 
 // WithModel allows overriding the model name
-func WithModel[Request promptbuilder.Bindable, Response any](model string) Option[Request, Response] {
+func WithModel[Request promptbuilder.Bindable, Response any](modelName string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
-		if !strings.HasPrefix(model, "claude-") {
-			return fmt.Errorf("model %q does not appear to be a Claude model (expected claude-* format)", model)
+		if model.Resolve(modelName).Backend != model.BackendClaude {
+			return fmt.Errorf("model %q does not appear to be a Claude model (expected claude-* or anthropic.claude-* format)", modelName)
 		}
-		e.modelName = model
+		e.modelName = modelName
 		return nil
 	}
 }
@@ -367,12 +367,11 @@ func WithRefusalNudge[Request promptbuilder.Bindable, Response any](maxRetries i
 }
 
 // Provider identifies the serving backend a Claude request goes to. The same
-// Claude model can be served by two different providers with two different
-// bills: Google Vertex AI (GCP billing) or the Anthropic first-party API via
-// Workload Identity Federation (Anthropic workspace billing). The provider is
-// stamped on every metric (gen_ai.provider.name) and trace turn (system), so
-// stored telemetry distinguishes the backends explicitly instead of inferring
-// them from model-ID shape (the Vertex-only "@version" suffix).
+// Claude model can be served by Google Vertex AI, the Anthropic first-party
+// API, or AWS Bedrock Mantle. The provider is stamped on every metric
+// (gen_ai.provider.name) and trace turn (system), so stored telemetry
+// distinguishes the backends explicitly instead of inferring them from model
+// ID shape.
 type Provider string
 
 const (
@@ -380,35 +379,45 @@ const (
 	ProviderVertex Provider = "vertex"
 	// ProviderAnthropic is Claude served by the Anthropic first-party API.
 	ProviderAnthropic Provider = "anthropic"
+	// ProviderBedrock is Claude served by AWS Bedrock Mantle.
+	ProviderBedrock Provider = "bedrock"
 )
 
 // metricName is the OTel gen_ai.provider.name value for the backend, aligned
 // with the semconv well-known values the sibling executors use
 // (googleexecutor: "gcp.vertex_ai", openaiexecutor: "openai-compat").
 func (p Provider) metricName() string {
-	if p == ProviderAnthropic {
+	switch p {
+	case ProviderAnthropic:
 		return "anthropic"
+	case ProviderBedrock:
+		return "aws.bedrock"
+	default:
+		return "gcp.vertex_ai"
 	}
-	return "gcp.vertex_ai"
 }
 
 // traceSystem is the agenttrace system value for the backend.
 func (p Provider) traceSystem() string {
-	if p == ProviderAnthropic {
+	switch p {
+	case ProviderAnthropic:
 		return agenttrace.SystemAnthropic
+	case ProviderBedrock:
+		return agenttrace.SystemBedrock
+	default:
+		return agenttrace.SystemGoogleVertex
 	}
-	return agenttrace.SystemGoogleVertex
 }
 
 // WithProvider declares which backend serves this executor's requests, so
 // metrics and traces carry the true serving provider. Defaults to
 // ProviderVertex, which matches anthropicauth.NewClient's fallback when no
-// federation config is present; callers that construct a federation client
-// must pass ProviderAnthropic.
+// federation config is present. Callers must pass ProviderAnthropic for a
+// federation client or ProviderBedrock for a Bedrock Mantle client.
 func WithProvider[Request promptbuilder.Bindable, Response any](p Provider) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		switch p {
-		case ProviderVertex, ProviderAnthropic:
+		case ProviderVertex, ProviderAnthropic, ProviderBedrock:
 			e.provider = p
 			return nil
 		default:

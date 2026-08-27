@@ -53,6 +53,41 @@ func TestWithMaxTokens(t *testing.T) {
 	}
 }
 
+func TestWithModel(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := promptbuilder.NewPrompt("test prompt")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		model   string
+		wantErr bool
+	}{
+		{name: "canonical Claude ID", model: "claude-sonnet-5"},
+		{name: "AWS Bedrock Claude ID", model: "anthropic.claude-sonnet-5"},
+		{name: "other provider", model: "gemini-3-pro", wantErr: true},
+		{name: "empty", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := New[*testBindable, *testResponse](
+				anthropic.Client{},
+				prompt,
+				WithModel[*testBindable, *testResponse](tt.model),
+			)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("WithModel(%q) error = %v, wantErr %v", tt.model, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestWithMaxTurns(t *testing.T) {
 	t.Parallel()
 
@@ -225,6 +260,12 @@ func TestWithProvider(t *testing.T) {
 		wantMetricName:  "anthropic",
 		wantTraceSystem: "anthropic",
 	}, {
+		name:            "AWS Bedrock Mantle",
+		opts:            []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](ProviderBedrock)},
+		wantProvider:    ProviderBedrock,
+		wantMetricName:  "aws.bedrock",
+		wantTraceSystem: "aws.bedrock",
+	}, {
 		name:            "explicit vertex",
 		opts:            []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](ProviderVertex)},
 		wantProvider:    ProviderVertex,
@@ -232,7 +273,7 @@ func TestWithProvider(t *testing.T) {
 		wantTraceSystem: "google.vertex",
 	}, {
 		name:    "unknown provider errors",
-		opts:    []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](Provider("bedrock"))},
+		opts:    []Option[*testBindable, *testResponse]{WithProvider[*testBindable, *testResponse](Provider("unknown"))},
 		wantErr: true,
 	}}
 

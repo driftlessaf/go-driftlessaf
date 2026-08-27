@@ -17,8 +17,8 @@ import (
 type Backend string
 
 const (
-	// BackendClaude covers ids with the "claude-" prefix, served by the
-	// Anthropic API.
+	// BackendClaude covers ids with the "claude-" prefix and AWS Bedrock's
+	// corresponding "anthropic.claude-" prefix.
 	BackendClaude Backend = "claude"
 	// BackendGemini covers ids with the "gemini-" prefix, served by the
 	// Google Generative AI API.
@@ -128,6 +128,8 @@ func Resolve(id string) Info {
 	switch {
 	case strings.HasPrefix(lower, "gemini-"):
 		return geminiInfo(id)
+	case strings.HasPrefix(lower, "anthropic.claude-"):
+		return claudeInfo(strings.TrimPrefix(id, "anthropic."))
 	case strings.HasPrefix(lower, "claude-"):
 		return claudeInfo(id)
 	case strings.Contains(id, "/"):
