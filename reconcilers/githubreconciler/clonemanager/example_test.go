@@ -7,15 +7,21 @@ package clonemanager
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/google/go-github/v88/github"
 )
 
 func ExampleLease_MakeAndPushChanges() {
@@ -147,6 +153,114 @@ func ExampleWorktreeCallbacks() {
 	// Output:
 	// file content: name: example
 	// changes pushed successfully
+}
+
+// ExampleFetchFile reads a single file over the GitHub REST API using the client
+// the reconciler was handed. Unlike Lease, it does not clone, so a reconciler
+// that only reads one path avoids the tree transfer. A path that is absent at the
+// ref reports ErrFileNotFound, which callers typically treat as a normal state
+// rather than a failure.
+func ExampleFetchFile() {
+	ctx := context.Background()
+
+	// Stand in for api.github.com: serve one file and 404 everything else.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/contents/packages/example.yaml") {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found"}`)
+			return
+		}
+		fmt.Fprintf(w, `{"type":"file","encoding":"base64","path":"packages/example.yaml","sha":"a1b2c3","content":%q}`,
+			base64.StdEncoding.EncodeToString([]byte("name: example\n")))
+	}))
+	defer srv.Close()
+
+	// In a reconciler this is the *github.Client passed to the ReconcilerFunc.
+	gh, err := github.NewClient(github.WithEnterpriseURLs(srv.URL+"/api/v3/", srv.URL+"/api/v3/"))
+	if err != nil {
+		fmt.Println("error creating client:", err)
+		return
+	}
+
+	res := &githubreconciler.Resource{
+		Owner: "example",
+		Repo:  "repo",
+		Type:  githubreconciler.ResourceTypePath,
+		Ref:   "main",
+		Path:  "packages/example.yaml",
+	}
+
+	file, err := FetchFile(ctx, gh, res)
+	if err != nil {
+		fmt.Println("fetch error:", err)
+		return
+	}
+	fmt.Printf("%s at %s: %s", file.Path, file.SHA, file.Content)
+
+	res.Path = "packages/missing.yaml"
+	_, err = FetchFile(ctx, gh, res)
+	fmt.Println("missing file not found:", errors.Is(err, ErrFileNotFound))
+
+	// Output:
+	// packages/example.yaml at a1b2c3: name: example
+	// missing file not found: true
+}
+
+// ExampleFetchFileRef reads res.Path at a ref of the caller's choosing rather
+// than res.Ref. A reconciler that has to compare a file across refs -- the merge
+// base of a pull request against its head, say -- uses this instead of mutating
+// the resource it was handed.
+func ExampleFetchFileRef() {
+	ctx := context.Background()
+
+	// Stand in for api.github.com: serve content that depends on ?ref=.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := "name: example\nversion: 2\n"
+		if r.URL.Query().Get("ref") == "v1.0.0" {
+			body = "name: example\nversion: 1\n"
+		}
+		fmt.Fprintf(w, `{"type":"file","encoding":"base64","path":"packages/example.yaml","sha":"a1b2c3","content":%q}`,
+			base64.StdEncoding.EncodeToString([]byte(body)))
+	}))
+	defer srv.Close()
+
+	gh, err := github.NewClient(github.WithEnterpriseURLs(srv.URL+"/api/v3/", srv.URL+"/api/v3/"))
+	if err != nil {
+		fmt.Println("error creating client:", err)
+		return
+	}
+
+	res := &githubreconciler.Resource{
+		Owner: "example",
+		Repo:  "repo",
+		Type:  githubreconciler.ResourceTypePath,
+		Ref:   "main",
+		Path:  "packages/example.yaml",
+	}
+
+	// The tag, not res.Ref.
+	tagged, err := FetchFileRef(ctx, gh, res, "v1.0.0")
+	if err != nil {
+		fmt.Println("fetch error:", err)
+		return
+	}
+	fmt.Printf("at v1.0.0:\n%s", tagged.Content)
+
+	// res.Ref is untouched, so FetchFile still reads main.
+	head, err := FetchFile(ctx, gh, res)
+	if err != nil {
+		fmt.Println("fetch error:", err)
+		return
+	}
+	fmt.Printf("at %s:\n%s", res.Ref, head.Content)
+
+	// Output:
+	// at v1.0.0:
+	// name: example
+	// version: 1
+	// at main:
+	// name: example
+	// version: 2
 }
 
 func initExampleRepo() string {
