@@ -20,6 +20,10 @@ SPDX-License-Identifier: Apache-2.0
 //	    dispatcher.WithErrorIngressURI(ctx, ingressURI, "my-wq"),
 //	)
 //
+// When the trigger request contains a valid W3C traceparent header, emitted
+// error events include its trace and span IDs. Recorders can use those IDs to
+// correlate an error with logs and traces.
+//
 // When the ingress URL is empty the option is a no-op, making the feature
 // entirely opt-in.
 //

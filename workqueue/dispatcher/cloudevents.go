@@ -15,6 +15,7 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
 	"github.com/google/uuid"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/idtoken"
@@ -60,6 +61,12 @@ type DispatcherErrorEvent struct {
 	// this error. It allows distinguishing errors from different reconcilers
 	// that share the same key space.
 	ReconcilerName string `json:"reconcilerName,omitempty"`
+
+	// TraceID is the W3C trace ID from the dispatcher's OpenTelemetry context.
+	TraceID string `json:"traceID,omitempty"`
+
+	// SpanID is the W3C span ID from the dispatcher's OpenTelemetry context.
+	SpanID string `json:"spanID,omitempty"`
 }
 
 // cloudEventErrorEmitter publishes dispatch errors as CloudEvents.
@@ -81,7 +88,7 @@ func (e *cloudEventErrorEmitter) emit(ctx context.Context, ec ErrorContext) {
 	ce.SetTime(occurAt)
 	ce.SetExtension("action", ec.Action.String())
 
-	if err := ce.SetData(cloudevents.ApplicationJSON, &DispatcherErrorEvent{
+	payload := &DispatcherErrorEvent{
 		Key:                ec.Key,
 		Error:              ec.Err.Error(),
 		Attempts:           ec.Attempts,
@@ -90,7 +97,13 @@ func (e *cloudEventErrorEmitter) emit(ctx context.Context, ec ErrorContext) {
 		Infrastructure:     ec.Infrastructure,
 		OccurAt:            occurAt,
 		ReconcilerName:     e.workqueueName,
-	}); err != nil {
+	}
+	if spanContext := oteltrace.SpanContextFromContext(ctx); spanContext.IsValid() {
+		payload.TraceID = spanContext.TraceID().String()
+		payload.SpanID = spanContext.SpanID().String()
+	}
+
+	if err := ce.SetData(cloudevents.ApplicationJSON, payload); err != nil {
 		clog.ErrorContext(ctx, "failed to set dispatcher error event data",
 			"key", ec.Key, "error", err)
 		return

@@ -6,5 +6,7 @@
   {"name": "nonRetriableReason", "type": "STRING", "mode": "NULLABLE"},
   {"name": "infrastructure", "type": "BOOLEAN", "mode": "NULLABLE"},
   {"name": "occurAt", "type": "TIMESTAMP", "mode": "NULLABLE"},
-  {"name": "reconcilerName", "type": "STRING", "mode": "NULLABLE"}
+  {"name": "reconcilerName", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "traceID", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "spanID", "type": "STRING", "mode": "NULLABLE"}
 ]

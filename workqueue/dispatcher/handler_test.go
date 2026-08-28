@@ -7,6 +7,8 @@ package dispatcher
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -14,9 +16,63 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"chainguard.dev/driftlessaf/workqueue"
 )
+
+func randomSpanContext(t *testing.T) oteltrace.SpanContext {
+	t.Helper()
+
+	for {
+		var traceID oteltrace.TraceID
+		if _, err := cryptorand.Read(traceID[:]); err != nil {
+			t.Fatalf("generate trace ID: %v", err)
+		}
+		var spanID oteltrace.SpanID
+		if _, err := cryptorand.Read(spanID[:]); err != nil {
+			t.Fatalf("generate span ID: %v", err)
+		}
+		if spanContext := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+			TraceID: traceID,
+			SpanID:  spanID,
+		}); spanContext.IsValid() {
+			return spanContext
+		}
+	}
+}
+
+func TestRequestTraceContext(t *testing.T) {
+	headerSpanContext := randomSpanContext(t)
+	activeSpanContext := randomSpanContext(t)
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want oteltrace.SpanContext
+	}{{
+		name: "extracts header without active context",
+		ctx:  t.Context(),
+		want: headerSpanContext,
+	}, {
+		name: "preserves active context",
+		ctx:  oteltrace.ContextWithSpanContext(t.Context(), activeSpanContext),
+		want: activeSpanContext,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(tt.ctx, http.MethodPost, "/", nil)
+			req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", headerSpanContext.TraceID(), headerSpanContext.SpanID()))
+			got := oteltrace.SpanContextFromContext(requestTraceContext(req))
+			if got.TraceID() != tt.want.TraceID() {
+				t.Errorf("trace ID: got = %q, want = %q", got.TraceID(), tt.want.TraceID())
+			}
+			if got.SpanID() != tt.want.SpanID() {
+				t.Errorf("span ID: got = %q, want = %q", got.SpanID(), tt.want.SpanID())
+			}
+		})
+	}
+}
 
 // triggerCount reads the current value of the trigger counter for the given
 // result, so tests can assert deltas against the process-global metric.

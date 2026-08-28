@@ -79,16 +79,16 @@ func TestCloudEventErrorEmitter_EmitsEvent(t *testing.T) {
 		t.Fatal("no event received")
 	}
 	if received.Type() != ErrorEventType {
-		t.Errorf("type: got = %q, wanted = %q", received.Type(), ErrorEventType)
+		t.Errorf("type: got = %q, want = %q", received.Type(), ErrorEventType)
 	}
 	if received.Source() != wqName {
-		t.Errorf("source: got = %q, wanted = %q", received.Source(), wqName)
+		t.Errorf("source: got = %q, want = %q", received.Source(), wqName)
 	}
 	if received.Subject() != key {
-		t.Errorf("subject: got = %q, wanted = %q", received.Subject(), key)
+		t.Errorf("subject: got = %q, want = %q", received.Subject(), key)
 	}
 	if action, _ := received.Extensions()["action"].(string); action != "dead-lettered" {
-		t.Errorf("extension action: got = %q, wanted = %q", action, "dead-lettered")
+		t.Errorf("extension action: got = %q, want = %q", action, "dead-lettered")
 	}
 
 	var payload DispatcherErrorEvent
@@ -96,16 +96,16 @@ func TestCloudEventErrorEmitter_EmitsEvent(t *testing.T) {
 		t.Fatalf("unmarshal data: %v", err)
 	}
 	if payload.Key != key {
-		t.Errorf("payload.Key: got = %q, wanted = %q", payload.Key, key)
+		t.Errorf("payload.Key: got = %q, want = %q", payload.Key, key)
 	}
 	if payload.Error != "something broke" {
-		t.Errorf("payload.Error: got = %q, wanted = %q", payload.Error, "something broke")
+		t.Errorf("payload.Error: got = %q, want = %q", payload.Error, "something broke")
 	}
 	if payload.Attempts != 3 {
-		t.Errorf("payload.Attempts: got = %d, wanted = 3", payload.Attempts)
+		t.Errorf("payload.Attempts: got = %d, want = 3", payload.Attempts)
 	}
 	if payload.Action != "dead-lettered" {
-		t.Errorf("payload.Action: got = %q, wanted = %q", payload.Action, "dead-lettered")
+		t.Errorf("payload.Action: got = %q, want = %q", payload.Action, "dead-lettered")
 	}
 	if payload.OccurAt.IsZero() {
 		t.Error("payload.OccurAt: expected non-zero timestamp")
@@ -114,7 +114,13 @@ func TestCloudEventErrorEmitter_EmitsEvent(t *testing.T) {
 		t.Errorf("payload.OccurAt %v != CE envelope time %v", payload.OccurAt, received.Time())
 	}
 	if payload.ReconcilerName != wqName {
-		t.Errorf("payload.ReconcilerName: got = %q, wanted = %q", payload.ReconcilerName, wqName)
+		t.Errorf("payload.ReconcilerName: got = %q, want = %q", payload.ReconcilerName, wqName)
+	}
+	if payload.TraceID != "" {
+		t.Errorf("payload.TraceID: got = %q, want empty", payload.TraceID)
+	}
+	if payload.SpanID != "" {
+		t.Errorf("payload.SpanID: got = %q, want empty", payload.SpanID)
 	}
 }
 
@@ -153,14 +159,17 @@ func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
 	next := &mockKey{name: key, attempts: 10}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 
-	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+	spanContext := randomSpanContext(t)
+	h := Handler(q, 1, 0, func(context.Context, string, workqueue.Options) error {
 		return errors.New("boom")
 	}, 10, opt)
-
-	if err := future(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", nil)
+	req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", spanContext.TraceID(), spanContext.SpanID()))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got = %d, want = %d", rec.Code, http.StatusOK)
 	}
-	// future() already calls cfg.errors.drain() internally.
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -174,10 +183,10 @@ func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if payload.Key != key {
-		t.Errorf("payload.Key: got = %q, wanted = %q", payload.Key, key)
+		t.Errorf("payload.Key: got = %q, want = %q", payload.Key, key)
 	}
 	if payload.Action != "dead-lettered" {
-		t.Errorf("payload.Action: got = %q, wanted = %q", payload.Action, "dead-lettered")
+		t.Errorf("payload.Action: got = %q, want = %q", payload.Action, "dead-lettered")
 	}
 	if payload.OccurAt.IsZero() {
 		t.Error("payload.OccurAt: expected non-zero timestamp")
@@ -186,6 +195,12 @@ func TestCloudEventErrorEmitter_IntegrationWithDispatcher(t *testing.T) {
 		t.Errorf("payload.OccurAt %v != CE envelope time %v", payload.OccurAt, received.Time())
 	}
 	if payload.ReconcilerName != "integration-test" {
-		t.Errorf("payload.ReconcilerName: got = %q, wanted = %q", payload.ReconcilerName, "integration-test")
+		t.Errorf("payload.ReconcilerName: got = %q, want = %q", payload.ReconcilerName, "integration-test")
+	}
+	if payload.TraceID != spanContext.TraceID().String() {
+		t.Errorf("payload.TraceID: got = %q, want = %q", payload.TraceID, spanContext.TraceID())
+	}
+	if payload.SpanID != spanContext.SpanID().String() {
+		t.Errorf("payload.SpanID: got = %q, want = %q", payload.SpanID, spanContext.SpanID())
 	}
 }

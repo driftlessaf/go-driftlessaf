@@ -6,9 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 package dispatcher
 
 import (
+	"context"
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
 	"chainguard.dev/driftlessaf/workqueue"
@@ -62,9 +65,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	countTrigger(triggerDispatched)
 
-	if err := HandleAsync(r.Context(), h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry, h.opts...)(); err != nil {
+	if err := HandleAsync(requestTraceContext(r),
+		h.wq, h.concurrency, h.batchSize, h.f, h.maxRetry, h.opts...)(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func requestTraceContext(r *http.Request) context.Context {
+	if oteltrace.SpanContextFromContext(r.Context()).IsValid() {
+		return r.Context()
+	}
+	return propagation.TraceContext{}.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 }
