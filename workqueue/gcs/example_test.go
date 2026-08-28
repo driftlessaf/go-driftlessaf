@@ -7,6 +7,7 @@ package gcs_test
 
 import (
 	"fmt"
+	"time"
 
 	"chainguard.dev/driftlessaf/workqueue/gcs"
 )
@@ -31,4 +32,14 @@ func ExampleNewWorkQueue() {
 func ExampleRefreshInterval() {
 	fmt.Println("Default refresh interval:", gcs.RefreshInterval)
 	// Output: Default refresh interval: 5m0s
+}
+
+// ExampleWithScheduledWaitWarningThreshold demonstrates enabling the optional
+// structured warning for keys that wait too long after becoming eligible.
+func ExampleWithScheduledWaitWarningThreshold() {
+	const threshold = 30 * time.Minute
+	_ = gcs.NewWorkQueue(nil, 10, gcs.WithScheduledWaitWarningThreshold(threshold))
+
+	fmt.Println("Scheduled wait warning threshold:", threshold)
+	// Output: Scheduled wait warning threshold: 30m0s
 }

@@ -53,6 +53,13 @@ func WithIdentity(identity string) Option {
 	return func(w *wq) { w.identity = identity }
 }
 
+// WithScheduledWaitWarningThreshold emits a bounded structured warning when a
+// key is successfully claimed after waiting at least threshold from its
+// scheduled eligibility time. Non-positive values disable the warning.
+func WithScheduledWaitWarningThreshold(threshold time.Duration) Option {
+	return func(w *wq) { w.scheduledWaitWarningThreshold = threshold }
+}
+
 // NewWorkQueue creates a new GCS-backed workqueue.
 func NewWorkQueue(client ClientInterface, limit int, opts ...Option) workqueue.Interface {
 	w := &wq{
@@ -73,6 +80,9 @@ type wq struct {
 	name string
 	// identity is recorded as the owner of in-progress objects this queue starts.
 	identity string
+	// scheduledWaitWarningThreshold controls the durable high-wait log emitted
+	// after a queued key is successfully claimed. Non-positive means disabled.
+	scheduledWaitWarningThreshold time.Duration
 }
 
 // baseLabels returns the {service_name, revision_name, queue_name} labels that
@@ -259,11 +269,8 @@ func checkPreconditionFailedOk(err error) (bool, error) {
 	}
 	// If the error is a googleapi.Error, and it's a PreconditionFailed,
 	// then it's OK.
-	var gerr *googleapi.Error
-	if errors.As(err, &gerr) {
-		if gerr.Code == http.StatusPreconditionFailed {
-			return true, nil
-		}
+	if gerr, ok := errors.AsType[*googleapi.Error](err); ok && gerr.Code == http.StatusPreconditionFailed {
+		return true, nil
 	}
 	return false, err
 }
@@ -367,11 +374,12 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 			mTimeUntilEligible.With(labels).Observe(timeUntilEligible)
 
 			qd = append(qd, &queuedKey{
-				client:    w.client,
-				attrs:     objAttrs,
-				priority:  priority,
-				queueName: w.name,
-				identity:  w.identity,
+				client:                        w.client,
+				attrs:                         objAttrs,
+				priority:                      priority,
+				queueName:                     w.name,
+				identity:                      w.identity,
+				scheduledWaitWarningThreshold: w.scheduledWaitWarningThreshold,
 			})
 			sort.Slice(qd, func(i, j int) bool {
 				if lhs, rhs := qd[i].Priority(), qd[j].Priority(); lhs != rhs {
@@ -1089,6 +1097,9 @@ type queuedKey struct {
 	// identity is recorded as the owner of the in-progress object when this key
 	// is started; "" records nothing.
 	identity string
+	// scheduledWaitWarningThreshold is copied from the queue when enumerated.
+	// Non-positive means disabled.
+	scheduledWaitWarningThreshold time.Duration
 }
 
 // baseLabels returns the labels every metric emitted from this key carries.
@@ -1137,9 +1148,10 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 			scheduledStart = notBeforeTime
 		}
 	}
+	scheduledWait := time.Now().UTC().Sub(scheduledStart)
 	schedLabels := q.baseLabels()
 	schedLabels["priority_class"] = priorityClass(q.priority)
-	mWaitLatencyFromScheduled.With(schedLabels).Observe(time.Now().UTC().Sub(scheduledStart).Seconds())
+	mWaitLatencyFromScheduled.With(schedLabels).Observe(scheduledWait.Seconds())
 
 	// Create a copier to copy the source object, and then we will delete it
 	// upon success.
@@ -1187,6 +1199,7 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 		clog.WarnContextf(ctx, "Start: copy to in-progress failed for key %q: %v", key, err)
 		return nil, fmt.Errorf("Run() = %w", err)
 	}
+	logHighScheduledWait(ctx, scheduledWait, q.scheduledWaitWarningThreshold)
 	if err := q.client.Object(srcObject).Delete(ctx); err != nil {
 		// The in-progress object was already created by the copy above,
 		// so we proceed normally. The queued object will be cleaned up
@@ -1208,6 +1221,17 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	oip.startHeartbeat(ctx)
 
 	return oip, nil
+}
+
+func logHighScheduledWait(ctx context.Context, wait, threshold time.Duration) {
+	if threshold <= 0 || wait < threshold {
+		return
+	}
+	clog.WarnContext(ctx, "workqueue key exceeded its scheduled wait threshold",
+		"event", "workqueue_scheduled_wait_high",
+		"scheduled_wait_seconds", wait.Seconds(),
+		"threshold_seconds", threshold.Seconds(),
+	)
 }
 
 type deadLetteredKey struct {
