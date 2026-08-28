@@ -334,6 +334,27 @@ func TestHandleAsync_CallbackFails_NonRetriable(t *testing.T) {
 	}
 }
 
+func TestHandleAsync_CallbackFails_ImmediateDeadLetter(t *testing.T) {
+	next := &mockKey{name: "fail"}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	dl := workqueue.DeadLetterError(errors.New("permanent refusal"), "permanent")
+	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return dl
+	}, 0)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 1 {
+		t.Errorf("expected Deadletter to be called for a dead-letter error")
+	}
+	if next.complete != 0 {
+		t.Errorf("expected Complete NOT to be called: a dead-letter error must never be silently dropped")
+	}
+	if next.requeue != 0 {
+		t.Errorf("expected Requeue NOT to be called for a dead-letter error")
+	}
+}
+
 func TestHandleAsync_RespectsBatchSize(t *testing.T) {
 	keys := []*mockKey{{
 		name: "k1",

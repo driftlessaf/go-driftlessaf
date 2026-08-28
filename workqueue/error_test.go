@@ -517,3 +517,51 @@ func TestInfrastructureErrorNil(t *testing.T) {
 		t.Errorf("InfrastructureError(nil): got = %v, want = nil", err)
 	}
 }
+
+func TestDeadLetterError(t *testing.T) {
+	base := errors.New("permanent refusal")
+	err := DeadLetterError(base, "permanent")
+	if err == nil {
+		t.Fatal("Expected non-nil error")
+	}
+
+	d := GetDeadLetterDetails(err)
+	if d == nil {
+		t.Fatal("GetDeadLetterDetails returned nil for a DeadLetterError")
+	}
+	if got, want := d.GetMessage(), "permanent"; got != want {
+		t.Errorf("GetMessage() = %q, want %q", got, want)
+	}
+
+	// A DeadLetterError must ALSO read as non-retriable: a dispatcher
+	// predating the marker degrades to the drop path, never a retry loop.
+	if nrd := GetNonRetriableDetails(err); nrd == nil {
+		t.Error("GetNonRetriableDetails returned nil: an old dispatcher would retry a permanent refusal")
+	}
+
+	// The marker must survive the gRPC status round-trip the
+	// receiver→dispatcher hop performs.
+	s, _ := status.FromError(err)
+	if d := GetDeadLetterDetails(s.Err()); d == nil || d.GetMessage() != "permanent" {
+		t.Errorf("dead-letter marker did not survive the status round-trip: %v", d)
+	}
+}
+
+func TestDeadLetterErrorNil(t *testing.T) {
+	if err := DeadLetterError(nil, "unused"); err != nil {
+		t.Errorf("DeadLetterError(nil) = %v, want nil", err)
+	}
+}
+
+func TestGetDeadLetterDetailsIgnoresPlainNonRetriable(t *testing.T) {
+	err := NonRetriableError(errors.New("plain"), "no retry")
+	if d := GetDeadLetterDetails(err); d != nil {
+		t.Errorf("GetDeadLetterDetails(NonRetriableError) = %v, want nil (a plain non-retriable must drop, not dead-letter)", d)
+	}
+	if d := GetDeadLetterDetails(errors.New("bare")); d != nil {
+		t.Errorf("GetDeadLetterDetails(bare error) = %v, want nil", d)
+	}
+	if d := GetDeadLetterDetails(nil); d != nil {
+		t.Errorf("GetDeadLetterDetails(nil) = %v, want nil", d)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -36,6 +37,74 @@ func NonRetriableError(err error, reason string) error {
 	}
 
 	return s.Err()
+}
+
+// The immediate-dead-letter marker DeadLetterError attaches alongside
+// NoRetryDetails, identified among a status' ErrorInfo details by this
+// domain/reason pair. It is a separate detail (google.rpc.ErrorInfo) rather
+// than a field on NoRetryDetails so no generated code changes: both details
+// survive the receiver→dispatcher gRPC hop the same way.
+const (
+	deadLetterDomain = "workqueue.driftlessaf.chainguard.dev"
+	deadLetterReason = "DEAD_LETTER"
+)
+
+// DeadLetterError marks the error as non-retriable AND directs the dispatcher
+// to move the key to the dead-letter queue immediately, instead of completing
+// (dropping) it the way a plain NonRetriableError does. Use it for permanent
+// refusals that need an operator disposition: the dead-letter object is the
+// durable, enumerable signal (Enumerate, drain audits, requeue tooling) where
+// a dropped key leaves only a log line.
+//
+// The error also carries the same NoRetryDetails a NonRetriableError carries,
+// deliberately: a dispatcher predating the marker degrades to the drop path
+// (today's behavior), never to a retry loop.
+func DeadLetterError(err error, reason string) error {
+	if err == nil {
+		return nil
+	}
+	// We ignore ok - usually happens when the error is not a gRPC error.
+	s, _ := status.FromError(err)
+	s, derr := s.WithDetails(
+		&NoRetryDetails{Message: reason},
+		&errdetails.ErrorInfo{Reason: deadLetterReason, Domain: deadLetterDomain},
+	)
+	if derr != nil {
+		// This shouldn't generally happen since this should only happen if the details aren't a protobuf message,
+		// but if it does, we return the original error.
+		return err
+	}
+	return s.Err()
+}
+
+// GetDeadLetterDetails extracts the NoRetryDetails from an error carrying the
+// immediate-dead-letter marker (DeadLetterError). It returns nil for a plain
+// NonRetriableError and for errors carrying neither detail, so a dispatcher
+// checks it BEFORE GetNonRetriableDetails (which also matches a DeadLetterError).
+func GetDeadLetterDetails(err error) *NoRetryDetails {
+	if err == nil {
+		return nil
+	}
+	s, ok := status.FromError(err)
+	if !ok {
+		return nil
+	}
+	marked := false
+	var nrd *NoRetryDetails
+	for _, detail := range s.Details() {
+		switch d := detail.(type) {
+		case *errdetails.ErrorInfo:
+			if d.GetDomain() == deadLetterDomain && d.GetReason() == deadLetterReason {
+				marked = true
+			}
+		case *NoRetryDetails:
+			nrd = d
+		}
+	}
+	if !marked {
+		return nil
+	}
+	return nrd
 }
 
 // GetNonRetriableDetails extracts the NoRetryDetails from the error if it exists.

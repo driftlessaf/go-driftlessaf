@@ -226,6 +226,24 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 						Action:         ErrorDeadLettered,
 						Infrastructure: workqueue.IsInfrastructureError(err),
 					})
+				} else if d := workqueue.GetDeadLetterDetails(err); d != nil {
+					// Checked BEFORE the plain non-retriable branch: a
+					// DeadLetterError carries NoRetryDetails too (so an older
+					// dispatcher degrades to the drop, never a retry loop), and
+					// matching that first here would silently complete a key the
+					// callback asked to surface durably.
+					clog.InfoContextf(ctx, "Key %q is marked for immediate dead-letter - reason: %s, err: %v", oip.Name(), d.GetMessage(), err)
+					if err := oip.Deadletter(cleanupCtx); err != nil {
+						return fmt.Errorf("deadletter(after dead-letter error) = %w", err)
+					}
+					cfg.errors.emit(cleanupCtx, ErrorContext{
+						Key:                oip.Name(),
+						Err:                err,
+						Attempts:           attempts,
+						Action:             ErrorDeadLettered,
+						NonRetriableReason: d.GetMessage(),
+						Infrastructure:     workqueue.IsInfrastructureError(err),
+					})
 				} else if d := workqueue.GetNonRetriableDetails(err); d != nil {
 					clog.InfoContextf(ctx, "Key %q is marked as non-retriable - reason: %s, err: %v", oip.Name(), d.GetMessage(), err)
 					// If the error is marked as non-retriable, we should not requeue it.

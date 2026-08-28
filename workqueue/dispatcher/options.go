@@ -17,8 +17,10 @@ const (
 	// ErrorRequeued indicates the key was returned to the queue for retry.
 	ErrorRequeued ErrorAction = iota
 
-	// ErrorDeadLettered indicates the key exhausted its retry budget and was
-	// moved to the dead-letter queue.
+	// ErrorDeadLettered indicates the key was moved to the dead-letter queue:
+	// it exhausted its retry budget, or the callback asked for it directly
+	// (workqueue.DeadLetterError). NonRetriableReason is set only in the
+	// latter case.
 	ErrorDeadLettered
 
 	// ErrorDropped indicates the error was marked non-retriable and the key
@@ -54,8 +56,10 @@ type ErrorContext struct {
 	// Action is what the dispatcher did with the key after the error.
 	Action ErrorAction
 
-	// NonRetriableReason is set when Action is ErrorDropped, providing
-	// the reason the error was marked non-retriable.
+	// NonRetriableReason is set when Action is ErrorDropped (the reason the
+	// error was marked non-retriable) and when Action is ErrorDeadLettered
+	// because the callback asked for it directly (workqueue.DeadLetterError);
+	// it is empty for a dead-letter on retry exhaustion.
 	NonRetriableReason string
 
 	// Infrastructure indicates Err was classified as an infrastructure
