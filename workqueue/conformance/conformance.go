@@ -422,6 +422,45 @@ func TestSemantics(t *testing.T, ctor func(int) workqueue.Interface) {
 		})
 	})
 
+	// A requeue writes the priority back onto the key. Whatever representation a
+	// backend uses, it has to stay comparable with what Queue writes, or the
+	// max-wins merge below silently stops working for requeued keys.
+	ct.scenario("requeue keeps priority comparable for dedup", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		if err := wq.Queue(ctx, "foo", workqueue.Options{Priority: 50}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		// Requeue carrying the priority forward, as the dispatcher does for a
+		// reconciler-requested requeue.
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{
+			Priority: 50,
+			Delay:    time.Minute,
+		}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+
+		// A fresh event at a higher priority must still escalate the key.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{Priority: 100}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+
+		state, err := wq.Get(ctx, "foo")
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if state.Priority != 100 {
+			t.Errorf("Get(foo).Priority = %d after requeue at 50 then Queue at 100, want 100", state.Priority)
+		}
+	})
+
 	ct.scenario("simple not before", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
 		// Queue a key with NotBefore.
 		if err := wq.Queue(ctx, "foo", workqueue.Options{

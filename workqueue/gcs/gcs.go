@@ -134,8 +134,28 @@ const (
 	ownerMetadataKey          = "owner"
 )
 
-var noPriority = fmt.Sprintf("%08d", 0)
+var noPriority = formatPriority(0)
 var noNotBefore = time.Time{}.UTC().Format(time.RFC3339)
+
+// formatPriority renders a priority for object metadata, zero-padded to 8
+// digits so that every value we write has the same width. Always write
+// priorities through this, never through strconv: a mix of padded and unpadded
+// values in the same bucket makes a string compare of two priorities disagree
+// with a numeric one.
+func formatPriority(priority int64) string {
+	return fmt.Sprintf("%08d", priority)
+}
+
+// parsePriority reads a priority from object metadata, tolerating the unpadded
+// values written by older versions of this package. A missing or malformed
+// value reads as 0, the lowest priority.
+func parsePriority(s string) int64 {
+	priority, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return priority
+}
 
 // Queue implements workqueue.Interface.
 func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) error {
@@ -144,9 +164,7 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 	}).NewWriter(ctx)
 
 	writer.Metadata = map[string]string{
-		// Zero-pad the priority to 8 digits to ensure lexicographic ordering,
-		// so that we don't have to parse it to order things.
-		priorityMetadataKey: fmt.Sprintf("%08d", opts.Priority),
+		priorityMetadataKey: formatPriority(opts.Priority),
 	}
 	writer.Metadata[notBeforeMetadataKey] = opts.NotBefore.UTC().Format(time.RFC3339)
 	if opts.NotBeforeFloor {
@@ -188,8 +206,11 @@ func updateMetadata(ctx context.Context, client ClientInterface, key string, met
 		attrs.Metadata = make(map[string]string, 2)
 	}
 	update := false
-	// Always choose the highest priority.
-	if p, ok := attrs.Metadata[priorityMetadataKey]; !ok || p < metadata[priorityMetadataKey] {
+	// Always choose the highest priority. Compare numerically rather than as
+	// strings: buckets can still hold unpadded values written by older versions
+	// of this package, and "50" > "00000100" as a string compare would both
+	// block a legitimate escalation and let a requeue lower a queued twin.
+	if p, ok := attrs.Metadata[priorityMetadataKey]; !ok || parsePriority(p) < parsePriority(metadata[priorityMetadataKey]) {
 		clog.InfoContextf(ctx, "Updating %s priority from %q to %q", key, p, metadata[priorityMetadataKey])
 		attrs.Metadata[priorityMetadataKey] = metadata[priorityMetadataKey]
 		update = true
@@ -302,10 +323,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 		}
 		var priority int64
 		if p, ok := objAttrs.Metadata[priorityMetadataKey]; ok {
-			priority, err = strconv.ParseInt(p, 10, 64)
-			if err != nil {
-				clog.WarnContextf(ctx, "Failed to parse priority: %v", err)
-			}
+			priority = parsePriority(p)
 		}
 		// Only check for max attempts if this is not a deadlettered item
 		if !strings.HasPrefix(objAttrs.Name, deadLetterPrefix) {
@@ -452,9 +470,7 @@ func (w *wq) getAttrs(ctx context.Context, objKey string) (objectAttrs, error) {
 
 	var priority int64
 	if p, ok := attrs.Metadata[priorityMetadataKey]; ok {
-		if parsedPriority, err := strconv.ParseInt(p, 10, 64); err == nil {
-			priority = parsedPriority
-		}
+		priority = parsePriority(p)
 	}
 
 	var notBefore time.Time
@@ -719,7 +735,7 @@ func (o *inProgressKey) requeueOnce(ctx context.Context, opts workqueue.Options,
 		copier.Metadata[attemptsMetadataKey] = "0"
 		notBefore := time.Now().UTC().Add(opts.Delay)
 		copier.Metadata[notBeforeMetadataKey] = notBefore.Format(time.RFC3339)
-	} else if p, ok := copier.Metadata[priorityMetadataKey]; ok && p != noPriority {
+	} else if p, ok := copier.Metadata[priorityMetadataKey]; ok && parsePriority(p) != 0 {
 		// If no custom delay and priority is set, use the standard backoff
 		attempts, err := strconv.Atoi(copier.Metadata[attemptsMetadataKey])
 		if err != nil {
@@ -738,7 +754,7 @@ func (o *inProgressKey) requeueOnce(ctx context.Context, opts workqueue.Options,
 
 	// Update priority if specified
 	if opts.Priority != 0 {
-		copier.Metadata[priorityMetadataKey] = strconv.FormatInt(opts.Priority, 10)
+		copier.Metadata[priorityMetadataKey] = formatPriority(opts.Priority)
 	}
 
 	_, err := copier.Run(ctx)
