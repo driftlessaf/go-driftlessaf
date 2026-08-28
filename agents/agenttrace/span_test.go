@@ -153,7 +153,12 @@ func TestBuildRecordedSpan_ShapeAndHashStability(t *testing.T) {
 	})
 	trace := tracer.NewTrace(ctx, "prompt", WithAgentName("materializer"))
 
-	turn := trace.BeginTurn(0, "anthropic", "claude-sonnet-4-7")
+	turn := trace.BeginTurnWithAttribution(0, "claude-sonnet-4-7", Attribution{
+		ProviderName: "anthropic",
+		System:       "anthropic",
+		LogicalModel: "reasoning",
+		Protocol:     "anthropic-messages",
+	})
 	messages := []map[string]string{{"role": "user", "content": "hello"}}
 	if err := turn.RecordRequest(messages); err != nil {
 		t.Fatalf("RecordRequest: %v", err)
@@ -183,6 +188,21 @@ func TestBuildRecordedSpan_ShapeAndHashStability(t *testing.T) {
 	}
 	if span.PromptHash == "" {
 		t.Error("prompt_hash must be set")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(span.Metadata, &metadata); err != nil {
+		t.Fatalf("metadata not valid JSON: %v", err)
+	}
+	wantMetadata := map[string]string{
+		"provider":      "anthropic",
+		"system":        "anthropic",
+		"logical_model": "reasoning",
+		"protocol":      "anthropic-messages",
+	}
+	for key, want := range wantMetadata {
+		if got := metadata[key]; got != want {
+			t.Errorf("metadata[%q]: got %v, want %q", key, got, want)
+		}
 	}
 
 	// Hash must be stable across builds — same canonical bytes ⇒ same hash.

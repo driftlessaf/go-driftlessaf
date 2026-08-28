@@ -22,6 +22,20 @@ import (
 // Option is a functional option for configuring the executor.
 type Option[Request promptbuilder.Bindable, Response any] func(*executor[Request, Response]) error
 
+// WithAttribution sets explicit route attribution for metrics, turn spans,
+// and serialized trace turns. It is provider-extensible: callers supply the
+// canonical and legacy provider names directly, without registering them in
+// this executor. All fields are required.
+func WithAttribution[Request promptbuilder.Bindable, Response any](attribution agenttrace.Attribution) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if err := attribution.Validate(); err != nil {
+			return fmt.Errorf("invalid attribution: %w", err)
+		}
+		e.attribution = attribution
+		return nil
+	}
+}
+
 // WithModel sets the model name.
 func WithModel[Request promptbuilder.Bindable, Response any](model string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
@@ -40,6 +54,18 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 			return fmt.Errorf("temperature must be between 0.0 and 2.0, got %f", temp)
 		}
 		e.temperature = temp
+		e.omitTemperature = false
+		return nil
+	}
+}
+
+// WithoutTemperature omits sampling temperature from provider requests.
+// Explicit routes use this when their effective capabilities narrow sampling
+// parameters out, even if the logical model family normally supports them.
+// Direct and legacy construction continue to send the executor default.
+func WithoutTemperature[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.omitTemperature = true
 		return nil
 	}
 }
@@ -118,6 +144,8 @@ func WithProvider[Request promptbuilder.Bindable, Response any](provider Provide
 		switch provider {
 		case ProviderOpenAICompatible, ProviderBaseten:
 			e.provider = provider
+			e.attribution.ProviderName = provider.metricName()
+			e.attribution.System = provider.traceSystem()
 			return nil
 		default:
 			return fmt.Errorf("unknown provider %q", provider)

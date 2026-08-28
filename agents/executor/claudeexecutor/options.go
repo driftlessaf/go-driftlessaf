@@ -8,6 +8,7 @@ package claudeexecutor
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
@@ -22,6 +23,20 @@ import (
 
 // Option is a functional option for configuring the executor
 type Option[Request promptbuilder.Bindable, Response any] func(*executor[Request, Response]) error
+
+// WithAttribution sets explicit route attribution for metrics, turn spans,
+// and serialized trace turns. It is provider-extensible: callers supply the
+// canonical and legacy provider names directly, without registering them in
+// this executor. All fields are required.
+func WithAttribution[Request promptbuilder.Bindable, Response any](attribution agenttrace.Attribution) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if err := attribution.Validate(); err != nil {
+			return fmt.Errorf("invalid attribution: %w", err)
+		}
+		e.attribution = attribution
+		return nil
+	}
+}
 
 // WithMaxTokens sets the maximum tokens for responses
 func WithMaxTokens[Request promptbuilder.Bindable, Response any](tokens int64) Option[Request, Response] {
@@ -52,6 +67,19 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 		}
 		e.temperature = temp
 		e.temperatureSet = true
+		e.omitTemperature = false
+		return nil
+	}
+}
+
+// WithoutTemperature omits sampling temperature from provider requests.
+// Explicit routes use this when their effective capabilities narrow sampling
+// parameters out, even if the logical model family normally supports them.
+// Direct and legacy construction continue to send the executor default.
+func WithoutTemperature[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.omitTemperature = true
+		e.temperatureSet = false
 		return nil
 	}
 }
@@ -133,6 +161,28 @@ func WithModel[Request promptbuilder.Bindable, Response any](modelName string) O
 			return fmt.Errorf("model %q does not appear to be a Claude model (expected claude-* or anthropic.claude-* format)", modelName)
 		}
 		e.modelName = modelName
+		e.capabilityModelName = modelName
+		return nil
+	}
+}
+
+// WithRoutedModel atomically sets the exact provider model ID used on the wire
+// and the logical model ID used for capability decisions. Unlike WithModel,
+// the provider model ID is opaque: an explicit route has already validated
+// its protocol and exact provider mapping.
+func WithRoutedModel[Request promptbuilder.Bindable, Response any](providerModelID, logicalModelID string) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if strings.TrimSpace(providerModelID) == "" {
+			return errors.New("provider model ID cannot be empty")
+		}
+		if strings.TrimSpace(providerModelID) != providerModelID {
+			return fmt.Errorf("provider model ID %q cannot have leading or trailing whitespace", providerModelID)
+		}
+		if model.Resolve(logicalModelID).Backend != model.BackendClaude {
+			return fmt.Errorf("logical model %q does not identify a Claude capability family", logicalModelID)
+		}
+		e.modelName = providerModelID
+		e.capabilityModelName = logicalModelID
 		return nil
 	}
 }
@@ -419,6 +469,8 @@ func WithProvider[Request promptbuilder.Bindable, Response any](p Provider) Opti
 		switch p {
 		case ProviderVertex, ProviderAnthropic, ProviderBedrock:
 			e.provider = p
+			e.attribution.ProviderName = p.metricName()
+			e.attribution.System = p.traceSystem()
 			return nil
 		default:
 			return fmt.Errorf("unknown provider %q", p)

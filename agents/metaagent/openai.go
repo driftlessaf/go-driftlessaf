@@ -6,11 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -137,6 +139,50 @@ func newOpenAICompatibleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any
 	resourceLabels map[string]string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
+	return newOpenAIAgentWithClient[Req, Resp, CB](openAIAgentConstruction{
+		client:              client,
+		providerModelID:     model,
+		legacyProvider:      &provider,
+		tokenLimitParameter: tokenLimitParameter,
+		applyTemperature:    true,
+		maxTokens:           32768,
+		resourceLabels:      resourceLabels,
+	}, config)
+}
+
+type openAIAgentConstruction struct {
+	client              openai.Client
+	providerModelID     string
+	legacyProvider      *openaiexecutor.Provider
+	tokenLimitParameter openaiexecutor.TokenLimitParameter
+	applyTemperature    bool
+	maxTokens           int64
+	resourceLabels      map[string]string
+	attribution         *agenttrace.Attribution
+}
+
+func newRoutedOpenAIChatCompletionsAgent[Req promptbuilder.Bindable, Resp, CB any](
+	binding OpenAIChatCompletionsBinding,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
+	plan := binding.Plan()
+	maxTokens := cmp.Or(config.MaxTokens, int64(32768))
+	attribution := routedAttribution(plan)
+	return newOpenAIAgentWithClient[Req, Resp, CB](openAIAgentConstruction{
+		client:              binding.Client(),
+		providerModelID:     plan.ProviderModelID(),
+		tokenLimitParameter: binding.TokenLimitParameter(),
+		applyTemperature:    plan.Capabilities().SamplingParameters,
+		maxTokens:           maxTokens,
+		resourceLabels:      binding.ResourceLabels(),
+		attribution:         &attribution,
+	}, config)
+}
+
+func newOpenAIAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
+	construction openAIAgentConstruction,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
 	// Build the terminal submit_result tool. The executor gates accepted
 	// submissions on the configured result validators before committing them
 	// as the run's final result.
@@ -146,13 +192,22 @@ func newOpenAICompatibleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any
 	}
 
 	executorOpts := []openaiexecutor.Option[Req, Resp]{
-		openaiexecutor.WithModel[Req, Resp](model),
-		openaiexecutor.WithTemperature[Req, Resp](0.2),
-		openaiexecutor.WithMaxTokens[Req, Resp](32768),
-		openaiexecutor.WithProvider[Req, Resp](provider),
-		openaiexecutor.WithTokenLimitParameter[Req, Resp](tokenLimitParameter),
+		openaiexecutor.WithModel[Req, Resp](construction.providerModelID),
+		openaiexecutor.WithMaxTokens[Req, Resp](construction.maxTokens),
+		openaiexecutor.WithTokenLimitParameter[Req, Resp](construction.tokenLimitParameter),
 		openaiexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.SubmitMetadata[Resp], error) { return submitTool, nil }),
-		openaiexecutor.WithResourceLabels[Req, Resp](resourceLabels),
+		openaiexecutor.WithResourceLabels[Req, Resp](construction.resourceLabels),
+	}
+	if construction.legacyProvider != nil {
+		executorOpts = append(executorOpts, openaiexecutor.WithProvider[Req, Resp](*construction.legacyProvider))
+	}
+	if construction.applyTemperature {
+		executorOpts = append(executorOpts, openaiexecutor.WithTemperature[Req, Resp](0.2))
+	} else {
+		executorOpts = append(executorOpts, openaiexecutor.WithoutTemperature[Req, Resp]())
+	}
+	if construction.attribution != nil {
+		executorOpts = append(executorOpts, openaiexecutor.WithAttribution[Req, Resp](*construction.attribution))
 	}
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, openaiexecutor.WithResultValidator[Req, Resp](v))
@@ -181,7 +236,7 @@ func newOpenAICompatibleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any
 		executorOpts = append(executorOpts, openaiexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
-	exec, err := openaiexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
+	exec, err := openaiexecutor.New[Req, Resp](construction.client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating OpenAI-compatible executor: %w", err)
 	}

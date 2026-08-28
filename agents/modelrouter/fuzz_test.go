@@ -23,6 +23,7 @@ func FuzzNewRegistryNeverPanics(f *testing.F) {
 			},
 			Protocol:        modelrouter.Protocol(protocol),
 			ProviderModelID: providerModelID,
+			Attribution:     modelrouter.Attribution{ProviderName: "test.provider", LegacySystem: "test.provider"},
 		})
 		if err != nil {
 			return
@@ -46,6 +47,7 @@ func FuzzResolveNeverPanics(f *testing.F) {
 		Selection:       selection,
 		Protocol:        modelrouter.ProtocolAnthropicMessages,
 		ProviderModelID: "claude-sonnet-5",
+		Attribution:     modelrouter.Attribution{ProviderName: "gcp.vertex_ai", LegacySystem: "google.vertex"},
 	})
 	if err != nil {
 		f.Fatalf("NewRegistry() error = %v", err)

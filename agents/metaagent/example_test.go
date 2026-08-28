@@ -9,9 +9,12 @@ import (
 	"context"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
 	"chainguard.dev/driftlessaf/agents/metaagent"
+	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"github.com/openai/openai-go"
 )
 
 // request is an example request type that implements promptbuilder.Bindable.
@@ -50,6 +53,62 @@ func ExampleNew() {
 		fmt.Println("error:", err)
 	}
 	// Output: error: unsupported model: unknown-model (expected gemini-*, claude-*, or publisher/model format)
+}
+
+// ExampleNewRouted demonstrates explicit provider selection with a test-only
+// provider that reuses the OpenAI Chat Completions protocol.
+func ExampleNewRouted() {
+	const provider modelrouter.Provider = "example-provider"
+	selection := modelrouter.Selection{Provider: provider, LogicalModel: "example/model"}
+	routes, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection:       selection,
+		Protocol:        modelrouter.ProtocolOpenAIChatCompletions,
+		ProviderModelID: "opaque-deployment-id",
+		Attribution: modelrouter.Attribution{
+			ProviderName: "example.provider",
+			LegacySystem: "example.provider",
+		},
+		Capabilities: modelrouter.Capabilities{
+			ToolCalling:        true,
+			TerminalSubmission: true,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	adapters, err := metaagent.NewOpenAIChatCompletionsAdapterRegistry(
+		metaagent.OpenAIChatCompletionsRegistration{
+			Provider: provider,
+			Adapter: func(_ context.Context, plan modelrouter.Plan) (metaagent.OpenAIChatCompletionsBinding, error) {
+				// A real application prepares the SDK client with its provider-owned
+				// endpoint and credential here, outside the route plan.
+				return metaagent.NewOpenAIChatCompletionsBinding(
+					plan, openai.Client{}, openaiexecutor.TokenLimitMaxTokens, nil,
+				)
+			},
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	router, err := metaagent.NewRouter(routes, metaagent.AdapterRegistries{OpenAIChatCompletions: adapters})
+	if err != nil {
+		panic(err)
+	}
+	prompt, err := promptbuilder.NewPrompt("answer the query")
+	if err != nil {
+		panic(err)
+	}
+	agent, err := metaagent.NewRouted[*request](context.Background(), router, selection, metaagent.Config[*response, toolcall.EmptyTools]{
+		UserPrompt: prompt,
+		Tools:      toolcall.NewEmptyToolsProvider[*response](),
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(agent != nil)
+	// Output: true
 }
 
 // ExampleAgent_Execute demonstrates calling Execute on an Agent to run a request.

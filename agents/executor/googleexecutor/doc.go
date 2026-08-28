@@ -55,8 +55,11 @@ The executor supports Google AI function calling through the Metadata type:
 
 The executor supports various configuration options:
 
+  - WithAttribution: Set canonical and compatibility route attribution
   - WithModel: Set the Gemini model to use
+  - WithRoutedModel: Set separate provider-wire and logical capability model IDs
   - WithTemperature: Control response randomness (0.0-2.0)
+  - WithoutTemperature: Omit temperature when an explicit route disallows sampling parameters
   - WithMaxOutputTokens: Set maximum response length
   - WithSystemInstructions: Provide system-level instructions
   - WithUserPromptSuffix: Append a static prompt to the built user prompt

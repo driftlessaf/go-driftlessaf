@@ -189,6 +189,15 @@ func (lt *LLMTurn[T]) buildRecordedSpan() (RecordedSpan, bool) {
 		"turn_index":      lt.record.Index,
 		"system":          lt.record.System,
 	}
+	if lt.record.Provider != "" {
+		metaMap["provider"] = lt.record.Provider
+	}
+	if lt.record.LogicalModel != "" {
+		metaMap["logical_model"] = lt.record.LogicalModel
+	}
+	if lt.record.Protocol != "" {
+		metaMap["protocol"] = lt.record.Protocol
+	}
 	// Surface payload truncation alongside the OTel per-trace attribute set
 	// at trace.go (driftlessaf.payload.truncated = true) so BigQuery rows
 	// where the prompt or completion was truncated are identifiable without

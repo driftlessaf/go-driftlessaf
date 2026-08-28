@@ -57,6 +57,7 @@ type Route struct {
 	Selection       Selection
 	Protocol        Protocol
 	ProviderModelID string
+	Attribution     Attribution
 	Capabilities    Capabilities
 }
 
@@ -73,7 +74,16 @@ type Plan struct {
 	selection       Selection
 	protocol        Protocol
 	providerModelID string
+	attribution     Attribution
 	capabilities    Capabilities
+	resolution      *resolutionToken
+}
+
+// resolutionToken gives each validated route declaration a private provenance
+// identity. It is deliberately non-zero-sized because Go may coalesce
+// addresses of distinct zero-sized allocations.
+type resolutionToken struct {
+	validated byte
 }
 
 // NewRegistry validates routes and returns an immutable registry. Validation
@@ -137,13 +147,29 @@ func (p Plan) ProviderModelID() string {
 	return p.providerModelID
 }
 
+// Attribution returns the route's secret-free provider attribution.
+func (p Plan) Attribution() Attribution {
+	return p.attribution
+}
+
 // Capabilities returns a copy of the route's effective capabilities.
 func (p Plan) Capabilities() Capabilities {
 	return cloneCapabilities(p.capabilities)
 }
 
+// SameResolution reports whether p and other are copies of the exact same
+// route resolution. Separately constructed registries receive distinct
+// identities even when their declarations have equal field values. Adapters
+// use this to prove they returned the Plan they were given.
+func (p Plan) SameResolution(other Plan) bool {
+	return p.resolution != nil && p.resolution == other.resolution
+}
+
 // Validate verifies that p was produced by successful route resolution.
 func (p Plan) Validate() error {
+	if p.resolution == nil || p.resolution.validated != 1 {
+		return fmt.Errorf("%w: missing resolution provenance", ErrInvalidPlan)
+	}
 	if err := p.selection.Validate(); err != nil {
 		return fmt.Errorf("%w: selection: %w", ErrInvalidPlan, err)
 	}
@@ -151,6 +177,9 @@ func (p Plan) Validate() error {
 		return fmt.Errorf("%w: %w", ErrInvalidPlan, err)
 	}
 	if err := validateModelID("provider model ID", p.providerModelID); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPlan, err)
+	}
+	if err := p.attribution.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPlan, err)
 	}
 	if err := validateCapabilities(p.capabilities); err != nil {
@@ -182,6 +211,9 @@ func planRoute(route Route) (Plan, error) {
 	if err := validateModelID("provider model ID", route.ProviderModelID); err != nil {
 		return Plan{}, fmt.Errorf("%w: %w", ErrInvalidRoute, err)
 	}
+	if err := route.Attribution.Validate(); err != nil {
+		return Plan{}, fmt.Errorf("%w: %w", ErrInvalidRoute, err)
+	}
 	if err := validateCapabilities(route.Capabilities); err != nil {
 		return Plan{}, fmt.Errorf("%w: capabilities: %w", ErrInvalidRoute, err)
 	}
@@ -201,7 +233,9 @@ func planRoute(route Route) (Plan, error) {
 		selection:       route.Selection,
 		protocol:        route.Protocol,
 		providerModelID: route.ProviderModelID,
+		attribution:     route.Attribution,
 		capabilities:    composeCapabilities(route.Protocol, info, declaredCapabilities),
+		resolution:      &resolutionToken{validated: 1},
 	}, nil
 }
 

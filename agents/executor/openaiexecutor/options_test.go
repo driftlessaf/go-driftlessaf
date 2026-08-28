@@ -24,6 +24,30 @@ func (r *testRequest) Bind(p *promptbuilder.Prompt) (*promptbuilder.Prompt, erro
 
 type testResponse struct{}
 
+func TestWithAttribution(t *testing.T) {
+	t.Parallel()
+
+	want := agenttrace.Attribution{
+		ProviderName: "test.provider",
+		System:       "test.system",
+		LogicalModel: "test-model",
+		Protocol:     "test-protocol",
+	}
+	e := &executor[*testRequest, testResponse]{}
+	if err := WithAttribution[*testRequest, testResponse](want)(e); err != nil {
+		t.Fatalf("WithAttribution: %v", err)
+	}
+	if e.attribution != want {
+		t.Errorf("attribution = %#v, want %#v", e.attribution, want)
+	}
+
+	invalid := want
+	invalid.LogicalModel = " test-model"
+	if err := WithAttribution[*testRequest, testResponse](invalid)(e); err == nil {
+		t.Fatal("WithAttribution accepted a logical model with leading whitespace")
+	}
+}
+
 func TestWithModel(t *testing.T) {
 	t.Parallel()
 
@@ -165,7 +189,12 @@ func TestWithProvider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			e := &executor[*testRequest, testResponse]{}
+			e := &executor[*testRequest, testResponse]{
+				attribution: agenttrace.Attribution{
+					LogicalModel: "fast",
+					Protocol:     "openai-chat-completions",
+				},
+			}
 			err := WithProvider[*testRequest, testResponse](tt.provider)(e)
 			if tt.wantErr {
 				if err == nil {
@@ -181,6 +210,18 @@ func TestWithProvider(t *testing.T) {
 			}
 			if got := e.provider.traceSystem(); got != tt.wantTraceSystem {
 				t.Errorf("traceSystem: got = %q, want = %q", got, tt.wantTraceSystem)
+			}
+			if got := e.attribution.ProviderName; got != tt.wantMetricName {
+				t.Errorf("attribution provider: got = %q, want = %q", got, tt.wantMetricName)
+			}
+			if got := e.attribution.System; got != tt.wantTraceSystem {
+				t.Errorf("attribution system: got = %q, want = %q", got, tt.wantTraceSystem)
+			}
+			if got := e.attribution.LogicalModel; got != "fast" {
+				t.Errorf("logical model changed: got = %q, want = %q", got, "fast")
+			}
+			if got := e.attribution.Protocol; got != "openai-chat-completions" {
+				t.Errorf("protocol changed: got = %q, want = %q", got, "openai-chat-completions")
 			}
 		})
 	}
@@ -238,6 +279,12 @@ func TestNewDefaultsPreserveOpenAICompatibleBehavior(t *testing.T) {
 	}
 	if e.provider != ProviderOpenAICompatible {
 		t.Errorf("provider: got = %q, want = %q", e.provider, ProviderOpenAICompatible)
+	}
+	if got, want := e.attribution.ProviderName, "openai-compat"; got != want {
+		t.Errorf("default attribution provider: got = %q, want = %q", got, want)
+	}
+	if got, want := e.attribution.System, agenttrace.SystemOpenAI; got != want {
+		t.Errorf("default attribution system: got = %q, want = %q", got, want)
 	}
 	if e.tokenLimitParam != TokenLimitMaxCompletionTokens {
 		t.Errorf("tokenLimitParam: got = %q, want = %q", e.tokenLimitParam, TokenLimitMaxCompletionTokens)

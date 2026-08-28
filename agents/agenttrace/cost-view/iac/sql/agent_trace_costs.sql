@@ -4,18 +4,17 @@
 -- covers both serving paths. Each price row carries a pricing_provider field
 -- (NULL = any provider) and price resolution already filters on it, so making
 -- a model's rates diverge later is a one-line change per rate: add a
--- provider-specific row ('anthropic' | 'google.vertex') next to (or instead
+-- provider-specific row ('anthropic' | 'gcp.vertex_ai') next to (or instead
 -- of) its NULL row. Resolution picks exactly one row per tier — provider-
 -- specific rows win over NULL rows, and LIMIT 1 bounds the match — so a NULL
 -- row coexisting with provider-specific rows can never fan out the output or
 -- double-count cost.
 --
--- The provider column is the first non-empty turns[].system value, one of the
--- agenttrace System* constants: 'anthropic' | 'google.vertex' | 'openai'.
--- NULL for traces recorded before turns[].system existed and for non-LLM
--- traces with no turns; such rows only match provider-agnostic (NULL) price
--- rows. Note: 'openai' rows are served through Vertex AI until DEV-1849
--- (OpenAI-direct WIF) lands, so their spend is Vertex spend despite the label.
+-- The provider column prefers the first non-empty canonical turns[].provider
+-- value (gen_ai.provider.name), then falls back to the first non-empty
+-- turns[].system compatibility value for historical rows. NULL is retained
+-- for traces recorded before either field existed and for non-LLM traces with
+-- no turns; such rows only match provider-agnostic (NULL) price rows.
 --
 -- Costs are summed over the per-call records in turns[]. Each turn carries
 -- its own input / output / cache_read / cache_creation token counts, so
@@ -32,9 +31,12 @@
 -- never engages today; the logic is in place for Sonnet 4.5 / Gemini 2.5
 -- Pro / 3.x Pro traffic.
 --
--- Model matching tolerates the Vertex '@version' suffix (e.g.
--- claude-sonnet-4-6@default): every row's regex ends in (@.*)?$ so rows
--- written by either serving path resolve to the same pricing_model.
+-- Model matching prefers the first non-empty turns[].logical_model value and
+-- falls back to the trace-level model for historical rows. The logical model
+-- is stable across serving providers, while routed trace-level model values
+-- are exact provider IDs and may include provider-specific path prefixes.
+-- Historical matching still tolerates the Vertex '@version' suffix (e.g.
+-- claude-sonnet-4-6@default).
 --
 -- NULL semantics: when turns[] is empty (non-LLM traces from mcptool /
 -- mcp-auth-test, or any future caller that doesn't open a turn), all
@@ -86,39 +88,69 @@ WITH prices AS (
     STRUCT('gemini-3.5-flash',              'Standard',      NULL, 1.5e-6,  9.0e-6, 1.5e-7,  0.0)
   ])
 ),
-matched AS (
+attributed AS (
   SELECT
     t.*,
-    -- First non-empty turns[].system, in turn order. See header for values.
-    (
-      SELECT turn.system
-      FROM UNNEST(t.turns) AS turn WITH OFFSET AS turn_offset
-      WHERE turn.system IS NOT NULL AND turn.system != ''
-      ORDER BY turn_offset
-      LIMIT 1
+    -- Prefer canonical provider attribution, with a compatibility fallback for
+    -- rows written before turns[].provider was added. Read the canonical field
+    -- through JSON so this view can deploy before or after the source table's
+    -- nested turns schema learns about provider.
+    COALESCE(
+      (
+        SELECT NULLIF(JSON_VALUE(TO_JSON_STRING(turn), '$.provider'), '')
+        FROM UNNEST(t.turns) AS turn WITH OFFSET AS turn_offset
+        WHERE NULLIF(JSON_VALUE(TO_JSON_STRING(turn), '$.provider'), '') IS NOT NULL
+        ORDER BY turn_offset
+        LIMIT 1
+      ),
+      (
+        SELECT turn.system
+        FROM UNNEST(t.turns) AS turn WITH OFFSET AS turn_offset
+        WHERE turn.system IS NOT NULL AND turn.system != ''
+        ORDER BY turn_offset
+        LIMIT 1
+      )
     ) AS provider,
+    -- Prefer the provider-independent model identity for routed rows. Read it
+    -- through JSON so this view can deploy before or after the source table's
+    -- nested turns schema learns about logical_model.
+    COALESCE(
+      (
+        SELECT NULLIF(JSON_VALUE(TO_JSON_STRING(turn), '$.logical_model'), '')
+        FROM UNNEST(t.turns) AS turn WITH OFFSET AS turn_offset
+        WHERE NULLIF(JSON_VALUE(TO_JSON_STRING(turn), '$.logical_model'), '') IS NOT NULL
+        ORDER BY turn_offset
+        LIMIT 1
+      ),
+      NULLIF(t.model, '')
+    ) AS model_for_pricing
+  FROM `${project_id}.${dataset_id}.${source_table_id}` t
+),
+matched AS (
+  SELECT
+    a.* EXCEPT (model_for_pricing),
     CASE
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-fable-5(@.*)?$')                        THEN 'claude-fable-5'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-opus-4-8(@.*)?$')                       THEN 'claude-opus-4-8'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-opus-4-7(@.*)?$')                       THEN 'claude-opus-4-7'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-opus-4-6(@.*)?$')                       THEN 'claude-opus-4-6'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-opus-4-5(-20251101)?(@.*)?$')           THEN 'claude-opus-4-5'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-sonnet-4-6(@.*)?$')                     THEN 'claude-sonnet-4-6'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-sonnet-4-5(-20250929)?(@.*)?$')         THEN 'claude-sonnet-4-5'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(anthropic/)?claude-haiku-4-5(-20251001)?(@.*)?$')          THEN 'claude-haiku-4-5'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-2\.5-pro(@.*)?$')                          THEN 'gemini-2.5-pro'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-2\.5-flash(@.*)?$')                        THEN 'gemini-2.5-flash'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-2\.5-flash-lite(@.*)?$')                   THEN 'gemini-2.5-flash-lite'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-2\.0-flash(-001)?(@.*)?$')                 THEN 'gemini-2.0-flash'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-2\.0-flash-lite(-preview)?(-02-05)?(@.*)?$') THEN 'gemini-2.0-flash-lite'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-3-pro-preview(@.*)?$')                     THEN 'gemini-3-pro-preview'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-3\.1-pro-preview(-customtools)?(@.*)?$')   THEN 'gemini-3.1-pro-preview'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-3-flash-preview(@.*)?$')                   THEN 'gemini-3-flash-preview'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-3\.1-flash-lite-preview(@.*)?$')           THEN 'gemini-3.1-flash-lite-preview'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(t.model, '')), r'^(google/)?gemini-3\.5-flash(@.*)?$')                        THEN 'gemini-3.5-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-fable-5(@.*)?$')                        THEN 'claude-fable-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-8(@.*)?$')                       THEN 'claude-opus-4-8'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-7(@.*)?$')                       THEN 'claude-opus-4-7'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-6(@.*)?$')                       THEN 'claude-opus-4-6'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-5(-20251101)?(@.*)?$')           THEN 'claude-opus-4-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-4-6(@.*)?$')                     THEN 'claude-sonnet-4-6'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-4-5(-20250929)?(@.*)?$')         THEN 'claude-sonnet-4-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-haiku-4-5(-20251001)?(@.*)?$')          THEN 'claude-haiku-4-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-pro(@.*)?$')                          THEN 'gemini-2.5-pro'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-flash(@.*)?$')                        THEN 'gemini-2.5-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-flash-lite(@.*)?$')                   THEN 'gemini-2.5-flash-lite'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.0-flash(-001)?(@.*)?$')                 THEN 'gemini-2.0-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.0-flash-lite(-preview)?(-02-05)?(@.*)?$') THEN 'gemini-2.0-flash-lite'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3-pro-preview(@.*)?$')                     THEN 'gemini-3-pro-preview'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.1-pro-preview(-customtools)?(@.*)?$')   THEN 'gemini-3.1-pro-preview'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3-flash-preview(@.*)?$')                   THEN 'gemini-3-flash-preview'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.1-flash-lite-preview(@.*)?$')           THEN 'gemini-3.1-flash-lite-preview'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.5-flash(@.*)?$')                        THEN 'gemini-3.5-flash'
       ELSE NULL
     END AS pricing_model
-  FROM `${project_id}.${dataset_id}.${source_table_id}` t
+  FROM attributed a
 ),
 priced AS (
   SELECT

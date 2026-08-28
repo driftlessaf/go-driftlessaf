@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/internal/claudebackend"
@@ -46,7 +47,48 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	if err != nil {
 		return nil, err
 	}
+	return newClaudeAgentWithMessages[Req, Resp, CB](claudeAgentConstruction{
+		messages:         backend.Messages,
+		providerModelID:  backend.ModelID,
+		logicalModelID:   backend.ModelID,
+		legacyProvider:   &backend.Provider,
+		applyTemperature: agentmodel.Resolve(backend.ModelID).SamplingParams,
+		resourceLabels:   map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(backend.ModelID)},
+	}, config)
+}
 
+type claudeAgentConstruction struct {
+	messages         anthropic.MessageService
+	providerModelID  string
+	logicalModelID   string
+	routed           bool
+	legacyProvider   *claudeexecutor.Provider
+	applyTemperature bool
+	resourceLabels   map[string]string
+	attribution      *agenttrace.Attribution
+}
+
+func newRoutedClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
+	binding AnthropicMessagesBinding,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
+	plan := binding.Plan()
+	attribution := routedAttribution(plan)
+	return newClaudeAgentWithMessages[Req, Resp, CB](claudeAgentConstruction{
+		messages:         binding.Messages(),
+		providerModelID:  plan.ProviderModelID(),
+		logicalModelID:   plan.LogicalModel(),
+		routed:           true,
+		applyTemperature: plan.Capabilities().SamplingParameters,
+		resourceLabels:   binding.ResourceLabels(),
+		attribution:      &attribution,
+	}, config)
+}
+
+func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
+	construction claudeAgentConstruction,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
 	// Build the terminal submit_result tool. The executor gates accepted
 	// submissions on the configured result validators before committing them
 	// as the run's final result.
@@ -55,14 +97,27 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("building submit tool: %w", err)
 	}
 
+	modelOption := claudeexecutor.WithModel[Req, Resp](construction.providerModelID)
+	if construction.routed {
+		modelOption = claudeexecutor.WithRoutedModel[Req, Resp](construction.providerModelID, construction.logicalModelID)
+	}
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
-		claudeexecutor.WithModel[Req, Resp](backend.ModelID),
-		claudeexecutor.WithProvider[Req, Resp](backend.Provider),
+		modelOption,
 		claudeexecutor.WithMaxTokens[Req, Resp](cmp.Or(config.MaxTokens, defaultMaxTokens)),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.SubmitMetadata[Resp], error) { return submitTool, nil }),
-		claudeexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(backend.ModelID)}),
+		claudeexecutor.WithResourceLabels[Req, Resp](construction.resourceLabels),
 	}
-	executorOpts = append(executorOpts, claudeTemperatureOptions[Req, Resp](backend.ModelID)...)
+	if construction.legacyProvider != nil {
+		executorOpts = append(executorOpts, claudeexecutor.WithProvider[Req, Resp](*construction.legacyProvider))
+	}
+	if construction.applyTemperature {
+		executorOpts = append(executorOpts, claudeexecutor.WithTemperature[Req, Resp](defaultClaudeTemperature))
+	} else {
+		executorOpts = append(executorOpts, claudeexecutor.WithoutTemperature[Req, Resp]())
+	}
+	if construction.attribution != nil {
+		executorOpts = append(executorOpts, claudeexecutor.WithAttribution[Req, Resp](*construction.attribution))
+	}
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, claudeexecutor.WithResultValidator[Req, Resp](v))
 	}
@@ -109,7 +164,7 @@ func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 		}))
 	}
 
-	executor, err := claudeexecutor.NewWithMessages[Req, Resp](backend.Messages, config.UserPrompt, executorOpts...)
+	executor, err := claudeexecutor.NewWithMessages[Req, Resp](construction.messages, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude executor: %w", err)
 	}

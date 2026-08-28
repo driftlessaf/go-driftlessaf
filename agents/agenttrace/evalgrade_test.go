@@ -156,6 +156,37 @@ func TestPayloadsEnabled(t *testing.T) {
 	}
 }
 
+func TestTurnRouteAttribution(t *testing.T) {
+	sr := setupRecorder(t)
+
+	trace, done := StartTrace[string](t.Context(), "route-aware request")
+	turn := trace.BeginTurnWithAttribution(0, "publishers/google/models/gemini-2.5-flash", Attribution{
+		ProviderName: "gcp.vertex_ai",
+		System:       SystemGoogleVertex,
+		LogicalModel: "fast",
+		Protocol:     "google-genai",
+	})
+	turn.End()
+	done("done", nil)
+
+	span := findSpan(sr.Ended(), "chat publishers/google/models/gemini-2.5-flash")
+	if span == nil {
+		t.Fatal("attributed chat turn span not found")
+	}
+	want := map[string]any{
+		"gen_ai.operation.name":     "chat",
+		"gen_ai.provider.name":      "gcp.vertex_ai",
+		"gen_ai.request.model":      "publishers/google/models/gemini-2.5-flash",
+		"gen_ai.system":             "google.vertex",
+		"driftlessaf.model.logical": "fast",
+		"driftlessaf.protocol":      "google-genai",
+		"driftlessaf.turn.index":    int64(0),
+	}
+	if diff := cmp.Diff(want, attrsAsMap(span), anyValue); diff != "" {
+		t.Errorf("turn attrs (-want +got):\n%s", diff)
+	}
+}
+
 // TestPayloadsDisabled verifies that with no WithPayloadsEnabled opt-in on
 // the ctx, the root span has no prompt/completion payload attributes —
 // including agent.prompt, which carries the identical rendered prompt and

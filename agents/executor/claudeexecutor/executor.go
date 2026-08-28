@@ -56,12 +56,14 @@ const DefaultToolCallConcurrency = 10
 type executor[Request promptbuilder.Bindable, Response any] struct {
 	messages             anthropic.MessageService
 	modelName            string
+	capabilityModelName  string
 	systemInstructions   *promptbuilder.Prompt
 	prompt               *promptbuilder.Prompt
 	maxTokens            int64
 	maxTurns             int // maximum conversation turns before aborting
 	temperature          float64
 	temperatureSet       bool                                // true when WithTemperature was applied; lets us warn if it gets dropped for a model that doesn't accept sampling params
+	omitTemperature      bool                                // true when an explicit route narrows sampling parameters out
 	thinkingBudgetTokens *int64                              // nil = disabled, non-nil = enabled with budget
 	effort               anthropic.OutputConfigEffort        // "" = model default (high); set via WithEffort to tune reasoning depth / token spend
 	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
@@ -70,6 +72,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
 	provider             Provider                            // serving backend: Vertex AI or the Anthropic first-party API
+	attribution          agenttrace.Attribution              // canonical and compatibility route attribution
 
 	// cacheControl enables Anthropic prompt caching. When true, the executor places
 	// cache breakpoints on tool definitions and the system prompt so the API can skip
@@ -212,7 +215,12 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 	e := &executor[Request, Response]{
 		messages:            messages,
 		modelName:           "claude-sonnet-4@20250514", // Default to Sonnet 4
+		capabilityModelName: "claude-sonnet-4@20250514", // Same identity on the legacy path
 		provider:            ProviderVertex,             // matches NewClient's Vertex fallback; anthropicauth callers override
+		attribution: agenttrace.Attribution{
+			ProviderName: ProviderVertex.metricName(),
+			System:       ProviderVertex.traceSystem(),
+		},
 		prompt:              prompt,
 		maxTokens:           8192,                       // Default max tokens
 		maxTurns:            DefaultMaxTurns,            // Default max conversation turns
@@ -257,7 +265,7 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 
 	// The recorder is built after options so it captures the final model,
 	// provider, and resource labels.
-	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.provider.metricName(), e.resourceLabels, responseCodeFromError)
+	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.attribution.ProviderName, e.resourceLabels, responseCodeFromError)
 
 	return e, nil
 }
@@ -325,7 +333,7 @@ func (e *executor[Request, Response]) Execute(
 	// already carries the resolved level; the log preserves the operator's
 	// signal that their configured level was adjusted for this model.
 	if e.effort != "" {
-		switch resolved := effortForModel(e.modelName, e.effort); resolved {
+		switch resolved := effortForModel(e.capabilityModelName, e.effort); resolved {
 		case e.effort:
 		case "":
 			clog.WarnContext(ctx, "dropping effort: not supported by this model",
@@ -343,7 +351,7 @@ func (e *executor[Request, Response]) Execute(
 	// content by default).
 	// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#extended-thinking-budgets-removed
 	if e.thinkingBudgetTokens != nil {
-		if supportsExtendedThinkingBudget(e.modelName) {
+		if supportsExtendedThinkingBudget(e.capabilityModelName) {
 			params.Thinking = anthropic.ThinkingConfigParamUnion{
 				OfEnabled: &anthropic.ThinkingConfigEnabledParam{
 					BudgetTokens: *e.thinkingBudgetTokens,
@@ -585,7 +593,7 @@ func (e *executor[Request, Response]) runConversation(
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
-		llmTurn := trace.BeginTurn(turn, e.provider.traceSystem(), e.modelName)
+		llmTurn := trace.BeginTurnWithAttribution(turn, e.modelName, e.attribution)
 		defer func() {
 			// A suspension is an intentional halt, not a failure: the shared
 			// carve-out keeps the turn from being marked Failed (the trace-level
@@ -1079,14 +1087,16 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// so callers don't need model-aware logic.
 	// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
 	dropTemperatureWarn := false
-	if supportsSamplingParams(e.modelName) {
-		params.Temperature = anthropic.Float(e.temperature)
-		// Extended thinking requires temperature=1.0.
+	switch {
+	case supportsSamplingParams(e.capabilityModelName) && e.thinkingBudgetTokens != nil:
+		// Extended thinking requires temperature=1.0. This protocol constraint
+		// still applies when an explicit route narrows caller-configurable
+		// sampling parameters out.
 		// See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
-		if e.thinkingBudgetTokens != nil {
-			params.Temperature = anthropic.Float(1.0)
-		}
-	} else if e.temperatureSet {
+		params.Temperature = anthropic.Float(1.0)
+	case supportsSamplingParams(e.capabilityModelName) && !e.omitTemperature:
+		params.Temperature = anthropic.Float(e.temperature)
+	case e.temperatureSet:
 		dropTemperatureWarn = true
 	}
 
@@ -1097,7 +1107,7 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// the extended-thinking budget (Opus 4.7+, Sonnet 5). The configured level is
 	// resolved against the model's supported set (see effortForModel) so callers
 	// don't need model-aware logic; Execute logs when the resolution is not exact.
-	if resolved := effortForModel(e.modelName, e.effort); resolved != "" {
+	if resolved := effortForModel(e.capabilityModelName, e.effort); resolved != "" {
 		params.OutputConfig.Effort = resolved
 	}
 

@@ -36,7 +36,10 @@
     "fields": [
       {"name": "index", "type": "INTEGER", "mode": "NULLABLE"},
       {"name": "model", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "provider", "type": "STRING", "mode": "NULLABLE"},
       {"name": "system", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "logical_model", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "protocol", "type": "STRING", "mode": "NULLABLE"},
       {"name": "input_tokens", "type": "INTEGER", "mode": "NULLABLE"},
       {"name": "output_tokens", "type": "INTEGER", "mode": "NULLABLE"},
       {"name": "cache_read_tokens", "type": "INTEGER", "mode": "NULLABLE"},

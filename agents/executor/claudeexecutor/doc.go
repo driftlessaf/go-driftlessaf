@@ -62,9 +62,12 @@ SPDX-License-Identifier: Apache-2.0
 // # Options
 //
 // The executor supports several configuration options:
+//   - WithAttribution: Set canonical and compatibility route attribution
 //   - WithModel: Override the default model (defaults to claude-sonnet-4@20250514)
-//   - WithMaxTokens: Set maximum response tokens (defaults to 8192, max 32000)
+//   - WithRoutedModel: Set separate provider-wire and logical capability model IDs
+//   - WithMaxTokens: Set maximum response tokens (defaults to 8192, max 128000)
 //   - WithTemperature: Set response temperature (defaults to 0.1)
+//   - WithoutTemperature: Omit temperature when an explicit route disallows sampling parameters
 //   - WithSystemInstructions: Provide system-level instructions
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)

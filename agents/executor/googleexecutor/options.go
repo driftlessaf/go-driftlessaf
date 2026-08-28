@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -24,6 +25,20 @@ import (
 // Option is a functional option for configuring an executor
 type Option[Request promptbuilder.Bindable, Response any] func(*executor[Request, Response]) error
 
+// WithAttribution sets explicit route attribution for metrics, turn spans,
+// and serialized trace turns. It is provider-extensible: callers supply the
+// canonical and legacy provider names directly, without registering them in
+// this executor. All fields are required.
+func WithAttribution[Request promptbuilder.Bindable, Response any](attribution agenttrace.Attribution) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if err := attribution.Validate(); err != nil {
+			return fmt.Errorf("invalid attribution: %w", err)
+		}
+		e.attribution = attribution
+		return nil
+	}
+}
+
 // WithModel sets the model to use for generation
 func WithModel[Request promptbuilder.Bindable, Response any](model string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
@@ -31,6 +46,28 @@ func WithModel[Request promptbuilder.Bindable, Response any](model string) Optio
 			return fmt.Errorf("model %q does not appear to be a Gemini model (expected gemini-* format)", model)
 		}
 		e.model = model
+		e.capabilityModel = model
+		return nil
+	}
+}
+
+// WithRoutedModel atomically sets the exact provider model ID used on the wire
+// and the logical model ID used for capability decisions. Unlike WithModel,
+// the provider model ID is opaque: an explicit route has already validated
+// its protocol and exact provider mapping.
+func WithRoutedModel[Request promptbuilder.Bindable, Response any](providerModelID, logicalModelID string) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if strings.TrimSpace(providerModelID) == "" {
+			return errors.New("provider model ID cannot be empty")
+		}
+		if strings.TrimSpace(providerModelID) != providerModelID {
+			return fmt.Errorf("provider model ID %q cannot have leading or trailing whitespace", providerModelID)
+		}
+		if model.Resolve(logicalModelID).Backend != model.BackendGemini {
+			return fmt.Errorf("logical model %q does not identify a Gemini capability family", logicalModelID)
+		}
+		e.model = providerModelID
+		e.capabilityModel = logicalModelID
 		return nil
 	}
 }
@@ -46,6 +83,18 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temperature f
 			return fmt.Errorf("temperature must be between 0.0 and 2.0, got %f", temperature)
 		}
 		e.temperature = temperature
+		e.omitTemperature = false
+		return nil
+	}
+}
+
+// WithoutTemperature omits the sampling temperature from provider requests.
+// Explicit routes use this when their effective capabilities narrow sampling
+// parameters out, even if the logical model family normally supports them.
+// Direct and legacy construction continue to send the executor default.
+func WithoutTemperature[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.omitTemperature = true
 		return nil
 	}
 }

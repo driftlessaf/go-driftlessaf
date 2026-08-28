@@ -54,6 +54,9 @@ func TestRegistryResolvesDeclaredRoutes(t *testing.T) {
 			if got := plan.ProviderModelID(); got != route.ProviderModelID {
 				t.Errorf("ProviderModelID() = %q, want %q", got, route.ProviderModelID)
 			}
+			if got := plan.Attribution(); got != route.Attribution {
+				t.Errorf("Attribution() = %+v, want %+v", got, route.Attribution)
+			}
 		})
 	}
 }
@@ -67,6 +70,7 @@ func TestRegistryAcceptsExtensionProvider(t *testing.T) {
 		Selection:       selection,
 		Protocol:        modelrouter.ProtocolAnthropicMessages,
 		ProviderModelID: "test/sonnet-5",
+		Attribution:     routeAttribution(provider),
 	})
 	if err != nil {
 		t.Fatalf("NewRegistry() with an extension provider error = %v", err)
@@ -125,6 +129,16 @@ func TestNewRegistryRejectsInvalidRoutesDeterministically(t *testing.T) {
 			route:   newRoute(modelrouter.ProviderVertexAI, "claude-sonnet-5", modelrouter.ProtocolAnthropicMessages, ""),
 			wantErr: modelrouter.ErrInvalidRoute,
 			want:    "route 0: invalid route: provider model ID must not be empty",
+		},
+		{
+			name: "empty attribution",
+			route: func() modelrouter.Route {
+				route := valid
+				route.Attribution = modelrouter.Attribution{}
+				return route
+			}(),
+			wantErr: modelrouter.ErrInvalidRoute,
+			want:    "route 0: invalid route: invalid route attribution: provider name: provider must not be empty",
 		},
 		{
 			name:    "provider model ID control character",
@@ -282,6 +296,42 @@ func TestPlanValidate(t *testing.T) {
 	}
 }
 
+func TestPlanSameResolutionUsesRegistryProvenance(t *testing.T) {
+	t.Parallel()
+
+	route := newRoute(modelrouter.ProviderVertexAI, "claude-sonnet-5", modelrouter.ProtocolAnthropicMessages, "claude-sonnet-5")
+	registry, err := modelrouter.NewRegistry(route)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	plan, err := registry.Resolve(route.Selection)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	copyFromSecondResolve, err := registry.Resolve(route.Selection)
+	if err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if !plan.SameResolution(plan) || !plan.SameResolution(copyFromSecondResolve) {
+		t.Error("copies from the same resolved declaration do not share provenance")
+	}
+
+	equivalentRegistry, err := modelrouter.NewRegistry(route)
+	if err != nil {
+		t.Fatalf("NewRegistry equivalent: %v", err)
+	}
+	equivalentPlan, err := equivalentRegistry.Resolve(route.Selection)
+	if err != nil {
+		t.Fatalf("Resolve equivalent: %v", err)
+	}
+	if plan.SameResolution(equivalentPlan) {
+		t.Error("separately constructed equivalent route unexpectedly shares provenance")
+	}
+	if plan.SameResolution(modelrouter.Plan{}) || (modelrouter.Plan{}).SameResolution(plan) {
+		t.Error("zero Plan unexpectedly shares resolution provenance")
+	}
+}
+
 func TestPlanDoesNotExposeCredentialFields(t *testing.T) {
 	t.Parallel()
 
@@ -289,6 +339,7 @@ func TestPlanDoesNotExposeCredentialFields(t *testing.T) {
 		modelrouter.Selection{},
 		modelrouter.Route{},
 		modelrouter.Plan{},
+		modelrouter.Attribution{},
 		modelrouter.Capabilities{},
 	} {
 		typeOf := reflect.TypeOf(value)
@@ -341,6 +392,7 @@ func newRoute(provider modelrouter.Provider, logicalModel string, protocol model
 		},
 		Protocol:        protocol,
 		ProviderModelID: providerModelID,
+		Attribution:     routeAttribution(provider),
 		Capabilities: modelrouter.Capabilities{
 			Efforts:                []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
 			ExplicitThinkingBudget: true,
@@ -352,5 +404,18 @@ func newRoute(provider modelrouter.Provider, logicalModel string, protocol model
 			MaximumOutputTokens:    true,
 			RefusalRecovery:        true,
 		},
+	}
+}
+
+func routeAttribution(provider modelrouter.Provider) modelrouter.Attribution {
+	switch provider {
+	case modelrouter.ProviderVertexAI:
+		return modelrouter.Attribution{ProviderName: "gcp.vertex_ai", LegacySystem: "google.vertex"}
+	case modelrouter.ProviderAnthropic:
+		return modelrouter.Attribution{ProviderName: "anthropic", LegacySystem: "anthropic"}
+	case modelrouter.ProviderAWSBedrock:
+		return modelrouter.Attribution{ProviderName: "aws.bedrock", LegacySystem: "aws.bedrock"}
+	default:
+		return modelrouter.Attribution{ProviderName: string(provider), LegacySystem: string(provider)}
 	}
 }

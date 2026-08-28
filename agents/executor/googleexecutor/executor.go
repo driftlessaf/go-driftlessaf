@@ -64,7 +64,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	client             *genai.Client
 	prompt             *promptbuilder.Prompt
 	model              string
+	capabilityModel    string
 	temperature        float32
+	omitTemperature    bool
 	maxOutputTokens    int32
 	maxTurns           int // maximum conversation turns before aborting
 	systemInstructions *promptbuilder.Prompt
@@ -82,6 +84,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	telemetry        *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig      retry.RetryConfig                   // retry configuration for transient Vertex AI errors
 	resourceLabels   map[string]string                   // resource labels for GCP billing attribution
+	attribution      agenttrace.Attribution              // canonical and compatibility route attribution
 
 	// resultValidators gate the terminal submit tool. When the model calls the
 	// submit tool with a payload that parses, every validator runs concurrently
@@ -141,6 +144,7 @@ func New[Request promptbuilder.Bindable, Response any](
 		client:              client,
 		prompt:              prompt,
 		model:               "gemini-2.5-flash",         // Default to Gemini 2.5 Flash
+		capabilityModel:     "gemini-2.5-flash",         // Same identity on the legacy path
 		temperature:         0.1,                        // Default temperature for consistency
 		maxOutputTokens:     8192,                       // Default max tokens
 		maxTurns:            DefaultMaxTurns,            // Default max conversation turns
@@ -148,6 +152,10 @@ func New[Request promptbuilder.Bindable, Response any](
 		cacheControl:        true,                       // Context caching on by default — see cacheControl field comment
 		cacheTTL:            30 * time.Minute,           // Default cache TTL
 		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
+		attribution: agenttrace.Attribution{
+			ProviderName: "gcp.vertex_ai",
+			System:       agenttrace.SystemGoogleVertex,
+		},
 
 		// The base schema-conformance validator is always first: submissions
 		// must honor the constraints declared in the Response type's
@@ -168,7 +176,7 @@ func New[Request promptbuilder.Bindable, Response any](
 		if exec.thinkingBudget != nil {
 			return nil, errors.New("WithEffort is incompatible with WithThinking: configure exactly one depth control")
 		}
-		if !usesThinkingLevel(exec.model) {
+		if !usesThinkingLevel(exec.capabilityModel) {
 			// Mirrors the WithThinking constraint: the API counts thinking and
 			// output tokens together against max_output_tokens.
 			if budget := thinkingBudgetForEffort(exec.effortLevel); budget > 0 && budget >= exec.maxOutputTokens {
@@ -179,7 +187,7 @@ func New[Request promptbuilder.Bindable, Response any](
 
 	// The recorder is built after options so it captures the final model and
 	// resource labels.
-	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, "gcp.vertex_ai", exec.resourceLabels, responseCodeFromError)
+	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, exec.attribution.ProviderName, exec.resourceLabels, responseCodeFromError)
 
 	return exec, nil
 }
@@ -256,12 +264,8 @@ func (e *executor[Request, Response]) Execute(
 		return cmp.Compare(a.Name, b.Name)
 	})
 
-	// Create generation config
-	config := &genai.GenerateContentConfig{
-		Temperature:     ptr(e.temperature),
-		MaxOutputTokens: e.maxOutputTokens,
-		Labels:          e.resourceLabels,
-	}
+	// Create generation config.
+	config := e.generationConfig()
 
 	// Build system instruction content
 	var systemInstruction *genai.Content
@@ -326,7 +330,7 @@ func (e *executor[Request, Response]) Execute(
 			ThinkingBudget:  e.thinkingBudget,
 		}
 	case e.effortLevel != "":
-		config.ThinkingConfig = thinkingConfigForEffort(e.model, e.effortLevel)
+		config.ThinkingConfig = thinkingConfigForEffort(e.capabilityModel, e.effortLevel)
 	}
 
 	// Create a new chat session with optional seed messages
@@ -491,7 +495,7 @@ func (e *executor[Request, Response]) Execute(
 
 	executeTurn := func(turn int, response *genai.GenerateContentResponse) (_ Response, _ *genai.GenerateContentResponse, _ bool, err error) {
 		var zero Response
-		llmTurn := trace.BeginTurn(turn, agenttrace.SystemGoogleVertex, e.model)
+		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.attribution)
 		defer func() {
 			if err != nil {
 				llmTurn.Fail(err)
@@ -836,7 +840,7 @@ func (e *executor[Request, Response]) Execute(
 	// is the source of truth for cost analysis (DEV-1140), so leaving
 	// them off would silently undercount maxTurns-exhausted runs.
 	if response != nil && response.UsageMetadata != nil {
-		llmTurn := trace.BeginTurn(e.maxTurns, agenttrace.SystemGoogleVertex, e.model)
+		llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.attribution)
 		inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
 		llmTurn.RecordTokens(inputTokens, outputTokens)
 		if e.cacheControl && response.UsageMetadata.CachedContentTokenCount > 0 {
@@ -845,6 +849,17 @@ func (e *executor[Request, Response]) Execute(
 		llmTurn.End()
 	}
 	return resp, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+}
+
+func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentConfig {
+	config := &genai.GenerateContentConfig{
+		MaxOutputTokens: e.maxOutputTokens,
+		Labels:          e.resourceLabels,
+	}
+	if !e.omitTemperature {
+		config.Temperature = ptr(e.temperature)
+	}
+	return config
 }
 
 // submitToolName returns the configured terminal submit tool's name, or ""

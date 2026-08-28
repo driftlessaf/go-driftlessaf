@@ -64,7 +64,12 @@ func TestTraceMarshalJSON(t *testing.T) {
 				CommitSHA:      "abc123",
 			})
 			trace := tracer.NewTrace(ctx, "test prompt")
-			turn := trace.BeginTurn(0, "google.vertex", "gemini-2.5-flash")
+			turn := trace.BeginTurnWithAttribution(0, "publishers/google/models/gemini-2.5-flash", Attribution{
+				ProviderName: "gcp.vertex_ai",
+				System:       "google.vertex",
+				LogicalModel: "fast",
+				Protocol:     "google-genai",
+			})
 			turn.RecordTokens(1500, 300)
 			turn.End()
 			trace.complete("the result", nil)
@@ -76,13 +81,16 @@ func TestTraceMarshalJSON(t *testing.T) {
 		want: map[string]any{
 			"input_prompt": "test prompt",
 			"result":       "the result",
-			"model":        "gemini-2.5-flash",
+			"model":        "publishers/google/models/gemini-2.5-flash",
 			"tool_calls":   []any{},
 			"turns": []any{
 				map[string]any{
 					"index":         float64(0),
-					"model":         "gemini-2.5-flash",
+					"model":         "publishers/google/models/gemini-2.5-flash",
+					"provider":      "gcp.vertex_ai",
 					"system":        "google.vertex",
+					"logical_model": "fast",
+					"protocol":      "google-genai",
 					"input_tokens":  float64(1500),
 					"output_tokens": float64(300),
 					"failed":        false,

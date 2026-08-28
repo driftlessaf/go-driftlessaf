@@ -10,9 +10,34 @@ import (
 	"slices"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+func TestWithAttribution(t *testing.T) {
+	t.Parallel()
+
+	want := agenttrace.Attribution{
+		ProviderName: "test.provider",
+		System:       "test.system",
+		LogicalModel: "test-model",
+		Protocol:     "test-protocol",
+	}
+	e := &executor[*testBindable, *testResponse]{}
+	if err := WithAttribution[*testBindable, *testResponse](want)(e); err != nil {
+		t.Fatalf("WithAttribution: %v", err)
+	}
+	if e.attribution != want {
+		t.Errorf("attribution = %#v, want %#v", e.attribution, want)
+	}
+
+	invalid := want
+	invalid.ProviderName = "unsafe\nprovider"
+	if err := WithAttribution[*testBindable, *testResponse](invalid)(e); err == nil {
+		t.Fatal("WithAttribution accepted a provider name with a control character")
+	}
+}
 
 func TestWithMaxTokens(t *testing.T) {
 	t.Parallel()
@@ -280,7 +305,13 @@ func TestWithProvider(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			e := &executor[*testBindable, *testResponse]{provider: ProviderVertex}
+			e := &executor[*testBindable, *testResponse]{
+				provider: ProviderVertex,
+				attribution: agenttrace.Attribution{
+					LogicalModel: "reasoning",
+					Protocol:     "anthropic-messages",
+				},
+			}
 			var err error
 			for _, opt := range tc.opts {
 				if applyErr := opt(e); applyErr != nil {
@@ -304,6 +335,18 @@ func TestWithProvider(t *testing.T) {
 			}
 			if got := e.provider.traceSystem(); got != tc.wantTraceSystem {
 				t.Errorf("traceSystem: got = %q, want = %q", got, tc.wantTraceSystem)
+			}
+			if got := e.attribution.ProviderName; got != tc.wantMetricName {
+				t.Errorf("attribution provider: got = %q, want = %q", got, tc.wantMetricName)
+			}
+			if got := e.attribution.System; got != tc.wantTraceSystem {
+				t.Errorf("attribution system: got = %q, want = %q", got, tc.wantTraceSystem)
+			}
+			if got := e.attribution.LogicalModel; got != "reasoning" {
+				t.Errorf("logical model changed: got = %q, want = %q", got, "reasoning")
+			}
+			if got := e.attribution.Protocol; got != "anthropic-messages" {
+				t.Errorf("protocol changed: got = %q, want = %q", got, "anthropic-messages")
 			}
 		})
 	}
@@ -329,5 +372,11 @@ func TestDefaultProvider(t *testing.T) {
 	}
 	if e.provider != ProviderVertex {
 		t.Errorf("default provider: got = %q, want = %q", e.provider, ProviderVertex)
+	}
+	if got, want := e.attribution.ProviderName, "gcp.vertex_ai"; got != want {
+		t.Errorf("default attribution provider: got = %q, want = %q", got, want)
+	}
+	if got, want := e.attribution.System, agenttrace.SystemGoogleVertex; got != want {
+		t.Errorf("default attribution system: got = %q, want = %q", got, want)
 	}
 }

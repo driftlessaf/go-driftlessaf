@@ -21,6 +21,10 @@ func Example() {
 		Selection:       selection,
 		Protocol:        modelrouter.ProtocolAnthropicMessages,
 		ProviderModelID: "anthropic.claude-sonnet-5",
+		Attribution: modelrouter.Attribution{
+			ProviderName: "aws.bedrock",
+			LegacySystem: "aws.bedrock",
+		},
 		Capabilities: modelrouter.Capabilities{
 			Efforts:            []effort.Level{effort.High},
 			ToolCalling:        true,

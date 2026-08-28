@@ -60,6 +60,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxTokens       int64
 	maxTurns        int
 	temperature     float64
+	omitTemperature bool
 	reasoningEffort shared.ReasoningEffort // "" = unset; omitted from requests
 	provider        Provider
 	tokenLimitParam TokenLimitParameter
@@ -67,6 +68,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	telemetry       *telemetry.Recorder
 	retryConfig     retry.RetryConfig
 	resourceLabels  map[string]string
+	attribution     agenttrace.Attribution
 
 	// resultValidators gate the terminal submit tool. When the model calls the
 	// submit tool with a payload that parses, every validator runs concurrently
@@ -99,13 +101,17 @@ func New[Request promptbuilder.Bindable, Response any](
 	}
 
 	e := &executor[Request, Response]{
-		client:              client,
-		modelName:           "google/gemini-2.5-flash",
-		prompt:              prompt,
-		maxTokens:           8192,
-		maxTurns:            DefaultMaxTurns,
-		temperature:         0.1,
-		provider:            ProviderOpenAICompatible,
+		client:      client,
+		modelName:   "google/gemini-2.5-flash",
+		prompt:      prompt,
+		maxTokens:   8192,
+		maxTurns:    DefaultMaxTurns,
+		temperature: 0.1,
+		provider:    ProviderOpenAICompatible,
+		attribution: agenttrace.Attribution{
+			ProviderName: ProviderOpenAICompatible.metricName(),
+			System:       ProviderOpenAICompatible.traceSystem(),
+		},
 		tokenLimitParam:     TokenLimitMaxCompletionTokens,
 		retryConfig:         retry.DefaultRetryConfig(),
 		toolCallConcurrency: DefaultToolCallConcurrency,
@@ -126,7 +132,7 @@ func New[Request promptbuilder.Bindable, Response any](
 	// resource labels. codeFromError is nil because this executor does not
 	// record genai.api.requests: it has no error→code mapping yet, and wiring
 	// one up is a behavior change tracked separately.
-	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, e.provider.metricName(), e.resourceLabels, nil)
+	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, e.attribution.ProviderName, e.resourceLabels, nil)
 
 	return e, nil
 }
@@ -199,20 +205,7 @@ func (e *executor[Request, Response]) Execute(
 		}, messages...)
 	}
 
-	reqParams := openai.ChatCompletionNewParams{
-		Model:       e.modelName,
-		Messages:    messages,
-		Tools:       toolDefs,
-		Temperature: param.NewOpt(e.temperature),
-		// The zero value is omitted from the request (omitzero), so this only
-		// takes effect when WithEffort configured it.
-		ReasoningEffort: e.reasoningEffort,
-	}
-	if e.tokenLimitParam == TokenLimitMaxTokens {
-		reqParams.MaxTokens = param.NewOpt(e.maxTokens)
-	} else {
-		reqParams.MaxCompletionTokens = param.NewOpt(e.maxTokens)
-	}
+	reqParams := e.requestParams(messages, toolDefs)
 
 	// isSubmit reports whether a call routes to the terminal submit tool. It
 	// is the routing predicate consulted by executeToolCall's dispatch switch.
@@ -314,7 +307,7 @@ func (e *executor[Request, Response]) Execute(
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
-		llmTurn := trace.BeginTurn(turn, e.provider.traceSystem(), e.modelName)
+		llmTurn := trace.BeginTurnWithAttribution(turn, e.modelName, e.attribution)
 		defer func() {
 			if err != nil {
 				llmTurn.Fail(err)
@@ -480,6 +473,29 @@ func (e *executor[Request, Response]) Execute(
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
 	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+}
+
+func (e *executor[Request, Response]) requestParams(
+	messages []openai.ChatCompletionMessageParamUnion,
+	tools []openai.ChatCompletionToolParam,
+) openai.ChatCompletionNewParams {
+	params := openai.ChatCompletionNewParams{
+		Model:    e.modelName,
+		Messages: messages,
+		Tools:    tools,
+		// The zero value is omitted from the request (omitzero), so this only
+		// takes effect when WithEffort configured it.
+		ReasoningEffort: e.reasoningEffort,
+	}
+	if !e.omitTemperature {
+		params.Temperature = param.NewOpt(e.temperature)
+	}
+	if e.tokenLimitParam == TokenLimitMaxTokens {
+		params.MaxTokens = param.NewOpt(e.maxTokens)
+	} else {
+		params.MaxCompletionTokens = param.NewOpt(e.maxTokens)
+	}
+	return params
 }
 
 // submitToolName returns the configured terminal submit tool's name, or ""

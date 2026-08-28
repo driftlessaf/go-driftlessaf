@@ -6,10 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -46,7 +48,52 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	if err != nil {
 		return nil, fmt.Errorf("creating Google AI client: %w", err)
 	}
+	return newGoogleAgentWithClient[Req, Resp, CB](googleAgentConstruction{
+		client:           client,
+		providerModelID:  model,
+		logicalModelID:   model,
+		applyTemperature: true,
+		maxOutputTokens:  65536,
+		resourceLabels:   map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)},
+	}, config)
+}
 
+type googleAgentConstruction struct {
+	client           *genai.Client
+	providerModelID  string
+	logicalModelID   string
+	routed           bool
+	applyTemperature bool
+	maxOutputTokens  int32
+	thinkingBudget   int32
+	resourceLabels   map[string]string
+	attribution      *agenttrace.Attribution
+}
+
+func newRoutedGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
+	binding GoogleGenAIBinding,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
+	plan := binding.Plan()
+	maxOutputTokens := int32(cmp.Or(config.MaxTokens, int64(65536)))
+	attribution := routedAttribution(plan)
+	return newGoogleAgentWithClient[Req, Resp, CB](googleAgentConstruction{
+		client:           binding.Client(),
+		providerModelID:  plan.ProviderModelID(),
+		logicalModelID:   plan.LogicalModel(),
+		routed:           true,
+		applyTemperature: plan.Capabilities().SamplingParameters,
+		maxOutputTokens:  maxOutputTokens,
+		thinkingBudget:   int32(config.ThinkingBudget),
+		resourceLabels:   binding.ResourceLabels(),
+		attribution:      &attribution,
+	}, config)
+}
+
+func newGoogleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
+	construction googleAgentConstruction,
+	config Config[Resp, CB],
+) (Agent[Req, Resp, CB], error) {
 	// Build the terminal submit_result tool. The executor gates accepted
 	// submissions on the configured result validators before committing them
 	// as the run's final result.
@@ -55,12 +102,26 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("building submit tool: %w", err)
 	}
 
+	modelOption := googleexecutor.WithModel[Req, Resp](construction.providerModelID)
+	if construction.routed {
+		modelOption = googleexecutor.WithRoutedModel[Req, Resp](construction.providerModelID, construction.logicalModelID)
+	}
 	executorOpts := []googleexecutor.Option[Req, Resp]{
-		googleexecutor.WithModel[Req, Resp](model),
-		googleexecutor.WithTemperature[Req, Resp](0.2),
-		googleexecutor.WithMaxOutputTokens[Req, Resp](65536), // Gemini 2.5 Flash max output tokens
+		modelOption,
+		googleexecutor.WithMaxOutputTokens[Req, Resp](construction.maxOutputTokens),
 		googleexecutor.WithSubmitResultProvider[Req, Resp](func() (googletool.SubmitMetadata[Resp], error) { return submitTool, nil }),
-		googleexecutor.WithResourceLabels[Req, Resp](map[string]string{"projectID": projectID, "region": region, "model_name": strings.ToLower(model)}),
+		googleexecutor.WithResourceLabels[Req, Resp](construction.resourceLabels),
+	}
+	if construction.applyTemperature {
+		executorOpts = append(executorOpts, googleexecutor.WithTemperature[Req, Resp](0.2))
+	} else {
+		executorOpts = append(executorOpts, googleexecutor.WithoutTemperature[Req, Resp]())
+	}
+	if construction.thinkingBudget > 0 {
+		executorOpts = append(executorOpts, googleexecutor.WithThinking[Req, Resp](construction.thinkingBudget))
+	}
+	if construction.attribution != nil {
+		executorOpts = append(executorOpts, googleexecutor.WithAttribution[Req, Resp](*construction.attribution))
 	}
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, googleexecutor.WithResultValidator[Req, Resp](v))
@@ -88,7 +149,7 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, googleexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
-	executor, err := googleexecutor.New[Req, Resp](client, config.UserPrompt, executorOpts...)
+	executor, err := googleexecutor.New[Req, Resp](construction.client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Google executor: %w", err)
 	}

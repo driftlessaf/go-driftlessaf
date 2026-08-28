@@ -52,30 +52,33 @@ type Config[Resp, CB any] struct {
 	// whose tool handlers mutate shared state without their own synchronization.
 	ToolCallConcurrency int
 
-	// MaxTokens caps the model's output tokens per turn (the Anthropic
-	// max_tokens parameter). Zero (the default) uses the meta-agent default of
-	// 32000; the executor rejects values above 128000, the ceiling for current
-	// Claude models. Because the executor streams every response, large values
-	// do not risk the SDK's non-streaming HTTP timeout. Raise it for stages
+	// MaxTokens caps the model's output tokens per turn. NewRouted maps it to
+	// the selected protocol's supported output-limit field after route
+	// capability validation. The compatibility New path retains its historical
+	// Claude-only behavior: zero uses 32000, and the Claude executor rejects
+	// values above 128000. Because the executor streams every response, large
+	// values do not risk the SDK's non-streaming HTTP timeout. Raise it for stages
 	// whose turns need room for BOTH extended thinking and a tool call: at high
 	// effort on a large context, adaptive thinking can otherwise consume the
 	// whole budget and stop at max_tokens before the model emits its tool call,
-	// which the executor surfaces as "no content in Claude's response". Claude
-	// backend only; no effect on the Gemini or OpenAI backends.
+	// which the executor surfaces as "no content in Claude's response".
 	MaxTokens int64
 
-	// ThinkingBudget enables Claude extended thinking with the given token
-	// budget when running on the Claude backend. Zero (the default) leaves
-	// thinking disabled. Must be at least 1024 and less than the executor's
-	// max tokens (MaxTokens, or the 32000 default); see claudeexecutor.WithThinking.
+	// ThinkingBudget enables an explicit thinking-token budget. NewRouted maps
+	// it to protocol-supported controls after route capability validation; the
+	// compatibility New path retains its historical Claude-only behavior. Zero
+	// leaves thinking disabled. On Claude, it must be at least 1024 and less
+	// than MaxTokens (or the 32000 default); see claudeexecutor.WithThinking.
 	// On models where the Anthropic API has removed the explicit budget
 	// parameter (Opus 4.7 and later), the executor automatically maps this to
-	// adaptive thinking and the budget value is advisory only. No effect on
-	// the Gemini or OpenAI backends.
+	// adaptive thinking and the budget value is advisory only. Under New,
+	// Gemini and OpenAI ignore this field. Under NewRouted, Google Gen AI maps
+	// it to its thinking budget and unsupported routes reject it before adapter
+	// construction.
 	//
-	// Deprecated: ThinkingBudget is Claude-only and already advisory-only on
-	// Opus 4.7+. Use Effort, which works on every backend; do not set both.
-	// The field will be removed once remaining consumers migrate.
+	// Deprecated: ThinkingBudget is provider-specific and already advisory-only
+	// on Opus 4.7+. Use Effort, which works across routed protocols; do not set
+	// both. The field will be removed once remaining consumers migrate.
 	ThinkingBudget int64
 
 	// Effort sets the provider-neutral reasoning-effort level, controlling how
@@ -108,8 +111,9 @@ type Config[Resp, CB any] struct {
 	// Anthropic's safety classifier is retried with a nudge instead of
 	// failing the run immediately. Zero (the default) leaves a refusal fatal,
 	// same as before this field existed, surfaced as a
-	// *claudeexecutor.RefusalError. Claude backend only; no effect on the
-	// Gemini or OpenAI backends. See claudeexecutor.WithRefusalNudge.
+	// *claudeexecutor.RefusalError. The compatibility New path applies it only
+	// to Claude. NewRouted rejects it before adapter construction unless the
+	// route supports refusal recovery. See claudeexecutor.WithRefusalNudge.
 	RefusalNudgeMaxRetries int
 
 	// SuspendToolName, when non-empty, enables the ask-a-friend suspend/resume

@@ -24,10 +24,10 @@ import (
 // so it is intentionally NOT sealed. Do not place submission-derived free text in
 // metadata while payload encryption is relied upon; put it in a sealed field.
 //
-// turns[].system is likewise left plaintext: despite the name it is the OTel
-// GenAI provider identifier ("anthropic", "google.vertex", "openai"; see
-// Trace.BeginTurn), a low-cardinality structural label that powers provider
-// filtering — not the LLM system prompt. It carries no submission-derived text.
+// turns[].provider, turns[].system, turns[].logical_model, and turns[].protocol
+// are likewise left plaintext: they are low-cardinality route identifiers
+// (see Trace.BeginTurnWithAttribution), not LLM prompts, and carry no
+// submission-derived text.
 //
 // One sealing session is used for the whole event so every field shares a single
 // KMS-wrapped DEK (one KMS call per event). An error is returned rather than
@@ -71,8 +71,8 @@ func sealSensitiveTraceFields(ctx context.Context, enc *payloadcrypt.Encryptor, 
 // span-event JSON (prompt_messages, completion), both JSON columns. The span's
 // `metadata` is structural-only by the same contract as the trace-level metadata
 // (see sealSensitiveTraceFields) and is intentionally left plaintext — its
-// "system" key is the OTel provider identifier (see Trace.BeginTurn), not the
-// LLM system prompt, so it carries no submission-derived free text.
+// route-attribution keys are identifiers (see Trace.BeginTurnWithAttribution),
+// not LLM prompts, so they carry no submission-derived free text.
 func sealSensitiveSpanFields(ctx context.Context, enc *payloadcrypt.Encryptor, raw []byte) ([]byte, error) {
 	sess, err := enc.NewSession(ctx)
 	if err != nil {

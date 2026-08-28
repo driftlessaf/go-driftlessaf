@@ -29,10 +29,8 @@ import (
 // with a driftlessaf.payload.truncated=true marker.
 const maxPayloadBytes = 64 * 1024
 
-// Canonical gen_ai.system values per the OpenTelemetry GenAI semantic
-// conventions. Executors pass these to BeginTurn so downstream eval tools
-// can filter traces by provider without consumers needing to remember the
-// exact spelling.
+// Legacy gen_ai.system compatibility values. Executors retain these while
+// downstream consumers migrate to canonical gen_ai.provider.name attribution.
 const (
 	SystemAnthropic    = "anthropic"
 	SystemBedrock      = "aws.bedrock"
@@ -157,7 +155,10 @@ type LLMTurn[T any] struct {
 type RecordedTurn struct {
 	Index               int       `json:"index"`
 	Model               string    `json:"model,omitempty"`
+	Provider            string    `json:"provider,omitempty"`
 	System              string    `json:"system,omitempty"`
+	LogicalModel        string    `json:"logical_model,omitempty"`
+	Protocol            string    `json:"protocol,omitempty"`
 	InputTokens         int64     `json:"input_tokens,omitempty"`
 	OutputTokens        int64     `json:"output_tokens,omitempty"`
 	CacheReadTokens     int64     `json:"cache_read_tokens,omitempty"`
@@ -397,8 +398,9 @@ func (t *Trace[T]) Context() context.Context {
 // The trace context is updated so subsequent tool call spans are nested under
 // this turn span. Call End() on the returned LLMTurn when the turn completes.
 //
-// system is the OTel GenAI provider identifier: "openai", "anthropic",
-// "google.vertex", etc. It powers provider filtering in eval tools.
+// system is the deprecated OTel GenAI provider identifier: "openai",
+// "anthropic", "google.vertex", etc. It powers historical provider filtering.
+// New route-aware callers should use BeginTurnWithAttribution.
 //
 // Per-call token usage (input/output and prompt cache) is recorded by
 // LLMTurn.RecordTokens / LLMTurn.RecordCacheTokens — replacing the old
@@ -412,6 +414,18 @@ func (t *Trace[T]) Context() context.Context {
 // Overlapping turns corrupt the span hierarchy: the later End() restores a
 // stale context, causing subsequent spans to be parented incorrectly.
 func (t *Trace[T]) BeginTurn(turn int, system, modelName string) *LLMTurn[T] {
+	return t.BeginTurnWithAttribution(turn, modelName, Attribution{System: system})
+}
+
+// BeginTurnWithAttribution starts a new LLM turn span with explicit route
+// attribution. Unlike BeginTurn, it emits the canonical gen_ai.provider.name
+// and DriftlessAF logical-model and protocol attributes in addition to the
+// deprecated gen_ai.system compatibility value.
+//
+// Callers MUST call End() on the current turn before calling this method
+// again. Attribution should already have been validated at route or executor
+// construction time.
+func (t *Trace[T]) BeginTurnWithAttribution(turn int, modelName string, attribution Attribution) *LLMTurn[T] {
 	tr := otelTracer()
 
 	t.mu.Lock()
@@ -423,8 +437,17 @@ func (t *Trace[T]) BeginTurn(turn int, system, modelName string) *LLMTurn[T] {
 		attribute.String("gen_ai.request.model", modelName),
 		attribute.Int("driftlessaf.turn.index", turn),
 	}
-	if system != "" {
-		attrs = append(attrs, attribute.String("gen_ai.system", system))
+	if attribution.ProviderName != "" {
+		attrs = append(attrs, attribute.String("gen_ai.provider.name", attribution.ProviderName))
+	}
+	if attribution.System != "" {
+		attrs = append(attrs, attribute.String("gen_ai.system", attribution.System))
+	}
+	if attribution.LogicalModel != "" {
+		attrs = append(attrs, attribute.String("driftlessaf.model.logical", attribution.LogicalModel))
+	}
+	if attribution.Protocol != "" {
+		attrs = append(attrs, attribute.String("driftlessaf.protocol", attribution.Protocol))
 	}
 
 	newCtx, span := tr.Start(parentCtx, "chat "+modelName,
@@ -448,10 +471,13 @@ func (t *Trace[T]) BeginTurn(turn int, system, modelName string) *LLMTurn[T] {
 		trace:   t,
 		prevCtx: parentCtx,
 		record: RecordedTurn{
-			Index:     turn,
-			Model:     modelName,
-			System:    system,
-			StartTime: time.Now(),
+			Index:        turn,
+			Model:        modelName,
+			Provider:     attribution.ProviderName,
+			System:       attribution.System,
+			LogicalModel: attribution.LogicalModel,
+			Protocol:     attribution.Protocol,
+			StartTime:    time.Now(),
 		},
 	}
 }

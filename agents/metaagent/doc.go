@@ -15,10 +15,17 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Model Support
 //
-// The model parameter determines which provider implementation is used:
+// New is the compatibility constructor. Its model parameter determines which
+// executor path is used:
 //   - Models starting with "gemini-" use Google's Generative AI SDK (native)
 //   - Models starting with "claude-" use Anthropic's SDK via Vertex AI (native)
 //   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
+//
+// NewRouted is the explicit path. An application constructs a modelrouter.Registry,
+// registers typed adapters by provider in the matching protocol registry, and
+// selects a provider and logical model. The resolved Plan remains authoritative
+// for the exact provider model ID, effective capabilities, and attribution;
+// credentials and SDK clients stay captured by adapters outside the Plan.
 //
 // # Usage
 //

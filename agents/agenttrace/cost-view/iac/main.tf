@@ -5,8 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 // agent_trace_costs is a view over the agent trace table that adds per-row USD
 // cost estimates derived from the model and token counts, plus a provider
-// column derived from turns[].system ('anthropic' | 'google.vertex' |
-// 'openai') so cost can be grouped by serving path. Rates are currently
+// column derived from canonical turns[].provider, with a turns[].system
+// fallback for historical rows, so cost can be grouped by serving path.
+// Rates are currently
 // provider-agnostic — Anthropic direct and Vertex AI Global list prices match
 // for every priced model — but the price table and price resolution carry a
 // provider dimension so per-provider rates are a one-line change if they
@@ -29,7 +30,7 @@ resource "google_bigquery_table" "agent_trace_costs" {
   table_id   = var.view_table_id
 
   friendly_name = "Agent traces with cost estimates"
-  description   = "Agent traces enriched with USD cost estimates derived from model and token counts, plus a provider column from turns[].system. List pricing (identical on Anthropic direct and Vertex AI Global today); cache writes use 5m TTL rate."
+  description   = "Agent traces enriched with USD cost estimates derived from model and token counts, plus a provider column preferring turns[].provider with a turns[].system fallback. List pricing (identical on Anthropic direct and Vertex AI Global today); cache writes use 5m TTL rate."
 
   deletion_protection = var.deletion_protection
 

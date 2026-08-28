@@ -30,9 +30,11 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Options
 //
+//   - [WithAttribution]: set canonical and compatibility route attribution
 //   - [WithModel]: set the model name (required for Vertex AI partner models)
 //   - [WithMaxTokens]: set the maximum completion tokens
 //   - [WithTemperature]: set the sampling temperature (0.0–2.0)
+//   - [WithoutTemperature]: omit temperature when an explicit route disallows sampling parameters
 //   - [WithEffort]: set the reasoning effort for reasoning models (xhigh/max clamp to high)
 //   - [WithMaxTurns]: set the maximum conversation turns before aborting
 //   - [WithSystemInstructions]: set the system prompt

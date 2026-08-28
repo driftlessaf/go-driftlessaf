@@ -272,6 +272,7 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 		{
 			Index:               0,
 			Model:               "gemini-2.5-flash",
+			Provider:            "gcp.vertex_ai",
 			System:              agenttrace.SystemGoogleVertex,
 			InputTokens:         1,
 			OutputTokens:        1,
@@ -280,6 +281,7 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 		{
 			Index:        1,
 			Model:        "gemini-2.5-flash",
+			Provider:     "gcp.vertex_ai",
 			System:       agenttrace.SystemGoogleVertex,
 			InputTokens:  1,
 			OutputTokens: 1,

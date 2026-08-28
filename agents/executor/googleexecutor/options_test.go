@@ -11,9 +11,34 @@ import (
 	"testing"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"google.golang.org/genai"
 )
+
+func TestWithAttribution(t *testing.T) {
+	t.Parallel()
+
+	want := agenttrace.Attribution{
+		ProviderName: "test.provider",
+		System:       "test.system",
+		LogicalModel: "test-model",
+		Protocol:     "test-protocol",
+	}
+	e := &executor[*testBindable, *testResponse]{}
+	if err := WithAttribution[*testBindable, *testResponse](want)(e); err != nil {
+		t.Fatalf("WithAttribution: %v", err)
+	}
+	if e.attribution != want {
+		t.Errorf("attribution = %#v, want %#v", e.attribution, want)
+	}
+
+	invalid := want
+	invalid.Protocol = ""
+	if err := WithAttribution[*testBindable, *testResponse](invalid)(e); err == nil {
+		t.Fatal("WithAttribution accepted an empty protocol")
+	}
+}
 
 func TestWithMaxTurns(t *testing.T) {
 	t.Parallel()
@@ -76,6 +101,12 @@ func TestMaxTurnsApplied(t *testing.T) {
 	e := exec.(*executor[*testBindable, *testResponse])
 	if e.maxTurns != DefaultMaxTurns {
 		t.Errorf("default maxTurns = %d, want %d", e.maxTurns, DefaultMaxTurns)
+	}
+	if got, want := e.attribution.ProviderName, "gcp.vertex_ai"; got != want {
+		t.Errorf("default attribution provider: got = %q, want = %q", got, want)
+	}
+	if got, want := e.attribution.System, agenttrace.SystemGoogleVertex; got != want {
+		t.Errorf("default attribution system: got = %q, want = %q", got, want)
 	}
 
 	// With option: should override
