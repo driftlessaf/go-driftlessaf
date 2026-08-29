@@ -43,6 +43,21 @@ func ExampleNewClient() {
 	_ = client
 }
 
+// ExampleNewDirectClient demonstrates strict construction for an explicit
+// Anthropic-direct route. An incomplete configuration returns an error rather
+// than falling back to Vertex AI.
+func ExampleNewDirectClient() {
+	client, err := anthropicauth.NewDirectClient(context.Background(), anthropicauth.Config{
+		FederationRuleID: "fdrl_0123456789",
+		OrganizationID:   "12345678-1234-1234-1234-123456789012",
+		Source:           anthropicauth.SourceGoogle,
+	})
+	if err != nil {
+		return
+	}
+	_ = client
+}
+
 // ExampleConfig_ResolveSource demonstrates identity-token source selection: an
 // explicit Source wins, the GitHub Actions endpoint is auto-detected when its
 // ambient env is present, a token file comes next, and Google (the Cloud Run /

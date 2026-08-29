@@ -24,3 +24,14 @@ func Example() {
 	}
 	fmt.Printf("AWS region: %s\n", cfg.Region)
 }
+
+// ExampleConfig_LoadAWSConfig demonstrates resolving the validated,
+// refreshable credential provider that a transport binds directly.
+func ExampleConfig_LoadAWSConfig() {
+	cfg := awsauth.Config{Region: "us-east-1", Profile: "engineering-sso"}
+	awsConfig, err := cfg.LoadAWSConfig(context.Background())
+	if err != nil {
+		return
+	}
+	fmt.Printf("AWS region: %s\n", awsConfig.Region)
+}

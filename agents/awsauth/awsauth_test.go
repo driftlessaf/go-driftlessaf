@@ -6,10 +6,15 @@ SPDX-License-Identifier: Apache-2.0
 package awsauth
 
 import (
+	"crypto/rand"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigFromEnv(t *testing.T) {
@@ -195,6 +200,118 @@ aws_secret_access_key = placeholder-secret-key
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("ValidateCredentials() error: got = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadAWSConfig(t *testing.T) {
+	accessKeyID := rand.Text()
+	secretAccessKey := rand.Text()
+	sessionToken := rand.Text()
+	expiration := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	tests := []struct {
+		name       string
+		statusCode int
+		response   string
+		wantErr    string
+	}{
+		{
+			name:       "credentials available",
+			statusCode: http.StatusOK,
+			response: fmt.Sprintf(`<AssumeRoleWithWebIdentityResponse>
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>%s</AccessKeyId>
+      <SecretAccessKey>%s</SecretAccessKey>
+      <SessionToken>%s</SessionToken>
+      <Expiration>%s</Expiration>
+    </Credentials>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>`, accessKeyID, secretAccessKey, sessionToken, expiration.Format(time.RFC3339)),
+		},
+		{
+			name:       "credentials unavailable",
+			statusCode: http.StatusBadRequest,
+			response: `<ErrorResponse>
+  <Error>
+    <Type>Sender</Type>
+    <Code>InvalidIdentityToken</Code>
+    <Message>the web identity token was rejected</Message>
+  </Error>
+</ErrorResponse>`,
+			wantErr: "retrieving AWS credentials",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnvironment(t)
+			tokenFile := filepath.Join(t.TempDir(), "web-identity-token")
+			webIdentityToken := rand.Text()
+			if err := os.WriteFile(tokenFile, []byte(webIdentityToken), 0o600); err != nil {
+				t.Fatalf("writing web identity token: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got, want := r.Method, http.MethodPost; got != want {
+					t.Errorf("request method: got = %q, want = %q", got, want)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("parsing STS request: %v", err)
+				}
+				for name, want := range map[string]string{
+					"Action":           "AssumeRoleWithWebIdentity",
+					"RoleArn":          "arn:aws:iam::123456789012:role/BedrockInvoker",
+					"WebIdentityToken": webIdentityToken,
+				} {
+					if got := r.Form.Get(name); got != want {
+						t.Errorf("request field %q: got = %q, want = %q", name, got, want)
+					}
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(tt.statusCode)
+				if _, err := fmt.Fprint(w, tt.response); err != nil {
+					t.Errorf("writing STS response: %v", err)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			t.Setenv(EnvRoleARN, "arn:aws:iam::123456789012:role/BedrockInvoker")
+			t.Setenv(EnvWebIdentityTokenFile, tokenFile)
+			t.Setenv("AWS_ENDPOINT_URL_STS", server.URL)
+
+			gotConfig, err := (Config{Region: "us-west-2"}).LoadAWSConfig(t.Context())
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("LoadAWSConfig(): got nil error, want error")
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("LoadAWSConfig() error: got = %q, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadAWSConfig(): got error %v, want nil", err)
+			}
+			gotCredentials, err := gotConfig.Credentials.Retrieve(t.Context())
+			if err != nil {
+				t.Fatalf("Retrieve(): got error %v, want nil", err)
+			}
+			for name, values := range map[string][2]string{
+				"access key ID":     {gotCredentials.AccessKeyID, accessKeyID},
+				"secret access key": {gotCredentials.SecretAccessKey, secretAccessKey},
+				"session token":     {gotCredentials.SessionToken, sessionToken},
+			} {
+				if got, want := values[0], values[1]; got != want {
+					t.Errorf("%s: got = %q, want = %q", name, got, want)
+				}
+			}
+			if got, want := gotCredentials.CanExpire, true; got != want {
+				t.Errorf("CanExpire: got = %t, want = %t", got, want)
+			}
+			if got, want := gotCredentials.Expires, expiration; !got.Equal(want) {
+				t.Errorf("Expires: got = %v, want = %v", got, want)
 			}
 		})
 	}

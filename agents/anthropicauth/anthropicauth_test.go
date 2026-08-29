@@ -8,6 +8,7 @@ package anthropicauth_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
@@ -184,6 +185,111 @@ func TestNewClient(t *testing.T) {
 			t.Error("NewClient() with configured Config: got client with nil Options, want federation request options")
 		}
 	})
+}
+
+func TestNewDirectClient(t *testing.T) {
+	configured := anthropicauth.Config{
+		FederationRuleID: "fdrl_0123456789",
+		OrganizationID:   "12345678-1234-1234-1234-123456789012",
+	}
+	tests := []struct {
+		name    string
+		config  anthropicauth.Config
+		wantErr string
+	}{
+		{
+			name:    "zero config cannot fall back to Vertex",
+			wantErr: "requires a federation rule ID and organization ID",
+		},
+		{
+			name: "unknown identity source",
+			config: anthropicauth.Config{
+				FederationRuleID: configured.FederationRuleID,
+				OrganizationID:   configured.OrganizationID,
+				Source:           "unsupported",
+			},
+			wantErr: `unknown identity token source "unsupported"`,
+		},
+		{
+			name: "GitHub Actions source requires both request fields",
+			config: anthropicauth.Config{
+				FederationRuleID: configured.FederationRuleID,
+				OrganizationID:   configured.OrganizationID,
+				Source:           anthropicauth.SourceGitHubActions,
+			},
+			wantErr: "requires both GitHub Actions ID-token request fields",
+		},
+		{
+			name: "partial GitHub Actions URL cannot fall through to Google",
+			config: anthropicauth.Config{
+				FederationRuleID:         configured.FederationRuleID,
+				OrganizationID:           configured.OrganizationID,
+				ActionsIDTokenRequestURL: "https://actions.invalid/token",
+			},
+			wantErr: "requires both ID-token request fields",
+		},
+		{
+			name: "partial GitHub Actions token cannot fall through to Google",
+			config: anthropicauth.Config{
+				FederationRuleID:           configured.FederationRuleID,
+				OrganizationID:             configured.OrganizationID,
+				ActionsIDTokenRequestToken: "opaque-token",
+			},
+			wantErr: "requires both ID-token request fields",
+		},
+		{
+			name: "file source requires a path",
+			config: anthropicauth.Config{
+				FederationRuleID: configured.FederationRuleID,
+				OrganizationID:   configured.OrganizationID,
+				Source:           anthropicauth.SourceFile,
+			},
+			wantErr: "requires an identity-token file",
+		},
+		{
+			name: "Google source constructs a direct client",
+			config: anthropicauth.Config{
+				FederationRuleID: configured.FederationRuleID,
+				OrganizationID:   configured.OrganizationID,
+				Source:           anthropicauth.SourceGoogle,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := anthropicauth.NewDirectClient(t.Context(), tc.config)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatal("NewDirectClient(): got nil error, want error")
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("NewDirectClient() error: got = %q, want substring %q", err, tc.wantErr)
+				}
+				if client.Options != nil {
+					t.Error("NewDirectClient() failure returned a configured client; want zero client")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewDirectClient(): got error %v, want nil", err)
+			}
+			if client.Options == nil {
+				t.Error("NewDirectClient(): got client with nil Options, want federation request options")
+			}
+		})
+	}
+}
+
+func TestNewClientKeepsLegacyInvalidSourceBehavior(t *testing.T) {
+	client := anthropicauth.NewClient(t.Context(), "", "", anthropicauth.Config{
+		FederationRuleID: "fdrl_0123456789",
+		OrganizationID:   "12345678-1234-1234-1234-123456789012",
+		Source:           "unsupported",
+	})
+	if client.Options != nil {
+		t.Error("NewClient() invalid direct source: got configured client, want legacy zero client")
+	}
 }
 
 func TestModelID(t *testing.T) {

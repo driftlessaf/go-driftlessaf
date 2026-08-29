@@ -10,8 +10,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -273,7 +273,64 @@ func NewClient(ctx context.Context, projectID, region string, cfg Config) anthro
 	)
 }
 
-// federationClient returns the Anthropic-direct client for cfg, constructing
+// NewDirectClient builds an Anthropic-direct client from an explicit workload
+// identity federation configuration. Unlike NewClient, it rejects an
+// incomplete or invalid direct configuration and never falls back to Vertex
+// AI. It doesn't read Anthropic routing or profile environment variables;
+// callers populate cfg at the application boundary, while the selected
+// identity provider may perform its own ambient credential discovery.
+func NewDirectClient(ctx context.Context, cfg Config) (anthropic.Client, error) {
+	if err := validateDirectConfig(cfg); err != nil {
+		return anthropic.Client{}, err
+	}
+	client, err := newFederationClient(ctx, cfg)
+	if err != nil {
+		return anthropic.Client{}, fmt.Errorf("constructing Anthropic-direct client: %w", err)
+	}
+	return client, nil
+}
+
+func validateDirectConfig(cfg Config) error {
+	if !cfg.Configured() {
+		return errors.New("anthropic-direct authentication requires a federation rule ID and organization ID")
+	}
+	if (cfg.ActionsIDTokenRequestURL == "") != (cfg.ActionsIDTokenRequestToken == "") {
+		return errors.New("anthropic-direct GitHub Actions authentication requires both ID-token request fields")
+	}
+	switch source := cfg.ResolveSource(); source {
+	case SourceGitHubActions:
+		if cfg.ActionsIDTokenRequestURL == "" || cfg.ActionsIDTokenRequestToken == "" {
+			return fmt.Errorf("anthropic-direct %q authentication requires both GitHub Actions ID-token request fields", source)
+		}
+	case SourceFile:
+		if cfg.IdentityTokenFile == "" {
+			return fmt.Errorf("anthropic-direct %q authentication requires an identity-token file", source)
+		}
+	case SourceGoogle:
+		return nil
+	default:
+		return fmt.Errorf("unknown identity token source %q", source)
+	}
+	return nil
+}
+
+// federationClient preserves NewClient's compatibility behavior for invalid
+// source configuration: it logs the error and returns an unusable zero client.
+func federationClient(ctx context.Context, cfg Config) anthropic.Client {
+	client, err := newFederationClient(ctx, cfg)
+	if err == nil {
+		return client
+	}
+	// A misconfigured source is a programming/deploy error, not a runtime
+	// condition to paper over: returning a Vertex client would silently serve
+	// the wrong backend. Surface it loudly; the exchange would fail anyway.
+	// The zero client makes the misconfiguration unmistakable.
+	clog.ErrorContext(ctx, "anthropic-direct identity source misconfigured; returning unusable client",
+		"error", err, "source", cfg.ResolveSource())
+	return anthropic.Client{}
+}
+
+// newFederationClient returns the Anthropic-direct client for cfg, constructing
 // it at most once per distinct Config for the life of the process and reusing
 // that one instance for every caller.
 //
@@ -293,21 +350,15 @@ func NewClient(ctx context.Context, projectID, region string, cfg Config) anthro
 //     Without it the default (file-reading) middleware runs first, sets the
 //     Authorization header, and the explicit provider never executes — the
 //     selected token source would be configured but dead.
-func federationClient(ctx context.Context, cfg Config) anthropic.Client {
+func newFederationClient(ctx context.Context, cfg Config) (anthropic.Client, error) {
 	fedMu.Lock()
 	defer fedMu.Unlock()
 	if c, ok := fedClients[cfg]; ok {
-		return c
+		return c, nil
 	}
 	provider, err := cfg.identityProvider()
 	if err != nil {
-		// A misconfigured source is a programming/deploy error, not a runtime
-		// condition to paper over: returning a Vertex client would silently
-		// serve the wrong backend. Surface it loudly; the exchange would fail
-		// anyway. The zero client makes the misconfiguration unmistakable.
-		clog.ErrorContext(ctx, "anthropic-direct identity source misconfigured; returning unusable client",
-			"error", err, "source", cfg.ResolveSource())
-		return anthropic.Client{}
+		return anthropic.Client{}, err
 	}
 	clog.InfoContext(ctx, "constructing Claude client via Anthropic-direct (first-party API + WIF)",
 		"backend", "anthropic-direct",
@@ -333,7 +384,7 @@ func federationClient(ctx context.Context, cfg Config) anthropic.Client {
 		),
 	)
 	fedClients[cfg] = c
-	return c
+	return c, nil
 }
 
 var (
@@ -361,8 +412,7 @@ func githubActionsIDToken(cfg Config) option.IdentityTokenFunc {
 		}
 		defer resp.Body.Close() //nolint:errcheck
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			return "", fmt.Errorf("github actions ID-token endpoint returned %d: %s", resp.StatusCode, body)
+			return "", fmt.Errorf("github actions ID-token endpoint returned %d", resp.StatusCode)
 		}
 		var out struct {
 			Value string `json:"value"`

@@ -40,16 +40,18 @@ func TestGithubActionsIDToken(t *testing.T) {
 
 func TestGithubActionsIDTokenErrors(t *testing.T) {
 	tests := []struct {
-		name    string
-		handler http.HandlerFunc
-		wantErr string
+		name          string
+		handler       http.HandlerFunc
+		wantErr       string
+		forbiddenText string
 	}{
 		{
 			name: "non-200",
-			handler: func(w http.ResponseWriter, _ *http.Request) {
-				http.Error(w, "boom", http.StatusInternalServerError)
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "echo: "+r.Header.Get("Authorization"), http.StatusInternalServerError)
 			},
-			wantErr: "returned 500",
+			wantErr:       "returned 500",
+			forbiddenText: "reqtok",
 		},
 		{
 			name: "empty value",
@@ -70,6 +72,9 @@ func TestGithubActionsIDTokenErrors(t *testing.T) {
 			_, err := githubActionsIDToken(cfg)(t.Context())
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("githubActionsIDToken() error = %v, want containing %q", err, tt.wantErr)
+			}
+			if err != nil && tt.forbiddenText != "" && strings.Contains(err.Error(), tt.forbiddenText) {
+				t.Errorf("githubActionsIDToken() error exposes credential text %q: %v", tt.forbiddenText, err)
 			}
 		})
 	}

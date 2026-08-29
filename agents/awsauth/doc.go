@@ -10,6 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 // Workloads authenticate with a web-identity token and role ARN. Static AWS
 // credentials and Bedrock API keys are rejected. ConfigFromEnv validates the
 // selected mode, and Config.ValidateCredentials verifies the source chosen by
-// the AWS SDK credential chain. This keeps AWS authentication policy independent
-// of any model transport.
+// the AWS SDK credential chain. Config.LoadAWSConfig additionally resolves the
+// same refreshable provider for a model transport to bind directly. This keeps
+// AWS authentication policy independent of any model transport.
 package awsauth

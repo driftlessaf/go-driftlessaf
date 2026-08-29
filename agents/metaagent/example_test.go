@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/anthropicauth"
+	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
@@ -109,6 +111,34 @@ func ExampleNewRouted() {
 
 	fmt.Println(agent != nil)
 	// Output: true
+}
+
+// ExampleNewAnthropicDirectMessagesAdapter demonstrates binding an explicit
+// Anthropic workload identity federation configuration to a typed Messages
+// adapter. The route plan remains separate and secret-free.
+func ExampleNewAnthropicDirectMessagesAdapter() {
+	adapter, err := metaagent.NewAnthropicDirectMessagesAdapter(anthropicauth.Config{
+		FederationRuleID: "fdrl_0123456789",
+		OrganizationID:   "12345678-1234-1234-1234-123456789012",
+		Source:           anthropicauth.SourceGoogle,
+	})
+	if err != nil {
+		return
+	}
+	_ = adapter
+}
+
+// ExampleNewBedrockAnthropicMessagesAdapter demonstrates binding explicit AWS
+// IAM Identity Center configuration to a typed Bedrock Messages adapter.
+func ExampleNewBedrockAnthropicMessagesAdapter() {
+	adapter, err := metaagent.NewBedrockAnthropicMessagesAdapter(awsauth.Config{
+		Region:  "us-east-1",
+		Profile: "engineering-sso",
+	})
+	if err != nil {
+		return
+	}
+	_ = adapter
 }
 
 // ExampleAgent_Execute demonstrates calling Execute on an Agent to run a request.

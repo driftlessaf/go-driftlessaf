@@ -91,6 +91,27 @@ func ConfigFromEnv(ctx context.Context) (Config, error) {
 // ValidateCredentials verifies that the AWS SDK credential chain selected by
 // cfg is backed by AWS IAM Identity Center (SSO) or web identity.
 func (cfg Config) ValidateCredentials(ctx context.Context) error {
+	_, err := cfg.loadAWSConfig(ctx)
+	return err
+}
+
+// LoadAWSConfig loads the refreshable AWS configuration selected by cfg,
+// verifies that its credential provider is backed by AWS IAM Identity Center
+// (SSO) or web identity, and confirms that credentials are currently
+// available. Callers can bind the returned provider directly to a transport so
+// validation and request signing use the same credential chain.
+func (cfg Config) LoadAWSConfig(ctx context.Context) (aws.Config, error) {
+	awsCfg, err := cfg.loadAWSConfig(ctx)
+	if err != nil {
+		return aws.Config{}, err
+	}
+	if _, err := awsCfg.Credentials.Retrieve(ctx); err != nil {
+		return aws.Config{}, fmt.Errorf("retrieving AWS credentials: %w", err)
+	}
+	return awsCfg, nil
+}
+
+func (cfg Config) loadAWSConfig(ctx context.Context) (aws.Config, error) {
 	loadOptions := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
 	}
@@ -99,23 +120,23 @@ func (cfg Config) ValidateCredentials(ctx context.Context) error {
 	}
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
-		return fmt.Errorf("loading AWS credential configuration: %w", err)
+		return aws.Config{}, fmt.Errorf("loading AWS credential configuration: %w", err)
 	}
 	provider, ok := awsCfg.Credentials.(aws.CredentialProviderSource)
 	if !ok {
-		return fmt.Errorf("credential provider %T does not expose its AWS source", awsCfg.Credentials)
+		return aws.Config{}, fmt.Errorf("credential provider %T does not expose its AWS source", awsCfg.Credentials)
 	}
 	sources := provider.ProviderSources()
 	if cfg.Profile != "" {
 		if !hasSSOCredentialSource(sources) {
-			return fmt.Errorf("profile %q must be backed by AWS IAM Identity Center (SSO)", cfg.Profile)
+			return aws.Config{}, fmt.Errorf("profile %q must be backed by AWS IAM Identity Center (SSO)", cfg.Profile)
 		}
-		return nil
+		return awsCfg, nil
 	}
 	if !slices.Contains(sources, aws.CredentialSourceEnvVarsSTSWebIDToken) {
-		return fmt.Errorf("credentials must resolve from %s and %s", EnvRoleARN, EnvWebIdentityTokenFile)
+		return aws.Config{}, fmt.Errorf("credentials must resolve from %s and %s", EnvRoleARN, EnvWebIdentityTokenFile)
 	}
-	return nil
+	return awsCfg, nil
 }
 
 func staticCredentialEnv(env environment) string {
