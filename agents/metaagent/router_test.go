@@ -22,6 +22,137 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestRouteResolutionBindsTheSelectedAnthropicPlan(t *testing.T) {
+	t.Parallel()
+
+	selection := modelrouter.Selection{Provider: "selected-provider", LogicalModel: "claude-sonnet-4-6"}
+	routes := mustRouteRegistry(t, routedTestRoute(selection, modelrouter.ProtocolAnthropicMessages, "provider-deployment-42"))
+	adapterCalls := 0
+	adapters, err := NewAnthropicMessagesAdapterRegistry(AnthropicMessagesRegistration{
+		Provider: selection.Provider,
+		Adapter: func(_ context.Context, plan modelrouter.Plan) (AnthropicMessagesBinding, error) {
+			adapterCalls++
+			return NewAnthropicMessagesBinding(plan, anthropic.NewMessageService(), map[string]string{"workload": "judge"})
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewAnthropicMessagesAdapterRegistry: %v", err)
+	}
+	router := mustRouter(t, routes, AdapterRegistries{AnthropicMessages: adapters})
+
+	resolution, err := router.Resolve(selection)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got, want := resolution.Plan().ProviderModelID(), "provider-deployment-42"; got != want {
+		t.Fatalf("resolved provider model ID = %q, want %q", got, want)
+	}
+	binding, err := resolution.BindAnthropicMessages(t.Context(), modelrouter.Requirements{MaximumOutputTokens: true})
+	if err != nil {
+		t.Fatalf("BindAnthropicMessages: %v", err)
+	}
+	if adapterCalls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", adapterCalls)
+	}
+	if !binding.Plan().SameResolution(resolution.Plan()) {
+		t.Error("binding plan does not carry the selected route resolution")
+	}
+	if got, want := binding.ResourceLabels()["workload"], "judge"; got != want {
+		t.Errorf("binding workload label = %q, want %q", got, want)
+	}
+}
+
+func TestRouteResolutionRejectsProtocolAndRequirementsBeforeAdapter(t *testing.T) {
+	t.Parallel()
+
+	selection := modelrouter.Selection{Provider: "selected-provider", LogicalModel: "claude-sonnet-4-6"}
+	route := routedTestRoute(selection, modelrouter.ProtocolAnthropicMessages, "provider-deployment-42")
+	route.Capabilities.MaximumOutputTokens = false
+	adapterCalls := 0
+	adapters, err := NewAnthropicMessagesAdapterRegistry(AnthropicMessagesRegistration{
+		Provider: selection.Provider,
+		Adapter: func(context.Context, modelrouter.Plan) (AnthropicMessagesBinding, error) {
+			adapterCalls++
+			return AnthropicMessagesBinding{}, errors.New("must not be called")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewAnthropicMessagesAdapterRegistry: %v", err)
+	}
+	resolution, err := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{AnthropicMessages: adapters}).Resolve(selection)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if _, err := resolution.BindGoogleGenAI(t.Context(), modelrouter.Requirements{}); err == nil || !strings.Contains(err.Error(), "want \"google-gen-ai\"") {
+		t.Fatalf("BindGoogleGenAI error = %v, want protocol mismatch", err)
+	}
+	if _, err := resolution.BindAnthropicMessages(t.Context(), modelrouter.Requirements{MaximumOutputTokens: true}); !errors.Is(err, modelrouter.ErrUnsupportedCapability) {
+		t.Fatalf("BindAnthropicMessages error = %v, want ErrUnsupportedCapability", err)
+	}
+	if adapterCalls != 0 {
+		t.Fatalf("adapter calls = %d, want 0", adapterCalls)
+	}
+}
+
+func TestRouteResolutionRejectsInvalidAdapterBindings(t *testing.T) {
+	t.Parallel()
+
+	selection := modelrouter.Selection{Provider: "selected-provider", LogicalModel: "claude-sonnet-4-6"}
+	route := routedTestRoute(selection, modelrouter.ProtocolAnthropicMessages, "provider-deployment-42")
+	foreignRegistry := mustRouteRegistry(t, route)
+	foreignPlan, err := foreignRegistry.Resolve(selection)
+	if err != nil {
+		t.Fatalf("foreign Resolve: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		adapter AnthropicMessagesAdapter
+	}{
+		{
+			name: "zero binding",
+			adapter: func(context.Context, modelrouter.Plan) (AnthropicMessagesBinding, error) {
+				return AnthropicMessagesBinding{}, nil
+			},
+		},
+		{
+			name: "same-looking foreign plan",
+			adapter: func(context.Context, modelrouter.Plan) (AnthropicMessagesBinding, error) {
+				return NewAnthropicMessagesBinding(foreignPlan, anthropic.NewMessageService(), nil)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			adapters, err := NewAnthropicMessagesAdapterRegistry(AnthropicMessagesRegistration{
+				Provider: selection.Provider,
+				Adapter:  tc.adapter,
+			})
+			if err != nil {
+				t.Fatalf("NewAnthropicMessagesAdapterRegistry: %v", err)
+			}
+			resolution, err := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{AnthropicMessages: adapters}).Resolve(selection)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if _, err := resolution.BindAnthropicMessages(t.Context(), modelrouter.Requirements{}); !errors.Is(err, ErrInvalidBinding) {
+				t.Fatalf("BindAnthropicMessages error = %v, want ErrInvalidBinding", err)
+			}
+		})
+	}
+}
+
+func TestZeroRouteResolutionCannotBind(t *testing.T) {
+	t.Parallel()
+
+	var resolution RouteResolution
+	if _, err := resolution.BindAnthropicMessages(t.Context(), modelrouter.Requirements{}); !errors.Is(err, ErrInvalidRouter) {
+		t.Fatalf("BindAnthropicMessages error = %v, want ErrInvalidRouter", err)
+	}
+}
+
 func TestNewRoutedRejectsUnsupportedRequirementsBeforeAdapter(t *testing.T) {
 	t.Parallel()
 
@@ -89,6 +220,34 @@ func TestNewRoutedMaximumOutputTokensAreRequestedOnlyWhenConfigured(t *testing.T
 	}
 	if adapterCalls != 1 {
 		t.Fatalf("adapter calls after unsupported max tokens = %d, want unchanged 1", adapterCalls)
+	}
+}
+
+func TestNewRoutedPreservesCapabilityErrorPrecedence(t *testing.T) {
+	t.Parallel()
+
+	selection := modelrouter.Selection{Provider: "selected-provider", LogicalModel: "gemini-2.5-flash"}
+	route := routedTestRoute(selection, modelrouter.ProtocolGoogleGenAI, "provider-deployment-42")
+	route.Capabilities.MaximumOutputTokens = false
+	adapterCalls := 0
+	adapters, err := NewGoogleGenAIAdapterRegistry(GoogleGenAIRegistration{
+		Provider: selection.Provider,
+		Adapter: func(context.Context, modelrouter.Plan) (GoogleGenAIBinding, error) {
+			adapterCalls++
+			return GoogleGenAIBinding{}, errors.New("must not be called")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewGoogleGenAIAdapterRegistry: %v", err)
+	}
+	config := routedTestConfig(t)
+	config.MaxTokens = 65537 // Also exceeds the Google protocol limit.
+	_, err = NewRouted[*testRequest](t.Context(), mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{GoogleGenAI: adapters}), selection, config)
+	if !errors.Is(err, modelrouter.ErrUnsupportedCapability) {
+		t.Fatalf("NewRouted error = %v, want capability error before protocol-limit error", err)
+	}
+	if adapterCalls != 0 {
+		t.Fatalf("adapter calls = %d, want 0", adapterCalls)
 	}
 }
 

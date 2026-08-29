@@ -12,6 +12,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/internal/claudebackend"
+	"chainguard.dev/driftlessaf/agents/metaagent"
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // claude implements Interface using the backend selected by claudebackend.
@@ -27,20 +29,73 @@ func newClaude(ctx context.Context, projectID, region, model string, opts ...cla
 	if err != nil {
 		return nil, err
 	}
+	provider := backend.Provider
+	return newClaudeWithMessages(claudeJudgeConstruction{
+		messages:        backend.Messages,
+		providerModelID: backend.ModelID,
+		logicalModelID:  backend.ModelID,
+		legacyProvider:  &provider,
+		samplingParams:  true,
+	}, opts...)
+}
 
+type claudeJudgeConstruction struct {
+	messages        anthropic.MessageService
+	providerModelID string
+	logicalModelID  string
+	legacyProvider  *claudeexecutor.Provider
+	routed          bool
+	samplingParams  bool
+	promptCaching   bool
+	resourceLabels  map[string]string
+	attribution     *agenttrace.Attribution
+}
+
+func newRoutedClaude(binding metaagent.AnthropicMessagesBinding) (Interface, error) {
+	plan := binding.Plan()
+	attribution := routedAttribution(plan)
+	return newClaudeWithMessages(claudeJudgeConstruction{
+		messages:        binding.Messages(),
+		providerModelID: plan.ProviderModelID(),
+		logicalModelID:  plan.LogicalModel(),
+		routed:          true,
+		samplingParams:  plan.Capabilities().SamplingParameters,
+		promptCaching:   plan.Capabilities().PromptCaching,
+		resourceLabels:  binding.ResourceLabels(),
+		attribution:     &attribution,
+	})
+}
+
+func newClaudeWithMessages(construction claudeJudgeConstruction, opts ...claudeexecutor.Option[*Request, *Judgement]) (Interface, error) {
 	// Create one executor per mode using the pre-parsed templates from
 	// prompts.go; executors apply options read-only, so one slice is shared.
 	execOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
-		claudeexecutor.WithModel[*Request, *Judgement](backend.ModelID),
-		claudeexecutor.WithProvider[*Request, *Judgement](backend.Provider),
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
 	}
-	execOpts = append(execOpts, opts...) // Apply caller-provided options (e.g., enricher)
+	if construction.routed {
+		execOpts = append(execOpts,
+			claudeexecutor.WithRoutedModel[*Request, *Judgement](construction.providerModelID, construction.logicalModelID),
+			claudeexecutor.WithAttribution[*Request, *Judgement](*construction.attribution),
+			claudeexecutor.WithResourceLabels[*Request, *Judgement](construction.resourceLabels),
+		)
+		if !construction.samplingParams {
+			execOpts = append(execOpts, claudeexecutor.WithoutTemperature[*Request, *Judgement]())
+		}
+		if !construction.promptCaching {
+			execOpts = append(execOpts, claudeexecutor.WithoutCacheControl[*Request, *Judgement]())
+		}
+	} else {
+		execOpts = append([]claudeexecutor.Option[*Request, *Judgement]{
+			claudeexecutor.WithModel[*Request, *Judgement](construction.providerModelID),
+			claudeexecutor.WithProvider[*Request, *Judgement](*construction.legacyProvider),
+		}, execOpts...)
+		execOpts = append(execOpts, opts...) // Preserve compatibility option precedence.
+	}
 	executors := make([]claudeexecutor.Interface[*Request, *Judgement], len(modePrompts))
 	for i, mp := range modePrompts {
 		executor, err := claudeexecutor.NewWithMessages[*Request, *Judgement](
-			backend.Messages,
+			construction.messages,
 			mp.prompt,
 			execOpts...,
 		)

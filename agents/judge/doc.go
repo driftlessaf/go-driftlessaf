@@ -12,7 +12,8 @@ SPDX-License-Identifier: Apache-2.0
 //
 // The judge package provides:
 //   - A common Interface for different LLM judge implementations
-//   - Support for Claude (via Vertex AI) and Google Gemini models
+//   - Explicit route-aware construction for Google Gen AI and Anthropic Messages providers
+//   - Legacy Vertex AI construction for Claude and Google Gemini models
 //   - Single-criterion evaluation for clarity and simplicity
 //   - Integration with the evals package for test harness usage
 //

@@ -16,7 +16,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go"
+	"google.golang.org/genai"
 )
 
 // request is an example request type that implements promptbuilder.Bindable.
@@ -111,6 +113,122 @@ func ExampleNewRouted() {
 
 	fmt.Println(agent != nil)
 	// Output: true
+}
+
+// ExampleRouter_Resolve demonstrates resolving once and requesting the typed
+// provider binding for that exact plan.
+func ExampleRouter_Resolve() {
+	selection := modelrouter.Selection{
+		Provider:     modelrouter.ProviderAnthropic,
+		LogicalModel: "claude-sonnet-4-6",
+	}
+	routes, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection:       selection,
+		Protocol:        modelrouter.ProtocolAnthropicMessages,
+		ProviderModelID: "claude-sonnet-4-6",
+		Attribution: modelrouter.Attribution{
+			ProviderName: "anthropic",
+			LegacySystem: "anthropic",
+		},
+		Capabilities: modelrouter.Capabilities{MaximumOutputTokens: true},
+	})
+	if err != nil {
+		panic(err)
+	}
+	adapters, err := metaagent.NewAnthropicMessagesAdapterRegistry(
+		metaagent.AnthropicMessagesRegistration{
+			Provider: selection.Provider,
+			Adapter: func(_ context.Context, plan modelrouter.Plan) (metaagent.AnthropicMessagesBinding, error) {
+				// Production adapters return a Messages service built from explicit
+				// provider credentials.
+				return metaagent.NewAnthropicMessagesBinding(plan, anthropic.NewMessageService(), nil)
+			},
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	router, err := metaagent.NewRouter(routes, metaagent.AdapterRegistries{AnthropicMessages: adapters})
+	if err != nil {
+		panic(err)
+	}
+	resolution, err := router.Resolve(selection)
+	if err != nil {
+		panic(err)
+	}
+	binding, err := resolution.BindAnthropicMessages(context.Background(), modelrouter.Requirements{MaximumOutputTokens: true})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(binding.Plan().ProviderModelID())
+	// Output: claude-sonnet-4-6
+}
+
+// ExampleRouteResolution_Plan demonstrates inspecting the immutable,
+// secret-free plan before constructing a provider client.
+func ExampleRouteResolution_Plan() {
+	router, selection := exampleGoogleRouter()
+	resolution, err := router.Resolve(selection)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(resolution.Plan().ProviderModelID())
+	// Output: gemini-2.5-flash
+}
+
+// ExampleRouteResolution_BindGoogleGenAI demonstrates requesting the typed
+// provider binding for a previously resolved Google Gen AI route.
+func ExampleRouteResolution_BindGoogleGenAI() {
+	router, selection := exampleGoogleRouter()
+	resolution, err := router.Resolve(selection)
+	if err != nil {
+		panic(err)
+	}
+	binding, err := resolution.BindGoogleGenAI(context.Background(), modelrouter.Requirements{MaximumOutputTokens: true})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(binding.Plan().ProviderModelID())
+	// Output: gemini-2.5-flash
+}
+
+func exampleGoogleRouter() (*metaagent.Router, modelrouter.Selection) {
+	selection := modelrouter.Selection{
+		Provider:     modelrouter.ProviderVertexAI,
+		LogicalModel: "gemini-flash",
+	}
+	routes, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection:       selection,
+		Protocol:        modelrouter.ProtocolGoogleGenAI,
+		ProviderModelID: "gemini-2.5-flash",
+		Attribution: modelrouter.Attribution{
+			ProviderName: "gcp.vertex_ai",
+			LegacySystem: "google.vertex",
+		},
+		Capabilities: modelrouter.Capabilities{MaximumOutputTokens: true},
+	})
+	if err != nil {
+		panic(err)
+	}
+	adapters, err := metaagent.NewGoogleGenAIAdapterRegistry(
+		metaagent.GoogleGenAIRegistration{
+			Provider: selection.Provider,
+			Adapter: func(_ context.Context, plan modelrouter.Plan) (metaagent.GoogleGenAIBinding, error) {
+				return metaagent.NewGoogleGenAIBinding(plan, &genai.Client{}, nil)
+			},
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	router, err := metaagent.NewRouter(routes, metaagent.AdapterRegistries{GoogleGenAI: adapters})
+	if err != nil {
+		panic(err)
+	}
+	return router, selection
 }
 
 // ExampleNewAnthropicDirectMessagesAdapter demonstrates binding an explicit

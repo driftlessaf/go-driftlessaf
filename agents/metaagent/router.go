@@ -32,9 +32,22 @@ type AdapterRegistries struct {
 
 // Router combines an immutable route registry with explicitly constructed,
 // typed adapter registries. It contains no package-global registration state.
+// A Router is safe for concurrent use when its registered adapters are safe
+// for concurrent use.
 type Router struct {
 	routes   *modelrouter.Registry
 	adapters AdapterRegistries
+}
+
+// RouteResolution carries one route plan together with the Router that
+// resolved it. Its private fields preserve plan provenance while allowing
+// protocol consumers such as judge to request one typed adapter binding.
+// Its exported API exposes no credentials or provider client. A
+// RouteResolution is safe to copy and use concurrently; binding concurrently
+// requires the selected adapter to be safe for concurrent use.
+type RouteResolution struct {
+	router *Router
+	plan   modelrouter.Plan
 }
 
 // NewRouter constructs an explicit meta-agent router.
@@ -43,6 +56,109 @@ func NewRouter(routes *modelrouter.Registry, adapters AdapterRegistries) (*Route
 		return nil, fmt.Errorf("%w: route registry is nil", ErrInvalidRouter)
 	}
 	return &Router{routes: routes, adapters: adapters}, nil
+}
+
+// Resolve resolves selection without loading credentials or invoking an
+// adapter. The returned RouteResolution can bind only the exact plan produced
+// by this Router.
+func (r *Router) Resolve(selection modelrouter.Selection) (RouteResolution, error) {
+	if r == nil || r.routes == nil {
+		return RouteResolution{}, fmt.Errorf("%w: router is nil", ErrInvalidRouter)
+	}
+	plan, err := r.routes.Resolve(selection)
+	if err != nil {
+		return RouteResolution{}, fmt.Errorf("resolving model route: %w", err)
+	}
+	return RouteResolution{router: r, plan: plan}, nil
+}
+
+// Plan returns the immutable, secret-free plan carried by r.
+func (r RouteResolution) Plan() modelrouter.Plan {
+	return r.plan
+}
+
+// BindGoogleGenAI validates requirements and invokes the one Google Gen AI
+// adapter selected by r.
+func (r RouteResolution) BindGoogleGenAI(ctx context.Context, requirements modelrouter.Requirements) (GoogleGenAIBinding, error) {
+	if err := r.validate(modelrouter.ProtocolGoogleGenAI, requirements); err != nil {
+		return GoogleGenAIBinding{}, err
+	}
+	adapter, err := r.router.adapters.GoogleGenAI.lookup(r.plan.Provider())
+	if err != nil {
+		return GoogleGenAIBinding{}, err
+	}
+	binding, err := adapter(ctx, r.plan)
+	if err != nil {
+		return GoogleGenAIBinding{}, r.adapterError(err)
+	}
+	if !binding.initialized {
+		return GoogleGenAIBinding{}, fmt.Errorf("%w: adapter returned a zero Google Gen AI binding", ErrInvalidBinding)
+	}
+	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
+		return GoogleGenAIBinding{}, err
+	}
+	return binding, nil
+}
+
+// BindAnthropicMessages validates requirements and invokes the one Anthropic
+// Messages adapter selected by r.
+func (r RouteResolution) BindAnthropicMessages(ctx context.Context, requirements modelrouter.Requirements) (AnthropicMessagesBinding, error) {
+	if err := r.validate(modelrouter.ProtocolAnthropicMessages, requirements); err != nil {
+		return AnthropicMessagesBinding{}, err
+	}
+	adapter, err := r.router.adapters.AnthropicMessages.lookup(r.plan.Provider())
+	if err != nil {
+		return AnthropicMessagesBinding{}, err
+	}
+	binding, err := adapter(ctx, r.plan)
+	if err != nil {
+		return AnthropicMessagesBinding{}, r.adapterError(err)
+	}
+	if !binding.initialized {
+		return AnthropicMessagesBinding{}, fmt.Errorf("%w: adapter returned a zero Anthropic Messages binding", ErrInvalidBinding)
+	}
+	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
+		return AnthropicMessagesBinding{}, err
+	}
+	return binding, nil
+}
+
+func (r RouteResolution) bindOpenAIChatCompletions(ctx context.Context, requirements modelrouter.Requirements) (OpenAIChatCompletionsBinding, error) {
+	if err := r.validate(modelrouter.ProtocolOpenAIChatCompletions, requirements); err != nil {
+		return OpenAIChatCompletionsBinding{}, err
+	}
+	adapter, err := r.router.adapters.OpenAIChatCompletions.lookup(r.plan.Provider())
+	if err != nil {
+		return OpenAIChatCompletionsBinding{}, err
+	}
+	binding, err := adapter(ctx, r.plan)
+	if err != nil {
+		return OpenAIChatCompletionsBinding{}, r.adapterError(err)
+	}
+	if !binding.initialized {
+		return OpenAIChatCompletionsBinding{}, fmt.Errorf("%w: adapter returned a zero OpenAI Chat Completions binding", ErrInvalidBinding)
+	}
+	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
+		return OpenAIChatCompletionsBinding{}, err
+	}
+	return binding, nil
+}
+
+func (r RouteResolution) validate(protocol modelrouter.Protocol, requirements modelrouter.Requirements) error {
+	if r.router == nil || r.router.routes == nil {
+		return fmt.Errorf("%w: route resolution is uninitialized", ErrInvalidRouter)
+	}
+	if err := r.plan.Validate(); err != nil {
+		return fmt.Errorf("%w: route resolution plan: %w", ErrInvalidRouter, err)
+	}
+	if r.plan.Protocol() != protocol {
+		return fmt.Errorf("resolved route protocol is %q, want %q", r.plan.Protocol(), protocol)
+	}
+	return r.plan.ValidateRequirements(requirements)
+}
+
+func (r RouteResolution) adapterError(err error) error {
+	return fmt.Errorf("constructing adapter binding for provider %q and protocol %q: %w", r.plan.Provider(), r.plan.Protocol(), err)
 }
 
 // NewRouted resolves selection, validates every requested capability, invokes
@@ -61,11 +177,16 @@ func NewRouted[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, err
 	}
 
-	plan, err := router.routes.Resolve(selection)
+	resolution, err := router.Resolve(selection)
 	if err != nil {
-		return nil, fmt.Errorf("resolving model route: %w", err)
+		return nil, err
 	}
-	if err := plan.ValidateRequirements(requirementsForConfig(plan.Protocol(), config)); err != nil {
+	plan := resolution.Plan()
+	requirements := requirementsForConfig(plan.Protocol(), config)
+	// Preserve the legacy NewRouted validation order: route capabilities fail
+	// before protocol-specific config and submit-schema validation. The typed
+	// binder validates again so direct RouteResolution consumers remain safe.
+	if err := plan.ValidateRequirements(requirements); err != nil {
 		return nil, err
 	}
 	if err := validateRoutedConfigForProtocol(plan.Protocol(), config); err != nil {
@@ -79,52 +200,22 @@ func NewRouted[Req promptbuilder.Bindable, Resp, CB any](
 
 	switch plan.Protocol() {
 	case modelrouter.ProtocolGoogleGenAI:
-		adapter, err := router.adapters.GoogleGenAI.lookup(plan.Provider())
+		binding, err := resolution.BindGoogleGenAI(ctx, requirements)
 		if err != nil {
-			return nil, err
-		}
-		binding, err := adapter(ctx, plan)
-		if err != nil {
-			return nil, fmt.Errorf("constructing adapter binding for provider %q and protocol %q: %w", plan.Provider(), plan.Protocol(), err)
-		}
-		if !binding.initialized {
-			return nil, fmt.Errorf("%w: adapter returned a zero Google Gen AI binding", ErrInvalidBinding)
-		}
-		if err := validateReturnedPlan(plan, binding.Plan()); err != nil {
 			return nil, err
 		}
 		return newRoutedGoogleAgent[Req, Resp, CB](binding, config)
 
 	case modelrouter.ProtocolAnthropicMessages:
-		adapter, err := router.adapters.AnthropicMessages.lookup(plan.Provider())
+		binding, err := resolution.BindAnthropicMessages(ctx, requirements)
 		if err != nil {
-			return nil, err
-		}
-		binding, err := adapter(ctx, plan)
-		if err != nil {
-			return nil, fmt.Errorf("constructing adapter binding for provider %q and protocol %q: %w", plan.Provider(), plan.Protocol(), err)
-		}
-		if !binding.initialized {
-			return nil, fmt.Errorf("%w: adapter returned a zero Anthropic Messages binding", ErrInvalidBinding)
-		}
-		if err := validateReturnedPlan(plan, binding.Plan()); err != nil {
 			return nil, err
 		}
 		return newRoutedClaudeAgent[Req, Resp, CB](binding, config)
 
 	case modelrouter.ProtocolOpenAIChatCompletions:
-		adapter, err := router.adapters.OpenAIChatCompletions.lookup(plan.Provider())
+		binding, err := resolution.bindOpenAIChatCompletions(ctx, requirements)
 		if err != nil {
-			return nil, err
-		}
-		binding, err := adapter(ctx, plan)
-		if err != nil {
-			return nil, fmt.Errorf("constructing adapter binding for provider %q and protocol %q: %w", plan.Provider(), plan.Protocol(), err)
-		}
-		if !binding.initialized {
-			return nil, fmt.Errorf("%w: adapter returned a zero OpenAI Chat Completions binding", ErrInvalidBinding)
-		}
-		if err := validateReturnedPlan(plan, binding.Plan()); err != nil {
 			return nil, err
 		}
 		return newRoutedOpenAIChatCompletionsAgent[Req, Resp, CB](binding, config)

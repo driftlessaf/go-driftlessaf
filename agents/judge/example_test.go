@@ -15,6 +15,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/judge"
+	"chainguard.dev/driftlessaf/agents/metaagent"
+	"chainguard.dev/driftlessaf/agents/modelrouter"
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // ExampleRetry demonstrates calling a judge through the shared retry helper, which
@@ -145,6 +148,53 @@ func ExampleNewVertex() {
 
 	fmt.Printf("Score: %.2f\n", judgment.Score)
 	fmt.Printf("Reasoning: %s\n", judgment.Reasoning)
+}
+
+// ExampleNewRouted demonstrates constructing a judge from an explicit route.
+func ExampleNewRouted() {
+	selection := modelrouter.Selection{
+		Provider:     modelrouter.ProviderAnthropic,
+		LogicalModel: "claude-sonnet-4-6",
+	}
+	routes, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection:       selection,
+		Protocol:        modelrouter.ProtocolAnthropicMessages,
+		ProviderModelID: "claude-sonnet-4-6",
+		Attribution: modelrouter.Attribution{
+			ProviderName: "anthropic",
+			LegacySystem: "anthropic",
+		},
+		Capabilities: modelrouter.Capabilities{
+			SamplingParameters:  true,
+			PromptCaching:       true,
+			MaximumOutputTokens: true,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	adapters, err := metaagent.NewAnthropicMessagesAdapterRegistry(
+		metaagent.AnthropicMessagesRegistration{
+			Provider: selection.Provider,
+			Adapter: func(_ context.Context, plan modelrouter.Plan) (metaagent.AnthropicMessagesBinding, error) {
+				return metaagent.NewAnthropicMessagesBinding(plan, anthropic.NewMessageService(), nil)
+			},
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	router, err := metaagent.NewRouter(routes, metaagent.AdapterRegistries{AnthropicMessages: adapters})
+	if err != nil {
+		panic(err)
+	}
+	judgeInstance, err := judge.NewRouted(context.Background(), router, selection)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(judgeInstance != nil)
+	// Output: true
 }
 
 // ExampleNewVertex_gemini demonstrates creating a Gemini-based judge.

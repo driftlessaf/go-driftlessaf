@@ -26,6 +26,8 @@ SPDX-License-Identifier: Apache-2.0
 // selects a provider and logical model. The resolved Plan remains authoritative
 // for the exact provider model ID, effective capabilities, and attribution;
 // credentials and SDK clients stay captured by adapters outside the Plan.
+// Routers and route resolutions are safe for concurrent use when their
+// registered adapters are safe for concurrent use.
 //
 // # Usage
 //
