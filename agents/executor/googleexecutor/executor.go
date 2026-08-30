@@ -473,10 +473,35 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to create chat with model %q: %w", e.model, err)
 	}
 
+	// The GenAI SDK omits both an invalid model response and the user input
+	// that produced it from the curated history used by the next Send. Track
+	// the pre-send history and input ourselves so response-level recovery can
+	// rebuild the chat and replay the request together with its nudge. Without
+	// this, a malformed or empty first response leaves the retry with only the
+	// nudge and no original task.
+	var historyBeforeLastSend []*genai.Content
+	var lastInputParts []*genai.Part
+	send := func(ctx context.Context, parts ...*genai.Part) (*genai.GenerateContentResponse, error) {
+		historyBeforeLastSend = slices.Clone(chat.History(true))
+		lastInputParts = slices.Clone(parts)
+		return chat.Send(ctx, parts...)
+	}
+	replayLastInput := func(ctx context.Context, nudge genai.Part) ([]*genai.Part, error) {
+		if len(lastInputParts) == 0 {
+			return nil, errors.New("cannot recover invalid response without a previous input")
+		}
+		rebuilt, err := e.client.Chats.Create(ctx, e.model, config, historyBeforeLastSend)
+		if err != nil {
+			return nil, fmt.Errorf("rebuilding chat after invalid response: %w", err)
+		}
+		chat = rebuilt
+		return append(slices.Clone(lastInputParts), &nudge), nil
+	}
+
 	// Send final message to get response with retry for transient errors
 	clog.InfoContext(ctx, "Sending final message")
 	response, err := e.sendWithRetry(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", "failed to send final message", func() (*genai.GenerateContentResponse, error) {
-		return chat.Send(ctx, history[len(history)-1].Parts...)
+		return send(ctx, history[len(history)-1].Parts...)
 	})
 	if err != nil {
 		return resp, err
@@ -588,7 +613,7 @@ func (e *executor[Request, Response]) Execute(
 			// Ask the model to provide a more concise version
 			retryMsg := genai.Part{Text: "Your response exceeded the maximum output token limit. Please provide a more concise response that focuses on the most critical information while still completing the task."}
 			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_max_tokens_retry", "failed to send retry message after hitting max tokens", func() (*genai.GenerateContentResponse, error) {
-				return chat.SendMessage(ctx, retryMsg)
+				return send(ctx, &retryMsg)
 			})
 			if err != nil {
 				return zero, nil, true, err
@@ -611,8 +636,12 @@ func (e *executor[Request, Response]) Execute(
 
 			// Send a message asking the model to try again with retry for transient errors
 			retryMsg := genai.Part{Text: fmt.Sprintf("The function call was malformed. Please try again using the available functions: %v", funcNames)}
+			retryParts, err := replayLastInput(ctx, retryMsg)
+			if err != nil {
+				return zero, nil, true, err
+			}
 			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_malformed_retry", "failed to send retry message after malformed function call", func() (*genai.GenerateContentResponse, error) {
-				return chat.SendMessage(ctx, retryMsg)
+				return send(ctx, retryParts...)
 			})
 			if err != nil {
 				return zero, nil, true, err
@@ -650,8 +679,12 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "Model returned an unusable response, asking it to continue",
 				"reason", what, "attempt", emptyTurns, "turn", turn)
 			retryMsg := genai.Part{Text: "Your last response was empty. Please continue: either call one of the available functions or provide your answer as text."}
+			retryParts, err := replayLastInput(ctx, retryMsg)
+			if err != nil {
+				return nil, true, err
+			}
 			resp, err := e.sendWithRetry(ctx, turnCfg, "send_empty_response_retry", "failed to send retry message after an empty response", func() (*genai.GenerateContentResponse, error) {
-				return chat.SendMessage(ctx, retryMsg)
+				return send(ctx, retryParts...)
 			})
 			if err != nil {
 				return nil, true, err
@@ -767,7 +800,7 @@ func (e *executor[Request, Response]) Execute(
 
 			// Send tool responses back to the chat with retry for transient errors
 			nextResponse, err := e.sendWithRetry(ctx, turnCfg, "send_tool_responses", "failed to send tool responses", func() (*genai.GenerateContentResponse, error) {
-				return chat.Send(ctx, toolResponseParts...)
+				return send(ctx, toolResponseParts...)
 			})
 			if err != nil {
 				return zero, nil, true, err
@@ -783,7 +816,7 @@ func (e *executor[Request, Response]) Execute(
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
 			redirectResp, err := e.sendWithRetry(ctx, turnCfg, "send_submit_redirect", "failed to send submit_result redirect", func() (*genai.GenerateContentResponse, error) {
-				return chat.SendMessage(ctx, genai.Part{
+				return send(ctx, &genai.Part{
 					Text: "You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary.",
 				})
 			})

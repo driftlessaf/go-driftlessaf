@@ -142,6 +142,17 @@ const cachedContentReply = `{"name":"cachedContents/test-cache","model":"models/
 // aborting the in-flight HTTP exchange.
 func newValidatingGenerateContentServer(t *testing.T, cacheReqs *int, script func(reqNum int, body []byte) string) *httptest.Server {
 	t.Helper()
+	return newValidatingGenerateContentServerWithStatus(t, cacheReqs, func(reqNum int, body []byte) (int, string) {
+		return http.StatusOK, script(reqNum, body)
+	})
+}
+
+// newValidatingGenerateContentServerWithStatus is the status-aware form of
+// newValidatingGenerateContentServer. It lets retry tests return provider
+// errors through the real GenAI SDK decoding path while retaining the shared
+// transcript-pairing validation.
+func newValidatingGenerateContentServerWithStatus(t *testing.T, cacheReqs *int, script func(reqNum int, body []byte) (int, string)) *httptest.Server {
+	t.Helper()
 	var mu sync.Mutex
 	var reqNum int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -173,8 +184,10 @@ func newValidatingGenerateContentServer(t *testing.T, cacheReqs *int, script fun
 			t.Errorf("request %d: %s", n, v)
 		}
 
+		status, response := script(n, body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, script(n, body))
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, response)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -182,13 +195,13 @@ func newValidatingGenerateContentServer(t *testing.T, cacheReqs *int, script fun
 
 // lookupTurnJSON is a generateContent response calling the lookup tool.
 const lookupTurnJSON = `{
-	"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_lookup","name":"lookup","args":{}}}]}}],
+	"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_lookup","name":"lookup","args":{}}}]}}],
 	"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
 }`
 
 // submitTurnJSON is a generateContent response calling submit_result.
 const submitTurnJSON = `{
-	"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_submit","name":"submit_result","args":{"answer":"42"}}}]}}],
+	"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_submit","name":"submit_result","args":{"answer":"42"}}}]}}],
 	"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
 }`
 

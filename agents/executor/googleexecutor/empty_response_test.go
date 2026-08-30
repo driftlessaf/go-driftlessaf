@@ -7,12 +7,12 @@ package googleexecutor_test
 
 import (
 	"context"
+	"crypto/rand"
 	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
-	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"google.golang.org/genai"
@@ -28,12 +28,9 @@ const emptyTurnJSON = `{
 	"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":0,"totalTokenCount":1}
 }`
 
-func newEmptyResponseExecutor(t *testing.T, url string, maxTurns int) googleexecutor.Interface[errCapRequest, errCapResponse] {
+func newEmptyResponseExecutor(t *testing.T, url, promptText string, maxTurns int) googleexecutor.Interface[errCapRequest, errCapResponse] {
 	t.Helper()
-	prompt, err := promptbuilder.NewPrompt("hello")
-	if err != nil {
-		t.Fatalf("NewPrompt: %v", err)
-	}
+	prompt := newRuntimePrompt(t, promptText)
 	exec, err := googleexecutor.New[errCapRequest, errCapResponse](
 		newTestClient(t, url),
 		prompt,
@@ -62,17 +59,22 @@ func newEmptyResponseExecutor(t *testing.T, url string, maxTurns int) googleexec
 // TestEmptyResponseIsRetried is the regression test for the dominant CI flake:
 // a single degenerate turn used to fail the whole run terminally.
 func TestEmptyResponseIsRetried(t *testing.T) {
+	originalPrompt := rand.Text()
 	var requests int
-	srv := newValidatingGenerateContentServer(t, nil, func(reqNum int, _ []byte) string {
+	retryRequest := make(chan []byte, 1)
+	srv := newValidatingGenerateContentServer(t, nil, func(reqNum int, body []byte) string {
 		requests = reqNum
 		// One empty turn, then a real answer -- the shape of the transient.
 		if reqNum == 1 {
 			return emptyTurnJSON
 		}
+		if reqNum == 2 {
+			retryRequest <- append([]byte(nil), body...)
+		}
 		return submitTurnJSON
 	})
 
-	exec := newEmptyResponseExecutor(t, srv.URL, 10)
+	exec := newEmptyResponseExecutor(t, srv.URL, originalPrompt, 10)
 
 	resp, err := exec.Execute(t.Context(), errCapRequest{}, map[string]googletool.Metadata[errCapResponse]{})
 	if err != nil {
@@ -83,6 +85,14 @@ func TestEmptyResponseIsRetried(t *testing.T) {
 	}
 	if requests < 2 {
 		t.Errorf("requests: got = %d, want >= 2 (the retry must actually re-ask)", requests)
+	}
+	texts := requestTexts(t, <-retryRequest)
+	joined := strings.Join(texts, "\n")
+	if !strings.Contains(joined, originalPrompt) {
+		t.Errorf("retry request omitted original input: got text parts %q, want prompt %q", texts, originalPrompt)
+	}
+	if !strings.Contains(joined, "last response was empty") {
+		t.Errorf("retry request omitted recovery instruction: got text parts %q", texts)
 	}
 }
 
@@ -98,7 +108,7 @@ func TestEmptyResponseRetryIsBounded(t *testing.T) {
 
 	// maxTurns is deliberately far above the empty-response bound so that
 	// hitting the bound, not the turn limit, is what stops the run.
-	exec := newEmptyResponseExecutor(t, srv.URL, 100)
+	exec := newEmptyResponseExecutor(t, srv.URL, rand.Text(), 100)
 
 	_, err := exec.Execute(t.Context(), errCapRequest{}, map[string]googletool.Metadata[errCapResponse]{})
 	if err == nil {

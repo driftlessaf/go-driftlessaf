@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"google.golang.org/api/googleapi"
+	"google.golang.org/genai"
 )
 
 func TestIsRetryableVertexError(t *testing.T) {
@@ -29,6 +30,7 @@ func TestIsRetryableVertexError(t *testing.T) {
 		{name: "502 googleapi", err: &googleapi.Error{Code: http.StatusBadGateway, Message: "bad gateway"}, want: true},
 		{name: "503 googleapi", err: &googleapi.Error{Code: http.StatusServiceUnavailable, Message: "unavailable"}, want: true},
 		{name: "504 googleapi", err: &googleapi.Error{Code: http.StatusGatewayTimeout, Message: "timeout"}, want: true},
+		{name: "504 genai", err: genai.APIError{Code: http.StatusGatewayTimeout, Message: "Deadline expired", Status: "DEADLINE_EXCEEDED"}, want: true},
 		{name: "403 googleapi", err: &googleapi.Error{Code: http.StatusForbidden, Message: "forbidden"}, want: false},
 		{name: "404 googleapi", err: &googleapi.Error{Code: http.StatusNotFound, Message: "not found"}, want: false},
 		{name: "400 googleapi", err: &googleapi.Error{Code: http.StatusBadRequest, Message: "bad request"}, want: false},
@@ -46,6 +48,7 @@ func TestIsRetryableVertexError(t *testing.T) {
 		{name: "auth error string", err: errors.New("authentication failed"), want: false},
 		{name: "UNAVAILABLE string", err: errors.New("Error 503, Message: Visibility check was unavailable. Please retry the request, Status: UNAVAILABLE, Details: []"), want: true},
 		{name: "unavailable lowercase string", err: errors.New("service unavailable: please retry"), want: true},
+		{name: "DEADLINE_EXCEEDED string", err: errors.New("Error 504, Message: Deadline expired, Status: DEADLINE_EXCEEDED"), want: true},
 		// Structured codes whose message text matches a transient keyword
 		// must still retry: a real Vertex 529 always carries "Overloaded".
 		{name: "structured 401 with retryable message", err: &googleapi.Error{Code: http.StatusUnauthorized, Message: "rate limit"}, want: true},
@@ -76,6 +79,9 @@ func TestResponseCodeFromError(t *testing.T) {
 		{name: "529 googleapi", err: &googleapi.Error{Code: 529}, want: 529},
 		{name: "403 googleapi", err: &googleapi.Error{Code: http.StatusForbidden}, want: 403},
 		{name: "wrapped 429 googleapi", err: fmt.Errorf("send: %w", &googleapi.Error{Code: http.StatusTooManyRequests}), want: 429},
+		{name: "504 genai", err: genai.APIError{Code: http.StatusGatewayTimeout, Status: "DEADLINE_EXCEEDED"}, want: 504},
+		{name: "504 genai pointer", err: &genai.APIError{Code: http.StatusGatewayTimeout, Status: "DEADLINE_EXCEEDED"}, want: 504},
+		{name: "wrapped 504 genai", err: fmt.Errorf("send: %w", genai.APIError{Code: http.StatusGatewayTimeout, Status: "DEADLINE_EXCEEDED"}), want: 504},
 		// gRPC string fallbacks
 		{name: "RESOURCE_EXHAUSTED", err: errors.New("rpc error: code = ResourceExhausted desc = quota"), want: 429},
 		{name: "rate limit", err: errors.New("rate limit exceeded"), want: 429},
@@ -83,6 +89,7 @@ func TestResponseCodeFromError(t *testing.T) {
 		{name: "UNAVAILABLE", err: errors.New("Status: UNAVAILABLE, Details: []"), want: 503},
 		{name: "CANCELLED", err: errors.New("rpc error: code = CANCELLED"), want: 499},
 		{name: "Internal error", err: errors.New("Internal error occurred"), want: 500},
+		{name: "DEADLINE_EXCEEDED", err: errors.New("Status: DEADLINE_EXCEEDED"), want: 504},
 		// Unrecognised → -1, surfaced as "unknown" by the telemetry recorder
 		{name: "opaque error maps to -1", err: errors.New("something weird happened"), want: -1},
 	}
@@ -112,6 +119,7 @@ func TestResponseCodeFromMessage(t *testing.T) {
 		{name: "CANCELLED", s: "rpc error: code = CANCELLED", want: 499},
 		{name: "Internal error", s: "Internal error occurred", want: 500},
 		{name: "server error", s: "server error: please retry", want: 500},
+		{name: "DEADLINE_EXCEEDED", s: "Status: DEADLINE_EXCEEDED", want: 504},
 		{name: "no match", s: "permission denied", want: -1},
 	}
 	for _, tt := range tests {
