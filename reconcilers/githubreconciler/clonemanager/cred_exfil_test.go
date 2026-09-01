@@ -195,7 +195,10 @@ func TestFetchUsesTrustedRemoteURLNotGitConfig(t *testing.T) {
 	// prepareClone fetches at lease time. It fails after the fetch (neither
 	// recording server is a real git endpoint), but the credential reaches the
 	// first request regardless — so we can assert WHERE it went.
-	cl := &clone{path: dir, repo: repo}
+	cl, err := newClone(dir, repo)
+	if err != nil {
+		t.Fatalf("newClone: %v", err)
+	}
 	res := &githubreconciler.Resource{Owner: "owner", Repo: "repo", Ref: "master", Path: "x", Type: githubreconciler.ResourceTypePath}
 	_, _, _ = m.prepareClone(ctx, cl, "master", res, 1)
 
@@ -242,13 +245,28 @@ func TestGitCLICheckoutIgnoresPlantedHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlainOpen: %v", err)
 	}
-	if err := m.backend.checkout(ctx, &clone{path: dir, repo: repo}, plumbing.NewHash(firstHash)); err != nil {
+	cl, err := newClone(dir, repo)
+	if err != nil {
+		t.Fatalf("newClone: %v", err)
+	}
+	if err := m.backend.checkout(ctx, cl, plumbing.NewHash(firstHash)); err != nil {
 		t.Fatalf("checkout: %v", err)
 	}
 
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("planted post-checkout hook executed (marker %s exists, err=%v), want hook suppressed via core.hooksPath", marker, err)
 	}
+}
+
+// openRoot opens an os.Root at dir for tests that call resetGitConfig directly.
+func openRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
 }
 
 // TestResetGitConfigReplacesIrregularInodes pins resetGitConfig's
@@ -271,7 +289,7 @@ func TestResetGitConfigReplacesIrregularInodes(t *testing.T) {
 			t.Fatalf("Symlink: %v", err)
 		}
 
-		if err := resetGitConfig(dir); err != nil {
+		if err := resetGitConfig(openRoot(t, dir)); err != nil {
 			t.Fatalf("resetGitConfig: %v", err)
 		}
 
@@ -297,7 +315,7 @@ func TestResetGitConfigReplacesIrregularInodes(t *testing.T) {
 
 		// A direct write would block forever on the readerless FIFO; the
 		// rename-based reset must complete. The test timeout is the guard.
-		if err := resetGitConfig(dir); err != nil {
+		if err := resetGitConfig(openRoot(t, dir)); err != nil {
 			t.Fatalf("resetGitConfig: %v", err)
 		}
 		fi, err := os.Lstat(cfg)
@@ -320,7 +338,7 @@ func TestResetGitConfigReplacesIrregularInodes(t *testing.T) {
 
 		// resetGitConfig must refuse rather than write victim/config through
 		// the symlinked .git.
-		if err := resetGitConfig(dir); err == nil {
+		if err := resetGitConfig(openRoot(t, dir)); err == nil {
 			t.Errorf("resetGitConfig succeeded through a symlinked .git, want error")
 		}
 		if _, err := os.Stat(filepath.Join(victim, "config")); !errors.Is(err, os.ErrNotExist) {
@@ -377,7 +395,10 @@ func TestGitCLIFetchIgnoresPoisonedGitConfig(t *testing.T) {
 	// The fetch fails (neither recording server is a real git endpoint), but
 	// the credential reaches the first request regardless — so we can assert
 	// WHERE it went.
-	cl := &clone{path: dir, repo: repo}
+	cl, err := newClone(dir, repo)
+	if err != nil {
+		t.Fatalf("newClone: %v", err)
+	}
 	res := &githubreconciler.Resource{Owner: "owner", Repo: "repo", Ref: "master", Path: "x", Type: githubreconciler.ResourceTypePath}
 	_, _, _ = m.prepareClone(ctx, cl, "master", res, 1)
 

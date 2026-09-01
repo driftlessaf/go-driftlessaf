@@ -9,9 +9,9 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -135,7 +135,7 @@ func (b cliBackend) runInClone(ctx context.Context, cl *clone, remote string, ar
 	if err != nil {
 		return err
 	}
-	if err := resetGitConfig(cl.path); err != nil {
+	if err := resetGitConfig(cl.root); err != nil {
 		return fmt.Errorf("resetting git config: %w", err)
 	}
 	return b.exec(ctx, cl.path, remote, env, args...)
@@ -277,29 +277,27 @@ const minimalGitConfig = `[core]
 // enforcing the config-poisoning invariant documented on cliBackend. It is the
 // CLI counterpart of trustedRemote (which protects the go-git path).
 //
-// The replacement is write-to-temp plus rename, not a direct write: rename
-// replaces whatever inode sits at the path without opening it, so a planted
-// symlink cannot redirect the write outside the clone and a planted FIFO
-// cannot block forever. .git itself is Lstat'd first, so a symlinked .git
-// cannot make CreateTemp write through it to an external directory.
-func resetGitConfig(dir string) error {
-	gitDir := filepath.Join(dir, ".git")
-	fi, err := os.Lstat(gitDir) //nolint:gosec // G703: path from git clone directory
+// Every path goes through the clone's os.Root, so a symlink planted at .git or
+// any component that escapes the clone is refused rather than followed. The
+// replacement is write-to-temp plus rename: rename replaces whatever inode sits
+// at .git/config (symlink, FIFO, regular) without opening it. The temp is
+// removed first (unlinking a symlink/FIFO planted in its place, without
+// following or blocking) then created O_EXCL; leases are exclusive and a
+// clone's git ops run serially, so nothing races on the fixed temp name.
+func resetGitConfig(root *os.Root) error {
+	const tmpName = ".git/config.new"
+	if err := root.Remove(tmpName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clearing temp config: %w", err)
+	}
+	f, err := root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating config: %w", err)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		return fmt.Errorf(".git is not a regular directory (mode %v)", fi.Mode())
-	}
-	tmp, err := os.CreateTemp(gitDir, "config-*")
-	if err != nil {
-		return err
-	}
-	_, werr := tmp.WriteString(minimalGitConfig)
-	cerr := tmp.Close()
+	_, werr := f.WriteString(minimalGitConfig)
+	cerr := f.Close()
 	if werr != nil || cerr != nil {
-		os.Remove(tmp.Name()) //nolint:gosec // G703: path from os.CreateTemp in the clone's .git
+		_ = root.Remove(tmpName)
 		return fmt.Errorf("writing config: %w", cmp.Or(werr, cerr))
 	}
-	return os.Rename(tmp.Name(), filepath.Join(gitDir, "config")) //nolint:gosec // G703: paths from git clone directory
+	return root.Rename(tmpName, ".git/config")
 }

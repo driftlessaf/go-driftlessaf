@@ -739,6 +739,64 @@ func testReturnClearsInfoExclude(t *testing.T, opts ...Option) {
 	}
 }
 
+// TestReturnInfoExcludeRemovalStaysInClone verifies the .git/info/exclude
+// cleanup cannot be redirected outside the clone: a lease that replaces
+// .git/info with a symlink to an external directory must not cause Return to
+// delete <external>/exclude. os.Root confines the removal, so the escaping
+// symlink is refused (Return errors and the clone is discarded) and the
+// external file survives.
+func TestReturnInfoExcludeRemovalStaysInClone(t *testing.T) {
+	forEachBackend(t, testReturnInfoExcludeRemovalStaysInClone)
+}
+
+func testReturnInfoExcludeRemovalStaysInClone(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// An external directory with a file the escaping symlink would target.
+	external := t.TempDir()
+	victim := filepath.Join(external, "exclude")
+	if err := os.WriteFile(victim, []byte("precious"), 0o644); err != nil {
+		t.Fatalf("WriteFile victim: %v", err)
+	}
+
+	lease, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease: %v", err)
+	}
+	// Replace .git/info with a symlink to the external directory.
+	info := filepath.Join(lease.WorkingTree(), ".git", "info")
+	if err := os.RemoveAll(info); err != nil {
+		t.Fatalf("RemoveAll .git/info: %v", err)
+	}
+	if err := os.Symlink(external, info); err != nil {
+		t.Fatalf("Symlink .git/info: %v", err)
+	}
+
+	// Return's cleanup must refuse to traverse the escaping symlink.
+	_ = lease.Return(ctx)
+
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("external exclude was removed through a symlinked .git/info: %v; want it untouched", err)
+	}
+}
+
 // commitToTestRepo advances the test repo's master branch with a new commit.
 func commitToTestRepo(t *testing.T, repoDir, name string) {
 	t.Helper()

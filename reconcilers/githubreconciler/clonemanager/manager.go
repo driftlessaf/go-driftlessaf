@@ -99,10 +99,26 @@ type Manager struct {
 
 type clone struct {
 	path string
+	// root confines the manager's own filesystem operations to the clone
+	// directory: it is opened once at creation and every direct read/write
+	// (config reset, path checks) goes through it, so a symlink planted at
+	// any path component by untrusted worktree code cannot redirect an op to
+	// an external file. go-git and the git subprocess still use path directly.
+	root *os.Root
 	repo *git.Repository
 	// fetches counts fetches that transferred a pack, i.e. the ones that
 	// grew the object store.
 	fetches int
+}
+
+// newClone wraps a freshly cloned directory, opening the os.Root that confines
+// the manager's filesystem operations to it.
+func newClone(dir string, repo *git.Repository) (*clone, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("opening clone root: %w", err)
+	}
+	return &clone{path: dir, root: root, repo: repo}, nil
 }
 
 // Lease represents an acquired clone prepared for a specific GitHub resource.
@@ -292,7 +308,12 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 		return nil, fmt.Errorf("cloning repository: %w", err)
 	}
 
-	return &clone{path: dir, repo: repo}, nil
+	cl, err := newClone(dir, repo)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	return cl, nil
 }
 
 func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *githubreconciler.Resource, depth int) (string, bool, error) {
@@ -370,9 +391,10 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 			return remoteRef.Hash().String(), false, fmt.Errorf("checking tree path %s: %w", res.Path, err)
 		}
 
-		// Verify the path actually exists on the filesystem, not just in the git tree.
-		fsPath := filepath.Join(cl.path, res.Path)
-		_, err = os.Stat(fsPath) //nolint:gosec // G703: path from git clone directory
+		// Verify the path actually exists on the filesystem, not just in the
+		// git tree. Stat through the clone's root so the check cannot be
+		// redirected outside it by a symlinked path component.
+		_, err = cl.root.Stat(res.Path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				clog.DebugContextf(ctx, "Path %s does not exist on filesystem at commit %s", res.Path, remoteRef.Hash().String())
@@ -393,8 +415,12 @@ func (m *Manager) resetClone(ctx context.Context, cl *clone) error {
 	}
 	// reset --hard/clean leave .git/info/exclude (untracked), so a lease could
 	// persist ignore rules there across Return. Remove it (git treats absent as
-	// empty); Remove, not truncate, unlinks a symlink rather than following it.
-	if err := os.Remove(filepath.Join(cl.path, ".git", "info", "exclude")); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // G703: path from git clone directory
+	// empty) through the clone's root: a symlink planted at any path component
+	// (.git, .git/info, ...) that escapes the clone is refused rather than
+	// followed, so the removal cannot reach an external file. An escaping
+	// symlink surfaces as a non-ErrNotExist error and discards the clone, which
+	// is the right outcome for a tampered one.
+	if err := cl.root.Remove(".git/info/exclude"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clearing .git/info/exclude: %w", err)
 	}
 	return nil
@@ -409,7 +435,10 @@ func (m *Manager) releaseClone(cl *clone) {
 }
 
 func (m *Manager) discardClone(cl *clone) {
-	os.RemoveAll(cl.path) //nolint:gosec // G703: path from git clone directory
+	if cl.root != nil {
+		cl.root.Close()
+	}
+	os.RemoveAll(cl.path) //nolint:gosec // G703: our own MkdirTemp path
 }
 
 // authForRemote adapts an OAuth2 token source to go-git's BasicAuth shape.
