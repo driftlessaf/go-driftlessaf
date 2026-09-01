@@ -27,25 +27,27 @@ import (
 
 // validatingOpenAIReqBody is the subset of the chat-completions request the
 // validating server inspects: the message transcript with enough of each
-// message to check assistant(tool_calls) → tool(tool_call_id) pairing.
+// message to check assistant(tool_calls) → tool(tool_call_id) pairing and the
+// JSON-object shape of replayed function arguments.
 type validatingOpenAIReqBody struct {
 	Messages []struct {
 		Role       string `json:"role"`
 		ToolCallID string `json:"tool_call_id"`
 		ToolCalls  []struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			Function struct {
+				Arguments string `json:"arguments"`
+			} `json:"function"`
 		} `json:"tool_calls"`
 	} `json:"messages"`
 }
 
-// openAIPairingViolations parses a chat-completions request body and returns a
-// message for every tool_call/tool pairing violation: every tool_call
-// advertised on an assistant message must be answered by a role:"tool" message
-// carrying the matching tool_call_id in the run of tool messages that
-// immediately follows. This is exactly the shape a verbatim transcript replay
-// (the DEV-2247 resume risk) would violate. A nil return means the body is
-// well-paired. A parse error is reported as a single violation.
-func openAIPairingViolations(body []byte) []string {
+// openAITranscriptViolations parses a chat-completions request body and returns
+// every invalid tool-call history entry. Each assistant tool call must contain
+// JSON-object arguments and be answered by an immediately following tool
+// message carrying the matching tool_call_id. A nil return means the body is a
+// valid replayable transcript. A parse error is reported as one violation.
+func openAITranscriptViolations(body []byte) []string {
 	var parsed validatingOpenAIReqBody
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return []string{fmt.Sprintf("invalid JSON body: %v", err)}
@@ -65,6 +67,12 @@ func openAIPairingViolations(body []byte) []string {
 			answered[parsed.Messages[j].ToolCallID] = struct{}{}
 		}
 		for _, tc := range m.ToolCalls {
+			var args map[string]any
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
+				violations = append(violations, fmt.Sprintf(
+					"tool_call %q on assistant message %d has arguments that are not a JSON object",
+					tc.ID, i))
+			}
 			if _, ok := answered[tc.ID]; !ok {
 				violations = append(violations, fmt.Sprintf(
 					"tool_call %q on assistant message %d has no matching tool message with that tool_call_id",
@@ -77,8 +85,8 @@ func openAIPairingViolations(body []byte) []string {
 
 // newValidatingOpenAIServer returns an httptest server that stands in for the
 // OpenAI-compatible chat-completions API. For each request it parses the body
-// and asserts the tool_call/tool message pairing the real API enforces (see
-// openAIPairingViolations) before returning a scripted completion.
+// and asserts the replayable tool-call transcript shape the real API enforces
+// (see openAITranscriptViolations) before returning a scripted completion.
 //
 // script returns the completion JSON to return for the given 1-based request
 // number; body is the raw request body so a script can vary its response on
@@ -100,8 +108,15 @@ func newValidatingOpenAIServer(t *testing.T, script func(reqNum int, body []byte
 		n := reqNum
 		mu.Unlock()
 
-		for _, v := range openAIPairingViolations(body) {
+		violations := openAITranscriptViolations(body)
+		for _, v := range violations {
 			t.Errorf("request %d: %s", n, v)
+		}
+		if len(violations) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"invalid tool-call transcript","type":"invalid_request_error"}}`)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -182,16 +197,29 @@ func TestValidatingOpenAIServerAcceptsPairedTranscript(t *testing.T) {
 	}
 }
 
-// TestOpenAIPairingViolationsRejectsUnpairedTranscript proves the pairing
+// TestOpenAITranscriptViolationsRejectsUnpairedTranscript proves the pairing
 // check actually fires: an assistant message advertising a tool_call with no
 // following tool message must be flagged. Without this the validating server
 // would be a blind mock that never catches a broken transcript.
-func TestOpenAIPairingViolationsRejectsUnpairedTranscript(t *testing.T) {
+func TestOpenAITranscriptViolationsRejectsUnpairedTranscript(t *testing.T) {
 	unpaired := []byte(`{"messages":[
 		{"role":"user","content":"hi"},
 		{"role":"assistant","tool_calls":[{"id":"call_x","type":"function","function":{"name":"tool_a","arguments":"{}"}}]}
 	]}`)
-	if got := openAIPairingViolations(unpaired); len(got) == 0 {
-		t.Error("openAIPairingViolations accepted an assistant tool_call with no matching tool message")
+	if got := openAITranscriptViolations(unpaired); len(got) == 0 {
+		t.Error("openAITranscriptViolations accepted an assistant tool_call with no matching tool message")
+	}
+}
+
+// TestOpenAIPairingViolationsRejectsMalformedArguments keeps the validating
+// server strict enough to reproduce gateways that reject malformed arguments
+// when an assistant tool-call message is replayed in conversation history.
+func TestOpenAITranscriptViolationsRejectsMalformedArguments(t *testing.T) {
+	malformed := []byte(`{"messages":[
+		{"role":"assistant","tool_calls":[{"id":"call_x","type":"function","function":{"name":"tool_a","arguments":"{\\\"reasoning\\\":"}}]},
+		{"role":"tool","tool_call_id":"call_x","content":"{}"}
+	]}`)
+	if got := openAITranscriptViolations(malformed); len(got) == 0 {
+		t.Error("openAITranscriptViolations accepted malformed tool-call arguments")
 	}
 }

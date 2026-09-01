@@ -38,6 +38,12 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // DefaultMaxTurns is the default maximum number of conversation turns before aborting.
 const DefaultMaxTurns = 200
 
+// maxInvalidResponseRetries bounds how many consecutive unusable responses the
+// executor will nudge the model through before failing. An unusable response is
+// either a tool-call turn whose arguments are not JSON objects or a normal-stop
+// turn carrying neither text nor tool calls.
+const maxInvalidResponseRetries = 3
+
 // DefaultToolCallConcurrency is the default bound on how many of a single
 // turn's tool calls run concurrently. Models routinely emit several
 // independent tool calls in one turn (parallel tool calls); dispatching their
@@ -243,6 +249,24 @@ func (e *executor[Request, Response]) Execute(
 		heldOutNames = append(heldOutNames, submitToolName)
 	}
 	availableTools := availableToolNames(tools, heldOutNames...)
+	invalidResponseRetries := 0
+
+	// retryInvalidResponse appends a provider-neutral correction without
+	// replaying the unusable assistant response. Replaying malformed tool-call
+	// arguments is not safe: strict OpenAI-compatible gateways reject the
+	// conversation history before the model can see a tool-result correction.
+	retryInvalidResponse := func(turn int, reason, instruction string) error {
+		invalidResponseRetries++
+		if invalidResponseRetries > maxInvalidResponseRetries {
+			return fmt.Errorf("model returned an unusable response repeatedly (%s) after %d attempts", reason, invalidResponseRetries)
+		}
+		clog.WarnContext(ctx, "Model returned an unusable response, asking it to retry",
+			"reason", reason,
+			"attempt", invalidResponseRetries,
+			"turn", turn)
+		reqParams.Messages = append(reqParams.Messages, openai.UserMessage(instruction))
+		return nil
+	}
 
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
@@ -251,13 +275,10 @@ func (e *executor[Request, Response]) Execute(
 	// accepted the call and the registered result validators passed, so
 	// resultPtr holds the run's final result — even when that result is the
 	// zero value.
-	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, resultPtr *Response) (string, bool, error) {
+	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, args map[string]any, resultPtr *Response) (string, bool, error) {
 		kvs := []any{"tool", tc.Function.Name, "id", tc.ID}
-		var args map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
-			for k, v := range args {
-				kvs = append(kvs, "args."+k, v)
-			}
+		for k, v := range args {
+			kvs = append(kvs, "args."+k, v)
 		}
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
@@ -373,6 +394,37 @@ func (e *executor[Request, Response]) Execute(
 
 		// Handle tool calls.
 		if len(choice.Message.ToolCalls) > 0 {
+			toolCalls := choice.Message.ToolCalls
+			parsedArgs := make([]map[string]any, len(toolCalls))
+
+			// Validate the complete batch before appending it to history or running
+			// any handler. Some compatible APIs accept malformed arguments in a
+			// completion but reject those same arguments when the assistant message
+			// is replayed on the next request. Rejecting the batch atomically also
+			// prevents valid siblings from producing side effects when another call
+			// cannot be represented in a valid transcript.
+			var malformed []string
+			for i, tc := range toolCalls {
+				args, err := decodeToolArguments(tc.Function.Arguments)
+				if err != nil {
+					malformed = append(malformed, tc.Function.Name)
+					trace.RejectedToolCall(tc.ID, tc.Function.Name,
+						map[string]any{"arguments_bytes": len(tc.Function.Arguments)},
+						fmt.Errorf("invalid tool arguments: %w", err))
+					continue
+				}
+				parsedArgs[i] = args
+			}
+			if len(malformed) > 0 {
+				if err := retryInvalidResponse(turn,
+					fmt.Sprintf("invalid JSON arguments for tools %v", malformed),
+					fmt.Sprintf("One or more tool calls contained invalid JSON arguments, so no tools were executed. Try the complete tool-call turn again using JSON objects for the available tools: %v.", availableTools)); err != nil {
+					return response, true, err
+				}
+				return response, false, nil
+			}
+			invalidResponseRetries = 0
+
 			// Add assistant message with tool calls to conversation.
 			reqParams.Messages = append(reqParams.Messages, choice.Message.ToParam())
 
@@ -385,7 +437,6 @@ func (e *executor[Request, Response]) Execute(
 			// slot so the shared finalResultPtr is never raced, and the tool
 			// messages are appended in the model's original order. Tool handlers
 			// must be safe for concurrent use when concurrency exceeds 1.
-			toolCalls := choice.Message.ToolCalls
 			type toolOutcome struct {
 				msg       openai.ChatCompletionMessageParamUnion
 				committed bool
@@ -397,7 +448,7 @@ func (e *executor[Request, Response]) Execute(
 			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
 				func(tc openai.ChatCompletionMessageToolCall) bool { return heldOut(tc.Function.Name) },
 				func(i int, tc openai.ChatCompletionMessageToolCall) {
-					resJSON, committed, cerr := executeToolCall(tc, &perCallResults[i])
+					resJSON, committed, cerr := executeToolCall(tc, parsedArgs[i], &perCallResults[i])
 					if cerr != nil {
 						outcomes[i] = toolOutcome{err: cerr}
 						return
@@ -428,6 +479,9 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		textContent := choice.Message.Content
+		if textContent != "" {
+			invalidResponseRetries = 0
+		}
 
 		// When submit_result is configured, redirect text responses back to the tool.
 		if e.submitTool.Handler != nil && textContent != "" {
@@ -458,7 +512,21 @@ func (e *executor[Request, Response]) Execute(
 			return resp, true, nil
 		}
 
-		return response, true, errors.New("no content in completion response")
+		// A natural-stop response with neither text nor tool calls is transient
+		// for several OpenAI-compatible reasoning models. Preserve the valid
+		// conversation built so far and nudge the model, but never retry explicit
+		// terminal reasons such as length or content_filter.
+		switch choice.FinishReason {
+		case "", "stop":
+			if err := retryInvalidResponse(turn,
+				"no content and no tool calls",
+				"Your last response was empty. Please continue: call one of the available tools or provide your answer as text."); err != nil {
+				return response, true, err
+			}
+			return response, false, nil
+		default:
+			return response, true, fmt.Errorf("no content in completion response (finish_reason=%q)", choice.FinishReason)
+		}
 	}
 
 	for turn := range e.maxTurns {
@@ -473,6 +541,20 @@ func (e *executor[Request, Response]) Execute(
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
 	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
 	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+}
+
+// decodeToolArguments validates the wire-level function arguments before a
+// tool-call turn enters conversation history. The OpenAI-compatible contract
+// requires an object, not merely any syntactically valid JSON value.
+func decodeToolArguments(arguments string) (map[string]any, error) {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return nil, err
+	}
+	if args == nil {
+		return nil, errors.New("tool arguments must be a JSON object")
+	}
+	return args, nil
 }
 
 func (e *executor[Request, Response]) requestParams(
