@@ -83,8 +83,11 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	submitTool       googletool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
 	telemetry        *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig      retry.RetryConfig                   // retry configuration for transient Vertex AI errors
-	resourceLabels   map[string]string                   // resource labels for GCP billing attribution
-	attribution      agenttrace.Attribution              // canonical and compatibility route attribution
+	// retryRequestTimeouts opts into retrying context.DeadlineExceeded from a
+	// client-level request timeout while the caller's overall context is active.
+	retryRequestTimeouts bool
+	resourceLabels       map[string]string      // resource labels for GCP billing attribution
+	attribution          agenttrace.Attribution // canonical and compatibility route attribution
 
 	// resultValidators gate the terminal submit tool. When the model calls the
 	// submit tool with a payload that parses, every validator runs concurrently
@@ -187,7 +190,11 @@ func New[Request promptbuilder.Bindable, Response any](
 
 	// The recorder is built after options so it captures the final model and
 	// resource labels.
-	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, exec.attribution.ProviderName, exec.resourceLabels, responseCodeFromError)
+	codeFromError := responseCodeFromError
+	if exec.retryRequestTimeouts {
+		codeFromError = responseCodeFromErrorWithRequestTimeout
+	}
+	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, exec.attribution.ProviderName, exec.resourceLabels, codeFromError)
 
 	return exec, nil
 }
@@ -937,10 +944,16 @@ func (e *executor[Request, Response]) sendWithRetry(
 	operation, errContext string,
 	send func() (*genai.GenerateContentResponse, error),
 ) (*genai.GenerateContentResponse, error) {
-	response, err := retry.RetryWithBackoff(ctx, cfg, operation, isRetryableVertexError, send)
+	isRetryable := func(err error) bool {
+		return isRetryableVertexErrorWithin(ctx, err, e.retryRequestTimeouts)
+	}
+	response, err := retry.RetryWithBackoff(ctx, cfg, operation, isRetryable, func() (*genai.GenerateContentResponse, error) {
+		response, err := send()
+		return response, markRequestTimeout(ctx, err, e.retryRequestTimeouts)
+	})
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
-		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableVertexError, "Vertex AI"); requeueErr != nil {
+		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryable, "Vertex AI"); requeueErr != nil {
 			return nil, requeueErr
 		}
 		return nil, fmt.Errorf("%s: %w", errContext, err)

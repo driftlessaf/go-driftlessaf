@@ -349,6 +349,17 @@ func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.Ret
 	}
 }
 
+// WithRetryRequestTimeouts makes context.DeadlineExceeded from a client-level
+// request timeout retryable while the caller's overall context remains active.
+// The client must configure the per-request timeout separately. Without this
+// option, context deadlines retain their historical fail-fast behavior.
+func WithRetryRequestTimeouts[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.retryRequestTimeouts = true
+		return nil
+	}
+}
+
 // WithoutCacheControl disables Vertex AI context caching.
 //
 // Context caching is enabled by default because it significantly reduces input

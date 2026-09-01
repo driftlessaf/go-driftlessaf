@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package googleexecutor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,6 +50,7 @@ func TestIsRetryableVertexError(t *testing.T) {
 		{name: "UNAVAILABLE string", err: errors.New("Error 503, Message: Visibility check was unavailable. Please retry the request, Status: UNAVAILABLE, Details: []"), want: true},
 		{name: "unavailable lowercase string", err: errors.New("service unavailable: please retry"), want: true},
 		{name: "DEADLINE_EXCEEDED string", err: errors.New("Error 504, Message: Deadline expired, Status: DEADLINE_EXCEEDED"), want: true},
+		{name: "request context deadline requires opt-in", err: fmt.Errorf("request failed: %w", context.DeadlineExceeded), want: false},
 		// Structured codes whose message text matches a transient keyword
 		// must still retry: a real Vertex 529 always carries "Overloaded".
 		{name: "structured 401 with retryable message", err: &googleapi.Error{Code: http.StatusUnauthorized, Message: "rate limit"}, want: true},
@@ -82,6 +84,7 @@ func TestResponseCodeFromError(t *testing.T) {
 		{name: "504 genai", err: genai.APIError{Code: http.StatusGatewayTimeout, Status: "DEADLINE_EXCEEDED"}, want: 504},
 		{name: "504 genai pointer", err: &genai.APIError{Code: http.StatusGatewayTimeout, Status: "DEADLINE_EXCEEDED"}, want: 504},
 		{name: "wrapped 504 genai", err: fmt.Errorf("send: %w", genai.APIError{Code: http.StatusGatewayTimeout, Status: "DEADLINE_EXCEEDED"}), want: 504},
+		{name: "request context deadline is unknown without opt-in", err: fmt.Errorf("request failed: %w", context.DeadlineExceeded), want: -1},
 		// gRPC string fallbacks
 		{name: "RESOURCE_EXHAUSTED", err: errors.New("rpc error: code = ResourceExhausted desc = quota"), want: 429},
 		{name: "rate limit", err: errors.New("rate limit exceeded"), want: 429},
@@ -102,6 +105,71 @@ func TestResponseCodeFromError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResponseCodeFromErrorWithRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{
+			name: "marked request timeout",
+			err:  requestTimeoutError{err: context.DeadlineExceeded},
+			want: 504,
+		},
+		{
+			name: "wrapped marked request timeout",
+			err:  fmt.Errorf("request failed: %w", requestTimeoutError{err: context.DeadlineExceeded}),
+			want: 504,
+		},
+		{
+			name: "overall context deadline remains unknown",
+			err:  context.DeadlineExceeded,
+			want: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := responseCodeFromErrorWithRequestTimeout(tt.err); got != tt.want {
+				t.Errorf("responseCodeFromErrorWithRequestTimeout(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMarkRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("marks request deadline while outer context is active", func(t *testing.T) {
+		t.Parallel()
+		err := markRequestTimeout(t.Context(), context.DeadlineExceeded, true)
+		if _, ok := errors.AsType[requestTimeoutError](err); !ok {
+			t.Fatalf("markRequestTimeout() = %T, want requestTimeoutError", err)
+		}
+	})
+
+	t.Run("does not mark when disabled", func(t *testing.T) {
+		t.Parallel()
+		err := markRequestTimeout(t.Context(), context.DeadlineExceeded, false)
+		if _, ok := errors.AsType[requestTimeoutError](err); ok {
+			t.Fatalf("markRequestTimeout() = %T, want unmarked error", err)
+		}
+	})
+
+	t.Run("does not mark an expired outer context", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		err := markRequestTimeout(ctx, context.DeadlineExceeded, true)
+		if _, ok := errors.AsType[requestTimeoutError](err); ok {
+			t.Fatalf("markRequestTimeout() = %T, want unmarked error", err)
+		}
+	})
 }
 
 func TestResponseCodeFromMessage(t *testing.T) {
@@ -154,4 +222,22 @@ func TestIsRetryableVertexError_WrappedError(t *testing.T) {
 			t.Error("isRetryableVertexError() = false, want true for wrapped ResourceExhausted error")
 		}
 	})
+}
+
+func TestIsRetryableVertexErrorWithin(t *testing.T) {
+	t.Parallel()
+
+	active := t.Context()
+	if isRetryableVertexErrorWithin(active, context.DeadlineExceeded, false) {
+		t.Error("request deadline without opt-in = retryable, want non-retryable")
+	}
+	if !isRetryableVertexErrorWithin(active, context.DeadlineExceeded, true) {
+		t.Error("active context request deadline = non-retryable, want retryable")
+	}
+
+	expired, cancel := context.WithCancel(t.Context())
+	cancel()
+	if isRetryableVertexErrorWithin(expired, context.DeadlineExceeded, true) {
+		t.Error("expired overall context deadline = retryable, want non-retryable")
+	}
 }

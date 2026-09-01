@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
@@ -42,6 +43,22 @@ func NewVertexGoogleGenAIAdapter(projectID, region string) (GoogleGenAIAdapter, 
 }
 
 func newVertexGoogleGenAIAdapter(projectID, region string, newClient vertexGoogleGenAIClientFactory) (GoogleGenAIAdapter, error) {
+	return newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region, 0, newClient)
+}
+
+// NewVertexGoogleGenAIAdapterWithRequestTimeout constructs a Vertex AI adapter
+// whose individual Google Gen AI requests are bounded by requestTimeout. The
+// bound applies to each attempt independently, so the executor's retry policy
+// can recover from a stalled request while the caller's context remains the
+// authority for the overall agent deadline.
+func NewVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, requestTimeout time.Duration) (GoogleGenAIAdapter, error) {
+	if requestTimeout <= 0 {
+		return nil, fmt.Errorf("%w: Vertex Google Gen AI request timeout must be greater than zero", ErrInvalidAdapter)
+	}
+	return newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region, requestTimeout, genai.NewClient)
+}
+
+func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, requestTimeout time.Duration, newClient vertexGoogleGenAIClientFactory) (GoogleGenAIAdapter, error) {
 	config, err := newVertexConfig(projectID, region)
 	if err != nil {
 		return nil, err
@@ -53,15 +70,24 @@ func newVertexGoogleGenAIAdapter(projectID, region string, newClient vertexGoogl
 		if err := validateVertexPlan(plan, modelrouter.ProtocolGoogleGenAI); err != nil {
 			return GoogleGenAIBinding{}, err
 		}
-		client, err := newClient(ctx, &genai.ClientConfig{
+		clientConfig := &genai.ClientConfig{
 			Project:  config.projectID,
 			Location: config.region,
 			Backend:  genai.BackendVertexAI,
-		})
+		}
+		if requestTimeout > 0 {
+			clientConfig.HTTPOptions.Timeout = &requestTimeout
+		}
+		client, err := newClient(ctx, clientConfig)
 		if err != nil {
 			return GoogleGenAIBinding{}, fmt.Errorf("creating Google AI client: %w", err)
 		}
-		return NewGoogleGenAIBinding(plan, client, config.resourceLabels(plan))
+		binding, err := NewGoogleGenAIBinding(plan, client, config.resourceLabels(plan))
+		if err != nil {
+			return GoogleGenAIBinding{}, err
+		}
+		binding.retryRequestTimeouts = requestTimeout > 0
+		return binding, nil
 	}, nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
@@ -473,10 +474,14 @@ func TestVertexRoutesCoverAllControlledProtocols(t *testing.T) {
 	routeRegistry := mustRouteRegistry(t, routes...)
 
 	googleCalls := 0
-	googleAdapter, err := newVertexGoogleGenAIAdapter("test-project", "us-central1", func(_ context.Context, config *genai.ClientConfig) (*genai.Client, error) {
+	const googleRequestTimeout = 2 * time.Minute
+	googleAdapter, err := newVertexGoogleGenAIAdapterWithRequestTimeout("test-project", "us-central1", googleRequestTimeout, func(_ context.Context, config *genai.ClientConfig) (*genai.Client, error) {
 		googleCalls++
 		if config.Project != "test-project" || config.Location != "us-central1" || config.Backend != genai.BackendVertexAI {
 			t.Errorf("Google client config = %+v", config)
+		}
+		if config.HTTPOptions.Timeout == nil || *config.HTTPOptions.Timeout != googleRequestTimeout {
+			t.Errorf("Google client request timeout = %v, want %s", config.HTTPOptions.Timeout, googleRequestTimeout)
 		}
 		return &genai.Client{}, nil
 	})
@@ -537,6 +542,43 @@ func TestVertexRoutesCoverAllControlledProtocols(t *testing.T) {
 	}
 	if googleCalls != 1 || claudeCalls != 1 || openAICalls != 1 {
 		t.Errorf("Vertex adapter calls = Google:%d Claude:%d OpenAI:%d, want 1 each", googleCalls, claudeCalls, openAICalls)
+	}
+}
+
+func TestVertexGoogleGenAIRequestTimeoutMustBePositive(t *testing.T) {
+	t.Parallel()
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		if _, err := NewVertexGoogleGenAIAdapterWithRequestTimeout("test-project", "us-central1", timeout); !errors.Is(err, ErrInvalidAdapter) {
+			t.Errorf("NewVertexGoogleGenAIAdapterWithRequestTimeout(timeout=%s) error = %v, want ErrInvalidAdapter", timeout, err)
+		}
+	}
+}
+
+func TestVertexGoogleGenAIRequestTimeoutEnablesDeadlineRetries(t *testing.T) {
+	t.Parallel()
+
+	route := routedTestRoute(
+		modelrouter.Selection{Provider: modelrouter.ProviderVertexAI, LogicalModel: "gemini-3-flash-preview"},
+		modelrouter.ProtocolGoogleGenAI,
+		"publishers/google/models/gemini-3-flash-preview",
+	)
+	plan, err := mustRouteRegistry(t, route).Resolve(route.Selection)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	adapter, err := newVertexGoogleGenAIAdapterWithRequestTimeout("test-project", "us-central1", 2*time.Minute, func(context.Context, *genai.ClientConfig) (*genai.Client, error) {
+		return &genai.Client{}, nil
+	})
+	if err != nil {
+		t.Fatalf("newVertexGoogleGenAIAdapterWithRequestTimeout: %v", err)
+	}
+	binding, err := adapter(t.Context(), plan)
+	if err != nil {
+		t.Fatalf("adapter: %v", err)
+	}
+	if !binding.retryRequestTimeouts {
+		t.Error("binding retryRequestTimeouts = false, want true for timeout-configured adapter")
 	}
 }
 

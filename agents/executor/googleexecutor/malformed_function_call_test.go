@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
@@ -191,6 +192,61 @@ func TestMalformedFunctionCallRetryRetriesDeadlineExceeded(t *testing.T) {
 
 	prompt := newRuntimePrompt(t, "submit "+rand.Text())
 	exec := newMalformedRetryExecutor(t, srv.URL, prompt, 1)
+
+	resp, err := exec.Execute(t.Context(), errCapRequest{}, map[string]googletool.Metadata[errCapResponse]{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := resp.Answer, "42"; got != want {
+		t.Errorf("resp.Answer: got = %q, want = %q", got, want)
+	}
+	if got, want := requests.Load(), int32(3); got != want {
+		t.Errorf("generateContent requests: got = %d, want = %d", got, want)
+	}
+}
+
+func TestMalformedFunctionCallRetryPreservesBudgetAfterRequestTimeout(t *testing.T) {
+	var requests atomic.Int32
+	srv := newValidatingGenerateContentServerWithStatus(t, nil, func(reqNum int, _ []byte) (int, string) {
+		requests.Store(int32(reqNum))
+		switch reqNum {
+		case 1:
+			return http.StatusOK, malformedFunctionCallJSON
+		case 2:
+			// Simulate a provider attempt that stalls longer than its own
+			// request deadline. The executor must retain enough outer-context
+			// budget to retry the correction.
+			time.Sleep(500 * time.Millisecond)
+			return http.StatusOK, submitTurnJSON
+		default:
+			return http.StatusOK, submitTurnJSON
+		}
+	})
+
+	prompt := newRuntimePrompt(t, "submit "+rand.Text())
+	exec, err := googleexecutor.New[errCapRequest, errCapResponse](
+		newTestClientWithRequestTimeout(t, srv.URL, 100*time.Millisecond),
+		prompt,
+		googleexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(1)),
+		googleexecutor.WithRetryRequestTimeouts[errCapRequest, errCapResponse](),
+		googleexecutor.WithMaxTurns[errCapRequest, errCapResponse](3),
+		googleexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](func() (googletool.SubmitMetadata[errCapResponse], error) {
+			return googletool.SubmitMetadata[errCapResponse]{
+				Definition: &genai.FunctionDeclaration{Name: "submit_result"},
+				Handler: func(_ context.Context, call *genai.FunctionCall, _ *agenttrace.Trace[errCapResponse]) toolcall.SubmitOutcome[errCapResponse] {
+					answer, _ := call.Args["answer"].(string)
+					return toolcall.SubmitOutcome[errCapResponse]{
+						Accepted:   true,
+						Response:   errCapResponse{Answer: answer},
+						ToolResult: map[string]any{"success": true},
+					}
+				},
+			}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	resp, err := exec.Execute(t.Context(), errCapRequest{}, map[string]googletool.Metadata[errCapResponse]{})
 	if err != nil {

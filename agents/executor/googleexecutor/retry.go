@@ -6,12 +6,24 @@ SPDX-License-Identifier: Apache-2.0
 package googleexecutor
 
 import (
+	"context"
 	"errors"
 	"strings"
 
 	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 )
+
+// requestTimeoutError marks a deadline that came from the GenAI client's
+// per-request timeout, rather than from the caller's overall context. Keeping
+// that distinction in the error chain lets retry and telemetry treat provider
+// attempt timeouts as 504s without misclassifying operation-level expiry.
+type requestTimeoutError struct {
+	err error
+}
+
+func (e requestTimeoutError) Error() string { return e.err.Error() }
+func (e requestTimeoutError) Unwrap() error { return e.err }
 
 // responseCodeFromError maps a Vertex API error to an HTTP-style response code.
 // Returns 0 for nil err (the success path; the caller chooses how to render
@@ -41,6 +53,27 @@ func responseCodeFromError(err error) int {
 		return apiErr.Code
 	}
 	return responseCodeFromMessage(err.Error())
+}
+
+// responseCodeFromErrorWithRequestTimeout additionally maps explicitly marked
+// per-request timeouts to 504. A bare context.DeadlineExceeded remains unknown
+// because it may represent expiry of the caller's overall operation.
+func responseCodeFromErrorWithRequestTimeout(err error) int {
+	if _, ok := errors.AsType[requestTimeoutError](err); ok {
+		return 504
+	}
+	return responseCodeFromError(err)
+}
+
+// markRequestTimeout preserves whether a context deadline came from the
+// client's request timeout. If the caller's context has expired, the error is
+// left unmarked so telemetry and retry policy do not report it as a provider
+// timeout.
+func markRequestTimeout(ctx context.Context, err error, enabled bool) error {
+	if enabled && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return requestTimeoutError{err: err}
+	}
+	return err
 }
 
 // responseCodeFromMessage recovers an HTTP-style code from gRPC keywords in
@@ -108,4 +141,18 @@ func isRetryableVertexError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isRetryableVertexErrorWithin distinguishes an individual request timeout
+// from expiry of the caller's overall operation. The former may be retried;
+// the latter must propagate without starting more work or requesting a
+// workqueue requeue.
+func isRetryableVertexErrorWithin(ctx context.Context, err error, retryRequestTimeouts bool) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return retryRequestTimeouts
+	}
+	return isRetryableVertexError(err)
 }

@@ -59,15 +59,16 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 type googleAgentConstruction struct {
-	client           *genai.Client
-	providerModelID  string
-	logicalModelID   string
-	routed           bool
-	applyTemperature bool
-	maxOutputTokens  int32
-	thinkingBudget   int32
-	resourceLabels   map[string]string
-	attribution      *agenttrace.Attribution
+	client               *genai.Client
+	providerModelID      string
+	logicalModelID       string
+	routed               bool
+	applyTemperature     bool
+	maxOutputTokens      int32
+	thinkingBudget       int32
+	resourceLabels       map[string]string
+	attribution          *agenttrace.Attribution
+	retryRequestTimeouts bool
 }
 
 func newRoutedGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
@@ -78,15 +79,16 @@ func newRoutedGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	maxOutputTokens := int32(cmp.Or(config.MaxTokens, int64(65536)))
 	attribution := routedAttribution(plan)
 	return newGoogleAgentWithClient[Req, Resp, CB](googleAgentConstruction{
-		client:           binding.Client(),
-		providerModelID:  plan.ProviderModelID(),
-		logicalModelID:   plan.LogicalModel(),
-		routed:           true,
-		applyTemperature: plan.Capabilities().SamplingParameters,
-		maxOutputTokens:  maxOutputTokens,
-		thinkingBudget:   int32(config.ThinkingBudget),
-		resourceLabels:   binding.ResourceLabels(),
-		attribution:      &attribution,
+		client:               binding.Client(),
+		providerModelID:      plan.ProviderModelID(),
+		logicalModelID:       plan.LogicalModel(),
+		routed:               true,
+		applyTemperature:     plan.Capabilities().SamplingParameters,
+		maxOutputTokens:      maxOutputTokens,
+		thinkingBudget:       int32(config.ThinkingBudget),
+		resourceLabels:       binding.ResourceLabels(),
+		attribution:          &attribution,
+		retryRequestTimeouts: binding.retryRequestTimeouts,
 	}, config)
 }
 
@@ -122,6 +124,9 @@ func newGoogleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
 	}
 	if construction.attribution != nil {
 		executorOpts = append(executorOpts, googleexecutor.WithAttribution[Req, Resp](*construction.attribution))
+	}
+	if construction.retryRequestTimeouts {
+		executorOpts = append(executorOpts, googleexecutor.WithRetryRequestTimeouts[Req, Resp]())
 	}
 	for _, v := range config.ResultValidators {
 		executorOpts = append(executorOpts, googleexecutor.WithResultValidator[Req, Resp](v))

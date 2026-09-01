@@ -59,13 +59,19 @@ func fastRetry(maxRetries int) retry.RetryConfig {
 // server URL. Uses the Gemini API backend with an APIKey to avoid Vertex's
 // requirement for real GCP credentials in unit tests.
 func newTestClient(t *testing.T, baseURL string) *genai.Client {
+	return newTestClientWithRequestTimeout(t, baseURL, 0)
+}
+
+func newTestClientWithRequestTimeout(t *testing.T, baseURL string, requestTimeout time.Duration) *genai.Client {
 	t.Helper()
+	httpOptions := genai.HTTPOptions{BaseURL: baseURL}
+	if requestTimeout > 0 {
+		httpOptions.Timeout = &requestTimeout
+	}
 	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
-		Backend: genai.BackendGeminiAPI,
-		APIKey:  "test",
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: baseURL,
-		},
+		Backend:     genai.BackendGeminiAPI,
+		APIKey:      "test",
+		HTTPOptions: httpOptions,
 	})
 	if err != nil {
 		t.Fatalf("genai.NewClient: %v", err)
