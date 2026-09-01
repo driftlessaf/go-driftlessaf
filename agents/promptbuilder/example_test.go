@@ -8,6 +8,7 @@ package promptbuilder_test
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 )
@@ -168,4 +169,28 @@ func ExamplePrompt_MustBindStringLiteral() {
 
 	fmt.Println(result)
 	// Output: Hello World!
+}
+
+// ExamplePrompt_BindRawFenced demonstrates binding runtime content verbatim
+// inside a nonce-delimited untrusted-content fence. The nonce differs on
+// every Build, so the example prints structure rather than the raw output.
+func ExamplePrompt_BindRawFenced() {
+	p := promptbuilder.MustNewPrompt(`Evidence:
+{{evidence}}`)
+
+	p, err := p.BindRawFenced("evidence", `if a < b && c > "d" { exfiltrate() }`)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result, err := p.Build()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// The bound value is preserved byte-identical inside the fence.
+	fmt.Println(strings.Contains(result, `if a < b && c > "d" { exfiltrate() }`))
+	fmt.Println(strings.Contains(result, "----- BEGIN UNTRUSTED CONTENT"))
+	// Output: true
+	// true
 }

@@ -72,6 +72,12 @@ The package provides multiple binding methods for different data formats:
 	// BindUnorderedList / BindOrderedList - Render single-line items as a Markdown list
 	p, err = p.BindUnorderedList("steps", promptbuilder.UnorderedList{"Check logs", "Summarise failures"})
 
+	// BindRawFenced - Preserves runtime content byte-identical inside a
+	// nonce-delimited untrusted-content fence, for consumers that need
+	// verbatim bytes (e.g. citation grounding) where encoder escaping
+	// would break them
+	p, err = p.BindRawFenced("evidence", fileContents)
+
 Each method also has a Must variant that panics on error:
 
 	p = p.MustBindStringLiteral("key", "value")
