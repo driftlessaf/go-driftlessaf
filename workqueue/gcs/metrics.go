@@ -167,7 +167,37 @@ var (
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)
+	// QueuedDepth is polled rather than called once per pass, so it gets its own
+	// pair. Without them a stalled producer looks the same whether the queue is
+	// full and it is throttling correctly, or the depth read is failing and the
+	// caller is swallowing it.
+	mQueuedDepthLatency = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "workqueue_queued_depth_latency_seconds",
+			Help:    "The duration of QueuedDepth() calls counting the keys under queued/.",
+			Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+		},
+		[]string{"service_name", "revision_name", "queue_name"},
+	)
+	mQueuedDepthErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "workqueue_queued_depth_errors_total",
+			Help: "The number of QueuedDepth() calls that failed to read the queue's depth.",
+		},
+		[]string{"service_name", "revision_name", "queue_name"},
+	)
 )
+
+// depthLabels are the base labels for a QueuedDepth call. It mirrors
+// wq.baseLabels, which QueuedDepth cannot use: it is a free function over a
+// bucket rather than a method on a queue, so the queue's name is a parameter.
+func depthLabels(queueName string) prometheus.Labels {
+	return prometheus.Labels{
+		"service_name":  baseServiceName,
+		"revision_name": baseRevisionName,
+		"queue_name":    queueName,
+	}
+}
 
 // priorityClass converts a priority value to a priority class label.
 func priorityClass(priority int64) string {

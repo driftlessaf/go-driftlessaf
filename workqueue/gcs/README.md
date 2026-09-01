@@ -42,6 +42,48 @@ Each object stores metadata to track task state:
 - **Orphan detection** - Detects and handles tasks with expired leases
 - **Deduplication** - Duplicate queue requests update priority/timing instead of creating duplicates
 
+## Producer backpressure
+
+`QueuedDepth(ctx, client, queueName, limit)` counts the keys under `queued/`,
+counting no further than `limit`. A result equal to `limit` means there are at
+least that many; any smaller result is exact. An error returns a count of zero,
+never a partial one — a caller that logged the error and carried on would
+otherwise read the keys counted before the failure as headroom.
+
+Use it instead of `Enumerate` for that question. `Enumerate` lists every object
+in the bucket, in every state, and sorts as it goes — the dispatcher can afford
+that because it runs once per dispatch and needs the whole picture, but a bulk
+producer polling it would pay for the size of its own backlog on every check.
+
+**What a call costs.** One list request per 1,000 keys counted, rounded up: GCS
+caps a page at 1,000 however large `maxResults` is, so a limit of 2,000 is two
+round trips and a limit of 200,000 is two hundred, sequentially, on every poll.
+Size a threshold knowing that. Only the object name is selected, so the bytes
+stay small even when the round trips do not.
+
+It emits `workqueue_queued_depth_latency_seconds` and
+`workqueue_queued_depth_errors_total`, labelled with the `queueName` passed in —
+which should be the name the queue was built with, or `""` for a queue with none.
+The pair exists because this read is polled: without it a stalled producer looks
+the same whether the queue is full and it is throttling correctly, or the depth
+read is failing and the caller is swallowing it.
+
+Three things it does not do, all deliberate:
+
+- It counts every queued key, including one whose `not-before` has not arrived: a
+  delayed key is work the queue still owes, and reading `not-before` would mean
+  fetching each object's metadata.
+- It counts nothing in progress and nothing dead-lettered — those are bounded by
+  the queue's concurrency and by attention, not by how fast a producer runs.
+- It counts **one bucket**. A sharded queue (see `hyperqueue`) gives each shard
+  its own workqueue module and so its own bucket, so a count against one of them
+  sees 1/N of the depth and reads as headroom. A producer in front of a sharded
+  queue has to sum the shards.
+
+A `limit` below 1 is an error. No count satisfies the contract above, and a
+threshold misconfigured to zero should be heard about rather than read as either
+"always full" or "always room" depending on its sign.
+
 ## Metrics
 
 The implementation exports Prometheus metrics for:
