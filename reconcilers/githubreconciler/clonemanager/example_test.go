@@ -86,6 +86,47 @@ func ExampleLease_MakeAndPushChanges() {
 	// commit author: true
 }
 
+// ExampleWithGitCLI constructs a Manager whose clones and fetches shell out
+// to the git binary. The lease API is unchanged: only the transport differs,
+// trading go-git's full-snapshot shallow fetches for native git's negotiated
+// incremental packs.
+func ExampleWithGitCLI() {
+	ctx := context.Background()
+
+	repoDir := initExampleRepo()
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	defer func() { repoURL = defaultRemoteURL }()
+
+	mgr, err := New(ctx, staticTokenSource(""), "automation", nil, WithGitCLI())
+	if err != nil {
+		fmt.Println("error creating manager:", err)
+		return
+	}
+
+	lease, err := mgr.Lease(ctx, &githubreconciler.Resource{
+		Owner: "example",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  "packages/example.yaml",
+		Type:  githubreconciler.ResourceTypePath,
+	})
+	if err != nil {
+		fmt.Println("lease error:", err)
+		return
+	}
+
+	fmt.Println("path exists:", lease.PathExists())
+
+	if err := lease.Return(ctx); err != nil {
+		fmt.Println("return error:", err)
+		return
+	}
+
+	// Output:
+	// path exists: true
+}
+
 // ExampleWorktreeCallbacks demonstrates using WorktreeCallbacks for AI agent integration.
 // WorktreeCallbacks creates WorktreeTools from a git worktree, which can be passed
 // to an AI agent (via metaagent.BaseCallbacks) to allow it to read, write, search,

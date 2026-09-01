@@ -30,6 +30,12 @@ const cloneDirPrefix = "clonemanager-clone-"
 
 const gitFetchDepth = 1
 
+// resetTimeout bounds the worktree reset on Return. It runs under
+// context.WithoutCancel (so a canceled reconcile does not abort cleanup), which
+// also drops the deadline, so a stalled CLI-backend reset/clean would otherwise
+// hang forever. Generous versus a normal reset (~sub-second on a 46k-file tree).
+const resetTimeout = 2 * time.Minute
+
 // ErrNothingToCommit is returned by MakeAndPushChanges when the update function
 // runs without error but leaves the working tree clean (i.e., no diff to commit).
 // changemanager.Upsert translates this into changemanager.ErrNoChanges so callers
@@ -62,12 +68,15 @@ var repoURL = defaultRemoteURL
 type Option func(*Manager)
 
 // WithMaxFetches sets how many pack-transferring fetches a clone serves before
-// it is discarded and replaced by a fresh clone. Every such fetch permanently
-// grows a clone's object store — go-git appends a packfile per fetch and never
-// prunes — so on a fast-moving repository a pooled clone grows without bound.
-// The bound caps that growth at the amortized cost of one re-clone every n
-// fetches. Fetches that find the ref already up to date transfer nothing and
-// don't count. Zero or negative (the default) disables the bound.
+// it is discarded and replaced by a fresh clone. Under the default go-git
+// backend every such fetch permanently grows a clone's object store — go-git
+// appends a packfile per fetch and never prunes — so on a fast-moving
+// repository a pooled clone grows without bound. The bound caps that growth
+// at the amortized cost of one re-clone every n fetches. The git CLI backend
+// transfers negotiated increments and runs auto maintenance, so there the
+// bound is only a backstop. Fetches that find the ref already up to date
+// transfer nothing and don't count. Zero or negative (the default) disables
+// the bound.
 func WithMaxFetches(n int) Option {
 	return func(m *Manager) {
 		m.maxFetches = n
@@ -82,6 +91,7 @@ type Manager struct {
 	identity    string
 	signer      git.Signer
 	maxFetches  int
+	backend     gitBackend
 
 	mu        sync.Mutex
 	available []*clone
@@ -127,7 +137,7 @@ type UpdateFunc func(context.Context, *git.Worktree) (string, error)
 // and pushing to the targeted repository. Identity is used as the commit author
 // name (and, when it lacks a domain, suffixed with @chainguard.dev). The signer
 // may be nil when Gitsign-style signing is not required.
-func New(_ context.Context, tokenSource oauth2.TokenSource, identity string, signer git.Signer, opts ...Option) (*Manager, error) {
+func New(ctx context.Context, tokenSource oauth2.TokenSource, identity string, signer git.Signer, opts ...Option) (*Manager, error) {
 	if tokenSource == nil {
 		return nil, errors.New("token source cannot be nil")
 	}
@@ -142,8 +152,14 @@ func New(_ context.Context, tokenSource oauth2.TokenSource, identity string, sig
 		identity:    identity,
 		signer:      signer,
 	}
+	m.backend = gogitBackend{tokenSource: tokenSource}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if _, ok := m.backend.(cliBackend); ok {
+		if err := checkGitVersion(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
 }
@@ -270,34 +286,13 @@ func (m *Manager) createClone(ctx context.Context, ref string, res *githubreconc
 	remote := repoURL(res)
 	clog.InfoContextf(ctx, "Cloning repository %s into %s", remote, dir)
 
-	auth, err := m.authForRemote()
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("getting token: %w", err)
-	}
-
-	cloneOpts := &git.CloneOptions{
-		URL:          remote,
-		SingleBranch: true,
-		Depth:        gitFetchDepth,
-		Auth:         auth,
-		// Tag refs pin their objects in the clone forever (nothing ever prunes
-		// the object store) and go-git defaults to AllTags, so skip them.
-		Tags: git.NoTags,
-	}
-	// Only set ReferenceName for branch refs. Non-branch refs (e.g.
-	// refs/pull/N/head) are not advertised during clone negotiation, so we
-	// clone the default branch and let prepareClone fetch the target ref.
-	if !strings.HasPrefix(ref, "refs/") {
-		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(ref)
-	}
-	cloned, err := gogit.PlainCloneContext(ctx, dir, false, cloneOpts)
+	repo, err := m.backend.clone(ctx, dir, remote, ref)
 	if err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("cloning repository: %w", err)
 	}
 
-	return &clone{path: dir, repo: cloned.Repository}, nil
+	return &clone{path: dir, repo: repo}, nil
 }
 
 func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *githubreconciler.Resource, depth int) (string, bool, error) {
@@ -311,20 +306,9 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 		cl.repo = repo
 	}
 
-	auth, err := m.authForRemote()
-	if err != nil {
-		return "", false, fmt.Errorf("getting token: %w", err)
-	}
-
 	dst := plumbing.NewRemoteReferenceName("origin", ref)
 	fetchURL := repoURL(res)
-	fetchOpts := &git.FetchOptions{
-		RemoteName: "origin",
-		RefSpecs:   []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+%s:%s", resolveRefName(ref), dst))},
-		Auth:       auth,
-		Depth:      depth,
-		Tags:       git.NoTags,
-	}
+	refspec := fmt.Sprintf("+%s:%s", resolveRefName(ref), dst)
 
 	// Fetch from the trusted URL (see trustedRemote), never from the clone's
 	// on-disk .git/config: a pooled clone is reused across reconciles and
@@ -332,14 +316,16 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	// [remote "origin"] url in an earlier lease could otherwise redirect this
 	// credentialed fetch.
 	clog.InfoContextf(ctx, "Fetching ref %s", ref)
-	switch err := trustedRemote(repo, fetchURL).FetchContext(ctx, fetchOpts); {
-	case errors.Is(err, git.NoErrAlreadyUpToDate):
-		// No pack transferred; the clone did not grow.
-	case err != nil:
+	grew, err := m.backend.fetch(ctx, cl, fetchURL, refspec, dst, depth)
+	if err != nil {
 		return "", false, fmt.Errorf("fetching ref %s: %w", ref, err)
-	default:
+	}
+	if grew {
 		cl.fetches++
 	}
+	// The backend may have replaced the repository handle (the CLI backend
+	// re-opens it after fetching).
+	repo = cl.repo
 
 	remoteRef, err := repo.Reference(dst, true)
 	if err != nil {
@@ -352,16 +338,10 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 		return "", false, fmt.Errorf("getting HEAD ref: %w", err)
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return "", false, fmt.Errorf("getting worktree: %w", err)
-	}
-
 	// Skip checkout when HEAD already matches the remote ref: the worktree
 	// already contains the correct content.
 	if headRef.Hash() != remoteRef.Hash() {
-		worktreeCheckout := &git.CheckoutOptions{Hash: remoteRef.Hash(), Force: true}
-		if err := worktree.Checkout(worktreeCheckout); err != nil {
+		if err := m.backend.checkout(ctx, cl, remoteRef.Hash()); err != nil {
 			return remoteRef.Hash().String(), false, fmt.Errorf("checking out ref %s: %w", ref, err)
 		}
 	}
@@ -407,20 +387,16 @@ func (m *Manager) prepareClone(ctx context.Context, cl *clone, ref string, res *
 	return remoteRef.Hash().String(), true, nil
 }
 
-func (m *Manager) resetClone(cl *clone) error {
-	worktree, err := cl.repo.Worktree()
-	if err != nil {
-		return fmt.Errorf("getting worktree: %w", err)
+func (m *Manager) resetClone(ctx context.Context, cl *clone) error {
+	if err := m.backend.reset(ctx, cl); err != nil {
+		return err
 	}
-
-	if err := worktree.Reset(&git.ResetOptions{Mode: git.HardReset}); err != nil {
-		return fmt.Errorf("resetting worktree: %w", err)
+	// reset --hard/clean leave .git/info/exclude (untracked), so a lease could
+	// persist ignore rules there across Return. Remove it (git treats absent as
+	// empty); Remove, not truncate, unlinks a symlink rather than following it.
+	if err := os.Remove(filepath.Join(cl.path, ".git", "info", "exclude")); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // G703: path from git clone directory
+		return fmt.Errorf("clearing .git/info/exclude: %w", err)
 	}
-
-	if err := worktree.Clean(&git.CleanOptions{Dir: true}); err != nil {
-		return fmt.Errorf("cleaning worktree: %w", err)
-	}
-
 	return nil
 }
 
@@ -436,8 +412,9 @@ func (m *Manager) discardClone(cl *clone) {
 	os.RemoveAll(cl.path) //nolint:gosec // G703: path from git clone directory
 }
 
-func (m *Manager) authForRemote() (*githttp.BasicAuth, error) {
-	token, err := m.tokenSource.Token()
+// authForRemote adapts an OAuth2 token source to go-git's BasicAuth shape.
+func authForRemote(tokenSource oauth2.TokenSource) (*githttp.BasicAuth, error) {
+	token, err := tokenSource.Token()
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +670,14 @@ func (l *Lease) Return(ctx context.Context) error {
 		return nil
 	}
 
-	if err := l.manager.resetClone(l.clone); err != nil {
+	// Reset must survive a canceled reconcile: callers defer Return with the
+	// reconcile context, and failing here discards the clone — forcing the
+	// full re-clone the pool exists to avoid. WithoutCancel drops the deadline
+	// too, so bound it: a CLI-backend reset/clean subprocess that stalls (slow
+	// disk, NFS) then fails and discards the clone instead of hanging Return.
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resetTimeout)
+	defer cancel()
+	if err := l.manager.resetClone(resetCtx, l.clone); err != nil {
 		l.manager.discardClone(l.clone)
 		l.clone = nil
 		return err

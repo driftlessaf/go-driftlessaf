@@ -21,10 +21,20 @@ import (
 	"golang.org/x/oauth2"
 )
 
-func TestLeaseLifecycle(t *testing.T) {
+// forEachBackend runs the test body against both clone/fetch transports, so
+// the git CLI backend cannot silently drift from the go-git behavior it
+// mirrors.
+func forEachBackend(t *testing.T, fn func(t *testing.T, opts ...Option)) {
+	t.Run("gogit", func(t *testing.T) { fn(t) })
+	t.Run("gitcli", func(t *testing.T) { fn(t, WithGitCLI()) })
+}
+
+func TestLeaseLifecycle(t *testing.T) { forEachBackend(t, testLeaseLifecycle) }
+
+func testLeaseLifecycle(t *testing.T, opts ...Option) {
 	ctx := t.Context()
 
-	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -161,10 +171,12 @@ func TestLeaseLifecycle(t *testing.T) {
 	}
 }
 
-func TestMakeAndPushChanges(t *testing.T) {
+func TestMakeAndPushChanges(t *testing.T) { forEachBackend(t, testMakeAndPushChanges) }
+
+func testMakeAndPushChanges(t *testing.T, opts ...Option) {
 	ctx := context.Background()
 
-	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -288,9 +300,13 @@ func TestMakeAndPushChanges(t *testing.T) {
 }
 
 func TestMakeAndPushChanges_NothingToCommit(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesNothingToCommit)
+}
+
+func testMakeAndPushChangesNothingToCommit(t *testing.T, opts ...Option) {
 	ctx := t.Context()
 
-	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -313,6 +329,9 @@ func TestMakeAndPushChanges_NothingToCommit(t *testing.T) {
 		t.Fatalf("Lease: %v", err)
 	}
 	t.Cleanup(func() {
+		// t.Context() is canceled before cleanups run; Return's reset must
+		// survive that (context.WithoutCancel) instead of discarding the
+		// clone, so this doubles as the canceled-context regression test.
 		if err := lease.Return(ctx); err != nil {
 			t.Fatalf("Return: %v", err)
 		}
@@ -378,10 +397,12 @@ func initTestRepo(t *testing.T) (string, string) {
 // released to the back of the pool and acquired from the front, so the oldest
 // returned clone is acquired next. This allows problematic clones to age out
 // at the back of the pool rather than being reused repeatedly.
-func TestFIFOPoolBehavior(t *testing.T) {
+func TestFIFOPoolBehavior(t *testing.T) { forEachBackend(t, testFIFOPoolBehavior) }
+
+func testFIFOPoolBehavior(t *testing.T, opts ...Option) {
 	ctx := context.Background()
 
-	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -464,6 +485,260 @@ func TestFIFOPoolBehavior(t *testing.T) {
 	_ = reacquired3.Return(ctx)
 }
 
+// TestLeaseRefDeepHistory drives LeaseRef with WithCommitDepth over a
+// file:// remote — the URL form under which git honors --depth, unlike the
+// plain-path remotes used elsewhere in this suite — so both backends
+// exercise real shallow clones and deepening fetches, the production shape.
+func TestLeaseRefDeepHistory(t *testing.T) { forEachBackend(t, testLeaseRefDeepHistory) }
+
+func testLeaseRefDeepHistory(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, firstHash := initTestRepo(t)
+	commitToTestRepo(t, repoDir, "second.yaml")
+	commitToTestRepo(t, repoDir, "third.yaml")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return "file://" + repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Depth 3 covers all three commits; the merge-base walk (depth-1 = 2
+	// first-parent hops from HEAD) must land on the initial commit's parent
+	// slot, i.e. BaseCommit is the initial commit.
+	lease, err := mgr.LeaseRef(ctx, res, "master", WithCommitDepth(3))
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	if got := lease.BaseCommit().String(); got != firstHash {
+		t.Errorf("BaseCommit: got %s, want %s", got, firstHash)
+	}
+	if err := lease.Return(ctx); err != nil {
+		t.Fatalf("Return: %v", err)
+	}
+
+	// Re-lease at depth 1 with an unmoved tip: the pooled clone is reused
+	// and the shallow boundary handling must not break the lease.
+	lease2, err := mgr.LeaseRef(ctx, res, "master")
+	if err != nil {
+		t.Fatalf("LeaseRef reuse: %v", err)
+	}
+	if lease2.SHA() == "" || !lease2.PathExists() {
+		t.Errorf("reused lease: SHA=%q PathExists=%v, want non-empty SHA and true", lease2.SHA(), lease2.PathExists())
+	}
+	if err := lease2.Return(ctx); err != nil {
+		t.Fatalf("Return reuse: %v", err)
+	}
+}
+
+// TestLeaseRefNonBranchRef leases a refs/... ref that is not advertised at
+// clone time, exercising the clone-default-branch-then-fetch path.
+func TestLeaseRefNonBranchRef(t *testing.T) { forEachBackend(t, testLeaseRefNonBranchRef) }
+
+func testLeaseRefNonBranchRef(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+
+	// Point a PR-style ref at HEAD, as GitHub does for refs/pull/N/head.
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	prRef := plumbing.ReferenceName("refs/pull/1/head")
+	if err := origin.Storer.SetReference(plumbing.NewHashReference(prRef, plumbing.NewHash(headHash))); err != nil {
+		t.Fatalf("SetReference: %v", err)
+	}
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Type:  githubreconciler.ResourceTypePullRequest,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return "file://" + repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, prRef.String())
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	if got := lease.SHA(); got != headHash {
+		t.Errorf("SHA: got %s, want %s", got, headHash)
+	}
+	if err := lease.Return(ctx); err != nil {
+		t.Fatalf("Return: %v", err)
+	}
+}
+
+// TestLeaseAfterForcePush moves the remote branch backward (history rewrite)
+// and verifies a pooled clone follows it to the new tip.
+func TestLeaseAfterForcePush(t *testing.T) { forEachBackend(t, testLeaseAfterForcePush) }
+
+func testLeaseAfterForcePush(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, firstHash := initTestRepo(t)
+	commitToTestRepo(t, repoDir, "second.yaml")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return "file://" + repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease: %v", err)
+	}
+	tip := lease.SHA()
+	if err := lease.Return(ctx); err != nil {
+		t.Fatalf("Return: %v", err)
+	}
+
+	// Rewind master to the initial commit, simulating a force push.
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	if err := origin.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), plumbing.NewHash(firstHash))); err != nil {
+		t.Fatalf("SetReference: %v", err)
+	}
+	wt, err := origin.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := wt.Reset(&git.ResetOptions{Mode: git.HardReset}); err != nil {
+		t.Fatalf("Reset origin: %v", err)
+	}
+
+	lease2, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease after force push: %v", err)
+	}
+	if got := lease2.SHA(); got != firstHash {
+		t.Errorf("SHA after force push: got %s, want %s (was %s)", got, firstHash, tip)
+	}
+	if err := lease2.Return(ctx); err != nil {
+		t.Fatalf("Return after force push: %v", err)
+	}
+}
+
+// TestReturnClearsInfoExclude verifies Return strips a .git/info/exclude a
+// prior lease left in the pooled clone, so its ignore rules cannot leak into a
+// later lease. It also locks the commit behavior: a file matching the (now
+// cleared) exclude is committed, not silently dropped — which would also catch
+// a future go-git that starts honoring .git/info/exclude in Status/Add.
+func TestReturnClearsInfoExclude(t *testing.T) { forEachBackend(t, testReturnClearsInfoExclude) }
+
+func testReturnClearsInfoExclude(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Lease 1 poisons .git/info/exclude, as untrusted code with worktree write
+	// access could, then returns the clone to the pool.
+	lease1, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 1: %v", err)
+	}
+	dir := lease1.WorkingTree()
+	excl := filepath.Join(dir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excl), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(excl, []byte("*\n"), 0o644); err != nil {
+		t.Fatalf("poison exclude: %v", err)
+	}
+	if err := lease1.Return(ctx); err != nil {
+		t.Fatalf("Return 1: %v", err)
+	}
+
+	// Lease 2 reuses the same pooled clone; the poisoned exclude must be gone.
+	lease2, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 2: %v", err)
+	}
+	if lease2.WorkingTree() != dir {
+		t.Fatalf("expected pooled clone reuse: got %s, want %s", lease2.WorkingTree(), dir)
+	}
+	if _, err := os.Stat(excl); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf(".git/info/exclude persisted across Return: err=%v, want removed", err)
+	}
+
+	// A file matching the cleared exclude must still land in the commit.
+	newFile := filepath.ToSlash(filepath.Join("packages", "bar.yaml"))
+	branch := "clonemanager/exclude-test"
+	if err := lease2.MakeAndPushChanges(ctx, branch, func(_ context.Context, wt *git.Worktree) (string, error) {
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), newFile), []byte("name: bar"), 0o644); err != nil {
+			return "", err
+		}
+		return "add bar", nil
+	}); err != nil {
+		t.Fatalf("MakeAndPushChanges: %v", err)
+	}
+	if err := lease2.Return(ctx); err != nil {
+		t.Fatalf("Return 2: %v", err)
+	}
+
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen origin: %v", err)
+	}
+	ref, err := origin.Reference(plumbing.NewBranchReferenceName(branch), true)
+	if err != nil {
+		t.Fatalf("Reference: %v", err)
+	}
+	commit, err := origin.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("CommitObject: %v", err)
+	}
+	if _, err := commit.File(newFile); err != nil {
+		t.Errorf("%q missing from pushed commit (silently dropped by a poisoned exclude?): %v", newFile, err)
+	}
+}
+
 // commitToTestRepo advances the test repo's master branch with a new commit.
 func commitToTestRepo(t *testing.T, repoDir, name string) {
 	t.Helper()
@@ -494,10 +769,12 @@ func commitToTestRepo(t *testing.T, repoDir, name string) {
 	}
 }
 
-func TestMaxFetchesDiscardsClone(t *testing.T) {
+func TestMaxFetchesDiscardsClone(t *testing.T) { forEachBackend(t, testMaxFetchesDiscardsClone) }
+
+func testMaxFetchesDiscardsClone(t *testing.T, opts ...Option) {
 	ctx := t.Context()
 
-	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, WithMaxFetches(2))
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, append(opts, WithMaxFetches(2))...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -594,9 +871,14 @@ func BenchmarkLease(b *testing.B) {
 		b.Skip("GITHUB_TOKEN not set")
 	}
 
+	b.Run("gogit", func(b *testing.B) { benchmarkLease(b, token) })
+	b.Run("gitcli", func(b *testing.B) { benchmarkLease(b, token, WithGitCLI()) })
+}
+
+func benchmarkLease(b *testing.B, token string, opts ...Option) {
 	ctx := context.Background()
 
-	mgr, err := New(ctx, staticTokenSource(token), "bench", nil)
+	mgr, err := New(ctx, staticTokenSource(token), "bench", nil, opts...)
 	if err != nil {
 		b.Fatalf("New: %v", err)
 	}
