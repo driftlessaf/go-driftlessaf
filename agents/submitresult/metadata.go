@@ -65,7 +65,7 @@ func extractMetadata(t reflect.Type) (tagMetadata, bool) {
 }
 
 func parseTag(tag string, meta *tagMetadata) {
-	for part := range strings.SplitSeq(tag, ",") {
+	for _, part := range splitTagParts(tag) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -92,4 +92,32 @@ func parseTag(tag string, meta *tagMetadata) {
 			meta.PayloadDescription = value
 		}
 	}
+}
+
+// splitTagParts splits a tag on its unescaped commas. A comma preceded by a
+// backslash (`\,` in the tag as reflect returns it, written `\\,` inside a
+// raw-string struct tag) is part of the value, not a delimiter, and the
+// escape is removed. Descriptions read by the model routinely need commas —
+// "escalate, block, reasoning" — and a naive split silently truncates them
+// at the first one, which the model sees as a tool it cannot use correctly.
+func splitTagParts(tag string) []string {
+	var (
+		parts []string
+		cur   strings.Builder
+	)
+	for i := 0; i < len(tag); i++ {
+		c := tag[i]
+		switch {
+		case c == '\\' && i+1 < len(tag) && tag[i+1] == ',':
+			cur.WriteByte(',')
+			i++
+		case c == ',':
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	parts = append(parts, cur.String())
+	return parts
 }

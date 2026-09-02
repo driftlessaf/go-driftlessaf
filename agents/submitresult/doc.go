@@ -15,6 +15,12 @@ SPDX-License-Identifier: Apache-2.0
 // option), or is rejected back to the model with the validators' findings so
 // the loop continues.
 //
+// Tool metadata comes from a `submitresult:"..."` struct tag on a blank field
+// of the response type: comma-delimited key=value pairs (name, description,
+// payload, payloadDescription, success). A comma inside a value is written
+// escaped as `\,` (`\\,` inside a raw-string tag); an unescaped comma ends
+// the value.
+//
 // Payload leniency: when the model JSON-encodes the payload object into a
 // string instead of passing it as a nested object (a common model mistake),
 // the handlers transparently decode the string and accept the submit instead
