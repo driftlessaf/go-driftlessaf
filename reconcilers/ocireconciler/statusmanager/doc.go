@@ -14,8 +14,7 @@ SPDX-License-Identifier: Apache-2.0
 //
 //   - Keyless signing using Fulcio certificates and Rekor transparency log
 //   - Schema-scoped attestations: the payload type declares its own in-toto
-//     predicate type via Predicated, so a Manager cannot write under one type
-//     and read under another
+//     predicate type via Predicated.
 //   - SKIPSAME semantics: writing a byte-identical status is a no-op (no
 //     signing or registry write); a changed status is written alongside any
 //     prior bundle, readers resolve the latest verified bundle, and
@@ -34,8 +33,7 @@ SPDX-License-Identifier: Apache-2.0
 //	func (MyDetails) PredicateType() string { return "https://status.example.dev/my-reconciler" }
 //
 // Implement it on leaf schemas with a value receiver returning a constant, and
-// instantiate the Manager with the value type. See Predicated for why a type
-// meant for embedding must not implement it.
+// instantiate the Manager with the value type.
 //
 // Create a Manager and use sessions to track reconciliation state:
 //
@@ -100,6 +98,12 @@ SPDX-License-Identifier: Apache-2.0
 // A reader may instantiate a narrower type than the writer, so long as it
 // declares the same predicate type: unknown fields are ignored on decode, so a
 // consumer that wants only part of a schema need not depend on all of it.
+// When a schema keeps the same JSON shape across versioned predicate URIs, the
+// same Manager can select an older predicate for one read:
+//
+//	historical, err := mgr.NewSession(digest).ObservedStateWithOptions(ctx,
+//	    statusmanager.WithPredicateType("https://status.example.dev/my-reconciler/v1"),
+//	)
 //
 // # Authentication
 //

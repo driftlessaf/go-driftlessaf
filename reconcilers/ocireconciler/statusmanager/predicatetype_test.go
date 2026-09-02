@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package statusmanager
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,12 @@ import (
 type validSchema struct{}
 
 func (validSchema) PredicateType() string { return "https://status.cgr.dev/test/scan" }
+
+type observer interface {
+	ObservedState(context.Context) (*Status[validSchema], error)
+}
+
+var _ observer = (*Session[validSchema])(nil)
 
 type emptySchema struct{}
 
@@ -71,4 +78,28 @@ func TestNewRejectsBadPredicateTypeBeforeNetwork(t *testing.T) {
 func TestNewRejectsPointerInstantiation(t *testing.T) {
 	_, err := NewReadOnly[*validSchema](t.Context())
 	require.ErrorContains(t, err, "instantiate the Manager with the value type")
+}
+
+func TestWithPredicateType(t *testing.T) {
+	const current = "https://status.cgr.dev/test/v2"
+	session := &Session[validSchema]{manager: &Manager[validSchema]{predicateType: current}}
+	for _, tc := range []struct {
+		name string
+		opts []CallOption
+		want string
+	}{
+		{"default", nil, current},
+		{"empty uses default", []CallOption{WithPredicateType("")}, current},
+		{"custom", []CallOption{WithPredicateType("https://status.cgr.dev/test/v1")}, "https://status.cgr.dev/test/v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := session.observedPredicateType(tc.opts...)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+
+	_, err := session.ObservedStateWithOptions(t.Context(), WithPredicateType("not-a-uri"))
+	require.ErrorContains(t, err, "absolute URI")
+	require.Equal(t, current, session.manager.predicateType)
 }

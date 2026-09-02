@@ -7,6 +7,7 @@ package statusmanager
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -43,13 +44,12 @@ const sigstoreAudience = "sigstore"
 // predicate type their attestations carry. The predicate type, not the Go type,
 // is what separates one Manager's attestations from another's on a shared
 // subject: writes replace only referrers carrying a matching type, and reads
-// accept only those. Taking it from T means a Manager cannot write under one
-// type and read under another.
+// accept only those.
 //
-// Implement it on leaf schemas with a value receiver returning a constant, and
-// instantiate the Manager with the value type. A method on a type meant for
-// embedding would be promoted to every embedder, handing them the same predicate
-// type by default.
+// Implement it on a leaf schema with a value receiver returning a constant,
+// and instantiate the Manager with the value type. A method on a type meant for
+// embedding is promoted to every embedder, handing them the same predicate type
+// by default.
 type Predicated interface {
 	PredicateType() string
 }
@@ -289,7 +289,30 @@ func (m *Manager[T]) NewSession(digest name.Digest) *Session[T] {
 
 // ObservedState returns the latest recorded status, if any.
 func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
-	return s.manager.fetchLatestStatus(ctx, s.subject)
+	return s.manager.fetchLatestStatus(ctx, s.subject, s.manager.predicateType)
+}
+
+// ObservedStateWithOptions returns the latest recorded status using call-local
+// options that do not mutate the Manager or Session.
+func (s *Session[T]) ObservedStateWithOptions(ctx context.Context, opts ...CallOption) (*Status[T], error) {
+	predicateType, err := s.observedPredicateType(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return s.manager.fetchLatestStatus(ctx, s.subject, predicateType)
+}
+
+func (s *Session[T]) observedPredicateType(opts ...CallOption) (string, error) {
+	cfg := callConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.predicateType != "" {
+		if u, err := url.ParseRequestURI(cfg.predicateType); err != nil || u.Scheme == "" {
+			return "", fmt.Errorf("predicate type %q must be an absolute URI with a scheme", cfg.predicateType)
+		}
+	}
+	return cmp.Or(cfg.predicateType, s.manager.predicateType), nil
 }
 
 // SetActualState persists the provided status as an attestation. Transient
@@ -366,7 +389,7 @@ func (m *Manager[T]) subjectDigest(d name.Digest) name.Digest {
 	return m.repoOverride.Digest(d.DigestStr())
 }
 
-func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest) (*Status[T], error) {
+func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest, predicateType string) (*Status[T], error) {
 	bundles, subjectHash, err := cosign.GetBundles(ctx, subject, m.ociremoteOptions(ctx))
 	if err != nil {
 		if isMissing(err) {
@@ -386,7 +409,7 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 
 	var latest *statusCandidate[T]
 	for _, b := range bundles {
-		status, ts, ok := m.verifyAndExtract(ctx, b, policy)
+		status, ts, ok := m.verifyAndExtract(ctx, b, policy, predicateType)
 		if !ok {
 			continue
 		}
@@ -401,7 +424,7 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 }
 
 // verifyAndExtract verifies the bundle, then filters out any whose verified
-// in-toto statement predicate type doesn't match this manager's, returning the
+// in-toto statement predicate type doesn't match predicateType, returning the
 // parsed Status[T] alongside the verified timestamp.
 //
 // The predicate is decoded directly from the DSSE payload bytes — the exact
@@ -414,13 +437,13 @@ func (m *Manager[T]) fetchLatestStatus(ctx context.Context, subject name.Digest)
 // read from the result, alongside the verified timestamp, so decoding the
 // payload directly avoids that cost regardless of whether the verifier
 // materialized a predicate.
-func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, policy verify.PolicyBuilder) (*Status[T], time.Time, bool) {
+func (m *Manager[T]) verifyAndExtract(ctx context.Context, b *sgbundle.Bundle, policy verify.PolicyBuilder, predicateType string) (*Status[T], time.Time, bool) {
 	result, err := m.verifier.Verify(b, policy)
 	if err != nil {
 		clog.WarnContextf(ctx, "Bundle verification failed: %v", err)
 		return nil, time.Time{}, false
 	}
-	if result.Statement == nil || result.Statement.PredicateType != m.predicateType {
+	if result.Statement == nil || result.Statement.PredicateType != predicateType {
 		return nil, time.Time{}, false
 	}
 

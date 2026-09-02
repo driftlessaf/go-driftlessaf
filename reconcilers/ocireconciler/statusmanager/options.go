@@ -19,6 +19,9 @@ import (
 // Option customizes the Manager.
 type Option func(*config)
 
+// CallOption customizes a single status read.
+type CallOption func(*callConfig)
+
 type config struct {
 	remoteOpts       []remote.Option
 	repoOverride     *name.Repository
@@ -27,6 +30,10 @@ type config struct {
 	trustedMaterial  root.TrustedMaterial
 	oidcProvider     fulcio.OIDCProvider
 	expectedIdentity *cosign.Identity
+}
+
+type callConfig struct {
+	predicateType string
 }
 
 func defaultConfig() *config {
@@ -90,4 +97,11 @@ func WithOIDCProvider(p fulcio.OIDCProvider) Option {
 // provided for writable managers (which extract the identity from their credentials).
 func WithExpectedIdentity(identity cosign.Identity) Option {
 	return func(c *config) { c.expectedIdentity = &identity }
+}
+
+// WithPredicateType selects a compatible payload schema stored under a
+// different in-toto predicate URI for one [Session.ObservedStateWithOptions]
+// call. An empty predicate leaves the Manager's declared predicate unchanged.
+func WithPredicateType(predicateType string) CallOption {
+	return func(c *callConfig) { c.predicateType = predicateType }
 }
