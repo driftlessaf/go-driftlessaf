@@ -102,13 +102,23 @@ func (a *App) newRepoTokenSource(ctx context.Context, org, repo string) (oauth2.
 	if err != nil {
 		return nil, err
 	}
+	return a.InstallationTokenSource(ctx, installID, repo), nil
+}
+
+// InstallationTokenSource returns a token source minting installation tokens
+// for the given installation ID, scoped to repo when non-empty. Unlike
+// [App.TokenSourceFunc] it performs no org→installation lookup: it is for
+// callers that already hold the authoritative installation ID (e.g. from an
+// account-association record), so no GitHub API call is spent — or trusted —
+// resolving an org login to an installation.
+func (a *App) InstallationTokenSource(ctx context.Context, installID int64, repo string) oauth2.TokenSource {
 	itr := ghinstallation.NewFromAppsTransport(a.atr, installID)
 	if repo != "" {
 		itr.InstallationTokenOptions = &github.InstallationTokenOptions{
 			Repositories: []string{repo},
 		}
 	}
-	return &appTokenSource{ctx: ctx, itr: itr}, nil
+	return &appTokenSource{ctx: ctx, itr: itr}
 }
 
 // newAppTransport creates a *ghinstallation.AppsTransport from a key URI:
