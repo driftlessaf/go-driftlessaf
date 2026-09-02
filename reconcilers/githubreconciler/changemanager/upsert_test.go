@@ -46,6 +46,14 @@ func TestUpsert(t *testing.T) {
 		wantPRNumber:   42,
 		wantAssignable: true,
 	}, {
+		name:                 "create new PR shortens long labels",
+		prNumber:             0,
+		labels:               []string{"damienaicheh-update-android-manifest-package-action"},
+		wantPRNumber:         42,
+		wantAssignable:       true,
+		wantAddLabelsCalled:  true,
+		wantAddLabelsPayload: []string{"damienaicheh-update-android-manifest-pac62d884ef48"},
+	}, {
 		name:           "create new PR without labels",
 		prNumber:       0,
 		wantPRNumber:   42,
@@ -90,6 +98,22 @@ func TestUpsert(t *testing.T) {
 		wantAddLabelsCalled:  true,                        // "cve-remediation" is missing
 		wantAddLabelsPayload: []string{"cve-remediation"}, // only the missing one
 	}, {
+		name:                 "update existing PR shortens missing long label",
+		prNumber:             99,
+		labels:               []string{"aws-actions-vulnerability-scan-github-action-for-amazon-inspector"},
+		wantPRNumber:         99,
+		wantAssignable:       true,
+		wantAddLabelsCalled:  true,
+		wantAddLabelsPayload: []string{"aws-actions-vulnerability-scan-github-ac0bfa73b82e"},
+	}, {
+		name:                "update recognizes normalized existing label",
+		prNumber:            99,
+		labels:              []string{"damienaicheh-update-android-manifest-package-action"},
+		existingPRLabels:    []string{"damienaicheh-update-android-manifest-pac62d884ef48"},
+		wantPRNumber:        99,
+		wantAssignable:      true,
+		wantAddLabelsCalled: false,
+	}, {
 		name:              "update existing PR removes managed label no longer desired",
 		prNumber:          99,
 		labels:            []string{"automated-pr"},
@@ -116,6 +140,14 @@ func TestUpsert(t *testing.T) {
 		managedLabels:    nil, // skip:approver-bot is not managed, so it stays
 		wantPRNumber:     99,
 		wantAssignable:   true,
+	}, {
+		name:              "managed long label uses normalized name",
+		prNumber:          99,
+		existingPRLabels:  []string{"damienaicheh-update-android-manifest-pac62d884ef48"},
+		managedLabels:     []string{"damienaicheh-update-android-manifest-package-action"},
+		wantPRNumber:      99,
+		wantAssignable:    true,
+		wantRemovedLabels: []string{"damienaicheh-update-android-manifest-pac62d884ef48"},
 	}}
 
 	for _, tt := range tests {
@@ -407,6 +439,14 @@ func TestAddLabels(t *testing.T) {
 		wantPath:  99,
 		wantBody:  []string{"language/go"},
 		wantCache: []string{"language/python", "language/go"},
+	}, {
+		name:      "shortens long label",
+		prLabels:  []string{"automated-pr"},
+		add:       []string{"damienaicheh-update-android-manifest-package-action"},
+		wantCall:  true,
+		wantPath:  99,
+		wantBody:  []string{"damienaicheh-update-android-manifest-pac62d884ef48"},
+		wantCache: []string{"automated-pr", "damienaicheh-update-android-manifest-pac62d884ef48"},
 	}, {
 		name:      "no PR, no API call",
 		noPR:      true,

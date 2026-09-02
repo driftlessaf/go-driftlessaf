@@ -152,9 +152,10 @@ func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
 // bots are preserved. Use this for labels the reconciler toggles on and off
 // based on the current state (e.g. a "manual review needed" label applied
 // only when a diff requires it). Labels not listed here are never removed.
+// Labels exceeding GitHub's limit use the same normalized name as Upsert.
 func WithManagedLabels[T any](labels ...string) Option[T] {
 	return func(cm *CM[T]) {
-		cm.managedLabels = labels
+		cm.managedLabels = normalizeLabels(labels)
 	}
 }
 

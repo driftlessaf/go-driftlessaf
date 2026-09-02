@@ -455,6 +455,14 @@ func TestHasLabel(t *testing.T) {
 		labelName: "test-label",
 		wantHas:   true,
 	}, {
+		name: "PR with normalized long label",
+		session: Session[testData]{
+			prNumber: 1,
+			prLabels: []string{"damienaicheh-update-android-manifest-pac62d884ef48"},
+		},
+		labelName: "damienaicheh-update-android-manifest-package-action",
+		wantHas:   true,
+	}, {
 		name: "PR with label absent",
 		session: Session[testData]{
 			prNumber: 2,

@@ -152,7 +152,7 @@ func (s *Session[T]) IssueHasSkipLabel(issue *github.Issue) bool {
 
 // HasLabel returns true if the PR has the specified label.
 func (s *Session[T]) HasLabel(labelName string) bool {
-	return s.prNumber != 0 && slices.Contains(s.prLabels, labelName)
+	return s.prNumber != 0 && slices.Contains(s.prLabels, normalizeLabel(labelName))
 }
 
 // State returns the composite state of the PR as a bit-field.
@@ -240,32 +240,43 @@ func (s *Session[T]) Extract() (*T, error) {
 	return s.manager.Extract(s.prBody)
 }
 
-// turnLimitLabelSuffix and readyForReviewLabelSuffix are defined once, like
-// gaveUpLabelSuffix, so the Apply* methods and the Has*Label accessors cannot
-// drift apart on a rename.
+// State-label suffixes are defined once so readers and writers cannot drift.
 const (
 	turnLimitLabelSuffix      = "/turn-limit"
 	readyForReviewLabelSuffix = "/ready-for-review"
+	gaveUpLabelSuffix         = "/too-hard-need-human"
 )
+
+func (s *Session[T]) turnLimitLabel() string {
+	return normalizeLabel(s.manager.identity + turnLimitLabelSuffix)
+}
+
+func (s *Session[T]) readyForReviewLabel() string {
+	return normalizeLabel(s.manager.identity + readyForReviewLabelSuffix)
+}
+
+func (s *Session[T]) gaveUpLabel() string {
+	return normalizeLabel(s.manager.identity + gaveUpLabelSuffix)
+}
 
 // HasTurnLimitLabel reports whether the PR carries this identity's
 // turn-limit label (applied by ApplyTurnLimit). False when no PR exists.
 func (s *Session[T]) HasTurnLimitLabel() bool {
-	return s.HasLabel(s.manager.identity + turnLimitLabelSuffix)
+	return s.HasLabel(s.turnLimitLabel())
 }
 
 // HasReadyForReviewLabel reports whether the PR carries this identity's
 // ready-for-review label (applied by ApplyReadyForReview). False when no PR
 // exists.
 func (s *Session[T]) HasReadyForReviewLabel() bool {
-	return s.HasLabel(s.manager.identity + readyForReviewLabelSuffix)
+	return s.HasLabel(s.readyForReviewLabel())
 }
 
 // HasGaveUpLabel reports whether the PR carries this identity's
 // too-hard-need-human label (applied by ApplyGaveUp, removed by
 // ClearGaveUp). False when no PR exists.
 func (s *Session[T]) HasGaveUpLabel() bool {
-	return s.HasLabel(s.manager.identity + gaveUpLabelSuffix)
+	return s.HasLabel(s.gaveUpLabel())
 }
 
 // PRURL returns the HTML URL of the existing PR, or "" if none exists.
@@ -281,7 +292,7 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	turnLimitLabel := s.manager.identity + turnLimitLabelSuffix
+	turnLimitLabel := s.turnLimitLabel()
 	if slices.Contains(s.prLabels, turnLimitLabel) {
 		clog.InfoContext(ctx, "PR already has turn-limit label", "pr", s.prNumber)
 		return s.prURL, nil
@@ -360,7 +371,7 @@ func (s *Session[T]) ApplyReadyForReview(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	label := s.manager.identity + readyForReviewLabelSuffix
+	label := s.readyForReviewLabel()
 	if slices.Contains(s.prLabels, label) {
 		return s.prURL, nil
 	}
@@ -373,10 +384,6 @@ func (s *Session[T]) ApplyReadyForReview(ctx context.Context) (string, error) {
 	return s.prURL, nil
 }
 
-// gaveUpLabelSuffix is defined once so ApplyGaveUp and ClearGaveUp cannot
-// drift apart on a rename.
-const gaveUpLabelSuffix = "/too-hard-need-human"
-
 // ApplyGaveUp adds an <identity>/too-hard-need-human label to the PR,
 // signaling that the agent has posted a give-up explanation and is handing
 // the PR off for human review. Idempotent: re-running when the label is
@@ -386,7 +393,7 @@ func (s *Session[T]) ApplyGaveUp(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	label := s.manager.identity + gaveUpLabelSuffix
+	label := s.gaveUpLabel()
 	if slices.Contains(s.prLabels, label) {
 		return s.prURL, nil
 	}
@@ -408,7 +415,7 @@ func (s *Session[T]) ClearGaveUp(ctx context.Context) (string, error) {
 	if s.prNumber == 0 {
 		return "", nil
 	}
-	label := s.manager.identity + gaveUpLabelSuffix
+	label := s.gaveUpLabel()
 	if !slices.Contains(s.prLabels, label) {
 		return s.prURL, nil
 	}
@@ -420,12 +427,14 @@ func (s *Session[T]) ClearGaveUp(ctx context.Context) (string, error) {
 	return s.prURL, nil
 }
 
-// AddLabels adds the given labels to the existing PR.
+// AddLabels adds the given labels to the existing PR. Labels exceeding
+// GitHub's limit are shortened to a 40-character prefix and 10-character hash.
 // This is a no-op if no PR exists or if all provided labels are already present.
 func (s *Session[T]) AddLabels(ctx context.Context, labels []string) error {
 	if s.prNumber == 0 || len(labels) == 0 {
 		return nil
 	}
+	labels = normalizeLabels(labels)
 	// Filter out labels that are already present.
 	existing := make(map[string]struct{}, len(s.prLabels))
 	for _, l := range s.prLabels {
@@ -794,8 +803,10 @@ func resolveReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLCl
 var ErrNoChanges = errors.New("no changes")
 
 // Upsert creates a new PR or updates an existing one with the provided properties.
-// It only calls makeChanges when refresh is needed: no existing PR, merge conflict,
-// CI failures (only when WithFindingsIteration is enabled), or embedded data differs.
+// Labels exceeding GitHub's limit are shortened to a 40-character prefix and
+// 10-character hash. It only calls makeChanges when refresh is needed: no existing
+// PR, merge conflict, CI failures (only when WithFindingsIteration is enabled), or
+// embedded data differs.
 //
 // If makeChanges returns ErrNoChanges (or clonemanager.ErrNothingToCommit, which
 // is translated to ErrNoChanges), it is passed through (wrapped) so the caller
@@ -810,6 +821,8 @@ func (s *Session[T]) Upsert(
 	labels []string,
 	makeChanges func(ctx context.Context, branchName string) error,
 ) (prURL string, err error) {
+	labels = normalizeLabels(labels)
+
 	// Check if refresh is needed
 	needsRefresh, err := s.needsRefresh(ctx, data, labels)
 	if err != nil {

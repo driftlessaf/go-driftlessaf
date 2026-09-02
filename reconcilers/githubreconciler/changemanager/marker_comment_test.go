@@ -557,6 +557,93 @@ func TestClearGaveUp(t *testing.T) {
 	}
 }
 
+func TestStateLabelWritersNormalizeLongIdentity(t *testing.T) {
+	const identity = "a-very-long-change-manager-identity-that-exceeds-fifty-characters"
+
+	tests := []struct {
+		name   string
+		suffix string
+		remove bool
+	}{
+		{name: "turn limit", suffix: turnLimitLabelSuffix},
+		{name: "ready for review", suffix: readyForReviewLabelSuffix},
+		{name: "gave up", suffix: gaveUpLabelSuffix},
+		{name: "clear gave up", suffix: gaveUpLabelSuffix, remove: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wantLabel := normalizeLabel(identity + tt.suffix)
+			var gotMethod, gotLabel string
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v3/repos/test-owner/test-repo/issues/{number}/labels", func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				var labels []string
+				if err := json.NewDecoder(r.Body).Decode(&labels); err != nil {
+					t.Errorf("decoding labels: %v", err)
+				}
+				if len(labels) != 1 {
+					t.Fatalf("label payload: got = %v, want one label", labels)
+				}
+				gotLabel = labels[0]
+				writeJSON(t, w, []*github.Label{})
+			})
+			mux.HandleFunc("DELETE /api/v3/repos/test-owner/test-repo/issues/{number}/labels/{label...}", func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotLabel = r.PathValue("label")
+				w.WriteHeader(http.StatusNoContent)
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+			if err != nil {
+				t.Fatalf("creating client: %v", err)
+			}
+			s := &Session[testData]{
+				manager:  &CM[testData]{identity: identity},
+				client:   client,
+				owner:    "test-owner",
+				repo:     "test-repo",
+				prNumber: 7,
+				prURL:    "https://example.test/pull/7",
+			}
+			if tt.remove {
+				s.prLabels = []string{wantLabel}
+			}
+
+			switch tt.name {
+			case "turn limit":
+				_, err = s.ApplyTurnLimit(t.Context())
+			case "ready for review":
+				_, err = s.ApplyReadyForReview(t.Context())
+			case "gave up":
+				_, err = s.ApplyGaveUp(t.Context())
+			case "clear gave up":
+				_, err = s.ClearGaveUp(t.Context())
+			}
+			if err != nil {
+				t.Fatalf("applying state label: %v", err)
+			}
+
+			wantMethod := http.MethodPost
+			if tt.remove {
+				wantMethod = http.MethodDelete
+			}
+			if gotMethod != wantMethod {
+				t.Errorf("method: got = %q, want = %q", gotMethod, wantMethod)
+			}
+			if gotLabel != wantLabel {
+				t.Errorf("label: got = %q, want = %q", gotLabel, wantLabel)
+			}
+			if got := slices.Contains(s.prLabels, wantLabel); got == tt.remove {
+				t.Errorf("cached normalized label present: got = %v, want = %v", got, !tt.remove)
+			}
+		})
+	}
+}
+
 // TestFindMarkerCommentPaginates verifies the marker is found on a later page,
 // exercising the pagination loop in findMarkerComment.
 func TestFindMarkerCommentPaginates(t *testing.T) {
