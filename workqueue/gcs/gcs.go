@@ -29,6 +29,12 @@ import (
 )
 
 // ClientInterface is an interface that abstracts the GCS client.
+//
+// Objects must forward q, including its attribute selection, to the underlying
+// listing. Enumerate selects exactly the attributes it reads (see keyAttrs). An
+// implementation that substitutes its own query lists the full projection. One
+// that narrows the selection further lists observed keys with a zero Generation
+// and Metageneration, and their requeue then skips orphan recovery.
 type ClientInterface interface {
 	Object(name string) *storage.ObjectHandle
 	Objects(ctx context.Context, q *storage.Query) *storage.ObjectIterator
@@ -296,6 +302,32 @@ func checkPreconditionFailedOk(err error) (bool, error) {
 	return false, err
 }
 
+// keyAttrs is the subset of storage.ObjectAttrs used by workqueue keys.
+// Keeping the key implementations on this narrow type makes a new
+// attribute dependency a compile-time change instead of a silent read of an
+// attribute the listing did not request.
+type keyAttrs struct {
+	Name           string
+	Created        time.Time
+	Generation     int64
+	Metageneration int64
+	Metadata       map[string]string
+}
+
+func newKeyAttrs(attrs *storage.ObjectAttrs) *keyAttrs {
+	return &keyAttrs{
+		Name:           attrs.Name,
+		Created:        attrs.Created,
+		Generation:     attrs.Generation,
+		Metageneration: attrs.Metageneration,
+		Metadata:       attrs.Metadata,
+	}
+}
+
+// enumerateAttrSelection lists exactly the fields represented by
+// keyAttrs. A test keeps the selection and struct in sync.
+var enumerateAttrSelection = []string{"Name", "Created", "Generation", "Metageneration", "Metadata"}
+
 // Enumerate implements workqueue.Interface.
 func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
 	labels := w.baseLabels()
@@ -305,7 +337,11 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 		mEnumerateLatency.With(labels).Observe(time.Since(start).Seconds())
 	}()
 
-	iter := w.client.Objects(ctx, nil)
+	q := &storage.Query{}
+	if err := q.SetAttrSelection(enumerateAttrSelection); err != nil {
+		return nil, nil, nil, fmt.Errorf("SetAttrSelection() = %w", err)
+	}
+	iter := w.client.Objects(ctx, q)
 
 	wip := make([]workqueue.ObservedInProgressKey, 0, w.limit)
 	qd := make([]*queuedKey, 0, w.limit+1)
@@ -321,14 +357,15 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 		} else if err != nil {
 			return nil, nil, nil, fmt.Errorf("Next() = %w", err)
 		}
+		attrs := newKeyAttrs(objAttrs)
 		var priority int64
-		if p, ok := objAttrs.Metadata[priorityMetadataKey]; ok {
+		if p, ok := attrs.Metadata[priorityMetadataKey]; ok {
 			priority = parsePriority(p)
 		}
 		// Only check for max attempts if this is not a deadlettered item
-		if !strings.HasPrefix(objAttrs.Name, deadLetterPrefix) {
+		if !strings.HasPrefix(attrs.Name, deadLetterPrefix) {
 			// Check for attempts and track maximum
-			if att, ok := objAttrs.Metadata[attemptsMetadataKey]; ok && att != "" {
+			if att, ok := attrs.Metadata[attemptsMetadataKey]; ok && att != "" {
 				attempts, err := strconv.Atoi(att)
 				if err != nil {
 					clog.WarnContextf(ctx, "Failed to parse attempts: %v", err)
@@ -337,7 +374,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 				}
 				if attempts > TrackWorkAttemptMinThreshold {
 					l := w.baseLabels()
-					l["task_id"] = objAttrs.Name
+					l["task_id"] = attrs.Name
 					mTaskMaxAttempts.With(l).Set(float64(attempts))
 				}
 			}
@@ -348,10 +385,10 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 		mTaskMaxAttempts.With(l).Set(float64(0))
 
 		switch {
-		case strings.HasPrefix(objAttrs.Name, inProgressPrefix):
+		case strings.HasPrefix(attrs.Name, inProgressPrefix):
 			ipk := &inProgressKey{
 				client:    w.client,
-				attrs:     objAttrs,
+				attrs:     attrs,
 				priority:  priority,
 				queueName: w.name,
 			}
@@ -359,7 +396,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 
 			// Keys started before owner recording existed (or by a queue
 			// without an owner) count as "unknown".
-			if owner, ok := objAttrs.Metadata[ownerMetadataKey]; ok && owner != "" {
+			if owner, ok := attrs.Metadata[ownerMetadataKey]; ok && owner != "" {
 				ownerCounts[owner]++
 			} else {
 				ownerCounts["unknown"]++
@@ -367,20 +404,20 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 
 			// Record lease age for active (non-orphaned) keys
 			if !ipk.IsOrphaned() {
-				leaseAge := time.Since(objAttrs.Created)
+				leaseAge := time.Since(attrs.Created)
 				mLeaseAge.With(labels).Observe(leaseAge.Seconds())
 			}
 
-		case strings.HasPrefix(objAttrs.Name, queuedPrefix):
+		case strings.HasPrefix(attrs.Name, queuedPrefix):
 			// Calculate time until eligible for all queued keys
 			timeUntilEligible := 0.0 // Default: immediately eligible
-			if nbf, ok := objAttrs.Metadata[notBeforeMetadataKey]; ok && nbf != "" && nbf != noNotBefore {
+			if nbf, ok := attrs.Metadata[notBeforeMetadataKey]; ok && nbf != "" && nbf != noNotBefore {
 				if notBefore, err := time.Parse(time.RFC3339, nbf); err != nil {
 					clog.WarnContextf(ctx, "Failed to parse not-before: %v", err)
 				} else {
 					timeUntilEligible = notBefore.Sub(time.Now().UTC()).Seconds()
 					if time.Now().UTC().Before(notBefore) {
-						clog.DebugContextf(ctx, "Skipping key %q until %v", objAttrs.Name, notBefore)
+						clog.DebugContextf(ctx, "Skipping key %q until %v", attrs.Name, notBefore)
 						notbefore++
 						// Record metric before skipping
 						mTimeUntilEligible.With(labels).Observe(timeUntilEligible)
@@ -393,7 +430,7 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 
 			qd = append(qd, &queuedKey{
 				client:                        w.client,
-				attrs:                         objAttrs,
+				attrs:                         attrs,
 				priority:                      priority,
 				queueName:                     w.name,
 				identity:                      w.identity,
@@ -414,10 +451,10 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 			}
 			queued++
 
-		case strings.HasPrefix(objAttrs.Name, deadLetterPrefix):
+		case strings.HasPrefix(attrs.Name, deadLetterPrefix):
 			// Collect and count the dead-lettered keys
 			dl = append(dl, &deadLetteredKey{
-				attrs:    objAttrs,
+				attrs:    attrs,
 				priority: priority,
 			})
 			deadlettered++
@@ -566,7 +603,7 @@ type inProgressKey struct {
 	// Once we start to heartbeat things, then that thread may update attrs,
 	// so use the RWMutex to protect it from concurrent access.
 	rw    sync.RWMutex
-	attrs *storage.ObjectAttrs
+	attrs *keyAttrs
 }
 
 // baseLabels returns the labels every metric emitted from this key carries.
@@ -1068,7 +1105,7 @@ func (o *inProgressKey) refreshLease(ctx context.Context, expiry time.Time) (tim
 				return err
 			}
 			// This is what we're guarding with the write lock.
-			o.attrs = attrs
+			o.attrs = newKeyAttrs(attrs)
 			return nil
 		}()
 		switch {
@@ -1105,7 +1142,7 @@ func (o *inProgressKey) refreshLease(ctx context.Context, expiry time.Time) (tim
 
 type queuedKey struct {
 	client   ClientInterface
-	attrs    *storage.ObjectAttrs
+	attrs    *keyAttrs
 	priority int64
 	// queueName is the queue_name label value applied to all metrics emitted
 	// when this key is started.
@@ -1227,7 +1264,7 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 
 	oip := &inProgressKey{
 		client:    q.client,
-		attrs:     attrs,
+		attrs:     newKeyAttrs(attrs),
 		priority:  q.priority,
 		queueName: q.queueName,
 	}
@@ -1251,7 +1288,7 @@ func logHighScheduledWait(ctx context.Context, wait, threshold time.Duration) {
 }
 
 type deadLetteredKey struct {
-	attrs    *storage.ObjectAttrs
+	attrs    *keyAttrs
 	priority int64
 }
 

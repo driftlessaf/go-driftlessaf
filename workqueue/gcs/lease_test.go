@@ -60,9 +60,72 @@ func (f *fakeGCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		return
 	}
+	// Honor the listing's fields mask the way GCS does. Without this the fake
+	// answers every mask with the same full object, so a test that narrows the
+	// selection is answered as though it had not.
+	if status == http.StatusOK {
+		if mask := call.query.Get("fields"); mask != "" {
+			body = projectListing(body, mask)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	fmt.Fprint(w, body)
+}
+
+// projectListing drops object members the fields mask did not request, applying
+// the same projection GCS would. A body that is not an object listing is
+// returned unchanged.
+func projectListing(body, mask string) string {
+	var listing struct {
+		Kind     string            `json:"kind,omitempty"`
+		NextPage string            `json:"nextPageToken,omitempty"`
+		Prefixes []string          `json:"prefixes,omitempty"`
+		Items    []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body), &listing); err != nil || listing.Items == nil {
+		return body
+	}
+
+	start := strings.Index(mask, "items(")
+	if start < 0 {
+		return body
+	}
+	end := strings.LastIndex(mask, ")")
+	if end < start {
+		return body
+	}
+	keep := make(map[string]struct{})
+	for f := range strings.SplitSeq(mask[start+len("items("):end], ",") {
+		keep[strings.TrimSpace(f)] = struct{}{}
+	}
+
+	for i, raw := range listing.Items {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &item); err != nil {
+			continue
+		}
+		for member := range item {
+			// "kind" is structural, not an attribute, and GCS always returns it.
+			if member == "kind" {
+				continue
+			}
+			if _, ok := keep[member]; !ok {
+				delete(item, member)
+			}
+		}
+		projected, err := json.Marshal(item)
+		if err != nil {
+			continue
+		}
+		listing.Items[i] = projected
+	}
+
+	out, err := json.Marshal(listing)
+	if err != nil {
+		return body
+	}
+	return string(out)
 }
 
 func (f *fakeGCS) recorded() []gcsCall {
@@ -126,7 +189,7 @@ func newTestKey(t *testing.T, client ClientInterface, key string, gen, metagen i
 		client:      client,
 		ownerCtx:    ctx,
 		ownerCancel: cancel,
-		attrs: &storage.ObjectAttrs{
+		attrs: &keyAttrs{
 			Name:           inProgressPrefix + key,
 			Generation:     gen,
 			Metageneration: metagen,
@@ -143,7 +206,7 @@ func newTestKey(t *testing.T, client ClientInterface, key string, gen, metagen i
 func newObservedKey(client ClientInterface, key string, gen, metagen int64) *inProgressKey {
 	return &inProgressKey{
 		client: client,
-		attrs: &storage.ObjectAttrs{
+		attrs: &keyAttrs{
 			Name:           inProgressPrefix + key,
 			Generation:     gen,
 			Metageneration: metagen,
@@ -1020,7 +1083,7 @@ func TestStartRecordsOwner(t *testing.T) {
 
 			qk := &queuedKey{
 				client: client,
-				attrs: &storage.ObjectAttrs{
+				attrs: &keyAttrs{
 					Name:     queuedPrefix + "test-key",
 					Metadata: test.metadata,
 				},
