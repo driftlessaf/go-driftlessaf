@@ -7,39 +7,38 @@ package agenttrace
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/chainguard-dev/clog"
 )
 
-// NewDefaultTracer creates a new default tracer that logs to clog.
-// The trace is logged as a structured JSON document via MarshalJSON so
-// that JSON log sinks (Cloud Logging, etc.) receive a parseable record.
+// NewDefaultTracer creates a default tracer that logs to clog. The log record
+// always contains the structural trace. When payloads are enabled on the trace
+// context, the trace also contains its payload fields.
 //
 // We use trace.ctx (not the startup ctx) so that each log line carries the
 // per-request context — including trace metadata, reconciler key, etc.
 //
-// The logged document embeds the trace's payloads (input_prompt, result,
-// tool-call contents). Services whose agents run on confidential input must
-// install NewMetadataTracer instead, so those payloads never reach log sinks.
+// Use NewMetadataTracer when the log sink must never receive raw payloads,
+// including when a caller enables them for another sink.
 func NewDefaultTracer[T any](_ context.Context) Tracer[T] {
 	return ByCode[T](func(trace *Trace[T]) {
-		clog.InfoContext(trace.ctx, "Agent trace completed",
-			"trace_id", trace.ID,
-			"duration_ms", trace.Duration().Milliseconds(),
-			"tool_calls", len(trace.ToolCalls),
-			"trace", trace,
-		)
-	})
-}
+		traceValue := any(trace)
+		if !payloadsEnabledFrom(trace.ctx) {
+			projected, err := projectTraceForLog(trace)
+			if err != nil {
+				clog.WarnContext(trace.ctx, "Agent trace projection failed",
+					"trace_id", trace.ID,
+				)
 
-// NewMetadataTracer creates a tracer that logs trace METADATA only — id,
-// agent, model, duration, tool-call count, error state — never the trace
-// document itself (input_prompt, result, tool-call payloads). Install it
-// (per result type, via WithTracer) in services whose agents run on
-// confidential input that must not reach log sinks; the default tracer's
-// full-trace log line is exactly the leak this prevents.
-func NewMetadataTracer[T any](_ context.Context) Tracer[T] {
-	return ByCode[T](func(trace *Trace[T]) {
+				logTraceMetadata(trace)
+				return
+			}
+
+			traceValue = projected
+		}
+
 		clog.InfoContext(trace.ctx, "Agent trace completed",
 			"trace_id", trace.ID,
 			"agent_name", trace.AgentName,
@@ -47,6 +46,39 @@ func NewMetadataTracer[T any](_ context.Context) Tracer[T] {
 			"duration_ms", trace.Duration().Milliseconds(),
 			"tool_calls", len(trace.ToolCalls),
 			"failed", trace.Error != nil,
+			"trace", traceValue,
 		)
 	})
+}
+
+func projectTraceForLog[T any](trace *Trace[T]) (json.RawMessage, error) {
+	raw, err := json.Marshal(trace)
+	if err != nil {
+		return nil, fmt.Errorf("marshal trace: %w", err)
+	}
+
+	projected, err := omitSensitiveTraceFields(raw)
+	if err != nil {
+		return nil, fmt.Errorf("omit trace payloads: %w", err)
+	}
+
+	return json.RawMessage(projected), nil
+}
+
+// NewMetadataTracer creates a tracer that always logs trace metadata only: id,
+// agent, model, duration, tool-call count, and error state. It does not log the
+// trace document, even when payloads are enabled on the trace context.
+func NewMetadataTracer[T any](_ context.Context) Tracer[T] {
+	return ByCode[T](logTraceMetadata[T])
+}
+
+func logTraceMetadata[T any](trace *Trace[T]) {
+	clog.InfoContext(trace.ctx, "Agent trace completed",
+		"trace_id", trace.ID,
+		"agent_name", trace.AgentName,
+		"model", trace.Model,
+		"duration_ms", trace.Duration().Milliseconds(),
+		"tool_calls", len(trace.ToolCalls),
+		"failed", trace.Error != nil,
+	)
 }

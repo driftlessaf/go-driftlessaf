@@ -13,6 +13,37 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace/payloadcrypt"
 )
 
+type fieldTransform func(obj map[string]json.RawMessage, key string) error
+
+type fieldTransforms struct {
+	jsonValue   fieldTransform
+	stringValue fieldTransform
+	reasoning   fieldTransform
+}
+
+type objectArrayFields struct {
+	key        string
+	jsonKeys   []string
+	stringKeys []string
+}
+
+func omitSensitiveTraceFields(raw []byte) ([]byte, error) {
+	return transformSensitiveTraceFields(raw, "without payloads", fieldTransforms{
+		jsonValue:   omitField,
+		stringValue: omitField,
+		reasoning:   omitField,
+	})
+}
+
+func omitSensitiveSpanFields(raw []byte) ([]byte, error) {
+	return transformSensitiveSpanFields(raw, "without payloads", omitField)
+}
+
+func omitField(obj map[string]json.RawMessage, key string) error {
+	delete(obj, key)
+	return nil
+}
+
 // sealSensitiveTraceFields replaces the free-text payload fields of a marshalled
 // trace-event JSON (input_prompt, result, tool_calls[].params, tool_calls[].result,
 // reasoning[].thinking) with sealed envelopes, leaving structural fields (ids,
@@ -38,33 +69,33 @@ func sealSensitiveTraceFields(ctx context.Context, enc *payloadcrypt.Encryptor, 
 		return nil, fmt.Errorf("new seal session: %w", err)
 	}
 
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, fmt.Errorf("unmarshal trace event: %w", err)
+	return transformSensitiveTraceFields(raw, "sealed", sealTraceFieldTransforms(sess))
+}
+
+func sealTraceFieldTransforms(sess *payloadcrypt.Session) fieldTransforms {
+	nested := fieldTransforms{
+		jsonValue: func(obj map[string]json.RawMessage, key string) error {
+			return sealJSONField(sess, obj, key)
+		},
+		stringValue: func(obj map[string]json.RawMessage, key string) error {
+			return sealStringField(sess, obj, key)
+		},
 	}
 
-	// input_prompt is a STRING column: keep the sealed value a JSON string.
-	if err := sealStringField(sess, obj, "input_prompt"); err != nil {
-		return nil, err
+	return fieldTransforms{
+		jsonValue:   nested.jsonValue,
+		stringValue: nested.stringValue,
+		reasoning:   reasoningFieldTransform(nested),
 	}
-	// result is a JSON column: the sealed envelope object is itself valid JSON.
-	if err := sealJSONField(sess, obj, "result"); err != nil {
-		return nil, err
-	}
-	// tool_calls[].params / .result are JSON columns.
-	if err := sealObjectArrayFields(sess, obj, "tool_calls", []string{"params", "result"}, nil); err != nil {
-		return nil, err
-	}
-	// reasoning[].thinking is a STRING column.
-	if err := sealObjectArrayFields(sess, obj, "reasoning", nil, []string{"thinking"}); err != nil {
-		return nil, err
-	}
+}
 
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return nil, fmt.Errorf("marshal sealed trace event: %w", err)
+func reasoningFieldTransform(nested fieldTransforms) fieldTransform {
+	return func(obj map[string]json.RawMessage, key string) error {
+		return transformObjectArrayFields(obj, objectArrayFields{
+			key:        key,
+			stringKeys: []string{"thinking"},
+		}, nested)
 	}
-	return out, nil
 }
 
 // sealSensitiveSpanFields seals the per-turn payload fields of a marshalled
@@ -79,21 +110,56 @@ func sealSensitiveSpanFields(ctx context.Context, enc *payloadcrypt.Encryptor, r
 		return nil, fmt.Errorf("new seal session: %w", err)
 	}
 
+	return transformSensitiveSpanFields(raw, "sealed", func(obj map[string]json.RawMessage, key string) error {
+		return sealJSONField(sess, obj, key)
+	})
+}
+
+func transformSensitiveTraceFields(raw []byte, action string, transforms fieldTransforms) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, fmt.Errorf("unmarshal span event: %w", err)
+		return nil, fmt.Errorf("unmarshal trace event: %w", err)
 	}
 
-	if err := sealJSONField(sess, obj, "prompt_messages"); err != nil {
+	if err := transforms.stringValue(obj, "input_prompt"); err != nil {
 		return nil, err
 	}
-	if err := sealJSONField(sess, obj, "completion"); err != nil {
+	if err := transforms.jsonValue(obj, "result"); err != nil {
+		return nil, err
+	}
+	if err := transformObjectArrayFields(obj, objectArrayFields{
+		key:      "tool_calls",
+		jsonKeys: []string{"params", "result"},
+	}, transforms); err != nil {
+		return nil, err
+	}
+	if err := transforms.reasoning(obj, "reasoning"); err != nil {
 		return nil, err
 	}
 
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return nil, fmt.Errorf("marshal sealed span event: %w", err)
+		return nil, fmt.Errorf("marshal %s trace event: %w", action, err)
+	}
+	return out, nil
+}
+
+func transformSensitiveSpanFields(raw []byte, action string, jsonField fieldTransform) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("unmarshal span event: %w", err)
+	}
+
+	if err := jsonField(obj, "prompt_messages"); err != nil {
+		return nil, err
+	}
+	if err := jsonField(obj, "completion"); err != nil {
+		return nil, err
+	}
+
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s span event: %w", action, err)
 	}
 	return out, nil
 }
@@ -141,43 +207,44 @@ func sealStringField(sess *payloadcrypt.Session, obj map[string]json.RawMessage,
 	return nil
 }
 
-// sealObjectArrayFields seals named fields inside each element of a JSON array of
-// objects (e.g. tool_calls, reasoning). jsonKeys are sealed as JSON values,
-// stringKeys as JSON strings.
-func sealObjectArrayFields(sess *payloadcrypt.Session, obj map[string]json.RawMessage, arrayKey string, jsonKeys, stringKeys []string) error {
-	v, ok := obj[arrayKey]
+func transformObjectArrayFields(
+	obj map[string]json.RawMessage,
+	fields objectArrayFields,
+	transforms fieldTransforms,
+) error {
+	v, ok := obj[fields.key]
 	if isNullOrAbsent(v, ok) {
 		return nil
 	}
 	var elems []json.RawMessage
 	if err := json.Unmarshal(v, &elems); err != nil {
-		return fmt.Errorf("unmarshal %q array: %w", arrayKey, err)
+		return fmt.Errorf("unmarshal %q array: %w", fields.key, err)
 	}
 	for i, elem := range elems {
 		var em map[string]json.RawMessage
 		if err := json.Unmarshal(elem, &em); err != nil {
-			return fmt.Errorf("unmarshal %q[%d]: %w", arrayKey, i, err)
+			return fmt.Errorf("unmarshal %q[%d]: %w", fields.key, i, err)
 		}
-		for _, k := range jsonKeys {
-			if err := sealJSONField(sess, em, k); err != nil {
-				return fmt.Errorf("%q[%d]: %w", arrayKey, i, err)
+		for _, k := range fields.jsonKeys {
+			if err := transforms.jsonValue(em, k); err != nil {
+				return fmt.Errorf("%q[%d]: %w", fields.key, i, err)
 			}
 		}
-		for _, k := range stringKeys {
-			if err := sealStringField(sess, em, k); err != nil {
-				return fmt.Errorf("%q[%d]: %w", arrayKey, i, err)
+		for _, k := range fields.stringKeys {
+			if err := transforms.stringValue(em, k); err != nil {
+				return fmt.Errorf("%q[%d]: %w", fields.key, i, err)
 			}
 		}
 		reencoded, err := json.Marshal(em)
 		if err != nil {
-			return fmt.Errorf("marshal sealed %q[%d]: %w", arrayKey, i, err)
+			return fmt.Errorf("marshal transformed %q[%d]: %w", fields.key, i, err)
 		}
 		elems[i] = reencoded
 	}
 	reencoded, err := json.Marshal(elems)
 	if err != nil {
-		return fmt.Errorf("marshal sealed %q array: %w", arrayKey, err)
+		return fmt.Errorf("marshal transformed %q array: %w", fields.key, err)
 	}
-	obj[arrayKey] = reencoded
+	obj[fields.key] = reencoded
 	return nil
 }

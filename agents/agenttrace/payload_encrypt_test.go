@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace/payloadcrypt"
+	"github.com/google/go-cmp/cmp"
 )
 
 func testEncryptor(t *testing.T) *payloadcrypt.Encryptor {
@@ -184,6 +185,41 @@ func TestSealSensitiveSpanFields(t *testing.T) {
 	}
 	if got := string(openField(t, obj["completion"], false)); got != `{"text": "secret completion body"}` {
 		t.Errorf("completion round-trip: %s", got)
+	}
+}
+
+func TestOmitSensitiveSpanFields(t *testing.T) {
+	raw := []byte(`{
+		"trace_id": "20260709-120000-abcd",
+		"span_id": "20260709-120000-abcd-t0",
+		"model_id": "claude-opus-4-8",
+		"prompt_messages": [{"role": "user", "content": "secret prompt body"}],
+		"completion": {"text": "secret completion body"},
+		"prompt_hash": "deadbeef",
+		"token_counts": {"input": 10, "output": 20}
+	}`)
+
+	out, err := omitSensitiveSpanFields(raw)
+	if err != nil {
+		t.Fatalf("omitSensitiveSpanFields: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	want := map[string]any{
+		"trace_id":    "20260709-120000-abcd",
+		"span_id":     "20260709-120000-abcd-t0",
+		"model_id":    "claude-opus-4-8",
+		"prompt_hash": "deadbeef",
+		"token_counts": map[string]any{
+			"input":  float64(10),
+			"output": float64(20),
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("span without payloads (-want +got):\n%s", diff)
 	}
 }
 

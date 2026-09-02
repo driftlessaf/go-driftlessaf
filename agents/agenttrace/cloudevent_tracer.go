@@ -8,6 +8,7 @@ package agenttrace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -33,6 +34,8 @@ const (
 	ceSendTimeout = 30 * time.Second
 )
 
+var errTraceMarshal = errors.New("trace marshal failed")
+
 // ceEmittingTracer wraps an inner Tracer and emits a CloudEvent for every
 // completed trace. Sends are non-blocking (bounded errgroup) so emission
 // does not delay the reconciler. Call Drain to flush in-flight events
@@ -42,10 +45,9 @@ type ceEmittingTracer[T any] struct {
 	client cloudevents.Client
 	source string
 	// enc, when non-nil, seals the sensitive free-text payload fields of every
-	// emitted trace/span event before it leaves the process, so the CloudEvent
-	// (and the BigQuery row derived from it) carries ciphertext. Nil means the
-	// events are emitted as-is (structure + payloads in plaintext, gated by
-	// WithPayloadsEnabled upstream).
+	// emitted trace/span event before it leaves the process. Nil leaves enabled
+	// payloads in plaintext. WithPayloadsEnabled controls whether either form is
+	// present in the event.
 	enc *payloadcrypt.Encryptor
 	eg  errgroup.Group
 }
@@ -75,6 +77,10 @@ func WithPayloadEncryptor[T any](enc *payloadcrypt.Encryptor) CEOption[T] {
 // cloudevents.Client (see NewBrokerClient) and a source identifier
 // (e.g. the OCTO_IDENTITY of the reconciler). The CloudEvent type is
 // always EventType.
+//
+// The event always contains structural trace fields. Raw payload fields are
+// included only when the trace context enables them through
+// WithPayloadsEnabled.
 //
 // Call Drain on the returned tracer (via type assertion) before process
 // exit to flush in-flight events.
@@ -115,7 +121,7 @@ func (t *ceEmittingTracer[T]) emitSpan(ctx context.Context, span RecordedSpan) e
 	ce.SetSubject(span.TraceID)
 	ce.SetTime(span.RecordedAt)
 
-	if err := t.setEventData(ctx, &ce, span, sealSensitiveSpanFields); err != nil {
+	if err := t.setEventData(ctx, &ce, span, omitSensitiveSpanFields, sealSensitiveSpanFields); err != nil {
 		// Fail closed: on a seal error the payload would otherwise leak, so the
 		// span event is dropped rather than sent in the clear.
 		clog.ErrorContext(ctx, "Failed to set span CloudEvent data",
@@ -165,7 +171,7 @@ func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
 	ce.SetSubject(trace.ExecContext.ReconcilerKey)
 	ce.SetTime(trace.StartTime)
 
-	if err := t.setEventData(ctx, &ce, trace, sealSensitiveTraceFields); err != nil {
+	if err := t.setEventData(ctx, &ce, trace, omitSensitiveTraceFields, sealSensitiveTraceFields); err != nil {
 		// Fail closed: on a seal error the payload would otherwise leak, so the
 		// trace event is dropped rather than sent in the clear.
 		clog.ErrorContext(ctx, "Failed to set CloudEvent data",
@@ -178,23 +184,33 @@ func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
 	t.send(ctx, ce, "Failed to deliver agent trace event", "trace_id", trace.ID)
 }
 
-// setEventData sets ce's data to obj as JSON. When a payload encryptor is
-// configured it first marshals obj, seals its sensitive fields via sealFn, and
-// sets the resulting ciphertext JSON — so the event on the wire never carries
-// plaintext payloads. Any marshal/seal error is returned so the caller can drop
-// the event (fail closed) rather than emit in the clear.
+// setEventData sets ce's data to obj as JSON. Without the payload opt-in, it
+// removes the sensitive fields through omitFn. With the opt-in and a payload
+// encryptor, it seals those fields through sealFn before setting the event data.
 func (t *ceEmittingTracer[T]) setEventData(
 	ctx context.Context,
 	ce *cloudevents.Event,
 	obj any,
+	omitFn func(raw []byte) ([]byte, error),
 	sealFn func(ctx context.Context, enc *payloadcrypt.Encryptor, raw []byte) ([]byte, error),
 ) error {
-	if t.enc == nil {
-		return ce.SetData(cloudevents.ApplicationJSON, obj)
-	}
 	raw, err := json.Marshal(obj)
 	if err != nil {
+		if !payloadsEnabledFrom(ctx) {
+			return errTraceMarshal
+		}
+
 		return err
+	}
+	if !payloadsEnabledFrom(ctx) {
+		withoutPayloads, err := omitFn(raw)
+		if err != nil {
+			return err
+		}
+		return ce.SetData(cloudevents.ApplicationJSON, withoutPayloads)
+	}
+	if t.enc == nil {
+		return ce.SetData(cloudevents.ApplicationJSON, raw)
 	}
 	sealed, err := sealFn(ctx, t.enc, raw)
 	if err != nil {

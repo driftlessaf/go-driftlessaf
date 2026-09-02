@@ -237,6 +237,57 @@ func TestPayloadsDisabled(t *testing.T) {
 	}
 }
 
+func TestToolCallPayloadPolicy(t *testing.T) {
+	tests := []struct {
+		name            string
+		payloadsEnabled bool
+		want            map[string]any
+	}{
+		{
+			name:            "enabled",
+			payloadsEnabled: true,
+			want: map[string]any{
+				"gen_ai.operation.name":      "execute_tool",
+				"tool.name":                  "read_logs",
+				"tool.id":                    "call-1",
+				"gen_ai.input.messages":      `{"path":"/private/build.log","reasoning":"inspect the failed step"}`,
+				"driftlessaf.tool.reasoning": "inspect the failed step",
+				"gen_ai.output.messages":     `{"contents":"secret build output"}`,
+			},
+		},
+		{
+			name: "disabled",
+			want: map[string]any{
+				"gen_ai.operation.name": "execute_tool",
+				"tool.name":             "read_logs",
+				"tool.id":               "call-1",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sr := setupRecorder(t)
+			ctx := WithPayloadsEnabled(t.Context(), test.payloadsEnabled)
+			trace := newTrace[string](ctx, "secret prompt")
+			toolCall := trace.StartToolCall("call-1", "read_logs", map[string]any{
+				"path":      "/private/build.log",
+				"reasoning": "inspect the failed step",
+			})
+			toolCall.Complete(map[string]any{"contents": "secret build output"}, nil)
+			trace.complete("done", nil)
+
+			span := findSpan(sr.Ended(), "execute_tool read_logs")
+			if span == nil {
+				t.Fatal("execute_tool read_logs span not found")
+			}
+			if diff := cmp.Diff(test.want, attrsAsMap(span), anyValue); diff != "" {
+				t.Errorf("tool-call attrs (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestTruncation verifies that a prompt larger than maxPayloadBytes is
 // truncated before being emitted as gen_ai.prompt / gen_ai.input.messages,
 // and that driftlessaf.payload.truncated=true is stamped to signal the

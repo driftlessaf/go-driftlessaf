@@ -205,19 +205,22 @@ func GetDefaultNameFn(ctx context.Context) func(ExecutionContext) string {
 	return nil
 }
 
-// WithPayloadsEnabled returns a context that opts in (or out) of emitting
-// raw prompt / completion payloads as OTel attributes on the root
-// invoke_agent span (gen_ai.prompt, gen_ai.input.messages, gen_ai.completion,
-// gen_ai.output.messages). The default — when nothing is set on ctx — is
-// false so library consumers don't accidentally leak PII-bearing prompts
-// to a third-party eval backend.
+// WithPayloadsEnabled returns a context that controls raw payload emission
+// from the built-in trace sinks. When enabled, the sinks can emit prompts,
+// completions, tool arguments, tool results, and model reasoning through OTel
+// attributes, structured logs, and CloudEvents. When disabled or unset, the
+// sinks omit those fields but can still emit structural fields, including
+// metadata and error strings. This policy does not inspect structural fields
+// for embedded payload content.
+//
+// This setting does not scrub payload fields that are already present on the
+// in-memory Trace passed to a Tracer implementation. A custom tracer must apply
+// the same policy before it sends or logs the trace.
 //
 // Consumer main packages read their own env var (e.g. DRIFTLESSAF_LLM_PAYLOADS)
-// at startup and set this flag on the base context before handing off to
-// the reconciler or executor. Keeping the decision on ctx (rather than a
-// process-wide env read at package init) matches the repository's
-// go-standards rule that library packages accept configuration as
-// parameters instead of reading the environment directly.
+// at startup and set this flag on the base context before handing off to the
+// reconciler or executor. The library accepts the setting through the context
+// instead of reading the environment itself.
 func WithPayloadsEnabled(ctx context.Context, enabled bool) context.Context {
 	return context.WithValue(ctx, payloadsEnabledKey, enabled)
 }

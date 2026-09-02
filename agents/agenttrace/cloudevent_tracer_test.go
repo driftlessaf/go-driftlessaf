@@ -97,6 +97,7 @@ func TestWithCloudEventEmission_EmitsCloudEvent(t *testing.T) {
 		ReconcilerType: "pr",
 		CommitSHA:      "abc123",
 	})
+	ctx = WithPayloadsEnabled(ctx, true)
 	ctx = WithTracer[string](ctx, wrapped)
 	trace, done := StartTrace[string](ctx, "fix the title")
 
@@ -186,7 +187,8 @@ func TestWithCloudEventEmission_ErrorSerializesAsString(t *testing.T) {
 	inner := ByCode[string](func(_ *Trace[string]) {})
 	wrapped := WithCloudEventEmission[string](inner, client, "test-source")
 
-	ctx := WithTracer[string](t.Context(), wrapped)
+	ctx := WithPayloadsEnabled(t.Context(), true)
+	ctx = WithTracer[string](ctx, wrapped)
 	_, done := StartTrace[string](ctx, "prompt")
 	done("", errors.New("something went wrong"))
 	drainCE[string](wrapped)
@@ -204,6 +206,68 @@ func TestWithCloudEventEmission_ErrorSerializesAsString(t *testing.T) {
 		"exec_context": map[string]any{},
 	}, decoded, ignoreDynamic); diff != "" {
 		t.Errorf("CE body mismatch (-want +got):\n%s", diff)
+	}
+}
+
+var errSensitiveMarshal = errors.New("sensitive prompt from marshal error")
+
+type marshalErrorResult struct{}
+
+func (marshalErrorResult) MarshalJSON() ([]byte, error) {
+	return nil, errSensitiveMarshal
+}
+
+func TestSetEventData_MarshalError(t *testing.T) {
+	type errorIdentity struct {
+		Sanitised bool
+		Sensitive bool
+	}
+
+	tests := []struct {
+		name            string
+		payloadsEnabled bool
+		want            errorIdentity
+	}{
+		{
+			name: "payloads disabled",
+			want: errorIdentity{
+				Sanitised: true,
+			},
+		},
+		{
+			name:            "payloads enabled",
+			payloadsEnabled: true,
+			want: errorIdentity{
+				Sensitive: true,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := WithPayloadsEnabled(t.Context(), test.payloadsEnabled)
+			trace := &Trace[marshalErrorResult]{
+				Result: marshalErrorResult{},
+			}
+			ce := cloudevents.NewEvent()
+			tracer := &ceEmittingTracer[marshalErrorResult]{}
+
+			err := tracer.setEventData(
+				ctx,
+				&ce,
+				trace,
+				omitSensitiveTraceFields,
+				sealSensitiveTraceFields,
+			)
+			got := errorIdentity{
+				Sanitised: errors.Is(err, errTraceMarshal),
+				Sensitive: errors.Is(err, errSensitiveMarshal),
+			}
+
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("marshal error identity (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -302,15 +366,23 @@ func TestWithCloudEventEmission_EmitsPerSpanEvent(t *testing.T) {
 	}
 }
 
-// When WithPayloadsEnabled is unset, no per-span events should be emitted —
-// only the per-trace event at completion.
-func TestWithCloudEventEmission_NoSpanEventWhenPayloadsDisabled(t *testing.T) {
-	var typeCounts = map[string]int{}
+// When WithPayloadsEnabled is unset, no per-span events should be emitted and
+// the completed trace event should contain structural fields only.
+func TestWithCloudEventEmission_PayloadsDisabled(t *testing.T) {
+	var eventTypes []string
+	var traceBody []byte
 	var mu sync.Mutex
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading body: %v", err)
+		}
 		mu.Lock()
-		typeCounts[r.Header.Get("Ce-Type")]++
+		eventTypes = append(eventTypes, r.Header.Get("Ce-Type"))
+		if r.Header.Get("Ce-Type") == EventType {
+			traceBody = body
+		}
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -329,6 +401,12 @@ func TestWithCloudEventEmission_NoSpanEventWhenPayloadsDisabled(t *testing.T) {
 
 	ctx := WithTracer[string](t.Context(), wrapped)
 	trace, done := StartTrace[string](ctx, "prompt")
+	toolCall := trace.StartToolCall("call-1", "read_logs", map[string]any{
+		"path":      "/private/build.log",
+		"reasoning": "inspect the failed step",
+	})
+	toolCall.Complete(map[string]any{"contents": "secret build output"}, nil)
+	trace.Reasoning = []ReasoningContent{{Thinking: "secret model reasoning"}}
 	turn := trace.BeginTurn(0, "anthropic", "claude-sonnet-4-7")
 	// RecordRequest is a no-op since payloads are not enabled.
 	if err := turn.RecordRequest([]map[string]string{{"role": "user", "content": "hi"}}); err != nil {
@@ -340,10 +418,43 @@ func TestWithCloudEventEmission_NoSpanEventWhenPayloadsDisabled(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if got := typeCounts[SpanEventType]; got != 0 {
-		t.Errorf("span events with payloads disabled: got %d, want 0", got)
+	if diff := cmp.Diff([]string{EventType}, eventTypes); diff != "" {
+		t.Errorf("emitted event types (-want +got):\n%s", diff)
 	}
-	if got := typeCounts[EventType]; got != 1 {
-		t.Errorf("trace events: got %d, want 1", got)
+
+	var decoded map[string]any
+	if err := json.Unmarshal(traceBody, &decoded); err != nil {
+		t.Fatalf("trace body is not valid JSON: %v\nbody: %s", err, string(traceBody))
+	}
+	want := map[string]any{
+		"exec_context": map[string]any{},
+		"model":        "claude-sonnet-4-7",
+		"tool_calls": []any{
+			map[string]any{
+				"id":   "call-1",
+				"name": "read_logs",
+			},
+		},
+		"turns": []any{
+			map[string]any{
+				"index":  float64(0),
+				"model":  "claude-sonnet-4-7",
+				"system": "anthropic",
+				"failed": false,
+			},
+		},
+	}
+	if diff := cmp.Diff(want, decoded, ignoreDynamic); diff != "" {
+		t.Errorf("trace body with payloads disabled (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff(map[string]any{
+		"path":      "/private/build.log",
+		"reasoning": "inspect the failed step",
+	}, trace.ToolCalls[0].Params); diff != "" {
+		t.Errorf("in-memory tool-call params (-want +got):\n%s", diff)
+	}
+	if got, want := trace.Result, "done"; got != want {
+		t.Errorf("in-memory result: got %q, want %q", got, want)
 	}
 }

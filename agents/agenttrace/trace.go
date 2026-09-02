@@ -630,6 +630,9 @@ func (lt *LLMTurn[T]) End() {
 // StartToolCall starts a new tool call and returns it
 func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCall[T] {
 	tr := otelTracer()
+	t.mu.Lock()
+	parentCtx := t.ctx
+	t.mu.Unlock()
 
 	spanAttrs := []oteltrace.SpanStartOption{
 		oteltrace.WithAttributes(
@@ -639,21 +642,19 @@ func (t *Trace[T]) StartToolCall(id, name string, params map[string]any) *ToolCa
 		),
 	}
 
-	if paramsJSON, err := json.Marshal(params); err == nil {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(
-			attribute.String("gen_ai.input.messages", string(paramsJSON)),
-		))
-	}
+	if payloadsEnabledFrom(parentCtx) {
+		if paramsJSON, err := json.Marshal(params); err == nil {
+			spanAttrs = append(spanAttrs, oteltrace.WithAttributes(
+				attribute.String("gen_ai.input.messages", string(paramsJSON)),
+			))
+		}
 
-	if reasoning, ok := params["reasoning"].(string); ok && reasoning != "" {
-		spanAttrs = append(spanAttrs, oteltrace.WithAttributes(
-			attribute.String("driftlessaf.tool.reasoning", reasoning),
-		))
+		if reasoning, ok := params["reasoning"].(string); ok && reasoning != "" {
+			spanAttrs = append(spanAttrs, oteltrace.WithAttributes(
+				attribute.String("driftlessaf.tool.reasoning", reasoning),
+			))
+		}
 	}
-
-	t.mu.Lock()
-	parentCtx := t.ctx
-	t.mu.Unlock()
 
 	ctx, span := tr.Start(parentCtx, "execute_tool "+name, spanAttrs...)
 
@@ -743,7 +744,7 @@ func (tc *ToolCall[T]) Complete(result any, err error) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		} else {
-			if result != nil {
+			if result != nil && payloadsEnabledFrom(trace.Context()) {
 				if resultJSON, marshalErr := json.Marshal(result); marshalErr == nil {
 					span.SetAttributes(attribute.String("gen_ai.output.messages", string(resultJSON)))
 				}
