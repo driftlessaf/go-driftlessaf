@@ -48,7 +48,7 @@ func newMarkerCommentServer(t *testing.T, existing ...*github.IssueComment) (*gi
 			t.Fatalf("decoding create body: %v", err)
 		}
 		rec.created = append(rec.created, c.GetBody())
-		writeJSON(t, w, &github.IssueComment{ID: github.Ptr(int64(1)), Body: c.Body})
+		writeJSON(t, w, &github.IssueComment{ID: new(int64(1)), Body: c.Body})
 	})
 	mux.HandleFunc("PATCH /api/v3/repos/test-owner/test-repo/issues/comments/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var c github.IssueComment
@@ -111,7 +111,7 @@ func TestUpsertMarkerComment(t *testing.T) {
 	})
 
 	t.Run("skips when identical", func(t *testing.T) {
-		existing := &github.IssueComment{ID: github.Ptr(int64(42)), Body: github.Ptr(testMarker + "\nblocked on foo")}
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(testMarker + "\nblocked on foo")}
 		client, rec := newMarkerCommentServer(t, existing)
 		s := newMarkerSession(client, 7)
 
@@ -128,7 +128,7 @@ func TestUpsertMarkerComment(t *testing.T) {
 	})
 
 	t.Run("edits when changed", func(t *testing.T) {
-		existing := &github.IssueComment{ID: github.Ptr(int64(42)), Body: github.Ptr(testMarker + "\nblocked on foo")}
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(testMarker + "\nblocked on foo")}
 		client, rec := newMarkerCommentServer(t, existing)
 		s := newMarkerSession(client, 7)
 
@@ -187,7 +187,7 @@ func TestUpsertIssueMarkerComment(t *testing.T) {
 
 		// A second reconcile finds the existing marker comment and rewrites
 		// nothing, so the announcement stays a single comment.
-		rec.existing = append(rec.existing, &github.IssueComment{ID: github.Ptr(int64(1)), Body: github.Ptr(want)})
+		rec.existing = append(rec.existing, &github.IssueComment{ID: new(int64(1)), Body: new(want)})
 		if err := s.UpsertIssueMarkerComment(t.Context(), testMarker, "starting work"); err != nil {
 			t.Fatalf("UpsertIssueMarkerComment (repeat): got error = %v, want = nil", err)
 		}
@@ -238,7 +238,7 @@ func TestUpsertIssueMarkerComment(t *testing.T) {
 
 func TestDeleteMarkerComment(t *testing.T) {
 	t.Run("deletes when present", func(t *testing.T) {
-		existing := &github.IssueComment{ID: github.Ptr(int64(42)), Body: github.Ptr(testMarker + "\nblocked on foo")}
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(testMarker + "\nblocked on foo")}
 		client, rec := newMarkerCommentServer(t, existing)
 		s := newMarkerSession(client, 7)
 
@@ -265,7 +265,7 @@ func TestDeleteMarkerComment(t *testing.T) {
 	// A human reply that merely quotes the marker mid-body must not be matched:
 	// findMarkerComment uses a prefix match, not a substring search.
 	t.Run("ignores marker quoted mid-body", func(t *testing.T) {
-		quoted := &github.IssueComment{ID: github.Ptr(int64(99)), Body: github.Ptr("> someone said:\n" + testMarker + "\nold reason")}
+		quoted := &github.IssueComment{ID: new(int64(99)), Body: new("> someone said:\n" + testMarker + "\nold reason")}
 		client, rec := newMarkerCommentServer(t, quoted)
 		s := newMarkerSession(client, 7)
 
@@ -310,7 +310,7 @@ func TestMarkerCommentForbiddenIsGraceful(t *testing.T) {
 	t.Run("delete when deleting is forbidden", func(t *testing.T) {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /api/v3/repos/test-owner/test-repo/issues/{number}/comments", func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(t, w, []*github.IssueComment{{ID: github.Ptr(int64(42)), Body: github.Ptr(testMarker + "\nx")}})
+			writeJSON(t, w, []*github.IssueComment{{ID: new(int64(42)), Body: new(testMarker + "\nx")}})
 		})
 		mux.HandleFunc("DELETE /api/v3/repos/test-owner/test-repo/issues/comments/{id}", forbid)
 		s := newMarkerSession(forbiddenServer(t, mux), 7)
@@ -560,8 +560,8 @@ func TestClearGaveUp(t *testing.T) {
 // TestFindMarkerCommentPaginates verifies the marker is found on a later page,
 // exercising the pagination loop in findMarkerComment.
 func TestFindMarkerCommentPaginates(t *testing.T) {
-	page1 := []*github.IssueComment{{ID: github.Ptr(int64(1)), Body: github.Ptr("unrelated")}}
-	page2 := []*github.IssueComment{{ID: github.Ptr(int64(2)), Body: github.Ptr(testMarker + "\nblocked on foo")}}
+	page1 := []*github.IssueComment{{ID: new(int64(1)), Body: new("unrelated")}}
+	page2 := []*github.IssueComment{{ID: new(int64(2)), Body: new(testMarker + "\nblocked on foo")}}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v3/repos/test-owner/test-repo/issues/{number}/comments", func(w http.ResponseWriter, r *http.Request) {

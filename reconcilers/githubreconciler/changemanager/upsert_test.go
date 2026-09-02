@@ -131,7 +131,7 @@ func TestUpsert(t *testing.T) {
 			// CompareCommits — always return at least one file so Upsert proceeds.
 			mux.HandleFunc("GET /api/v3/repos/test-owner/test-repo/compare/{rest...}", func(w http.ResponseWriter, _ *http.Request) {
 				writeJSON(t, w, &github.CommitsComparison{
-					Files: []*github.CommitFile{{Filename: github.Ptr("README.md")}},
+					Files: []*github.CommitFile{{Filename: new("README.md")}},
 				})
 			})
 
@@ -139,8 +139,8 @@ func TestUpsert(t *testing.T) {
 			mux.HandleFunc("POST /api/v3/repos/test-owner/test-repo/pulls", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusCreated)
 				writeJSON(t, w, &github.PullRequest{
-					Number:  github.Ptr(42),
-					HTMLURL: github.Ptr(fmt.Sprintf("https://%s/repos/test-owner/test-repo/pull/42", r.Host)),
+					Number:  new(42),
+					HTMLURL: new(fmt.Sprintf("https://%s/repos/test-owner/test-repo/pull/42", r.Host)),
 				})
 			})
 
@@ -152,14 +152,14 @@ func TestUpsert(t *testing.T) {
 					ghLabels = append(ghLabels, &github.Label{Name: &n})
 				}
 				writeJSON(t, w, &github.PullRequest{
-					Number: github.Ptr(tt.prNumber),
+					Number: new(tt.prNumber),
 					Labels: ghLabels,
 				})
 			})
 
 			// Edit PR (update path)
 			mux.HandleFunc("PATCH /api/v3/repos/test-owner/test-repo/pulls/{number}", func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(t, w, &github.PullRequest{Number: github.Ptr(tt.prNumber)})
+				writeJSON(t, w, &github.PullRequest{Number: new(tt.prNumber)})
 			})
 
 			// Add labels (POST) — track calls and payload.
@@ -315,7 +315,7 @@ func TestUpsertEmbedsWrapper(t *testing.T) {
 			createdBody = pr.GetBody()
 		}
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(t, w, &github.PullRequest{Number: github.Ptr(7), HTMLURL: github.Ptr("https://example.test/pull/7")})
+		writeJSON(t, w, &github.PullRequest{Number: new(7), HTMLURL: new("https://example.test/pull/7")})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

@@ -51,20 +51,18 @@ const questionInputKey = "question"
 // budget left to resume into), so the run fails before a friend is asked.
 func NewAskAFriendSuspension(provider, model, configDigest string, turn, maxTurns int, call PendingToolCall, providerState, loopState json.RawMessage, traceID string) *Suspension {
 	return &Suspension{
-		Envelope: Envelope{
-			Version:          EnvelopeVersion,
-			Provider:         provider,
-			Model:            model,
-			ConfigDigest:     configDigest,
-			Turn:             turn,
-			RemainingTurns:   max(maxTurns-(turn+1), 0),
-			Reason:           ReasonAwaitingAnswer,
-			PendingToolCalls: []PendingToolCall{call},
-			ProviderState:    providerState,
-			LoopState:        loopState,
-			TraceID:          traceID,
-		},
-		Question: QuestionFromPending([]PendingToolCall{call}),
+		Version:          EnvelopeVersion,
+		Provider:         provider,
+		Model:            model,
+		ConfigDigest:     configDigest,
+		Turn:             turn,
+		RemainingTurns:   max(maxTurns-(turn+1), 0),
+		Reason:           ReasonAwaitingAnswer,
+		PendingToolCalls: []PendingToolCall{call},
+		ProviderState:    providerState,
+		LoopState:        loopState,
+		TraceID:          traceID,
+		Question:         QuestionFromPending([]PendingToolCall{call}),
 	}
 }
 

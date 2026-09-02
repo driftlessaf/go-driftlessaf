@@ -141,7 +141,7 @@ func TestRoundtripWithoutMarkdown(t *testing.T) {
 
 			// Extract the status back
 			checkRunOutput := &github.CheckRunOutput{
-				Summary: github.Ptr(output),
+				Summary: new(output),
 			}
 
 			extracted, err := sm.extractStatusFromOutput(checkRunOutput)
@@ -212,7 +212,7 @@ func TestRoundtripWithMarkdown(t *testing.T) {
 
 	// Extract the status back
 	checkRunOutput := &github.CheckRunOutput{
-		Summary: github.Ptr(output),
+		Summary: new(output),
 	}
 
 	extracted, err := sm.extractStatusFromOutput(checkRunOutput)
@@ -263,34 +263,34 @@ func TestExtractStatusFromOutputEdgeCases(t *testing.T) {
 	}, {
 		name: "nil summary",
 		output: &github.CheckRunOutput{
-			Title: github.Ptr("Test"),
+			Title: new("Test"),
 		},
 		wantNil: true,
 	}, {
 		name: "empty summary",
 		output: &github.CheckRunOutput{
-			Summary: github.Ptr(""),
+			Summary: new(""),
 		},
 		wantNil: true,
 		wantErr: false,
 	}, {
 		name: "no markers in summary",
 		output: &github.CheckRunOutput{
-			Summary: github.Ptr("Just some random text without markers"),
+			Summary: new("Just some random text without markers"),
 		},
 		wantNil: true,
 		wantErr: false,
 	}, {
 		name: "only start marker",
 		output: &github.CheckRunOutput{
-			Summary: github.Ptr(fmt.Sprintf("%s\n<!--\n{}\n", expectedMarker)),
+			Summary: new(fmt.Sprintf("%s\n<!--\n{}\n", expectedMarker)),
 		},
 		wantNil: true,  // Should return nil
 		wantErr: false, // Missing end marker: no observed state, no error.
 	}, {
 		name: "malformed JSON",
 		output: &github.CheckRunOutput{
-			Summary: github.Ptr(fmt.Sprintf("%s\n<!--\n{invalid json}\n-->\n%s",
+			Summary: new(fmt.Sprintf("%s\n<!--\n{invalid json}\n-->\n%s",
 				expectedMarker, expectedEndMarker)),
 		},
 		wantNil: true,  // Returns nil when JSON unmarshal fails
@@ -298,7 +298,7 @@ func TestExtractStatusFromOutputEdgeCases(t *testing.T) {
 	}, {
 		name: "valid but empty JSON",
 		output: &github.CheckRunOutput{
-			Summary: github.Ptr(fmt.Sprintf("%s\n<!--\n{}\n-->\n%s",
+			Summary: new(fmt.Sprintf("%s\n<!--\n{}\n-->\n%s",
 				expectedMarker, expectedEndMarker)),
 		},
 		wantNil: false,
@@ -456,7 +456,7 @@ func TestComplexRoundtrip(t *testing.T) {
 	}
 
 	checkRunOutput := &github.CheckRunOutput{
-		Summary: github.Ptr(output),
+		Summary: new(output),
 	}
 
 	extracted, err := sm.extractStatusFromOutput(checkRunOutput)
@@ -502,19 +502,19 @@ func TestNewSession(t *testing.T) {
 	}{{
 		name: "standard pull request",
 		pr: &github.PullRequest{
-			Number:  github.Ptr(123),
-			URL:     github.Ptr("https://api.github.com/repos/owner/repo/pulls/123"),
-			HTMLURL: github.Ptr("https://github.com/owner/repo/pull/123"),
+			Number:  new(123),
+			URL:     new("https://api.github.com/repos/owner/repo/pulls/123"),
+			HTMLURL: new("https://github.com/owner/repo/pull/123"),
 			Base: &github.PullRequestBranch{
 				Repo: &github.Repository{
 					Owner: &github.User{
-						Login: github.Ptr("test-owner"),
+						Login: new("test-owner"),
 					},
-					Name: github.Ptr("test-repo"),
+					Name: new("test-repo"),
 				},
 			},
 			Head: &github.PullRequestBranch{
-				SHA: github.Ptr("abc123def456"),
+				SHA: new("abc123def456"),
 			},
 		},
 		expectedOwner:   "test-owner",
@@ -526,19 +526,19 @@ func TestNewSession(t *testing.T) {
 	}, {
 		name: "pull request with special characters",
 		pr: &github.PullRequest{
-			Number:  github.Ptr(456),
-			URL:     github.Ptr("https://api.github.com/repos/org-with-dash/repo_with_underscore/pulls/456"),
-			HTMLURL: github.Ptr("https://github.com/org-with-dash/repo_with_underscore/pull/456"),
+			Number:  new(456),
+			URL:     new("https://api.github.com/repos/org-with-dash/repo_with_underscore/pulls/456"),
+			HTMLURL: new("https://github.com/org-with-dash/repo_with_underscore/pull/456"),
 			Base: &github.PullRequestBranch{
 				Repo: &github.Repository{
 					Owner: &github.User{
-						Login: github.Ptr("org-with-dash"),
+						Login: new("org-with-dash"),
 					},
-					Name: github.Ptr("repo_with_underscore"),
+					Name: new("repo_with_underscore"),
 				},
 			},
 			Head: &github.PullRequestBranch{
-				SHA: github.Ptr("xyz789abc123"),
+				SHA: new("xyz789abc123"),
 			},
 		},
 		expectedOwner:   "org-with-dash",

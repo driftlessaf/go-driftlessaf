@@ -164,7 +164,7 @@ func (s *IssueSession[T]) Reconcile(
 		// Post message as a comment if provided
 		if closeMessage != "" {
 			if _, _, err := s.client.Issues.CreateComment(ctx, s.owner, s.repo, existing.issue.GetNumber(), &github.IssueComment{
-				Body: github.Ptr(closeMessage),
+				Body: new(closeMessage),
 			}); err != nil {
 				return nil, fmt.Errorf("posting comment on issue #%d: %w", existing.issue.GetNumber(), err)
 			}
@@ -172,7 +172,7 @@ func (s *IssueSession[T]) Reconcile(
 
 		// Close the issue
 		if _, _, err := s.client.Issues.Edit(ctx, s.owner, s.repo, existing.issue.GetNumber(), &github.IssueRequest{
-			State: github.Ptr("closed"),
+			State: new("closed"),
 		}); err != nil {
 			return nil, fmt.Errorf("closing issue #%d: %w", existing.issue.GetNumber(), err)
 		}
@@ -339,8 +339,8 @@ func (s *IssueSession[T]) createIssue(ctx context.Context, data *T, pathLabel st
 	clog.InfoContext(ctx, "Creating new issue")
 
 	issue, _, err := s.client.Issues.Create(ctx, s.owner, s.repo, &github.IssueRequest{
-		Title:  github.Ptr(title),
-		Body:   github.Ptr(body),
+		Title:  new(title),
+		Body:   new(body),
 		Labels: &allLabels,
 	})
 	if err != nil {
@@ -365,8 +365,8 @@ func (s *IssueSession[T]) updateIssue(ctx context.Context, issue *github.Issue, 
 	log.Infof("Updating existing issue #%d", issue.GetNumber())
 
 	updated, _, err := s.client.Issues.Edit(ctx, s.owner, s.repo, issue.GetNumber(), &github.IssueRequest{
-		Title:  github.Ptr(title),
-		Body:   github.Ptr(body),
+		Title:  new(title),
+		Body:   new(body),
 		Labels: &mergedLabels,
 	})
 	if err != nil {

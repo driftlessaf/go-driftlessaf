@@ -140,9 +140,8 @@ func TestEffortWiredOnGoogleAndOpenAIBackends(t *testing.T) {
 				Tools: toolcall.NewFindingToolsProvider[*testResponse, toolcall.WorktreeTools[toolcall.EmptyTools]](
 					toolcall.NewWorktreeToolsProvider[*testResponse, toolcall.EmptyTools](
 						toolcall.NewEmptyToolsProvider[*testResponse]())),
-			}
 
-			config.Effort = effort.XHigh
+				Effort: effort.XHigh}
 			if _, err := New[*testRequest](t.Context(), "test-project", "us-central1", model, config); err != nil {
 				t.Errorf("New() with effort %q: got = %v, want = nil", config.Effort, err)
 			}

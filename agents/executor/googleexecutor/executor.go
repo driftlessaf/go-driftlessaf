@@ -897,7 +897,7 @@ func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentC
 		Labels:          e.resourceLabels,
 	}
 	if !e.omitTemperature {
-		config.Temperature = ptr(e.temperature)
+		config.Temperature = new(e.temperature)
 	}
 	return config
 }
@@ -1016,8 +1016,10 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 }
 
 // ptr is a helper function to create a pointer to a value
+//
+//go:fix inline
 func ptr[T any](v T) *T {
-	return &v
+	return new(v)
 }
 
 // recordTokenMetrics unpacks the genai usage-metadata shape into the shared

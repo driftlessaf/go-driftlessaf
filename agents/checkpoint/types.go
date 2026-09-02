@@ -124,7 +124,7 @@ type Envelope struct {
 	// Deadline is the wall-clock time after which the envelope must not be
 	// resumed — ValidateForResume rejects an envelope whose Deadline has
 	// passed (fail-closed on wake). Zero means no deadline.
-	Deadline time.Time `json:"deadline,omitempty"`
+	Deadline time.Time `json:"deadline"`
 }
 
 // Clone returns a deep copy of the envelope so a Store can hand back a value

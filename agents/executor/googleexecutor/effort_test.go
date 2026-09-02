@@ -132,23 +132,23 @@ func TestThinkingConfigForEffort(t *testing.T) {
 		},
 		{
 			name: "gemini 2.5 low budget", model: "gemini-2.5-flash", level: effort.Low,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: ptr(int32(1024))},
+			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: new(int32(1024))},
 		},
 		{
 			name: "gemini 2.5 medium budget", model: "gemini-2.5-flash", level: effort.Medium,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: ptr(int32(8192))},
+			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: new(int32(8192))},
 		},
 		{
 			name: "gemini 2.5 high is dynamic", model: "gemini-2.5-pro", level: effort.High,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: ptr(int32(-1))},
+			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: new(int32(-1))},
 		},
 		{
 			name: "gemini 2.5 xhigh pins the family ceiling", model: "gemini-2.5-flash", level: effort.XHigh,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: ptr(int32(24576))},
+			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: new(int32(24576))},
 		},
 		{
 			name: "gemini 2.5 max pins the family ceiling", model: "gemini-2.5-flash", level: effort.Max,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: ptr(int32(24576))},
+			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: new(int32(24576))},
 		},
 	}
 	for _, tt := range tests {

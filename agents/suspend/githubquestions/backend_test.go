@@ -20,7 +20,7 @@ func pagedComments(n, perPage int) [][]*github.IssueComment {
 	for range n {
 		page := make([]*github.IssueComment, 0, perPage)
 		for range perPage {
-			page = append(page, &github.IssueComment{ID: github.Ptr(id)})
+			page = append(page, &github.IssueComment{ID: new(id)})
 			id--
 		}
 		pages = append(pages, page)

@@ -17,7 +17,7 @@ import (
 type observer struct {
 	tb     *testing.T
 	prefix string
-	count  int64
+	count  atomic.Int64
 }
 
 // New creates a new Observer from a *testing.T
@@ -60,10 +60,10 @@ func (o *observer) Grade(score float64, reasoning string) {
 
 // Increment increments the observation counter
 func (o *observer) Increment() {
-	atomic.AddInt64(&o.count, 1)
+	o.count.Add(1)
 }
 
 // Total returns the number of observed instances
 func (o *observer) Total() int64 {
-	return atomic.LoadInt64(&o.count)
+	return o.count.Load()
 }

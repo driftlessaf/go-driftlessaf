@@ -97,9 +97,9 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
-				OpenWorld:   Ptr(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -148,8 +148,8 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 				{Name: "replace_all", Type: "boolean", Description: "Replace all occurrences instead of requiring uniqueness (default: false)", Required: false},
 			},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(false),
-				OpenWorld:   Ptr(false),
+				Destructive: new(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -196,9 +196,9 @@ func writeFileTool[Resp any](writeFile func(context.Context, string, string, os.
 			},
 			Annotations: &ToolAnnotations{
 				// Overwrites are recoverable via git — not considered destructive in worktree context.
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
-				OpenWorld:   Ptr(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -241,8 +241,8 @@ func deleteFileTool[Resp any](deleteFile func(context.Context, string) error) To
 				{Name: "path", Type: "string", Description: "The path to the file to delete (relative to repository root)", Required: true},
 			},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(true),
-				OpenWorld:   Ptr(false),
+				Destructive: new(true),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -275,8 +275,8 @@ func moveFileTool[Resp any](moveFile func(context.Context, string, string) error
 			},
 			Annotations: &ToolAnnotations{
 				// Destination clobber is recoverable via git — not considered destructive in worktree context.
-				Destructive: Ptr(false),
-				OpenWorld:   Ptr(false),
+				Destructive: new(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -313,9 +313,9 @@ func copyFileTool[Resp any](copyFile func(context.Context, string, string) error
 				{Name: "destination", Type: "string", Description: "The destination path (relative to repository root)", Required: true},
 			},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
-				OpenWorld:   Ptr(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -352,9 +352,9 @@ func chmodTool[Resp any](chmod func(context.Context, string, os.FileMode) error)
 				{Name: "mode", Type: "string", Description: "The file mode as an octal string (e.g., \"0755\", \"0644\")", Required: true},
 			},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
-				OpenWorld:   Ptr(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -397,8 +397,8 @@ func symlinkTool[Resp any](createSymlink func(context.Context, string, string) e
 				{Name: "target", Type: "string", Description: "What the symlink points to (relative path)", Required: true},
 			},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(false),
-				OpenWorld:   Ptr(false),
+				Destructive: new(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -438,9 +438,9 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
-				OpenWorld:   Ptr(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -485,9 +485,9 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
-				OpenWorld:   Ptr(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {

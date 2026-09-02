@@ -34,12 +34,12 @@ func (d CheckDetails) Annotations() []*github.CheckRunAnnotation {
 			line = 1
 		}
 		annotations = append(annotations, &github.CheckRunAnnotation{
-			Path:            github.Ptr(diag.Path),
-			StartLine:       github.Ptr(line),
-			EndLine:         github.Ptr(line),
-			AnnotationLevel: github.Ptr("warning"),
-			Title:           github.Ptr(diag.Rule),
-			Message:         github.Ptr(diag.Message),
+			Path:            new(diag.Path),
+			StartLine:       new(line),
+			EndLine:         new(line),
+			AnnotationLevel: new("warning"),
+			Title:           new(diag.Rule),
+			Message:         new(diag.Message),
 		})
 	}
 	return annotations

@@ -63,23 +63,21 @@ func (f *fakeAgent) Execute(_ context.Context, _ *PRContext, _ PRTools) (*PRFixR
 		pending = append(pending, checkpoint.PendingToolCall{ID: id, Name: askAFriendToolName})
 	}
 	return nil, &checkpoint.Suspension{
-		Envelope: checkpoint.Envelope{
-			Version:          checkpoint.EnvelopeVersion,
-			Provider:         checkpoint.ProviderAnthropic,
-			Model:            "claude-test",
-			RunID:            "run-1",
-			Turn:             1,
-			RemainingTurns:   5,
-			Reason:           checkpoint.ReasonAwaitingAnswer,
-			PendingToolCalls: pending,
-			// Coordinator.Suspend validates the envelope before persisting it: a
-			// real executor always captures provider state AND stamps a config
-			// digest (park-time Validate fails closed on a missing digest), so
-			// the fake must too.
-			ProviderState: json.RawMessage(`{"messages":[]}`),
-			ConfigDigest:  "test-digest",
-		},
-		Question: f.question,
+		Version:          checkpoint.EnvelopeVersion,
+		Provider:         checkpoint.ProviderAnthropic,
+		Model:            "claude-test",
+		RunID:            "run-1",
+		Turn:             1,
+		RemainingTurns:   5,
+		Reason:           checkpoint.ReasonAwaitingAnswer,
+		PendingToolCalls: pending,
+		// Coordinator.Suspend validates the envelope before persisting it: a
+		// real executor always captures provider state AND stamps a config
+		// digest (park-time Validate fails closed on a missing digest), so
+		// the fake must too.
+		ProviderState: json.RawMessage(`{"messages":[]}`),
+		ConfigDigest:  "test-digest",
+		Question:      f.question,
 	}
 }
 

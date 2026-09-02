@@ -277,10 +277,8 @@ func TestTruncateDesired(t *testing.T) {
 
 func TestIssueReconcilerReviewOnlySkipsPath(t *testing.T) {
 	rec := &IssueReconciler{
-		core: core{
-			identity: "test-identity",
-			mode:     ModeReview,
-		},
+		identity: "test-identity",
+		mode:     ModeReview,
 	}
 
 	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{
@@ -295,10 +293,8 @@ func TestIssueReconcilerReviewOnlySkipsPath(t *testing.T) {
 
 func TestIssueReconcilerNoneModeSkipsPath(t *testing.T) {
 	rec := &IssueReconciler{
-		core: core{
-			identity: "test-identity",
-			mode:     ModeNone,
-		},
+		identity: "test-identity",
+		mode:     ModeNone,
 	}
 
 	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{

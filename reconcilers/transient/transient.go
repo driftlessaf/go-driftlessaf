@@ -40,8 +40,7 @@ func Mark(err error) error {
 // Is reports whether err is a transient failure: one marked by Retry or
 // Mark, or a registry error with a temporary status code.
 func Is(err error) bool {
-	var te *transientError
-	if errors.As(err, &te) {
+	if _, ok := errors.AsType[*transientError](err); ok {
 		return true
 	}
 	var terr *transport.Error

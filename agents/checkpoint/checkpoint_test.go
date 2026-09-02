@@ -20,7 +20,7 @@ import (
 func TestAsSuspension(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
 		err := error(&checkpoint.Suspension{
-			Envelope: checkpoint.Envelope{ReconcilerKey: "k", RunID: "r", Turn: 2, Reason: "ask_a_friend"},
+			ReconcilerKey: "k", RunID: "r", Turn: 2, Reason: "ask_a_friend",
 		})
 		s, ok := checkpoint.AsSuspension(err)
 		if !ok {
@@ -32,7 +32,7 @@ func TestAsSuspension(t *testing.T) {
 	})
 
 	t.Run("wrapped", func(t *testing.T) {
-		base := &checkpoint.Suspension{Envelope: checkpoint.Envelope{RunID: "r"}}
+		base := &checkpoint.Suspension{RunID: "r"}
 		wrapped := fmt.Errorf("executor turn 3: %w", error(base))
 		s, ok := checkpoint.AsSuspension(wrapped)
 		if !ok {
@@ -54,7 +54,7 @@ func TestAsSuspension(t *testing.T) {
 }
 
 func TestSuspensionErrorString(t *testing.T) {
-	s := &checkpoint.Suspension{Envelope: checkpoint.Envelope{ReconcilerKey: "org/repo#1", RunID: "run-9", Turn: 4, Reason: "ask_a_friend"}}
+	s := &checkpoint.Suspension{ReconcilerKey: "org/repo#1", RunID: "run-9", Turn: 4, Reason: "ask_a_friend"}
 	got := s.Error()
 	for _, want := range []string{"org/repo#1", "run-9", "ask_a_friend", "turn 4"} {
 		if !strings.Contains(got, want) {

@@ -36,7 +36,7 @@ func newLabelTestSession(t *testing.T, opts ...Option[labelTestData]) *IssueSess
 func ghLabels(names ...string) []*github.Label {
 	labels := make([]*github.Label, 0, len(names))
 	for _, n := range names {
-		labels = append(labels, &github.Label{Name: github.Ptr(n)})
+		labels = append(labels, &github.Label{Name: new(n)})
 	}
 	return labels
 }

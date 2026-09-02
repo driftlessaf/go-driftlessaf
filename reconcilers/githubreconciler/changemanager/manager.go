@@ -477,9 +477,9 @@ func (cm *CM[T]) NewSession(
 		// Map GraphQL mergeable status to bool pointer
 		switch pr.Mergeable {
 		case "MERGEABLE":
-			prMergeable = ptrTo(true)
+			prMergeable = new(true)
 		case "CONFLICTING":
-			prMergeable = ptrTo(false)
+			prMergeable = new(false)
 		case "UNKNOWN":
 			prMergeable = nil // GitHub is still computing
 		}
@@ -548,8 +548,9 @@ func (cm *CM[T]) NewSession(
 	}, nil
 }
 
+//go:fix inline
 func ptrTo[T any](v T) *T {
-	return &v
+	return new(v)
 }
 
 // collectThreadFindings extracts findings from unresolved review threads.

@@ -14,8 +14,9 @@ import (
 )
 
 // ptr helpers make pointer literals concise in table tests.
-func f64(v float64) *float64 { return &v }
-func intv(v int) *int        { return &v }
+//
+//go:fix inline
+func f64(v float64) *float64 { return new(v) }
 
 // roundTripJSON normalises map[string]any through JSON marshal/unmarshal so
 // that numeric types are consistently float64 (the same shape produced by
@@ -178,11 +179,11 @@ func TestSchemaToMap(t *testing.T) {
 		want: map[string]any{"type": "number", "exclusiveMinimum": float64(0), "exclusiveMaximum": float64(100)},
 	}, {
 		name: "multipleOf",
-		in:   &toolcall.Schema{Type: "number", MultipleOf: f64(0.5)},
+		in:   &toolcall.Schema{Type: "number", MultipleOf: new(0.5)},
 		want: map[string]any{"type": "number", "multipleOf": float64(0.5)},
 	}, {
 		name: "string minLength and maxLength",
-		in:   &toolcall.Schema{Type: "string", MinLength: intv(1), MaxLength: intv(255)},
+		in:   &toolcall.Schema{Type: "string", MinLength: new(1), MaxLength: new(255)},
 		want: map[string]any{"type": "string", "minLength": 1, "maxLength": 255},
 	}, {
 		name: "string pattern",
@@ -347,8 +348,8 @@ func TestParameterToMap(t *testing.T) {
 		in: toolcall.Parameter{
 			Name:      "slug",
 			Type:      "string",
-			MinLength: intv(1),
-			MaxLength: intv(64),
+			MinLength: new(1),
+			MaxLength: new(64),
 			Pattern:   "^[a-z0-9-]+$",
 		},
 		want: map[string]any{

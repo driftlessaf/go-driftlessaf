@@ -50,9 +50,9 @@ func (b *githubBackend) listComments(ctx context.Context, owner, repo string, nu
 		return nil, fmt.Errorf("getting client for %s/%s: %w", owner, repo, err)
 	}
 	opts := &github.IssueListCommentsOptions{
-		Sort:        github.Ptr("created"),
-		Direction:   github.Ptr("desc"),
-		ListOptions: github.ListOptions{PerPage: 100},
+		Sort:      new("created"),
+		Direction: new("desc"),
+		PerPage:   100,
 	}
 	all, truncated, err := collectNewestFirst(func(page int) ([]*github.IssueComment, int, error) {
 		opts.Page = page
@@ -100,7 +100,7 @@ func (b *githubBackend) createComment(ctx context.Context, owner, repo string, n
 	if err != nil {
 		return fmt.Errorf("getting client for %s/%s: %w", owner, repo, err)
 	}
-	_, _, err = gh.Issues.CreateComment(ctx, owner, repo, number, &github.IssueComment{Body: github.Ptr(body)})
+	_, _, err = gh.Issues.CreateComment(ctx, owner, repo, number, &github.IssueComment{Body: new(body)})
 	return err
 }
 
@@ -109,6 +109,6 @@ func (b *githubBackend) editComment(ctx context.Context, owner, repo string, com
 	if err != nil {
 		return fmt.Errorf("getting client for %s/%s: %w", owner, repo, err)
 	}
-	_, _, err = gh.Issues.EditComment(ctx, owner, repo, commentID, &github.IssueComment{Body: github.Ptr(body)})
+	_, _, err = gh.Issues.EditComment(ctx, owner, repo, commentID, &github.IssueComment{Body: new(body)})
 	return err
 }

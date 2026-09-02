@@ -163,8 +163,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 	err = r.reconcileFunc(ctx, resource, client)
 	if err != nil {
 		// Check if it's a rate limit error from any GitHub API call
-		var rateLimitErr *github.RateLimitError
-		if errors.As(err, &rateLimitErr) {
+		if rateLimitErr, ok := errors.AsType[*github.RateLimitError](err); ok {
 			// Calculate duration until rate limit resets
 			resetTime := rateLimitErr.Rate.Reset.Time
 			delay := jitter.Add(time.Until(resetTime))
@@ -173,8 +172,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 		}
 
 		// Check if it's an abuse rate limit error
-		var abuseRateLimitErr *github.AbuseRateLimitError
-		if errors.As(err, &abuseRateLimitErr) {
+		if abuseRateLimitErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
 			// GitHub wants us to slow down - use retry after if provided, otherwise use a conservative 1 minute
 			retryAfter := time.Minute
 			if abuseRateLimitErr.RetryAfter != nil {
@@ -196,8 +194,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 		// Check if it's a transient host failure from breaker.Transport; its
 		// delay is already jittered, and the floor keeps re-enqueues from
 		// undercutting it.
-		var breakerErr *breaker.Error
-		if errors.As(err, &breakerErr) {
+		if breakerErr, ok := errors.AsType[*breaker.Error](err); ok {
 			clog.WarnContext(ctx, "Transient host failure, requeueing", "retry_after", breakerErr.RetryAfter)
 			return workqueue.RequeueNotBefore(breakerErr.RetryAfter)
 		}

@@ -23,26 +23,24 @@ const testKey = "org/repo#42"
 
 func newSuspension(reason string) *checkpoint.Suspension {
 	return &checkpoint.Suspension{
-		Envelope: checkpoint.Envelope{
-			Version:       checkpoint.EnvelopeVersion,
-			Provider:      checkpoint.ProviderAnthropic,
-			Model:         "claude-fable-5",
-			ReconcilerKey: testKey,
-			RunID:         "run-1",
-			Turn:          3,
-			PendingToolCalls: []checkpoint.PendingToolCall{{
-				ID:   "toolu_01ABC",
-				Name: "ask_a_friend",
-			}},
-			// Suspend validates the envelope before persisting it, so the fixture
-			// must carry everything a real executor captures: provider state, a
-			// config digest for the resume-side drift gate, and a positive
-			// remaining turn budget.
-			ProviderState:  json.RawMessage(`{"messages":[]}`),
-			ConfigDigest:   "sha256:cfg",
-			RemainingTurns: 8,
-		},
-		Question: reason,
+		Version:       checkpoint.EnvelopeVersion,
+		Provider:      checkpoint.ProviderAnthropic,
+		Model:         "claude-fable-5",
+		ReconcilerKey: testKey,
+		RunID:         "run-1",
+		Turn:          3,
+		PendingToolCalls: []checkpoint.PendingToolCall{{
+			ID:   "toolu_01ABC",
+			Name: "ask_a_friend",
+		}},
+		// Suspend validates the envelope before persisting it, so the fixture
+		// must carry everything a real executor captures: provider state, a
+		// config digest for the resume-side drift gate, and a positive
+		// remaining turn budget.
+		ProviderState:  json.RawMessage(`{"messages":[]}`),
+		ConfigDigest:   "sha256:cfg",
+		RemainingTurns: 8,
+		Question:       reason,
 	}
 }
 

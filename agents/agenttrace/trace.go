@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -190,7 +191,7 @@ type Trace[T any] struct {
 	ID          string             `json:"id"`
 	OTelTraceID string             `json:"otel_trace_id,omitempty"`
 	InputPrompt string             `json:"input_prompt"`
-	ExecContext ExecutionContext   `json:"exec_context,omitempty"` // PR/commit metadata
+	ExecContext ExecutionContext   `json:"exec_context"` // PR/commit metadata
 	ToolCalls   []*ToolCall[T]     `json:"tool_calls"`
 	Turns       []RecordedTurn     `json:"turns,omitempty"`
 	Reasoning   []ReasoningContent `json:"reasoning,omitempty"`
@@ -805,8 +806,7 @@ func (t *Trace[T]) AttachToolCallReasoning(id, reasoning string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for i := len(t.ToolCalls) - 1; i >= 0; i-- {
-		tc := t.ToolCalls[i]
+	for _, tc := range slices.Backward(t.ToolCalls) {
 		if tc.ID != id {
 			continue
 		}

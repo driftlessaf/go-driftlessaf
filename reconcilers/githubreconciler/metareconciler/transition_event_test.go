@@ -93,7 +93,7 @@ func TestEmitTransition(t *testing.T) {
 	rec := newTestReconciler(t, WithStateTransitionEmission[*testRequest, *testResult, testCallbacks](stub))
 
 	issue := &github.Issue{
-		HTMLURL: github.Ptr("https://github.com/o/r/issues/123"),
+		HTMLURL: new("https://github.com/o/r/issues/123"),
 	}
 	rec.emitTransition(t.Context(), issue, "https://github.com/o/r/pull/7",
 		statemachine.StatusFailed, statemachine.FailureModeMaxTurns, statemachine.TriggerMaxTurns)

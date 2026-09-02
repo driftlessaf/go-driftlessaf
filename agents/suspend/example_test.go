@@ -35,21 +35,19 @@ func ExampleCoordinator() {
 	// An executor suspended on a held-out ask-a-friend call and handed the
 	// Suspension up as an ordinary error; the reconciler parks it here.
 	err = c.Suspend(ctx, "org/repo#42", &checkpoint.Suspension{
-		Envelope: checkpoint.Envelope{
-			Version:        checkpoint.EnvelopeVersion,
-			Provider:       checkpoint.ProviderAnthropic,
-			Model:          "claude-fable-5",
-			ConfigDigest:   "sha256:cfg",
-			RunID:          "run-1",
-			Turn:           3,
-			RemainingTurns: 8,
-			PendingToolCalls: []checkpoint.PendingToolCall{{
-				ID:   "toolu_01ABC",
-				Name: "ask_a_friend",
-			}},
-			ProviderState: json.RawMessage(`{"messages":[]}`),
-		},
-		Question: "Should I force-push?",
+		Version:        checkpoint.EnvelopeVersion,
+		Provider:       checkpoint.ProviderAnthropic,
+		Model:          "claude-fable-5",
+		ConfigDigest:   "sha256:cfg",
+		RunID:          "run-1",
+		Turn:           3,
+		RemainingTurns: 8,
+		PendingToolCalls: []checkpoint.PendingToolCall{{
+			ID:   "toolu_01ABC",
+			Name: "ask_a_friend",
+		}},
+		ProviderState: json.RawMessage(`{"messages":[]}`),
+		Question:      "Should I force-push?",
 	})
 	delay, requeued := workqueue.GetRequeueDelay(err)
 	fmt.Println("parked, wake in:", requeued, delay)

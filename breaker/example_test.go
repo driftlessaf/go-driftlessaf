@@ -21,8 +21,7 @@ func ExampleNewTransport() {
 	}
 
 	resp, err := client.Get("https://packages.example.dev/os/x86_64/APKINDEX.tar.gz")
-	var berr *breaker.Error
-	if errors.As(err, &berr) {
+	if _, ok := errors.AsType[*breaker.Error](err); ok {
 		// Transient failure: requeue not before berr.RetryAfter.
 		return
 	}

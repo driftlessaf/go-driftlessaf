@@ -180,8 +180,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
 	issue, err := r.client.GetIssue(ctx, key)
 	if err != nil {
-		var rateLimitErr *RateLimitError
-		if errors.As(err, &rateLimitErr) {
+		if rateLimitErr, ok := errors.AsType[*RateLimitError](err); ok {
 			return workqueue.RequeueAfter(jitter.Add(rateLimitErr.RetryAfter))
 		}
 		return fmt.Errorf("fetching issue: %w", err)
@@ -215,8 +214,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
 	err = r.reconcileFunc(ctx, issue, r.client)
 	if err != nil {
-		var rateLimitErr *RateLimitError
-		if errors.As(err, &rateLimitErr) {
+		if rateLimitErr, ok := errors.AsType[*RateLimitError](err); ok {
 			log.With("retry_after", rateLimitErr.RetryAfter).
 				Warn("Rate limited, requeueing after retry period")
 			return workqueue.RequeueAfter(jitter.Add(rateLimitErr.RetryAfter))

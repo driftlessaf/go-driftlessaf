@@ -78,9 +78,9 @@ func NewIssues(
 	}
 
 	o := issuesOptions{
-		commonOptions: commonOptions{mode: ModeConfig},
-		closeMessage:  defaultCloseMessage,
-		grouping:      GroupByRule,
+		mode:         ModeConfig,
+		closeMessage: defaultCloseMessage,
+		grouping:     GroupByRule,
 	}
 	for _, opt := range opts {
 		opt.applyIssues(&o)

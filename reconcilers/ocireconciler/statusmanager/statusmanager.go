@@ -490,8 +490,7 @@ func isMissing(err error) bool {
 	if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
 		return true
 	}
-	var tagNotFound *cosign.ErrImageTagNotFound
-	if errors.As(err, &tagNotFound) {
+	if _, ok := errors.AsType[*cosign.ErrImageTagNotFound](err); ok {
 		return true
 	}
 	var noAtts *cosign.ErrNoMatchingAttestations

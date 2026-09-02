@@ -218,9 +218,9 @@ jsonPayload.sha=%q`,
 // server-side to ListCheckRunsForRef: a run this reconciler doesn't own must
 // never be mistaken for its own observed state (see WithPublisherAppID).
 func findCheckRun(ctx context.Context, client *github.Client, owner, repo, sha, name string, publisherAppID int64) (*github.CheckRun, error) {
-	opts := &github.ListCheckRunsOptions{CheckName: github.Ptr(name)}
+	opts := &github.ListCheckRunsOptions{CheckName: new(name)}
 	if publisherAppID != 0 {
-		opts.AppID = github.Ptr(publisherAppID)
+		opts.AppID = new(publisherAppID)
 	}
 	checkRuns, _, err := client.Checks.ListCheckRunsForRef(ctx, owner, repo, sha, opts)
 	if err != nil {
@@ -321,8 +321,8 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 
 	// Build CheckRunOutput with optional annotations
 	checkOutput := &github.CheckRunOutput{
-		Title:   github.Ptr(title),
-		Summary: github.Ptr(output),
+		Title:   new(title),
+		Summary: new(output),
 	}
 
 	// Check if Details implements Annotated interface
@@ -330,7 +330,7 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		annotations := annotated.Annotations()
 		if len(annotations) > 0 {
 			checkOutput.Annotations = annotations
-			checkOutput.AnnotationsCount = github.Ptr(len(annotations))
+			checkOutput.AnnotationsCount = new(len(annotations))
 		}
 	}
 
@@ -394,10 +394,10 @@ func ResetForRerun(ctx context.Context, client *github.Client, owner, repo, name
 	if _, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
 		Name:    name,
 		HeadSHA: headSHA,
-		Status:  github.Ptr("queued"),
+		Status:  new("queued"),
 		Output: &github.CheckRunOutput{
-			Title:   github.Ptr("Re-run requested"),
-			Summary: github.Ptr("Re-run requested; awaiting reprocessing."),
+			Title:   new("Re-run requested"),
+			Summary: new("Re-run requested; awaiting reprocessing."),
 		},
 	}); err != nil {
 		return fmt.Errorf("creating check run for re-run: %w", err)

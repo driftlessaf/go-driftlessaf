@@ -139,8 +139,7 @@ func GetNonRetriableDetails(err error) *NoRetryDetails {
 // infrastructure churn and application failures makes the failure-rate
 // dashboards readable.
 func IsInfrastructureError(err error) bool {
-	var ie *infrastructureError
-	if errors.As(err, &ie) {
+	if _, ok := errors.AsType[*infrastructureError](err); ok {
 		return true
 	}
 	return status.Code(err) == codes.Unavailable
@@ -279,8 +278,7 @@ func GetRequeueDelay(err error) (time.Duration, bool) {
 // RequeueNotBefore). floor is true only for RequeueNotBefore; ok is false for
 // non-requeue errors.
 func GetRequeueOptions(err error) (delay time.Duration, floor bool, ok bool) {
-	var re *requeueError
-	if errors.As(err, &re) {
+	if re, ok := errors.AsType[*requeueError](err); ok {
 		return re.delay, re.floor, true
 	}
 	return 0, false, false
@@ -319,8 +317,7 @@ func GetQueueKeys(err error) []QueueKey {
 	if err == nil {
 		return nil
 	}
-	var qke *queueKeysError
-	if errors.As(err, &qke) {
+	if qke, ok := errors.AsType[*queueKeysError](err); ok {
 		return qke.keys
 	}
 	return nil

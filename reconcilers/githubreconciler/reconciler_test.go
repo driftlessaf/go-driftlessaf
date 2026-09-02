@@ -312,6 +312,7 @@ func TestReconciler_Process_RequeueFloor(t *testing.T) {
 	}
 }
 
+//go:fix inline
 func ptrDuration(d time.Duration) *time.Duration {
-	return &d
+	return new(d)
 }

@@ -288,10 +288,8 @@ func TestWithGiveUpComment(t *testing.T) {
 
 func TestReconcileReviewOnlySkipsPath(t *testing.T) {
 	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
-		core: core{
-			identity: "test-identity",
-			mode:     ModeReview,
-		},
+		identity: "test-identity",
+		mode:     ModeReview,
 	}
 
 	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{
@@ -306,10 +304,8 @@ func TestReconcileReviewOnlySkipsPath(t *testing.T) {
 
 func TestReconcileNoneModeSkipsPath(t *testing.T) {
 	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
-		core: core{
-			identity: "test-identity",
-			mode:     ModeNone,
-		},
+		identity: "test-identity",
+		mode:     ModeNone,
 	}
 
 	err := rec.Reconcile(t.Context(), &githubreconciler.Resource{
@@ -439,12 +435,10 @@ func TestLoadRepoConfig(t *testing.T) {
 func TestReconcilerFields(t *testing.T) {
 	// Construct directly to avoid GCP metadata dependency in tests.
 	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
-		core: core{
-			identity: "test-identity",
-			analyzer: &fakeAnalyzer{},
-			labels:   []string{"label1", "label2"},
-		},
-		agent: &fakeAgent{},
+		identity: "test-identity",
+		analyzer: &fakeAnalyzer{},
+		labels:   []string{"label1", "label2"},
+		agent:    &fakeAgent{},
 		buildRequest: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *gogit.Worktree, findings []callbacks.Finding) (*testRequest, error) {
 			return &testRequest{Findings: findings}, nil
 		},
@@ -468,11 +462,9 @@ func TestReconcilerFields(t *testing.T) {
 
 func TestReconcilerWithEmptyLabels(t *testing.T) {
 	rec := &PRReconciler[*testRequest, *testResult, testCallbacks]{
-		core: core{
-			identity: "test-identity",
-			analyzer: &fakeAnalyzer{},
-		},
-		agent: &fakeAgent{},
+		identity: "test-identity",
+		analyzer: &fakeAnalyzer{},
+		agent:    &fakeAgent{},
 		buildRequest: func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *gogit.Worktree, _ []callbacks.Finding) (*testRequest, error) {
 			return &testRequest{}, nil
 		},
@@ -955,7 +947,7 @@ func TestHasLabel(t *testing.T) {
 func newPRWithLabels(names []string) *github.PullRequest {
 	labels := make([]*github.Label, 0, len(names))
 	for _, name := range names {
-		labels = append(labels, &github.Label{Name: github.Ptr(name)})
+		labels = append(labels, &github.Label{Name: new(name)})
 	}
 	return &github.PullRequest{Labels: labels}
 }

@@ -135,7 +135,7 @@ func NewPR[Req promptbuilder.Bindable, Resp Result, CB any](
 		return nil, errors.New("analyzer must be provided")
 	}
 
-	o := prOptions{commonOptions: commonOptions{mode: ModeConfig}}
+	o := prOptions{mode: ModeConfig}
 	for _, opt := range opts {
 		opt.applyPR(&o)
 	}

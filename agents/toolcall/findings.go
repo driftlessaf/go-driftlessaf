@@ -109,12 +109,12 @@ func getFindingDetailsTool[Resp any](getDetails func(context.Context, callbacks.
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
 				// Finding details are scoped to the current PR's pre-loaded
 				// state; the callback reads from an in-process cache rather
 				// than making a live external network call at tool-call time.
-				OpenWorld: Ptr(false),
+				OpenWorld: new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -158,12 +158,12 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 				Required:    true,
 			}},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				// resolve_finding mutates PR review state, but the operation
 				// is scoped to the current PR and does not open arbitrary
 				// external connections; the callback uses a pre-authenticated
 				// client bound to this PR's context.
-				OpenWorld: Ptr(false),
+				OpenWorld: new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -202,12 +202,12 @@ func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKin
 				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
 			},
 			Annotations: &ToolAnnotations{
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				// retry_finding triggers a CI re-run scoped to the current
 				// PR; it uses a pre-authenticated client and does not open
 				// arbitrary external connections beyond the CI system already
 				// associated with this PR's context.
-				OpenWorld: Ptr(false),
+				OpenWorld: new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -307,12 +307,12 @@ func readFindingLogsTool[Resp any](fetch func(context.Context, string, string) (
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
 				// Logs are fetched once from the CI system and cached
 				// in-process; subsequent reads serve from the local cache
 				// without additional external network calls.
-				OpenWorld: Ptr(false),
+				OpenWorld: new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -393,12 +393,12 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
-				Destructive: Ptr(false),
+				Destructive: new(false),
 				Idempotent:  true,
 				// Logs are fetched once from the CI system and cached
 				// in-process; subsequent searches operate on the local cache
 				// without additional external network calls.
-				OpenWorld: Ptr(false),
+				OpenWorld: new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {

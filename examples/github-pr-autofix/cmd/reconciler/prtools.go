@@ -31,13 +31,13 @@ func NewPRTools(gh *github.Client, owner, repo string, prNumber int) PRTools {
 	return PRTools{
 		UpdateTitle: func(ctx context.Context, newTitle string) error {
 			_, _, err := gh.PullRequests.Edit(ctx, owner, repo, prNumber, &github.PullRequest{
-				Title: github.Ptr(newTitle),
+				Title: new(newTitle),
 			})
 			return err
 		},
 		UpdateDescription: func(ctx context.Context, newDescription string) error {
 			_, _, err := gh.PullRequests.Edit(ctx, owner, repo, prNumber, &github.PullRequest{
-				Body: github.Ptr(newDescription),
+				Body: new(newDescription),
 			})
 			return err
 		},
@@ -93,8 +93,8 @@ func updatePRTitleTool(updateFn func(context.Context, string) error) toolcall.To
 				{Name: "new_title", Type: "string", Description: "The new PR title in conventional commit format", Required: true},
 			},
 			Annotations: &toolcall.ToolAnnotations{
-				Destructive: toolcall.Ptr(false),
-				OpenWorld:   toolcall.Ptr(false),
+				Destructive: new(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {
@@ -138,8 +138,8 @@ func updatePRDescriptionTool(updateFn func(context.Context, string) error) toolc
 				{Name: "new_description", Type: "string", Description: "The new PR description", Required: true},
 			},
 			Annotations: &toolcall.ToolAnnotations{
-				Destructive: toolcall.Ptr(false),
-				OpenWorld:   toolcall.Ptr(false),
+				Destructive: new(false),
+				OpenWorld:   new(false),
 			},
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[*PRFixResult], _ **PRFixResult) map[string]any {

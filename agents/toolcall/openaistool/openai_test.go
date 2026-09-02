@@ -148,8 +148,8 @@ func TestHandler_ValidArgs(t *testing.T) {
 	}
 
 	meta := FromTool(tool)
-	tc := openai.ChatCompletionMessageToolCall{}
-	tc.ID = "call_123"
+	tc := openai.ChatCompletionMessageToolCall{
+		ID: "call_123"}
 	tc.Function.Name = "test_tool"
 	tc.Function.Arguments = `{"reasoning":"testing","query":"hello"}`
 
@@ -178,8 +178,8 @@ func TestHandler_InvalidJSON(t *testing.T) {
 	}
 
 	meta := FromTool(tool)
-	tc := openai.ChatCompletionMessageToolCall{}
-	tc.ID = "call_bad"
+	tc := openai.ChatCompletionMessageToolCall{
+		ID: "call_bad"}
 	tc.Function.Name = "test_tool"
 	tc.Function.Arguments = "not json"
 

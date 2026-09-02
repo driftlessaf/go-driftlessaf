@@ -254,7 +254,7 @@ func thinkingConfigForEffort(model string, level effort.Level) *genai.ThinkingCo
 	}
 	return &genai.ThinkingConfig{
 		IncludeThoughts: true,
-		ThinkingBudget:  ptr(thinkingBudgetForEffort(level)),
+		ThinkingBudget:  new(thinkingBudgetForEffort(level)),
 	}
 }
 

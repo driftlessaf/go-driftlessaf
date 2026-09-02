@@ -516,14 +516,14 @@ func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) er
 	// Post message as a comment if provided
 	if message != "" {
 		if _, _, err := s.client.Issues.CreateComment(ctx, s.owner, s.repo, s.prNumber, &github.IssueComment{
-			Body: github.Ptr(message),
+			Body: new(message),
 		}); err != nil {
 			return fmt.Errorf("posting comment: %w", err)
 		}
 	}
 
 	_, _, err := s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{
-		State: github.Ptr("closed"),
+		State: new("closed"),
 	})
 	if err != nil {
 		return fmt.Errorf("closing pull request: %w", err)
@@ -611,7 +611,7 @@ func (s *Session[T]) upsertMarkerCommentOn(ctx context.Context, number int, mark
 		}
 		clog.InfoContextf(ctx, "Updating marker comment on #%d", number)
 		_, _, err = s.client.Issues.EditComment(ctx, s.owner, s.repo, existing.GetID(), &github.IssueComment{
-			Body: github.Ptr(want),
+			Body: new(want),
 		})
 		_, err = s.skipMarkerCommentIfForbidden(ctx, number, "editing marker comment", err)
 		return err
@@ -619,7 +619,7 @@ func (s *Session[T]) upsertMarkerCommentOn(ctx context.Context, number int, mark
 
 	clog.InfoContextf(ctx, "Posting marker comment on #%d", number)
 	_, _, err = s.client.Issues.CreateComment(ctx, s.owner, s.repo, number, &github.IssueComment{
-		Body: github.Ptr(want),
+		Body: new(want),
 	})
 	_, err = s.skipMarkerCommentIfForbidden(ctx, number, "posting marker comment", err)
 	return err
@@ -654,7 +654,7 @@ func (s *Session[T]) DeleteMarkerComment(ctx context.Context, marker string) err
 // a human reply that merely quotes the marker comment. The ListComments error is
 // returned unwrapped so callers can classify it (see skipMarkerCommentIfForbidden).
 func (s *Session[T]) findMarkerComment(ctx context.Context, number int, marker string) (*github.IssueComment, error) {
-	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+	opts := &github.IssueListCommentsOptions{PerPage: 100}
 	for {
 		comments, resp, err := s.client.Issues.ListComments(ctx, s.owner, s.repo, number, opts)
 		if err != nil {
@@ -876,11 +876,11 @@ func (s *Session[T]) Upsert(
 		clog.InfoContextf(ctx, "Creating new PR with head %s and base %s", s.branchName, s.ref)
 
 		pr, _, err := s.client.PullRequests.Create(ctx, s.owner, s.repo, &github.NewPullRequest{
-			Title: github.Ptr(title),
-			Body:  github.Ptr(body),
-			Head:  github.Ptr(s.branchName),
-			Base:  github.Ptr(s.ref),
-			Draft: github.Ptr(draft),
+			Title: new(title),
+			Body:  new(body),
+			Head:  new(s.branchName),
+			Base:  new(s.ref),
+			Draft: new(draft),
 		})
 		if err != nil {
 			return "", fmt.Errorf("creating pull request: %w", err)
@@ -918,9 +918,9 @@ func (s *Session[T]) Upsert(
 	}
 
 	_, _, err = s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{
-		Title: github.Ptr(title),
-		Body:  github.Ptr(body),
-		Draft: github.Ptr(draft),
+		Title: new(title),
+		Body:  new(body),
+		Draft: new(draft),
 	})
 	if err != nil {
 		return "", fmt.Errorf("updating pull request: %w", err)

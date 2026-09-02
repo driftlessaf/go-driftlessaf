@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -131,12 +132,12 @@ func questionBody(q suspend.Question) (string, error) {
 // into Pending. Nonce binding already prevents answer forgery; this closes
 // the marker channel itself.
 func pendingIn(comments []*github.IssueComment) (*github.IssueComment, suspend.Question, bool) {
-	for i := len(comments) - 1; i >= 0; i-- {
-		if comments[i].GetUser().GetType() != "Bot" {
+	for _, comment := range slices.Backward(comments) {
+		if comment.GetUser().GetType() != "Bot" {
 			continue
 		}
-		if q, ok := decodeMarker(comments[i].GetBody()); ok {
-			return comments[i], q, true
+		if q, ok := decodeMarker(comment.GetBody()); ok {
+			return comment, q, true
 		}
 	}
 	return nil, suspend.Question{}, false

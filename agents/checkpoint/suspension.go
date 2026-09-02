@@ -44,8 +44,7 @@ func (s *Suspension) Error() string {
 // returns it. It mirrors workqueue.GetRequeueOptions' errors.As-based extraction
 // so a Suspension can surface through arbitrarily wrapped error chains.
 func AsSuspension(err error) (*Suspension, bool) {
-	var s *Suspension
-	if errors.As(err, &s) {
+	if s, ok := errors.AsType[*Suspension](err); ok {
 		return s, true
 	}
 	return nil, false

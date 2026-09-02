@@ -166,7 +166,7 @@ func TestHitMaxCommitsDynamicBudget(t *testing.T) {
 			s := Session[testData]{
 				manager:     &CM[testData]{maxCommits: 5, dynamicCommitBudget: tt.dynamic},
 				prNumber:    1,
-				prMergeable: ptrTo(true),
+				prMergeable: new(true),
 				commitCount: tt.commitCount,
 				meta:        metadata{CommitBudgetBaseline: tt.baseline},
 			}
@@ -401,7 +401,7 @@ func TestIssueHasSkipLabel(t *testing.T) {
 	issueWith := func(names ...string) *github.Issue {
 		labels := make([]*github.Label, 0, len(names))
 		for _, n := range names {
-			labels = append(labels, &github.Label{Name: github.Ptr(n)})
+			labels = append(labels, &github.Label{Name: new(n)})
 		}
 		return &github.Issue{Labels: labels}
 	}
@@ -518,7 +518,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(true),
+			prMergeable: new(true),
 		},
 		expected:    sameData,
 		wantRefresh: false,
@@ -528,7 +528,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(true),
+			prMergeable: new(true),
 		},
 		expected:    differentData,
 		wantRefresh: true,
@@ -538,7 +538,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(false),
+			prMergeable: new(false),
 		},
 		expected:    sameData,
 		wantRefresh: true,
@@ -570,7 +570,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(false),
+			prMergeable: new(false),
 		},
 		expected:    differentData,
 		wantRefresh: true,
@@ -580,7 +580,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te, handlesFindings: true},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(true),
+			prMergeable: new(true),
 			findings:    []callbacks.Finding{{Kind: callbacks.FindingKindCICheck, Identifier: "1"}},
 		},
 		expected:    sameData,
@@ -591,7 +591,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:       &CM[testData]{templateExecutor: te},
 			prNumber:      1,
 			prBody:        bodyWithData,
-			prMergeable:   ptrTo(true),
+			prMergeable:   new(true),
 			pendingChecks: []string{"ci"},
 		},
 		expected:    sameData,
@@ -602,7 +602,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te, managedLabels: []string{"skip:approver-bot"}},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(true),
+			prMergeable: new(true),
 			prLabels:    []string{"skip:approver-bot"},
 		},
 		expected:      sameData,
@@ -614,7 +614,7 @@ func TestNeedsRefresh(t *testing.T) {
 			manager:     &CM[testData]{templateExecutor: te, managedLabels: []string{"skip:approver-bot"}},
 			prNumber:    1,
 			prBody:      bodyWithData,
-			prMergeable: ptrTo(true),
+			prMergeable: new(true),
 			prLabels:    []string{"skip:approver-bot"},
 		},
 		expected:      sameData,

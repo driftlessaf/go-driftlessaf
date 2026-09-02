@@ -215,8 +215,10 @@ func FalseSchema() *Schema {
 // Ptr returns a pointer to the given value.
 // Commonly used to set Destructive and OpenWorld fields on ToolAnnotations,
 // which use *bool to distinguish "explicitly false" from "unset (default true)".
+//
+//go:fix inline
 func Ptr[T any](v T) *T {
-	return &v
+	return new(v)
 }
 
 // SchemaToMap converts a Schema to the map[string]any JSON Schema

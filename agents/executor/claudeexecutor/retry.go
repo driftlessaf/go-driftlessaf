@@ -31,8 +31,7 @@ func responseCodeFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		if code := inStreamErrorCode(apiErr); code > 0 {
 			return code
 		}
@@ -108,8 +107,7 @@ func isRetryableClaudeError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		if inStreamErrorCode(apiErr) > 0 {
 			return true
 		}

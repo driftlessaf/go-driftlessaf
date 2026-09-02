@@ -254,8 +254,8 @@ func TestMaybeTransitionFromPRState(t *testing.T) {
 			}
 
 			pr := &github.PullRequest{
-				Merged: github.Ptr(tc.merged),
-				State:  github.Ptr(tc.state),
+				Merged: new(tc.merged),
+				State:  new(tc.state),
 			}
 			done, err := r.maybeTransitionFromPRState(t.Context(), mgr, existing, pr)
 			if err != nil {

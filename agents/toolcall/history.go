@@ -72,9 +72,9 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 				}},
 				Annotations: &ToolAnnotations{
 					ReadOnly:    true,
-					Destructive: Ptr(false),
+					Destructive: new(false),
 					Idempotent:  true,
-					OpenWorld:   Ptr(false),
+					OpenWorld:   new(false),
 				},
 			},
 			Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
@@ -122,9 +122,9 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 				}},
 				Annotations: &ToolAnnotations{
 					ReadOnly:    true,
-					Destructive: Ptr(false),
+					Destructive: new(false),
 					Idempotent:  true,
-					OpenWorld:   Ptr(false),
+					OpenWorld:   new(false),
 				},
 			},
 			Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {

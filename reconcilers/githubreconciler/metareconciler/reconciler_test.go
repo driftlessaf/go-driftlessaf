@@ -206,7 +206,7 @@ func TestDraftForIssue(t *testing.T) {
 	issue := func(labels ...string) *github.Issue {
 		i := &github.Issue{}
 		for _, l := range labels {
-			i.Labels = append(i.Labels, &github.Label{Name: github.Ptr(l)})
+			i.Labels = append(i.Labels, &github.Label{Name: new(l)})
 		}
 		return i
 	}
@@ -251,7 +251,7 @@ func TestShouldClearDraftLabel(t *testing.T) {
 	issue := func(labels ...string) *github.Issue {
 		i := &github.Issue{}
 		for _, l := range labels {
-			i.Labels = append(i.Labels, &github.Label{Name: github.Ptr(l)})
+			i.Labels = append(i.Labels, &github.Label{Name: new(l)})
 		}
 		return i
 	}
@@ -528,7 +528,7 @@ func TestPRLabelsForIssue(t *testing.T) {
 	issue := func(labels ...string) *github.Issue {
 		i := &github.Issue{}
 		for _, l := range labels {
-			i.Labels = append(i.Labels, &github.Label{Name: github.Ptr(l)})
+			i.Labels = append(i.Labels, &github.Label{Name: new(l)})
 		}
 		return i
 	}

@@ -310,7 +310,7 @@ func ResultValidator[T any](validator func(result T) error) ObservableTraceCallb
 	return func(o Observer, trace *agenttrace.Trace[T]) {
 		// Use reflection to check if Result is a nil pointer
 		v := reflect.ValueOf(trace.Result)
-		if !v.IsValid() || (v.Kind() == reflect.Ptr && v.IsNil()) {
+		if !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
 			o.Fail("result is nil")
 			return
 		}
