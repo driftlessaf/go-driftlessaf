@@ -17,7 +17,7 @@ require (
 require (
 	cel.dev/expr v0.25.2 // indirect
 	chainguard.dev/go-grpc-kit v0.18.0 // indirect
-	chainguard.dev/sdk v0.1.234 // indirect
+	chainguard.dev/sdk v0.1.213 // indirect
 	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.23.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
@@ -70,7 +70,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chainguard-dev/terraform-infra-common v1.38.0 // indirect
+	github.com/chainguard-dev/terraform-infra-common v1.25.0 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect
 	github.com/cloudflare/circl v1.6.4 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
@@ -265,7 +265,7 @@ require (
 	google.golang.org/genproto v0.0.0-20260622175928-b703f567277d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260727163830-6c54dddc4772 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260807164820-c8921c73eeea // indirect
-	google.golang.org/grpc v1.83.0 // indirect
+	google.golang.org/grpc v1.83.1 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
@@ -274,6 +274,10 @@ require (
 )
 
 replace chainguard.dev/driftlessaf => ../
+
+replace chainguard.dev/sdk => ../../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../../terraform-infra-common
 
 // TEMPORARY: sigstore-go v1.3.0 added GetLogEntryByUUID to sign.RekorClient,
 // which gitsign's validatingRekorClient does not implement, so every module
