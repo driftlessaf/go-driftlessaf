@@ -66,9 +66,16 @@ func xorEncryptor(t *testing.T) *payloadcrypt.Encryptor {
 
 // runTraceWithTurn drives one trace with a payload-recording turn against the
 // given tracer, then drains in-flight sends.
-func runTraceWithTurn(t *testing.T, wrapped Tracer[string]) *Trace[string] {
+func runTraceWithTurn(t *testing.T, wrapped Tracer[string]) {
 	t.Helper()
-	ctx := WithPayloadsEnabled(t.Context(), true)
+	runTraceWithTurnOn(t, t.Context(), wrapped)
+}
+
+// runTraceWithTurnOn is runTraceWithTurn against a caller-supplied base context,
+// so a test can drive the same trace under a context that is already canceled.
+func runTraceWithTurnOn(t *testing.T, base context.Context, wrapped Tracer[string]) {
+	t.Helper()
+	ctx := WithPayloadsEnabled(base, true)
 	ctx = WithExecutionContext(ctx, ExecutionContext{ReconcilerKey: "pr:owner/repo/42"})
 	ctx = WithTracer[string](ctx, wrapped)
 
@@ -93,7 +100,6 @@ func runTraceWithTurn(t *testing.T, wrapped Tracer[string]) *Trace[string] {
 
 	done("secret result body", nil)
 	drainCE[string](wrapped)
-	return trace
 }
 
 // With an encryptor configured, both the per-span and per-trace CloudEvents must
@@ -157,5 +163,67 @@ func TestWithPayloadEncryptor_FailClosedDropsEvents(t *testing.T) {
 
 	if got := bodiesFn(); len(got) != 0 {
 		t.Fatalf("fail-closed violated: expected 0 CloudEvents when sealing errors, got %d: %s", len(got), bytes.Join(got, []byte("\n---\n")))
+	}
+}
+
+// ctxRespectingEncryptor's wrap fails on a dead context, the way the real KMS
+// client does: an Encrypt on a canceled context is rejected before the RPC
+// leaves the process, and codes.Canceled is deliberately not in the client's
+// retryable set.
+func ctxRespectingEncryptor(t *testing.T) *payloadcrypt.Encryptor {
+	t.Helper()
+	enc, err := payloadcrypt.New("projects/p/locations/l/keyRings/r/cryptoKeys/k",
+		func(ctx context.Context, dek []byte) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			out := make([]byte, len(dek))
+			for i, b := range dek {
+				out[i] = b ^ 0x5a
+			}
+			return out, nil
+		})
+	if err != nil {
+		t.Fatalf("payloadcrypt.New: %v", err)
+	}
+	return enc
+}
+
+// A caller context that is already canceled must not cost the trace. Sealing is
+// detached from it exactly as delivery is, so both events are still sealed and
+// still sent.
+//
+// This is the regression for the drops logged as "Failed to set span CloudEvent
+// data" / "new seal session: kmsseal: wrap DEK: rpc error: code = Canceled":
+// send() detached delivery via context.WithoutCancel but
+// setEventData sealed on the caller's context, so every reconcile torn down
+// mid-flight — an instance drain, a dispatcher teardown, a deadline — lost the
+// record of what its agent had just done, fail-closed. Cancellation is the
+// normal end of a reconcile under load, not an exceptional case, which is why
+// this cannot be left to the caller to avoid.
+func TestWithPayloadEncryptor_SealsUnderCanceledCallerContext(t *testing.T) {
+	srv, client, bodiesFn := captureServer(t)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	inner := ByCode[string](func(_ *Trace[string]) {})
+	wrapped := WithCloudEventEmission[string](inner, client, "test-source",
+		WithPayloadEncryptor[string](ctxRespectingEncryptor(t)))
+
+	runTraceWithTurnOn(t, ctx, wrapped)
+
+	bodies := bodiesFn()
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 CloudEvents (1 span + 1 trace) despite the canceled caller context, got %d", len(bodies))
+	}
+	for i, body := range bodies {
+		if !bytes.Contains(body, []byte("driftlessaf_enc")) {
+			t.Errorf("event %d not sealed (no envelope marker): %s", i, body)
+		}
+		if bytes.Contains(body, []byte("secret prompt body")) {
+			t.Errorf("event %d leaked plaintext: %s", i, body)
+		}
 	}
 }

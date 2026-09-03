@@ -32,6 +32,7 @@ const (
 	ceMaxRetry    = 3
 	ceMaxInflight = 100
 	ceSendTimeout = 30 * time.Second
+	ceSealTimeout = 30 * time.Second
 )
 
 var errTraceMarshal = errors.New("trace marshal failed")
@@ -187,6 +188,17 @@ func (t *ceEmittingTracer[T]) RecordTrace(trace *Trace[T]) {
 // setEventData sets ce's data to obj as JSON. Without the payload opt-in, it
 // removes the sensitive fields through omitFn. With the opt-in and a payload
 // encryptor, it seals those fields through sealFn before setting the event data.
+//
+// Sealing runs on a context detached from the caller's, the same treatment send
+// gives delivery. It is a bounded amount of work — one KMS wrap per event, the
+// rest local AES-GCM — and the caller is very often a reconcile whose context
+// has just been canceled (an instance drain, a dispatcher teardown, a deadline),
+// which is exactly when the record of what the agent did is most worth keeping.
+// Inheriting that cancellation meant the KMS Encrypt was rejected before it left
+// the process (codes.Canceled, which the KMS client deliberately does not retry)
+// and every trace on a canceled run was dropped fail-closed. The timeout bounds
+// how long an unwinding caller can be held here. The omit path needs none of
+// this: it makes no KMS call.
 func (t *ceEmittingTracer[T]) setEventData(
 	ctx context.Context,
 	ce *cloudevents.Event,
@@ -212,7 +224,10 @@ func (t *ceEmittingTracer[T]) setEventData(
 	if t.enc == nil {
 		return ce.SetData(cloudevents.ApplicationJSON, raw)
 	}
-	sealed, err := sealFn(ctx, t.enc, raw)
+	sealCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ceSealTimeout)
+	defer cancel()
+
+	sealed, err := sealFn(sealCtx, t.enc, raw)
 	if err != nil {
 		return err
 	}

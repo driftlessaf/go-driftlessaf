@@ -596,14 +596,17 @@ func (lt *LLMTurn[T]) End() {
 		localSink := currentLocalSpanSink()
 		if emitter != nil || localSink != nil {
 			if span, ok := lt.buildRecordedSpan(); ok {
-				// Emitters are expected to be non-blocking and to handle their
-				// own delivery retries (see ceEmittingTracer.emitSpan). The
-				// only way one returns a non-nil error here is a synchronous
-				// pre-flight failure such as ce.SetData rejecting the span
-				// (the bug fixed in #3303142362). Log it at the call site so
-				// silent span loss is observable in Cloud Run logs without
-				// forcing End() to propagate the error — End() is the cleanup
-				// path on a deferred turn and has no useful return channel.
+				// Emitters handle their own delivery retries and never return a
+				// delivery error (see ceEmittingTracer.emitSpan). A non-nil
+				// error here is a synchronous pre-flight failure — ce.SetData
+				// rejecting the span (the bug fixed in #3303142362), or payload
+				// sealing failing — and the emitter has already dropped the
+				// event fail-closed. Log it at the call site so silent span
+				// loss is observable in Cloud Run logs without forcing End() to
+				// propagate the error: End() is the cleanup path on a deferred
+				// turn and has no useful return channel. Note this WARN
+				// duplicates the emitter's own ERROR for the same span — when
+				// counting drops, take one or the other, not both.
 				for _, sink := range []struct {
 					emit SpanEmitter
 					msg  string
