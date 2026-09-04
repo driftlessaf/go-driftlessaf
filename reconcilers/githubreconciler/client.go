@@ -19,6 +19,19 @@ import (
 // TokenSourceFunc is a function that creates an OAuth2 token source for a given org/repo.
 type TokenSourceFunc func(ctx context.Context, org, repo string) (oauth2.TokenSource, error)
 
+// CachedTokenSource builds a token source from tsf that is safe to cache and
+// reuse across requests. Token sources capture the context passed at
+// construction for their later Token refreshes, so binding one to a request
+// context poisons the cache once that request is canceled — every subsequent
+// refresh then fails with "context canceled" — and leaks request-scoped
+// deadlines and values into later refreshes. Constructing with
+// context.Background() detaches the source from any single request. Use this
+// wherever a TokenSourceFunc result outlives the request that created it,
+// rather than passing the request context directly.
+func CachedTokenSource(tsf TokenSourceFunc, org, repo string) (oauth2.TokenSource, error) {
+	return tsf(context.Background(), org, repo)
+}
+
 // ClientCache manages GitHub clients for multiple org/repo combinations.
 type ClientCache struct {
 	tokenSourceFunc TokenSourceFunc
@@ -140,11 +153,7 @@ func (cc *ClientCache) tokenSourceForLocked(org, repo string) (oauth2.TokenSourc
 		return tokenSource, nil
 	}
 
-	// Use context.Background() because token sources capture the context for
-	// later Token refreshes. Binding a cached source to a request context can
-	// poison the cache after that request is canceled, and can leak request-
-	// scoped deadlines or values into later refreshes.
-	tokenSource, err := cc.tokenSourceFunc(context.Background(), org, repo)
+	tokenSource, err := CachedTokenSource(cc.tokenSourceFunc, org, repo)
 	if err != nil {
 		return nil, err
 	}

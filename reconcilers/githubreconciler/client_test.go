@@ -220,6 +220,30 @@ func TestClientCache_TokenSourceForDoesNotCaptureCallerContext(t *testing.T) {
 	}
 }
 
+func TestCachedTokenSourceDetachesConstructionContext(t *testing.T) {
+	var got context.Context
+	tsf := func(ctx context.Context, _, _ string) (oauth2.TokenSource, error) {
+		got = ctx
+		return &mockTokenSource{token: "t"}, nil
+	}
+
+	if _, err := CachedTokenSource(tsf, "org", "repo"); err != nil {
+		t.Fatalf("CachedTokenSource: %v", err)
+	}
+	if got == nil {
+		t.Fatal("token source func received nil context")
+	}
+	if err := got.Err(); err != nil {
+		t.Fatalf("construction context already errored: %v", err)
+	}
+	// A request context typically carries a deadline; background does not. This
+	// guards against reintroducing a request context that would poison the
+	// cached source once its request is canceled.
+	if _, ok := got.Deadline(); ok {
+		t.Fatal("cached token source built with a context that has a deadline")
+	}
+}
+
 func TestClientCache_ConcurrentAccess(t *testing.T) {
 	ctx := context.Background()
 	var tokenSourceCalls atomic.Int32
