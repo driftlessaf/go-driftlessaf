@@ -59,15 +59,15 @@ func commitHeadline(msg string) string {
 // unreadable title or trip GitHub's title length limit and fail the Upsert.
 const prHeadlineMaxChars = 150
 
-// prHeadline returns the headline anchoring the PR title: the first
-// reasoning-log entry's commit headline — the PR's primary change, which
-// stays stable as follow-up iterations stack fix-up commits on top — or
-// fallback when the log is empty (runs without reasoning contribute no
-// entries; see changemanager.Session.AppendReasoning). Headlines longer
-// than prHeadlineMaxChars are truncated with an ellipsis.
-func prHeadline(entries []changemanager.ReasoningEntry, fallback string) string {
-	headline := fallback
-	if len(entries) > 0 {
+// prHeadline returns the headline anchoring the PR title. When the current
+// branch still contains the primary change, the first reasoning-log entry
+// keeps the title stable while follow-up fix-up commits stack on top. When the
+// branch was rebuilt from the default branch, the old primary commit was
+// discarded by the force-push, so the current headline must replace it.
+// Headlines longer than prHeadlineMaxChars are truncated with an ellipsis.
+func prHeadline(entries []changemanager.ReasoningEntry, current string, primaryStillPresent bool) string {
+	headline := current
+	if primaryStillPresent && len(entries) > 0 {
 		headline = entries[0].CommitHeadline
 	}
 	if runes := []rune(headline); len(runes) > prHeadlineMaxChars {

@@ -281,13 +281,14 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			// If the analyzer already fixed everything, commit its changes
 			// directly without invoking the agent. The commit contributes no
 			// reasoning entry, but the log persisted from prior iterations
-			// must still render rather than drop from the regenerated body,
-			// and the title headline must keep anchoring to the PR's primary
-			// change rather than reset to the fallback title.
+			// must still render rather than drop from the regenerated body.
+			// Leave Headline empty so analyzer-only PRs use their path-based
+			// title fallback instead of the generic analyzer commit message.
 			if allFixed {
+				msg := commitMessage(diagnostics)
 				prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
-				prData.Headline = prHeadline(session.ReasoningLog(), "")
-				return commitMessage(diagnostics), nil
+				prData.Headline = ""
+				return msg, nil
 			}
 
 			cbs, err := r.buildCallbacks(ctx, session, lease)
@@ -314,12 +315,14 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			// A commit is certain: log this run's reasoning under the
 			// commit's headline and render the accumulated log — prior
 			// iterations' entries plus this one — for the PR body. The
-			// title headline anchors to the log's first entry so the PR
-			// title describes the primary change, not the latest fix-up.
+			// title headline anchors to the log's first entry while that
+			// primary commit remains on the branch. A fresh-from-default
+			// force-push uses the current headline because the old primary
+			// commit and its change are no longer present.
 			msg := result.GetCommitMessage()
 			session.AppendReasoning(commitHeadline(msg), agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars))
 			prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
-			prData.Headline = prHeadline(session.ReasoningLog(), commitHeadline(msg))
+			prData.Headline = prHeadline(session.ReasoningLog(), commitHeadline(msg), usePRBranch)
 
 			return msg, nil
 		})

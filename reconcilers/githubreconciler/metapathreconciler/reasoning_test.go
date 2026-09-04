@@ -87,26 +87,35 @@ func TestCommitHeadline(t *testing.T) {
 
 func TestPRHeadline(t *testing.T) {
 	tests := []struct {
-		name     string
-		entries  []changemanager.ReasoningEntry
-		fallback string
-		want     string
+		name                string
+		entries             []changemanager.ReasoningEntry
+		current             string
+		primaryStillPresent bool
+		want                string
 	}{{
-		name:     "empty log uses fallback",
-		fallback: "fix(make-docs): add retry logic for go install",
-		want:     "fix(make-docs): add retry logic for go install",
+		name:    "empty log uses current headline",
+		current: "fix(make-docs): add retry logic for go install",
+		want:    "fix(make-docs): add retry logic for go install",
 	}, {
-		name:    "empty log and empty fallback",
+		name:    "empty log and empty current headline",
 		entries: nil,
 		want:    "",
 	}, {
-		name: "single entry wins over fallback",
+		name: "rewritten analyzer-only change leaves headline empty for path fallback",
+		entries: []changemanager.ReasoningEntry{{
+			CommitHeadline: "fix(redpanda): bump epoch to 8",
+			Summary:        "- attempted an earlier agent fix",
+		}},
+		want: "",
+	}, {
+		name: "single entry wins while primary commit remains",
 		entries: []changemanager.ReasoningEntry{{
 			CommitHeadline: "feat(gharchive): add example_test.go with Example functions",
 			Summary:        "- created the example test",
 		}},
-		fallback: "fix(lint): remove unused import",
-		want:     "feat(gharchive): add example_test.go with Example functions",
+		current:             "fix(lint): remove unused import",
+		primaryStillPresent: true,
+		want:                "feat(gharchive): add example_test.go with Example functions",
 	}, {
 		name: "multiple entries anchor to the first",
 		entries: []changemanager.ReasoningEntry{{
@@ -116,15 +125,25 @@ func TestPRHeadline(t *testing.T) {
 			CommitHeadline: "fix(make-docs): add retry logic for go install",
 			Summary:        "- wrapped go install in a retry loop",
 		}},
-		fallback: "fix(make-docs): add retry logic for go install",
-		want:     "feat(gharchive): add example_test.go with Example functions",
+		current:             "fix(make-docs): add retry logic for go install",
+		primaryStillPresent: true,
+		want:                "feat(gharchive): add example_test.go with Example functions",
+	}, {
+		name: "branch rewrite replaces discarded primary headline",
+		entries: []changemanager.ReasoningEntry{{
+			CommitHeadline: "fix(redpanda): bump epoch to 8",
+			Summary:        "- attempted an epoch-only repair",
+		}},
+		current: "fix(redpanda): migrate to go/build/v2",
+		want:    "fix(redpanda): migrate to go/build/v2",
 	}, {
 		name: "overlong headline truncated with ellipsis",
 		entries: []changemanager.ReasoningEntry{{
 			CommitHeadline: "fix(x): " + strings.Repeat("a", 200),
 			Summary:        "- long",
 		}},
-		want: "fix(x): " + strings.Repeat("a", prHeadlineMaxChars-9) + "…",
+		primaryStillPresent: true,
+		want:                "fix(x): " + strings.Repeat("a", prHeadlineMaxChars-9) + "…",
 	}, {
 		// Multibyte runes straddle the cap so byte-based slicing would cut
 		// mid-sequence and produce invalid UTF-8 instead of whole runes.
@@ -133,12 +152,13 @@ func TestPRHeadline(t *testing.T) {
 			CommitHeadline: "fix(x): " + strings.Repeat("é", 200),
 			Summary:        "- long",
 		}},
-		want: "fix(x): " + strings.Repeat("é", prHeadlineMaxChars-9) + "…",
+		primaryStillPresent: true,
+		want:                "fix(x): " + strings.Repeat("é", prHeadlineMaxChars-9) + "…",
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := prHeadline(tt.entries, tt.fallback); got != tt.want {
+			if got := prHeadline(tt.entries, tt.current, tt.primaryStillPresent); got != tt.want {
 				t.Errorf("prHeadline(): got = %q, want = %q", got, tt.want)
 			}
 		})
