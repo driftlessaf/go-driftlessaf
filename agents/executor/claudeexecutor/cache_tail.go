@@ -166,8 +166,6 @@ func blockCacheControl(block *anthropic.ContentBlockParamUnion) *anthropic.Cache
 		return &block.OfToolSearchToolResult.CacheControl
 	case block.OfContainerUpload != nil:
 		return &block.OfContainerUpload.CacheControl
-	case block.OfMidConvSystem != nil:
-		return &block.OfMidConvSystem.CacheControl
 	}
 	return nil
 }
