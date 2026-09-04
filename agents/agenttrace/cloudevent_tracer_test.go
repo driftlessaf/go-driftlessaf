@@ -271,6 +271,73 @@ func TestSetEventData_MarshalError(t *testing.T) {
 	}
 }
 
+// A trace built under WithPayloadsEnabled(ctx, true) (mentat's forced-on
+// local-capture case) must still omit payload fields from the emitted
+// CloudEvent when WithEmitPayloads(ctx, false) overrides emission, and must
+// include them when the override is true. This is the mentat repair/bootstrap
+// scenario: local capture (judge evidence, resume seed) always runs, but the
+// CloudEvent sent to the shared broker must track record_llm_payloads
+// independently.
+func TestWithCloudEventEmission_EmitPayloadsOverridesCapture(t *testing.T) {
+	tests := []struct {
+		name         string
+		emitPayloads bool
+		wantPrompt   bool
+	}{
+		{name: "capture on, emit off omits payload", emitPayloads: false, wantPrompt: false},
+		{name: "capture on, emit on includes payload", emitPayloads: true, wantPrompt: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				body, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("reading body: %v", err)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			client, err := cloudevents.NewClientHTTP(
+				cloudevents.WithTarget(srv.URL),
+				cehttp.WithClient(*srv.Client()),
+			)
+			if err != nil {
+				t.Fatalf("creating test CE client: %v", err)
+			}
+
+			inner := ByCode[string](func(_ *Trace[string]) {})
+			wrapped := WithCloudEventEmission[string](inner, client, "test-reconciler")
+
+			// Payloads always on for capture, exactly as mentat's authoring
+			// call sites force it, with the emission flag set independently
+			// from the (would-be) record_llm_payloads value.
+			ctx := WithPayloadsEnabled(t.Context(), true)
+			ctx = WithEmitPayloads(ctx, test.emitPayloads)
+			ctx = WithTracer[string](ctx, wrapped)
+			_, done := StartTrace[string](ctx, "sensitive authoring prompt")
+			done("sensitive result", nil)
+			drainCE[string](wrapped)
+
+			if body == nil {
+				t.Fatal("no CloudEvent body received")
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(body, &decoded); err != nil {
+				t.Fatalf("body is not valid JSON: %v\nbody: %s", err, string(body))
+			}
+
+			_, hasPrompt := decoded["input_prompt"]
+			if hasPrompt != test.wantPrompt {
+				t.Errorf("input_prompt present = %v, want %v; body: %s", hasPrompt, test.wantPrompt, string(body))
+			}
+		})
+	}
+}
+
 func TestNewBrokerClient_EmptyURL_ReturnsNil(t *testing.T) {
 	client := NewBrokerClient(t.Context(), "")
 	if client != nil {

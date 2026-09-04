@@ -47,8 +47,8 @@ type ceEmittingTracer[T any] struct {
 	source string
 	// enc, when non-nil, seals the sensitive free-text payload fields of every
 	// emitted trace/span event before it leaves the process. Nil leaves enabled
-	// payloads in plaintext. WithPayloadsEnabled controls whether either form is
-	// present in the event.
+	// payloads in plaintext. Whether either form is present in the event is
+	// controlled by WithEmitPayloads if set on ctx, else by WithPayloadsEnabled.
 	enc *payloadcrypt.Encryptor
 	eg  errgroup.Group
 }
@@ -80,8 +80,8 @@ func WithPayloadEncryptor[T any](enc *payloadcrypt.Encryptor) CEOption[T] {
 // always EventType.
 //
 // The event always contains structural trace fields. Raw payload fields are
-// included only when the trace context enables them through
-// WithPayloadsEnabled.
+// included only when the trace context enables them through WithEmitPayloads
+// if set, else through WithPayloadsEnabled.
 //
 // Call Drain on the returned tracer (via type assertion) before process
 // exit to flush in-flight events.
@@ -208,13 +208,13 @@ func (t *ceEmittingTracer[T]) setEventData(
 ) error {
 	raw, err := json.Marshal(obj)
 	if err != nil {
-		if !payloadsEnabledFrom(ctx) {
+		if !emitPayloadsEnabledFrom(ctx) {
 			return errTraceMarshal
 		}
 
 		return err
 	}
-	if !payloadsEnabledFrom(ctx) {
+	if !emitPayloadsEnabledFrom(ctx) {
 		withoutPayloads, err := omitFn(raw)
 		if err != nil {
 			return err

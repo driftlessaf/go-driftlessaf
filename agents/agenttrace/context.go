@@ -120,6 +120,7 @@ const (
 	agentNameKey        contextKey = "agent_name"
 	nameFnKey           contextKey = "name_fn"
 	payloadsEnabledKey  contextKey = "payloads_enabled"
+	emitPayloadsKey     contextKey = "emit_payloads_enabled"
 )
 
 // WithExecutionContext layers non-zero fields from execCtx onto any
@@ -234,4 +235,44 @@ func payloadsEnabledFrom(ctx context.Context) bool {
 		return val
 	}
 	return false
+}
+
+// GetPayloadsEnabled reports the flag stored in ctx by WithPayloadsEnabled, or
+// false if unset. Exported, unlike payloadsEnabledFrom, so a consumer can
+// read the caller's original policy before it overrides the flag for its own
+// purposes. See WithEmitPayloads.
+func GetPayloadsEnabled(ctx context.Context) bool {
+	return payloadsEnabledFrom(ctx)
+}
+
+// WithEmitPayloads overrides, for CloudEvent emission only, whether the event
+// a ceEmittingTracer sends includes raw payload fields. It is independent of
+// WithPayloadsEnabled, which controls whether the in-memory Trace/Span holds
+// those fields at all, and therefore whether non-CloudEvent sinks (OTel
+// attributes, structured logs, a local span sink) capture them.
+//
+// Leave this unset in almost every case: the CloudEvent tracer then falls
+// back to the WithPayloadsEnabled value, so capture and emission stay
+// coupled exactly as before this option existed. Set it only when a
+// consumer's own local capture needs WithPayloadsEnabled(ctx, true)
+// unconditionally, while the CloudEvent sent to a shared broker must still
+// track an independent policy such as an env var read before that consumer
+// overrides the flag. Mentat's authoring agents are this case: local
+// transcript capture (judge evidence, resume seeding) needs payloads always
+// "enabled" on the in-memory trace, but the CloudEvent sent to the shared
+// trace broker must still honor record_llm_payloads.
+func WithEmitPayloads(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, emitPayloadsKey, enabled)
+}
+
+// emitPayloadsEnabledFrom reports whether a ceEmittingTracer should include
+// raw payload fields in the CloudEvent it sends: the WithEmitPayloads
+// override if set on ctx, else the WithPayloadsEnabled value. A consumer
+// that never calls WithEmitPayloads gets the same behavior as before this
+// option existed.
+func emitPayloadsEnabledFrom(ctx context.Context) bool {
+	if val, ok := ctx.Value(emitPayloadsKey).(bool); ok {
+		return val
+	}
+	return payloadsEnabledFrom(ctx)
 }

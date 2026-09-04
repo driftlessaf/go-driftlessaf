@@ -159,3 +159,53 @@ func TestWithExecutionContext_emptyCtx(t *testing.T) {
 		t.Errorf("merge on empty ctx failed: %+v", got)
 	}
 }
+
+// emitPayloadsEnabledFrom must fall back to the WithPayloadsEnabled value
+// when WithEmitPayloads was never called, so every consumer that doesn't know
+// about WithEmitPayloads keeps capture and CloudEvent emission coupled
+// exactly as before that option existed.
+func TestEmitPayloadsEnabledFrom_FallsBackToPayloadsEnabled(t *testing.T) {
+	tests := []struct {
+		name            string
+		payloadsEnabled bool
+		want            bool
+	}{
+		{name: "unset defaults to false", payloadsEnabled: false, want: false},
+		{name: "payloads enabled, no override", payloadsEnabled: true, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := WithPayloadsEnabled(t.Context(), test.payloadsEnabled)
+			if got := emitPayloadsEnabledFrom(ctx); got != test.want {
+				t.Errorf("emitPayloadsEnabledFrom() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// WithEmitPayloads must override the WithPayloadsEnabled value for emission,
+// in both directions: mentat's local-capture-always-on case (payloads true,
+// emit false) and the inverse.
+func TestEmitPayloadsEnabledFrom_OverridesPayloadsEnabled(t *testing.T) {
+	tests := []struct {
+		name            string
+		payloadsEnabled bool
+		emitPayloads    bool
+	}{
+		{name: "capture on, emit off", payloadsEnabled: true, emitPayloads: false},
+		{name: "capture off, emit on", payloadsEnabled: false, emitPayloads: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := WithPayloadsEnabled(t.Context(), test.payloadsEnabled)
+			ctx = WithEmitPayloads(ctx, test.emitPayloads)
+
+			if got := payloadsEnabledFrom(ctx); got != test.payloadsEnabled {
+				t.Errorf("payloadsEnabledFrom() = %v, want %v (WithEmitPayloads must not affect it)", got, test.payloadsEnabled)
+			}
+			if got := emitPayloadsEnabledFrom(ctx); got != test.emitPayloads {
+				t.Errorf("emitPayloadsEnabledFrom() = %v, want %v", got, test.emitPayloads)
+			}
+		})
+	}
+}
