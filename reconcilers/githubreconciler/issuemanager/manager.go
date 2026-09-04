@@ -53,6 +53,7 @@ type IM[T Comparable[T]] struct {
 	bodyTemplate     *template.Template
 	labelTemplates   []*template.Template
 	managedLabels    map[string]struct{}
+	oneToOneMatching bool
 	templateExecutor *internaltemplate.Template[T]
 	owner            string
 	repo             string
@@ -107,6 +108,14 @@ func WithRepo[T Comparable[T]](repo string) Option[T] {
 func WithMaxDesiredIssuesPerPath[T Comparable[T]](limit int) Option[T] {
 	return func(im *IM[T]) {
 		im.maxDesiredIssues = limit
+	}
+}
+
+// WithOneToOneMatching prevents an existing issue from matching more than one
+// desired state in a single reconciliation. It is disabled by default.
+func WithOneToOneMatching[T Comparable[T]]() Option[T] {
+	return func(im *IM[T]) {
+		im.oneToOneMatching = true
 	}
 }
 

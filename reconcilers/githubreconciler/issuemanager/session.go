@@ -110,8 +110,8 @@ func (s *IssueSession[T]) Reconcile(
 
 	// Phase 1: Create or update issues for desired state
 	for i, data := range desired {
-		// Try to find matching existing issue
-		existing := s.findMatchingIssue(data)
+		// Try to find matching existing issue.
+		existing := s.findMatchingIssue(data, matchedIssues)
 
 		if existing != nil {
 			// Mark this issue as matched
@@ -161,10 +161,13 @@ func (s *IssueSession[T]) Reconcile(
 		// Close the issue
 		log.Infof("Closing issue #%d as it's not in the desired set", existing.issue.GetNumber())
 
-		// Post message as a comment if provided
-		if closeMessage != "" {
+		// If this issue still represents a desired state, it is an extra copy
+		// rather than a cleared finding. Link to the surviving issue instead of
+		// posting the caller's close reason.
+		message := s.closeMessageFor(existing.data, desired, issueURLs, closeMessage)
+		if message != "" {
 			if _, _, err := s.client.Issues.CreateComment(ctx, s.owner, s.repo, existing.issue.GetNumber(), &github.IssueComment{
-				Body: new(closeMessage),
+				Body: new(message),
 			}); err != nil {
 				return nil, fmt.Errorf("posting comment on issue #%d: %w", existing.issue.GetNumber(), err)
 			}
@@ -183,16 +186,35 @@ func (s *IssueSession[T]) Reconcile(
 	return issueURLs, nil
 }
 
-// findMatchingIssue finds an existing issue that matches the given data using the Equal method.
-// Returns nil if no match is found.
-func (s *IssueSession[T]) findMatchingIssue(data *T) *existingIssue[T] {
-	for _, existing := range s.existingIssues {
+// findMatchingIssue finds an existing issue that matches the given data using
+// the Equal method. When one-to-one matching is enabled, issues already matched
+// during this reconciliation are excluded. Returns nil if no match is found.
+func (s *IssueSession[T]) findMatchingIssue(data *T, matchedIssues map[int]struct{}) *existingIssue[T] {
+	for i := range s.existingIssues {
+		existing := &s.existingIssues[i]
+		if s.manager.oneToOneMatching {
+			if _, matched := matchedIssues[existing.issue.GetNumber()]; matched {
+				continue
+			}
+		}
 		if (*existing.data).Equal(*data) {
-			return &existing
+			return existing
 		}
 	}
 
 	return nil
+}
+
+// closeMessageFor distinguishes a duplicate existing issue from an issue whose
+// desired state disappeared. Duplicate closures link to the surviving issue;
+// other closures retain the caller-provided reason.
+func (s *IssueSession[T]) closeMessageFor(existing *T, desired []*T, issueURLs []string, fallback string) string {
+	for i, data := range desired {
+		if (*existing).Equal(*data) && issueURLs[i] != "" {
+			return fmt.Sprintf("Duplicate of %s, closing.", issueURLs[i])
+		}
+	}
+	return fallback
 }
 
 // needsUpdate determines if an existing issue needs to be updated.
