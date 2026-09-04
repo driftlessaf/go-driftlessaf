@@ -188,6 +188,13 @@ func (b cliBackend) env(remote string) ([]string, error) {
 		{"core.hooksPath", os.DevNull},
 		{"http.proxy", ""},
 		{"credential.helper", ""},
+		// Auto gc must not fork into the background. A forked gc can still
+		// be repacking objects after this command returns and the caller
+		// reopens the go-git handle, so a later go-git read can land on a
+		// pack gc already removed. Keep auto gc itself on: it is what
+		// bounds a pooled clone's object store. Only forbid the detach, so
+		// a triggered run finishes inside this command instead.
+		{"gc.autoDetach", "false"},
 	}
 	if remote != "" {
 		// URL-scoped so they outrank a same-specificity .git/config pin, and
