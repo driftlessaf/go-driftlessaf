@@ -93,11 +93,21 @@ func (a *App) LookupInstallID(ctx context.Context, org string) (int64, error) {
 // scoped to the requested org/repo.
 func (a *App) TokenSourceFunc() TokenSourceFunc {
 	return func(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
-		return a.newRepoTokenSource(ctx, org, repo)
+		return a.RepoTokenSource(ctx, org, repo)
 	}
 }
 
-func (a *App) newRepoTokenSource(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
+// OrgTokenSource returns a token source minting an installation token scoped
+// to every repo in org. Prefer this over RepoTokenSource when a token will be
+// reused across several repos in the same org, since it saves minting one
+// token per repo.
+func (a *App) OrgTokenSource(ctx context.Context, org string) (oauth2.TokenSource, error) {
+	return a.RepoTokenSource(ctx, org, "")
+}
+
+// RepoTokenSource returns a token source minting installation tokens scoped
+// to org/repo, resolving org's installation ID first (see LookupInstallID).
+func (a *App) RepoTokenSource(ctx context.Context, org, repo string) (oauth2.TokenSource, error) {
 	installID, err := a.LookupInstallID(ctx, org)
 	if err != nil {
 		return nil, err
