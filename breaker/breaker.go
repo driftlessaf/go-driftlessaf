@@ -40,13 +40,14 @@ type Breaker struct {
 	maxDelay  time.Duration
 
 	// now is injectable for deterministic tests.
-	now func() time.Time
+	now       func() time.Time
+	transport transportConfig
 
 	mu       sync.Mutex
 	circuits map[string]circuit
 }
 
-// Option configures a Breaker.
+// Option configures a Breaker and its HTTP transport integration.
 type Option func(*Breaker)
 
 // WithFailureThreshold sets the number of consecutive failures that trips a

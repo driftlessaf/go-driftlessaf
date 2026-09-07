@@ -34,6 +34,7 @@ func TestTransportClassification(t *testing.T) {
 		{"server_error_is_transient", http.StatusInternalServerError, true},
 		{"unavailable_is_transient", http.StatusServiceUnavailable, true},
 		{"rate_limit_is_transient", http.StatusTooManyRequests, true},
+		{"rekor_batch_cancel_passes_through", 499, false},
 		{"ok_passes_through", http.StatusOK, false},
 		{"not_found_passes_through", http.StatusNotFound, false},
 		{"forbidden_passes_through", http.StatusForbidden, false},
@@ -97,6 +98,34 @@ func TestTransportShortCircuits(t *testing.T) {
 	require.True(t, errors.As(err, &berr))
 	require.Zero(t, berr.StatusCode, "open circuit should not issue a request")
 	require.EqualValues(t, DefaultFailureThreshold, requests.Load())
+}
+
+func TestTransportFilter(t *testing.T) {
+	var guardedRequests atomic.Int64
+	var otherRequests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/guarded" {
+			guardedRequests.Add(1)
+		} else {
+			otherRequests.Add(1)
+		}
+		w.WriteHeader(499)
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Transport: NewTransport(nil,
+		WithRequestFilter(func(r *http.Request) bool { return r.URL.Path == "/guarded" }),
+		WithAdditionalResponseFailure(func(_ *http.Request, resp *http.Response) bool { return resp.StatusCode == 499 }),
+		WithFailureThreshold(1),
+	)}
+	require.Error(t, get(t, client, srv.URL+"/guarded"))
+	require.Error(t, get(t, client, srv.URL+"/guarded"))
+	require.EqualValues(t, 1, guardedRequests.Load(), "second guarded request should be short-circuited")
+
+	resp, err := client.Get(srv.URL + "/other")
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.EqualValues(t, 1, otherRequests.Load(), "unmatched request should pass through")
 }
 
 func TestTransportSuccessCloses(t *testing.T) {

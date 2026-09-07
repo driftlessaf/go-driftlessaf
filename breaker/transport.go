@@ -54,6 +54,23 @@ type Transport struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
+type transportConfig struct {
+	filter            func(*http.Request) bool
+	additionalFailure func(*http.Request, *http.Response) bool
+}
+
+// WithRequestFilter limits circuit breaking to requests accepted by filter.
+// Rejected requests pass directly to the base transport.
+func WithRequestFilter(filter func(*http.Request) bool) Option {
+	return func(b *Breaker) { b.transport.filter = filter }
+}
+
+// WithAdditionalResponseFailure marks matching responses as failures in
+// addition to the default 429 and 5xx set.
+func WithAdditionalResponseFailure(match func(*http.Request, *http.Response) bool) Option {
+	return func(b *Breaker) { b.transport.additionalFailure = match }
+}
+
 // NewTransport returns a Transport wrapping base (http.DefaultTransport when
 // nil) with a Breaker configured by opts.
 func NewTransport(base http.RoundTripper, opts ...Option) *Transport {
@@ -65,6 +82,10 @@ func NewTransport(base http.RoundTripper, opts ...Option) *Transport {
 
 // RoundTrip implements http.RoundTripper.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.breaker.transport.filter != nil && !t.breaker.transport.filter(req) {
+		return t.base.RoundTrip(req)
+	}
+
 	host := req.URL.Host
 	if ok, retryAfter := t.breaker.Allow(host); !ok {
 		if req.Body != nil {
@@ -77,7 +98,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, &Error{Key: host, RetryAfter: t.breaker.RecordFailure(host), Err: err}
 	}
-	if resp.StatusCode >= http.StatusInternalServerError || resp.StatusCode == http.StatusTooManyRequests {
+	if resp.StatusCode >= http.StatusInternalServerError || resp.StatusCode == http.StatusTooManyRequests ||
+		t.breaker.transport.additionalFailure != nil && t.breaker.transport.additionalFailure(req, resp) {
 		resp.Body.Close()
 		return nil, &Error{Key: host, StatusCode: resp.StatusCode, RetryAfter: t.breaker.RecordFailure(host)}
 	}

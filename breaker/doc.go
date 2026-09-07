@@ -12,6 +12,8 @@ SPDX-License-Identifier: Apache-2.0
 // the network — granting a single half-open probe per backoff window — so a
 // backlog of keys collapses to a trickle of probes instead of hammering an
 // unhealthy dependency. The delays suit workqueue.RequeueNotBefore floors.
+// WithRequestFilter applies this behavior only to matching requests when a
+// process-wide base transport must continue serving unrelated hosts normally.
 //
 // For non-HTTP dependencies, use a Breaker directly: gate each attempt with
 // Allow and report its outcome with RecordSuccess or RecordFailure.

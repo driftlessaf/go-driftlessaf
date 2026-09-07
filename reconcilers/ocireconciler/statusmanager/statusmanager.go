@@ -13,13 +13,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"chainguard.dev/driftlessaf/breaker"
 	"chainguard.dev/driftlessaf/reconcilers/transient"
 	"chainguard.dev/sdk/auth"
 	"github.com/chainguard-dev/clog"
@@ -75,14 +79,40 @@ func predicateTypeOf[T Predicated]() (string, error) {
 	return predicateType, nil
 }
 
-// transientRekorErrors are the Rekor failure modes known to be transient.
-// The rekor-tiles client returns untyped errors, flattening the HTTP status
-// into the message ("unexpected response: <code> <body>"), so string
-// matching is the only way to recognize them.
-var transientRekorErrors = []string{
-	"adding rekor v2 entry: unexpected response: 499",
-	"adding rekor v2 entry: unexpected response: 502",
-	"adding rekor v2 entry: unexpected response: 503 upstream connect error",
+const (
+	rekorV2EntryError              = "adding rekor v2 entry:"
+	rekorV2UnexpectedResponseError = rekorV2EntryError + " unexpected response:"
+)
+
+// isTransientRekorError recognizes retryable Rekor v2 failures. The
+// rekor-tiles client preserves wrapped network errors but flattens HTTP status
+// codes into the error message.
+func isTransientRekorError(err error) bool {
+	if err == nil || !strings.Contains(err.Error(), rekorV2EntryError) {
+		return false
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return true
+	}
+
+	idx := strings.Index(err.Error(), rekorV2UnexpectedResponseError)
+	if idx == -1 {
+		return false
+	}
+	fields := strings.Fields(err.Error()[idx+len(rekorV2UnexpectedResponseError):])
+	if len(fields) == 0 {
+		return false
+	}
+	statusCode, parseErr := strconv.Atoi(fields[0])
+	if parseErr != nil {
+		return false
+	}
+	return statusCode == 499 || statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode < 600)
 }
 
 // Status captures serialized reconciliation progress for a digest.
@@ -349,19 +379,12 @@ func (s *Session[T]) SetActualState(ctx context.Context, status *Status[T]) erro
 		Digest:    h,
 	}
 
-	// Retry temporary registry errors and, since Rekor errors are untyped,
-	// the Rekor failure modes known to be transient.
+	// Retry temporary registry errors and transient Rekor failures. A circuit
+	// breaker error already carries the workqueue backoff and must surface
+	// immediately instead of entering this short retry loop.
 	retryable := func(err error) bool {
-		if transient.Is(err) {
-			return true
-		}
-		msg := err.Error()
-		for _, s := range transientRekorErrors {
-			if strings.Contains(msg, s) {
-				return true
-			}
-		}
-		return false
+		_, hasBreakerError := errors.AsType[*breaker.Error](err)
+		return !hasBreakerError && (transient.Is(err) || isTransientRekorError(err))
 	}
 	// SkipSame short-circuits before signing when an existing bundle carries a
 	// byte-identical payload, so re-persisting an unchanged status costs a
