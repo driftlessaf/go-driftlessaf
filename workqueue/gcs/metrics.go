@@ -93,9 +93,15 @@ var (
 	)
 	mWaitLatencyFromScheduled = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "workqueue_wait_latency_from_scheduled_seconds",
-			Help:    "The duration the key waited to start from its scheduled time.",
-			Buckets: []float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960, 3600 /* 1h */, 7200 /* 2h */, 14400 /* 4h */, 28800 /* 8h */, 43200 /* 12h */, 86400 /* 24h */},
+			Name: "workqueue_wait_latency_from_scheduled_seconds",
+			Help: "The duration the key waited to start from its scheduled time.",
+			Buckets: append(
+				append(
+					[]float64{.25, .5, 1, 2.5, 5, 10, 20, 30, 45, 60, 120, 240, 480, 960},
+					prometheus.LinearBuckets(3600, 3600, 12 /* 1h through 12h */)...,
+				),
+				86400, // 24h
+			),
 		},
 		[]string{"service_name", "revision_name", "queue_name", "priority_class"},
 	)
