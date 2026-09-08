@@ -92,6 +92,25 @@ func TestResolveWithConfig(t *testing.T) {
 	}
 }
 
+func TestVertexMessagesConvertsClientConstructorPanic(t *testing.T) {
+	want := errors.New("Google transport setup failed")
+	_, err := vertexMessages(t.Context(), "test-project", "us-central1", func(context.Context, string, string) anthropic.Client {
+		panic(want)
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("vertexMessages() error = %v, want errors.Is(_, %v)", err, want)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = vertexMessages(ctx, "test-project", "us-central1", func(context.Context, string, string) anthropic.Client {
+		panic(want)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("vertexMessages() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestConfigFromEnv(t *testing.T) {
 	tests := []struct {
 		name    string

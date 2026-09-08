@@ -40,6 +40,7 @@ type config struct {
 }
 
 type mantleMessagesFactory func(context.Context, awsauth.Config) (anthropic.MessageService, error)
+type vertexClientFactory func(context.Context, string, string) anthropic.Client
 
 // Resolved contains the provider-specific inputs for a Claude executor.
 type Resolved struct {
@@ -105,8 +106,14 @@ func configFromEnv(ctx context.Context) (config, error) {
 func resolve(ctx context.Context, projectID, region, model string, cfg config, newMantle mantleMessagesFactory) (Resolved, error) {
 	switch cfg.backend {
 	case backendVertex:
+		messages, err := vertexMessages(ctx, projectID, region, func(ctx context.Context, projectID, region string) anthropic.Client {
+			return anthropicauth.NewClient(ctx, projectID, region, anthropicauth.Config{})
+		})
+		if err != nil {
+			return Resolved{}, fmt.Errorf("constructing Vertex Anthropic client: %w", err)
+		}
 		return Resolved{
-			Messages: anthropicauth.NewClient(ctx, projectID, region, anthropicauth.Config{}).Messages,
+			Messages: messages,
 			ModelID:  model,
 			Provider: claudeexecutor.ProviderVertex,
 		}, nil
@@ -133,6 +140,33 @@ func resolve(ctx context.Context, projectID, region, model string, cfg config, n
 	default:
 		return Resolved{}, fmt.Errorf("unsupported Claude backend %q", cfg.backend)
 	}
+}
+
+// vertexMessages confines recovery to anthropicauth's legacy Vertex client
+// constructor. The upstream Vertex option panics when Google transport setup
+// fails, while Resolve's contract reports backend construction failures as
+// errors.
+func vertexMessages(
+	ctx context.Context,
+	projectID, region string,
+	newClient vertexClientFactory,
+) (messages anthropic.MessageService, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				err = contextErr
+				return
+			}
+			switch cause := recovered.(type) {
+			case error:
+				err = fmt.Errorf("configuring Vertex Anthropic transport: %w", cause)
+			default:
+				err = fmt.Errorf("configuring Vertex Anthropic transport: %v", cause)
+			}
+		}
+	}()
+
+	return newClient(ctx, projectID, region).Messages, nil
 }
 
 func mantleModelID(model string) (string, error) {

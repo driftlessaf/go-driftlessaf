@@ -7,16 +7,18 @@ package metaagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
+	sdkoption "github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"golang.org/x/oauth2"
@@ -33,6 +35,7 @@ type vertexConfig struct {
 
 type vertexGoogleGenAIClientFactory func(context.Context, *genai.ClientConfig) (*genai.Client, error)
 type vertexAnthropicMessagesFactory func(context.Context, string, string) (anthropic.MessageService, error)
+type vertexAnthropicCredentialsOptionFactory func(context.Context, string, string, *google.Credentials) sdkoption.RequestOption
 type vertexTokenSourceFactory func(context.Context, ...string) (oauth2.TokenSource, error)
 
 // NewVertexGoogleGenAIAdapter constructs a Vertex AI adapter for the Google
@@ -96,8 +99,57 @@ func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, req
 // while constructing the typed Messages service.
 func NewVertexAnthropicMessagesAdapter(projectID, region string) (AnthropicMessagesAdapter, error) {
 	return newVertexAnthropicMessagesAdapter(projectID, region, func(ctx context.Context, projectID, region string) (anthropic.MessageService, error) {
-		return anthropicauth.NewClient(ctx, projectID, region, anthropicauth.Config{}).Messages, nil
+		credentials, err := google.FindDefaultCredentials(ctx, vertexCloudPlatformScope)
+		if err != nil {
+			return anthropic.MessageService{}, fmt.Errorf("finding Google Application Default Credentials: %w", err)
+		}
+		if credentials == nil {
+			return anthropic.MessageService{}, errors.New("finding Google Application Default Credentials: returned nil credentials")
+		}
+		return newVertexAnthropicMessageService(ctx, projectID, region, credentials, vertex.WithCredentials)
 	})
+}
+
+// newVertexAnthropicMessageService confines recovery to the SDK constructor.
+// vertex.WithCredentials panics when Google transport construction fails even
+// though this adapter's public constructor reports setup failures as errors.
+func newVertexAnthropicMessageService(
+	ctx context.Context,
+	projectID, region string,
+	credentials *google.Credentials,
+	withCredentials vertexAnthropicCredentialsOptionFactory,
+) (anthropic.MessageService, error) {
+	if credentials == nil {
+		return anthropic.MessageService{}, errors.New("vertex anthropic credentials are nil")
+	}
+	if withCredentials == nil {
+		return anthropic.MessageService{}, errors.New("vertex anthropic credentials option factory is nil")
+	}
+
+	credentialsOption, err := func() (option sdkoption.RequestOption, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if contextErr := ctx.Err(); contextErr != nil {
+					err = contextErr
+					return
+				}
+				switch cause := recovered.(type) {
+				case error:
+					err = fmt.Errorf("configuring Vertex Anthropic transport: %w", cause)
+				default:
+					err = fmt.Errorf("configuring Vertex Anthropic transport: %v", cause)
+				}
+			}
+		}()
+		return withCredentials(ctx, region, projectID, credentials), nil
+	}()
+	if err != nil {
+		return anthropic.MessageService{}, err
+	}
+
+	return anthropic.NewClient(
+		credentialsOption,
+	).Messages, nil
 }
 
 func newVertexAnthropicMessagesAdapter(projectID, region string, newMessages vertexAnthropicMessagesFactory) (AnthropicMessagesAdapter, error) {

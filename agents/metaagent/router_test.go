@@ -18,8 +18,10 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/anthropics/anthropic-sdk-go"
+	sdkoption "github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/openai/openai-go"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"
 )
 
@@ -551,6 +553,63 @@ func TestVertexGoogleGenAIRequestTimeoutMustBePositive(t *testing.T) {
 		if _, err := NewVertexGoogleGenAIAdapterWithRequestTimeout("test-project", "us-central1", timeout); !errors.Is(err, ErrInvalidAdapter) {
 			t.Errorf("NewVertexGoogleGenAIAdapterWithRequestTimeout(timeout=%s) error = %v, want ErrInvalidAdapter", timeout, err)
 		}
+	}
+}
+
+func TestVertexAnthropicMessagesAdapterReturnsCredentialErrors(t *testing.T) {
+	t.Parallel()
+
+	route := routedTestRoute(
+		modelrouter.Selection{Provider: modelrouter.ProviderVertexAI, LogicalModel: "claude-sonnet-5"},
+		modelrouter.ProtocolAnthropicMessages,
+		"publishers/anthropic/models/claude-sonnet-5@20260801",
+	)
+	plan, err := mustRouteRegistry(t, route).Resolve(route.Selection)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	want := errors.New("ADC unavailable")
+	adapter, err := newVertexAnthropicMessagesAdapter("test-project", "us-central1", func(context.Context, string, string) (anthropic.MessageService, error) {
+		return anthropic.MessageService{}, want
+	})
+	if err != nil {
+		t.Fatalf("newVertexAnthropicMessagesAdapter: %v", err)
+	}
+	if _, err := adapter(t.Context(), plan); !errors.Is(err, want) {
+		t.Fatalf("adapter error = %v, want errors.Is(_, %v)", err, want)
+	}
+}
+
+func TestVertexAnthropicMessageServiceConvertsSDKConstructorPanic(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("Google transport setup failed")
+	_, err := newVertexAnthropicMessageService(
+		t.Context(),
+		"test-project",
+		"us-central1",
+		&google.Credentials{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"})},
+		func(context.Context, string, string, *google.Credentials) sdkoption.RequestOption {
+			panic(want)
+		},
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("newVertexAnthropicMessageService() error = %v, want errors.Is(_, %v)", err, want)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = newVertexAnthropicMessageService(
+		ctx,
+		"test-project",
+		"us-central1",
+		&google.Credentials{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"})},
+		func(context.Context, string, string, *google.Credentials) sdkoption.RequestOption {
+			panic(want)
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("newVertexAnthropicMessageService() error = %v, want context.Canceled", err)
 	}
 }
 
