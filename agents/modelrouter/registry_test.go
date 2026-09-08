@@ -174,9 +174,9 @@ func TestNewRegistryRejectsInvalidRoutesDeterministically(t *testing.T) {
 		},
 		{
 			name:    "unknown logical model",
-			route:   newRoute(modelrouter.ProviderVertexAI, "gpt-4o", modelrouter.ProtocolOpenAIChatCompletions, "gpt-4o"),
+			route:   newRoute(modelrouter.ProviderVertexAI, "unrecognized-model", modelrouter.ProtocolOpenAIChatCompletions, "gpt-4o"),
 			wantErr: modelrouter.ErrInvalidRoute,
-			want:    `route 0: invalid route: logical model "gpt-4o" isn't recognized by agents/model`,
+			want:    `route 0: invalid route: logical model "unrecognized-model" isn't recognized by agents/model`,
 		},
 		{
 			name:    "protocol doesn't match model",

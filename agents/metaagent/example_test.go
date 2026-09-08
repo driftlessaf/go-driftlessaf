@@ -259,6 +259,26 @@ func ExampleNewBedrockAnthropicMessagesAdapter() {
 	_ = adapter
 }
 
+// ExampleNewBedrockOpenAIChatCompletionsAdapter constructs an adapter without
+// loading credentials or invoking a model. Register it with a test-only route
+// after independently verifying the account's provider model ID and access.
+func ExampleNewBedrockOpenAIChatCompletionsAdapter() {
+	adapter, err := metaagent.NewBedrockOpenAIChatCompletionsAdapter(awsauth.Config{
+		Region:  "us-east-1",
+		Profile: "engineering-sso",
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	_, err = metaagent.NewOpenAIChatCompletionsAdapterRegistry(metaagent.OpenAIChatCompletionsRegistration{
+		Provider: modelrouter.ProviderAWSBedrock,
+		Adapter:  adapter,
+	})
+	fmt.Println(err)
+	// Output: <nil>
+}
+
 // ExampleAgent_Execute demonstrates calling Execute on an Agent to run a request.
 // Execute sends the request to the model and returns the structured response.
 func ExampleAgent_Execute() {

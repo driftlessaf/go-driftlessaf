@@ -8,6 +8,7 @@ package metaagent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -38,9 +39,13 @@ func New[Req promptbuilder.Bindable, Resp, CB any](
 	case model.BackendClaude:
 		return newClaudeAgent[Req, Resp, CB](ctx, projectID, region, modelName, config)
 	case model.BackendOpenAICompat:
+		// Bare GPT logical IDs require an explicit route, not an implicit
+		// Vertex AI endpoint in this compatibility constructor.
+		if !strings.Contains(modelName, "/") {
+			break
+		}
 		// publisher/model format routes to the Vertex AI OpenAI-compatible endpoint
 		return newOpenAICompatAgent[Req, Resp, CB](ctx, projectID, region, modelName, config)
-	default:
-		return nil, fmt.Errorf("unsupported model: %s (expected gemini-*, claude-*, or publisher/model format)", modelName)
 	}
+	return nil, fmt.Errorf("unsupported model: %s (expected gemini-*, claude-*, or publisher/model format)", modelName)
 }

@@ -23,7 +23,7 @@ const (
 	// BackendGemini covers ids with the "gemini-" prefix, served by the
 	// Google Generative AI API.
 	BackendGemini Backend = "gemini"
-	// BackendOpenAICompat covers "publisher/model" ids, served by an
+	// BackendOpenAICompat covers "gpt-*" and "publisher/model" ids, served by an
 	// OpenAI-compatible endpoint.
 	BackendOpenAICompat Backend = "openai-compat"
 	// BackendUnknown is the zero value, for ids that match no known routing
@@ -132,7 +132,7 @@ func Resolve(id string) Info {
 		return claudeInfo(strings.TrimPrefix(id, "anthropic."))
 	case strings.HasPrefix(lower, "claude-"):
 		return claudeInfo(id)
-	case strings.Contains(id, "/"):
+	case strings.HasPrefix(lower, "gpt-"), strings.Contains(id, "/"):
 		// The executor clamps xhigh/max onto the provider's "high"
 		// reasoning_effort, so the whole scale is usable.
 		return Info{

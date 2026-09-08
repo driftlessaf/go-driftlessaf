@@ -64,7 +64,10 @@ func TestResolve(t *testing.T) {
 		{"anthropic.claude-sonnet-4-6", claudePreXHigh},
 		{"meta/llama-3.3-70b-instruct-maas", openAICompat},
 		{"mistralai/mistral-large", openAICompat},
-		{"gpt-4o", model.Info{}},
+		{"gpt-4o", openAICompat},
+		{"gpt-5.6-terra", openAICompat},
+		{"GPT-5.6-TERRA", openAICompat},
+		{"us.openai.gpt-5.6-terra", model.Info{}},
 		{"text-bison", model.Info{}},
 		{"", model.Info{}},
 		// Backend routing is case-insensitive, matching the metaagent
@@ -156,7 +159,7 @@ func TestInfoSupportsEffort(t *testing.T) {
 		{"gemini-2.5-flash", effort.Max, true},
 		{"gemini-3-pro-preview", effort.XHigh, true},
 		{"meta/llama-3.3-70b-instruct-maas", effort.XHigh, true},
-		{"gpt-4o", effort.Low, false},
+		{"gpt-5.6-terra", effort.Low, true},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s@%s", tt.id, tt.level), func(t *testing.T) {
