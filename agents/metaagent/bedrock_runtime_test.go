@@ -21,6 +21,7 @@ func TestBedrockRuntimeValidationBeforeCredentials(t *testing.T) {
 	for _, protocol := range []modelrouter.Protocol{
 		modelrouter.ProtocolOpenAIChatCompletions,
 		modelrouter.ProtocolOpenAIResponses,
+		modelrouter.ProtocolAnthropicMessages,
 	} {
 		t.Run(string(protocol), func(t *testing.T) {
 			t.Parallel()
@@ -32,6 +33,7 @@ func TestBedrockRuntimeValidationBeforeCredentials(t *testing.T) {
 				{"valid plan", func(*modelrouter.Route) {}, true},
 				{"wrong provider", func(r *modelrouter.Route) { r.Selection.Provider = modelrouter.ProviderVertexAI }, false},
 				{"wrong protocol", func(r *modelrouter.Route) {
+					r.Selection.LogicalModel = "gpt-5.6-terra"
 					if protocol == modelrouter.ProtocolOpenAIResponses {
 						r.Protocol = modelrouter.ProtocolOpenAIChatCompletions
 					} else {
@@ -52,7 +54,8 @@ func TestBedrockRuntimeValidationBeforeCredentials(t *testing.T) {
 					}
 					cfg := awsauth.Config{Region: "us-west-2"}
 					var bind func(context.Context, modelrouter.Plan) error
-					if protocol == modelrouter.ProtocolOpenAIResponses {
+					switch protocol {
+					case modelrouter.ProtocolOpenAIResponses:
 						adapter, err := newBedrockOpenAIResponsesAdapter(cfg, factory)
 						if err != nil {
 							t.Fatal(err)
@@ -61,7 +64,16 @@ func TestBedrockRuntimeValidationBeforeCredentials(t *testing.T) {
 							_, err := adapter(ctx, plan)
 							return err
 						}
-					} else {
+					case modelrouter.ProtocolAnthropicMessages:
+						adapter, err := newBedrockRuntimeAnthropicMessagesAdapter(cfg, factory)
+						if err != nil {
+							t.Fatal(err)
+						}
+						bind = func(ctx context.Context, plan modelrouter.Plan) error {
+							_, err := adapter(ctx, plan)
+							return err
+						}
+					default:
 						adapter, err := newBedrockOpenAIChatCompletionsAdapter(cfg, factory)
 						if err != nil {
 							t.Fatal(err)
@@ -78,6 +90,9 @@ func TestBedrockRuntimeValidationBeforeCredentials(t *testing.T) {
 					if test.edit != nil {
 						route := bedrockChatRoute()
 						route.Protocol = protocol
+						if protocol == modelrouter.ProtocolAnthropicMessages {
+							route.Selection.LogicalModel = "claude-sonnet-5"
+						}
 						test.edit(&route)
 						plan = bedrockChatPlan(t, route)
 					}
@@ -130,7 +145,8 @@ func TestBedrockRuntimeAdapterRegions(t *testing.T) {
 			cfg := awsauth.Config{Region: test.region}
 			_, chatErr := NewBedrockOpenAIChatCompletionsAdapter(cfg)
 			_, responsesErr := NewBedrockOpenAIResponsesAdapter(cfg)
-			for name, err := range map[string]error{"chat": chatErr, "responses": responsesErr} {
+			_, claudeErr := NewBedrockRuntimeAnthropicMessagesAdapter(cfg)
+			for name, err := range map[string]error{"chat": chatErr, "responses": responsesErr, "claude": claudeErr} {
 				if test.valid {
 					if err != nil {
 						t.Errorf("%s constructor: got = %v, want = nil", name, err)

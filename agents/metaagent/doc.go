@@ -29,6 +29,9 @@ SPDX-License-Identifier: Apache-2.0
 // NewBedrockOpenAIChatCompletionsAdapter binds Chat Completions to the regional
 // Bedrock Runtime endpoint through the shared SigV4 transport. Bare "gpt-*"
 // logical IDs require an explicit route; New does not infer a provider for them.
+// NewBedrockRuntimeAnthropicMessagesAdapter binds Anthropic Messages through
+// the same Runtime transport. NewBedrockAnthropicMessagesAdapter continues to
+// use Mantle; choosing Runtime requires explicitly registering the new adapter.
 // Routers and route resolutions are safe for concurrent use when their
 // registered adapters are safe for concurrent use.
 //
