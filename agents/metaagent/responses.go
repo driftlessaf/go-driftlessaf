@@ -118,10 +118,20 @@ type responsesAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 
 func newRoutedResponsesAgent[Req promptbuilder.Bindable, Resp, CB any](binding OpenAIResponsesBinding, config Config[Resp, CB]) (Agent[Req, Resp, CB], error) {
 	executor, err := responsesexecutor.New[Req](binding.Responses(), responsesexecutor.Config[Resp]{
-		Model: binding.Plan().ProviderModelID(), Attribution: routedAttribution(binding.Plan()),
-		UserPrompt: config.UserPrompt, SystemInstructions: config.SystemInstructions, UserPromptSuffix: config.UserPromptSuffix,
-		MaxTurns: config.MaxTurns, MaxTokens: config.MaxTokens, ToolCallConcurrency: config.ToolCallConcurrency, Effort: config.Effort,
-		Submit: submitOptions(config), ResultValidators: config.ResultValidators, ResourceLabels: binding.ResourceLabels(),
+		Model:               binding.Plan().ProviderModelID(),
+		Attribution:         routedAttribution(binding.Plan()),
+		UserPrompt:          config.UserPrompt,
+		SystemInstructions:  config.SystemInstructions,
+		UserPromptSuffix:    config.UserPromptSuffix,
+		MaxTurns:            config.MaxTurns,
+		MaxTokens:           config.MaxTokens,
+		ToolCallConcurrency: config.ToolCallConcurrency,
+		Effort:              config.Effort,
+		Submit:              submitOptions(config),
+		ResultValidators:    config.ResultValidators,
+		ResourceLabels:      binding.ResourceLabels(),
+		RequestTimeout:      config.ResponsesRequestTimeout,
+		ExecutionTimeout:    config.ResponsesExecutionTimeout,
 	})
 	if err != nil {
 		return nil, err

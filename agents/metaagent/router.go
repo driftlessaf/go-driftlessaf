@@ -183,6 +183,9 @@ func NewRouted[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, err
 	}
 	plan := resolution.Plan()
+	if plan.Protocol() != modelrouter.ProtocolOpenAIResponses && (config.ResponsesRequestTimeout != 0 || config.ResponsesExecutionTimeout != 0) {
+		return nil, errors.New("creating routed meta-agent: Responses timeouts require openai-responses")
+	}
 	requirements := requirementsForConfig(plan.Protocol(), config)
 	// Preserve the legacy NewRouted validation order: route capabilities fail
 	// before protocol-specific config and submit-schema validation. The typed
@@ -251,6 +254,9 @@ func requirementsForConfig[Resp, CB any](protocol modelrouter.Protocol, config C
 }
 
 func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
+	if config.ResponsesRequestTimeout < 0 || config.ResponsesExecutionTimeout < 0 {
+		return errors.New("creating routed meta-agent: Responses timeouts cannot be negative")
+	}
 	if config.UserPrompt == nil {
 		return errors.New("creating routed meta-agent: prompt cannot be nil")
 	}

@@ -28,8 +28,12 @@ in a parallel batch. Only an accepted, validated submission commits a result.
 
 - The defaults are 200 turns, 32,768 output tokens per request, and 10 concurrent
   tools. Set concurrency to 1 when tool handlers share unsynchronized state.
-- Each request has a three-minute deadline; each execution has a 30-minute
-  deadline. A shorter caller deadline takes precedence.
+- Requests inherit the execution deadline by default. Set `RequestTimeout` to
+  bound each streaming HTTP attempt, or `ExecutionTimeout` to change the
+  30-minute conversation deadline. Neither setting extends a shorter caller
+  deadline. Negative durations are rejected. These are total, not idle, timeouts.
+  For routed agents, use `metaagent.Config.ResponsesRequestTimeout` and
+  `ResponsesExecutionTimeout`; other routed protocols reject these settings.
 - Requests and individual tool results are limited to 8 MiB. Streams are limited
   to 16 MiB and 32,768 events; completed payloads are limited to 8 MiB.
 - A completed response can contain at most 128 function calls. Repeated call IDs
@@ -40,6 +44,12 @@ in a parallel batch. Only an accepted, validated submission commits a result.
 - HTTP 429, 500, 502, 503, and 504 responses can retry twice before a stream starts.
   Partial streams don't retry: completion and usage may be unknown. The SDK's
   own retries are disabled. Error diagnostics omit provider bodies and headers.
+
+Choose timeout budgets before comparing models, allowing for reasoning and the
+configured output-token limit. Deadline expiration remains an execution error,
+not a quality score or a reason to replay a potentially billable partial stream.
+The 8 MiB request cap includes the entire replayed conversation and encrypted
+reasoning. Exceeding it is also a non-retryable execution-limit failure.
 
 Low, medium, and high reasoning effort are sent directly. XHigh and Max clamp
 to high, matching the existing OpenAI-compatible executor's supported scale.
@@ -52,8 +62,11 @@ Turn traces include the route's provider, logical model, protocol, provider mode
 ID, input/output tokens, cache-read tokens, and reasoning tokens. Reasoning is
 already included in output tokens; cache reads are already included in input
 tokens. Don't add either subset again when calculating totals. The nullable
-`turns.reasoning_tokens` schema addition must be deployed for BigQuery to retain
-that field. This change doesn't add model prices or dashboard charts.
+`turns.reasoning_tokens` schema addition must be deployed before the first
+Responses run. A recorder that rejects unknown fields can reject the entire
+trace row if its table still uses the older schema. Verify the deployed table
+schema before collecting evaluation results. This change doesn't add model
+prices or dashboard charts.
 
 The HTTP/SSE fixture tests exercise the actual SDK decoder, native continuation,
 reasoning-state replay, parallel terminal ordering, schema rejection, malformed

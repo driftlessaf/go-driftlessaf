@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 package metaagent
 
 import (
+	"time"
+
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -44,6 +46,16 @@ type Config[Resp, CB any] struct {
 	// MaxTurns sets the maximum number of conversation turns (LLM round-trips)
 	// before the executor aborts. Zero means use the executor's default.
 	MaxTurns int
+
+	// ResponsesRequestTimeout bounds each HTTP attempt on a NewRouted
+	// openai-responses agent. Zero inherits the execution deadline.
+	ResponsesRequestTimeout time.Duration
+
+	// ResponsesExecutionTimeout bounds the entire NewRouted openai-responses
+	// conversation. Zero selects 30 minutes; a shorter caller deadline wins.
+	// These timeout fields do not configure the compatibility New path.
+	// NewRouted rejects nonzero Responses timeouts on other protocols.
+	ResponsesExecutionTimeout time.Duration
 
 	// ToolCallConcurrency bounds how many of a single turn's tool calls run
 	// concurrently when the model emits more than one (parallel tool use).

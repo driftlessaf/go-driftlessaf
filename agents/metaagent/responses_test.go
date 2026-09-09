@@ -8,9 +8,13 @@ package metaagent
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/responses"
 )
@@ -23,7 +27,7 @@ func responsesRoute() modelrouter.Route {
 
 func TestResponsesRequirementsPrecedeAdapter(t *testing.T) {
 	t.Parallel()
-	for _, feature := range []string{"thinking", "suspend", "refusal", "schema"} {
+	for _, feature := range []string{"thinking", "suspend", "refusal", "schema", "request timeout", "execution timeout"} {
 		t.Run(feature, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
@@ -38,6 +42,10 @@ func TestResponsesRequirementsPrecedeAdapter(t *testing.T) {
 			router := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{OpenAIResponses: registry})
 			cfg := routedTestConfig(t)
 			switch feature {
+			case "request timeout":
+				cfg.ResponsesRequestTimeout = -time.Second
+			case "execution timeout":
+				cfg.ResponsesExecutionTimeout = -time.Second
 			case "thinking":
 				cfg.ThinkingBudget = 1024
 			case "suspend":
@@ -52,6 +60,64 @@ func TestResponsesRequirementsPrecedeAdapter(t *testing.T) {
 			}
 			if calls != 0 {
 				t.Errorf("adapter invoked %d times", calls)
+			}
+		})
+	}
+}
+
+func TestRoutedResponsesTimeouts(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"request", "execution", "other protocol"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "fixture rejection", http.StatusBadRequest)
+			}))
+			defer server.Close()
+			observed := false
+			service := responses.NewResponseService(option.WithBaseURL(server.URL), option.WithHTTPClient(server.Client()), option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+				observed = true
+				deadline, ok := r.Context().Deadline()
+				if remaining := time.Until(deadline); !ok || remaining > 10*time.Minute || remaining < 9*time.Minute {
+					t.Errorf("request deadline: got = %v, want approximately 10m", remaining)
+				}
+				return next(r)
+			}))
+			registry, err := NewOpenAIResponsesAdapterRegistry(OpenAIResponsesRegistration{
+				Provider: modelrouter.ProviderAWSBedrock,
+				Adapter: func(_ context.Context, plan modelrouter.Plan) (OpenAIResponsesBinding, error) {
+					return NewOpenAIResponsesBinding(plan, service, nil)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			route := responsesRoute()
+			cfg := routedTestConfig(t)
+			if kind == "execution" {
+				cfg.ResponsesExecutionTimeout = 10 * time.Minute
+			} else {
+				cfg.ResponsesRequestTimeout = 10 * time.Minute
+			}
+			if kind == "other protocol" {
+				route.Protocol = modelrouter.ProtocolOpenAIChatCompletions
+			}
+			router := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{OpenAIResponses: registry})
+			agent, err := NewRouted[*testRequest](t.Context(), router, route.Selection, cfg)
+			if kind == "other protocol" {
+				if err == nil || errors.Is(err, ErrAdapterNotFound) {
+					t.Fatalf("error: got = %v, want timeout rejection before binding", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agent.Execute(t.Context(), &testRequest{}, toolcall.EmptyTools{}); err == nil {
+				t.Fatal("fixture HTTP rejection was ignored")
+			}
+			if !observed {
+				t.Fatal("request middleware was not invoked")
 			}
 		})
 	}

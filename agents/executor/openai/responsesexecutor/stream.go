@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -27,6 +26,7 @@ type httpFailure struct{ status int }
 func (e *httpFailure) Error() string {
 	return fmt.Sprintf("responses request failed (HTTP %d)", e.status)
 }
+
 func statusCode(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -36,6 +36,7 @@ func statusCode(err error) int {
 	}
 	return -1
 }
+
 func retryable(err error) bool {
 	switch statusCode(err) {
 	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
@@ -89,8 +90,11 @@ func boundWire(req *http.Request, next option.MiddlewareNext) (*http.Response, e
 }
 
 func (e *executor[Request, Response]) stream(ctx context.Context, params responses.ResponseNewParams) (*responses.Response, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
+	if e.config.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.config.RequestTimeout)
+		defer cancel()
+	}
 	// Retry ownership belongs to the executor. Never replay a partially
 	// consumed stream: neither usage nor the remote completion is known.
 	stream := e.client.NewStreaming(ctx, params, option.WithMaxRetries(0), option.WithMiddleware(boundWire))

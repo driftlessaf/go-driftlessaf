@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
@@ -310,6 +311,107 @@ func TestCancellation(t *testing.T) {
 	_, err := e.Execute(ctx, request{}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRequestDeadlines(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                                                  string
+		requestTimeout, executionTimeout, callerTimeout, want time.Duration
+	}{
+		{name: "default inherits execution", want: 30 * time.Minute},
+		{name: "longer execution", executionTimeout: 45 * time.Minute, want: 45 * time.Minute},
+		{name: "explicit request", requestTimeout: 15 * time.Minute, want: 15 * time.Minute},
+		{name: "execution wins", requestTimeout: time.Hour, executionTimeout: 20 * time.Minute, want: 20 * time.Minute},
+		{name: "caller wins", callerTimeout: time.Minute, want: time.Minute},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { emit(w, submit("done", "complete")) }))
+			defer server.Close()
+			cfg := config(t)
+			cfg.RequestTimeout = tt.requestTimeout
+			cfg.ExecutionTimeout = tt.executionTimeout
+			observed := false
+			service := responses.NewResponseService(option.WithBaseURL(server.URL), option.WithHTTPClient(server.Client()), option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+				observed = true
+				deadline, ok := r.Context().Deadline()
+				if remaining := time.Until(deadline); !ok || remaining > tt.want || remaining < tt.want-time.Second {
+					t.Errorf("deadline remaining: got = %v, want approximately %v", remaining, tt.want)
+				}
+				return next(r)
+			}))
+			e, err := New[request](service, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			if tt.callerTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.callerTimeout)
+				defer cancel()
+			}
+			if _, err := e.Execute(ctx, request{}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !observed {
+				t.Fatal("request middleware was not invoked")
+			}
+		})
+	}
+}
+
+func TestTimeoutDoesNotReplayPartialStream(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"request", "execution", "caller"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			cfg := config(t)
+			ctx := t.Context()
+			switch kind {
+			case "request":
+				cfg.RequestTimeout = time.Second
+			case "execution":
+				cfg.ExecutionTimeout = time.Second
+			case "caller":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Second)
+				defer cancel()
+			}
+			var requests atomic.Int32
+			e := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"partial\",\"status\":\"in_progress\"}}\n\n")
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}, cfg)
+			if _, err := e.Execute(ctx, request{}, nil); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error: got = %v, want DeadlineExceeded", err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Errorf("requests: got = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestNegativeTimeouts(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"request", "execution"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			cfg := config(t)
+			if kind == "request" {
+				cfg.RequestTimeout = -time.Second
+			} else {
+				cfg.ExecutionTimeout = -time.Second
+			}
+			if _, err := New[request](responses.ResponseService{}, cfg); err == nil {
+				t.Fatal("negative timeout accepted")
+			}
+		})
 	}
 }
 

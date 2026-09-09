@@ -7,6 +7,7 @@ package responsesexecutor_test
 
 import (
 	"fmt"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/openai/responsesexecutor"
@@ -33,6 +34,8 @@ func ExampleNew() {
 		Model: "us.openai.gpt-5.6-sol", UserPrompt: prompt,
 		Attribution: agenttrace.Attribution{ProviderName: "aws.bedrock", System: "aws.bedrock", LogicalModel: "gpt-5.6-sol", Protocol: "openai-responses"},
 		MaxTurns:    5, MaxTokens: 2048, ToolCallConcurrency: 1,
+		RequestTimeout:   15 * time.Minute,
+		ExecutionTimeout: time.Hour,
 	})
 	fmt.Println(err)
 	// Output: <nil>

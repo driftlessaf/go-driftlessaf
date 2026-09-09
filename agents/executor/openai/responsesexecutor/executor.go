@@ -37,15 +37,26 @@ import (
 // Concurrent tools must synchronize shared state themselves. Reasoning and cache
 // tokens are subsets of output and input tokens, respectively, not extra usage.
 type Config[Response any] struct {
-	Model                                            string
-	Attribution                                      agenttrace.Attribution
-	UserPrompt, SystemInstructions, UserPromptSuffix *promptbuilder.Prompt
-	MaxTurns, ToolCallConcurrency                    int
-	MaxTokens                                        int64
-	Effort                                           effort.Level
-	Submit                                           submitresult.Options[Response]
-	ResultValidators                                 []callbacks.ResultValidator[Response]
-	ResourceLabels                                   map[string]string
+	Model               string
+	Attribution         agenttrace.Attribution
+	UserPrompt          *promptbuilder.Prompt
+	SystemInstructions  *promptbuilder.Prompt
+	UserPromptSuffix    *promptbuilder.Prompt
+	MaxTurns            int
+	ToolCallConcurrency int
+	MaxTokens           int64
+	Effort              effort.Level
+	Submit              submitresult.Options[Response]
+	ResultValidators    []callbacks.ResultValidator[Response]
+	ResourceLabels      map[string]string
+
+	// RequestTimeout bounds each streaming HTTP attempt. Zero inherits the
+	// execution deadline. This is a total timeout, not an idle timeout.
+	RequestTimeout time.Duration
+
+	// ExecutionTimeout bounds the conversation, including tools and retries.
+	// Zero selects 30 minutes. A shorter caller deadline always wins.
+	ExecutionTimeout time.Duration
 }
 
 // Interface executes a native Responses conversation with provider-neutral tools.
@@ -75,6 +86,9 @@ func New[Request promptbuilder.Bindable, Response any](client responses.Response
 	if cfg.MaxTurns < 0 || cfg.ToolCallConcurrency < 0 || cfg.MaxTokens < 0 {
 		return nil, errors.New("responses limits cannot be negative")
 	}
+	if cfg.RequestTimeout < 0 || cfg.ExecutionTimeout < 0 {
+		return nil, errors.New("responses timeouts cannot be negative")
+	}
 	if cfg.Effort != "" {
 		if err := cfg.Effort.Validate(); err != nil {
 			return nil, err
@@ -88,20 +102,25 @@ func New[Request promptbuilder.Bindable, Response any](client responses.Response
 	cfg.MaxTurns = cmp.Or(cfg.MaxTurns, 200)
 	cfg.MaxTokens = cmp.Or(cfg.MaxTokens, int64(32768))
 	cfg.ToolCallConcurrency = cmp.Or(cfg.ToolCallConcurrency, 10)
+	cfg.ExecutionTimeout = cmp.Or(cfg.ExecutionTimeout, 30*time.Minute)
 	cfg.ResultValidators = append([]callbacks.ResultValidator[Response]{schema.ResultValidator[Response]()}, cfg.ResultValidators...)
 	cfg.ResourceLabels = execshared.DefaultResourceLabels(cfg.ResourceLabels)
 	submit, err := submitresult.ResponsesTool(cfg.Submit)
 	if err != nil {
 		return nil, err
 	}
-	return &executor[Request, Response]{client: client, config: cfg, submit: submit,
-		recorder: telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), cfg.Model, cfg.Attribution.ProviderName, cfg.ResourceLabels, statusCode)}, nil
+	return &executor[Request, Response]{
+		client:   client,
+		config:   cfg,
+		submit:   submit,
+		recorder: telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), cfg.Model, cfg.Attribution.ProviderName, cfg.ResourceLabels, statusCode),
+	}, nil
 }
 
 func (e *executor[Request, Response]) Execute(ctx context.Context, request Request, tools map[string]toolcall.Tool[Response]) (response Response, err error) {
 	// A caller's shorter deadline still wins. A provider that stops sending
 	// events cannot leave a run alive indefinitely.
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, e.config.ExecutionTimeout)
 	defer cancel()
 	bound, err := request.Bind(e.config.UserPrompt)
 	if err != nil {
@@ -122,10 +141,13 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 		return response, err
 	}
 	params := responses.ResponseNewParams{
-		Model: e.config.Model, Store: param.NewOpt(false),
-		MaxOutputTokens: param.NewOpt(e.config.MaxTokens), ParallelToolCalls: param.NewOpt(true),
-		Include: []responses.ResponseIncludable{"reasoning.encrypted_content"}, Tools: defs,
-		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: responses.ResponseInputParam{responses.ResponseInputItemParamOfMessage(prompt, "user")}},
+		Model:             e.config.Model,
+		Store:             param.NewOpt(false),
+		MaxOutputTokens:   param.NewOpt(e.config.MaxTokens),
+		ParallelToolCalls: param.NewOpt(true),
+		Include:           []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
+		Tools:             defs,
+		Input:             responses.ResponseNewParamsInputUnion{OfInputItemList: responses.ResponseInputParam{responses.ResponseInputItemParamOfMessage(prompt, "user")}},
 	}
 	if e.config.SystemInstructions != nil {
 		instructions, err := e.config.SystemInstructions.Build()
