@@ -201,8 +201,9 @@ func isAWSRegion(region string) bool {
 }
 
 func validateAnthropicDirectPlan(plan modelrouter.Plan) error {
-	return validateClaudeProviderPlan(
+	return validateProviderPlan(
 		plan,
+		modelrouter.ProtocolAnthropicMessages,
 		modelrouter.ProviderAnthropic,
 		agenttrace.SystemAnthropic,
 		agenttrace.SystemAnthropic,
@@ -210,29 +211,11 @@ func validateAnthropicDirectPlan(plan modelrouter.Plan) error {
 }
 
 func validateBedrockPlan(plan modelrouter.Plan) error {
-	return validateClaudeProviderPlan(
+	return validateProviderPlan(
 		plan,
+		modelrouter.ProtocolAnthropicMessages,
 		modelrouter.ProviderAWSBedrock,
 		agenttrace.SystemBedrock,
 		agenttrace.SystemBedrock,
 	)
-}
-
-func validateClaudeProviderPlan(
-	plan modelrouter.Plan,
-	provider modelrouter.Provider,
-	providerName, legacySystem string,
-) error {
-	if err := validateBindingPlan(plan, modelrouter.ProtocolAnthropicMessages); err != nil {
-		return err
-	}
-	if plan.Provider() != provider {
-		return fmt.Errorf("%w: %s adapter received provider %q", ErrInvalidBinding, provider, plan.Provider())
-	}
-	attribution := plan.Attribution()
-	if attribution.ProviderName != providerName || attribution.LegacySystem != legacySystem {
-		return fmt.Errorf("%w: %s route attribution must use provider name %q and legacy system %q, got %q and %q",
-			ErrInvalidBinding, provider, providerName, legacySystem, attribution.ProviderName, attribution.LegacySystem)
-	}
-	return nil
 }

@@ -7,6 +7,7 @@ package bedrockruntime_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +15,14 @@ import (
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 )
+
+func ExampleValidRegion() {
+	fmt.Println(bedrockruntime.ValidRegion("us-west-2"))
+	fmt.Println(bedrockruntime.ValidRegion("us-gov-west-1"))
+	// Output:
+	// true
+	// false
+}
 
 func ExampleNew() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

@@ -58,7 +58,7 @@ var _ Client = (*client)(nil)
 // New validates cfg and binds its refreshable credential provider to a client.
 // It does not invoke a model. Credential discovery may contact AWS SSO or STS.
 func New(ctx context.Context, cfg awsauth.Config) (Client, error) {
-	if !validRegion(cfg.Region) {
+	if !ValidRegion(cfg.Region) {
 		return nil, errors.New("bedrock runtime: invalid or unsupported region")
 	}
 	awsConfig, err := cfg.LoadAWSConfig(privateTraceContext{ctx})
@@ -82,7 +82,7 @@ func New(ctx context.Context, cfg awsauth.Config) (Client, error) {
 }
 
 func newClient(cfg aws.Config, transport http.RoundTripper, now func() time.Time) (*client, error) {
-	if !validRegion(cfg.Region) || cfg.Credentials == nil || transport == nil || now == nil {
+	if !ValidRegion(cfg.Region) || cfg.Credentials == nil || transport == nil || now == nil {
 		return nil, errors.New("bedrock runtime: invalid client configuration")
 	}
 	return &client{
@@ -91,7 +91,10 @@ func newClient(cfg aws.Config, transport http.RoundTripper, now func() time.Time
 	}, nil
 }
 
-func validRegion(region string) bool {
+// ValidRegion reports whether region has the syntax and partition supported by
+// this transport. It does not verify regional model availability or account access.
+// Adapters can use it before credential discovery.
+func ValidRegion(region string) bool {
 	return len(region) <= 63 && regionPattern.MatchString(region) &&
 		!strings.HasPrefix(region, "cn-") && !strings.HasPrefix(region, "us-gov-") &&
 		!strings.HasPrefix(region, "us-iso") && !strings.HasPrefix(region, "eu-isoe-")

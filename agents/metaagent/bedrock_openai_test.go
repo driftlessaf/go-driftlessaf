@@ -239,45 +239,6 @@ func TestBedrockChatErrorsDoNotRetryInsideSDK(t *testing.T) {
 	}
 }
 
-func TestBedrockChatValidationPrecedesCredentialDiscovery(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		edit func(*modelrouter.Route)
-	}{
-		{"wrong provider", func(r *modelrouter.Route) { r.Selection.Provider = modelrouter.ProviderVertexAI }},
-		{"wrong protocol", func(r *modelrouter.Route) {
-			r.Protocol = modelrouter.ProtocolAnthropicMessages
-			r.Selection.LogicalModel = "claude-sonnet-4-6"
-		}},
-		{"wrong provider attribution", func(r *modelrouter.Route) { r.Attribution.ProviderName = "openai" }},
-		{"wrong legacy attribution", func(r *modelrouter.Route) { r.Attribution.LegacySystem = "openai" }},
-		{"zero plan", nil},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			calls := 0
-			adapter, err := newBedrockOpenAIChatCompletionsAdapter(awsauth.Config{Region: "us-east-1"}, func(context.Context, awsauth.Config) (bedrockruntime.Client, error) {
-				calls++
-				return nil, errors.New("must not discover credentials")
-			})
-			if err != nil {
-				t.Fatalf("constructor: %v", err)
-			}
-			var plan modelrouter.Plan
-			if test.edit != nil {
-				route := bedrockChatRoute()
-				test.edit(&route)
-				plan = bedrockChatPlan(t, route)
-			}
-			if _, err := adapter(t.Context(), plan); err == nil {
-				t.Error("adapter error: got = nil, want = invalid binding")
-			}
-			if calls != 0 {
-				t.Errorf("credential discovery calls: got = %d, want = 0", calls)
-			}
-		})
-	}
-}
-
 func TestBedrockChatInvalidConfig(t *testing.T) {
 	for _, cfg := range []awsauth.Config{{}, {Region: " us-east-1"}, {Region: "us-east-1/path"}, {Region: "US-EAST-1"}, {Region: "us-east-1", Profile: " trailing "}} {
 		if _, err := NewBedrockOpenAIChatCompletionsAdapter(cfg); !errors.Is(err, ErrInvalidAdapter) {

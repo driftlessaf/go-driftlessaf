@@ -18,6 +18,28 @@ import (
 	"google.golang.org/genai"
 )
 
+// validateProviderPlan validates the protocol, provider, and attribution before
+// provider adapters perform credential discovery or construct clients.
+func validateProviderPlan(
+	plan modelrouter.Plan,
+	protocol modelrouter.Protocol,
+	provider modelrouter.Provider,
+	providerName, legacySystem string,
+) error {
+	if err := validateBindingPlan(plan, protocol); err != nil {
+		return err
+	}
+	if plan.Provider() != provider {
+		return fmt.Errorf("%w: %s adapter received provider %q", ErrInvalidBinding, provider, plan.Provider())
+	}
+	attribution := plan.Attribution()
+	if attribution.ProviderName != providerName || attribution.LegacySystem != legacySystem {
+		return fmt.Errorf("%w: %s route attribution must use provider name %q and legacy system %q, got %q and %q",
+			ErrInvalidBinding, provider, providerName, legacySystem, attribution.ProviderName, attribution.LegacySystem)
+	}
+	return nil
+}
+
 var (
 	// ErrInvalidAdapter identifies an invalid adapter registration.
 	ErrInvalidAdapter = errors.New("invalid model adapter")

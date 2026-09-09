@@ -35,7 +35,7 @@ func NewBedrockOpenAIChatCompletionsAdapter(cfg awsauth.Config) (OpenAIChatCompl
 }
 
 func newBedrockOpenAIChatCompletionsAdapter(cfg awsauth.Config, newTransport bedrockRuntimeFactory) (OpenAIChatCompletionsAdapter, error) {
-	if cfg.Region == "" || cfg.Region != strings.TrimSpace(cfg.Region) || !isAWSRegion(cfg.Region) {
+	if !bedrockruntime.ValidRegion(cfg.Region) {
 		return nil, fmt.Errorf("%w: invalid Bedrock AWS region", ErrInvalidAdapter)
 	}
 	if cfg.Profile != strings.TrimSpace(cfg.Profile) {
@@ -45,15 +45,9 @@ func newBedrockOpenAIChatCompletionsAdapter(cfg awsauth.Config, newTransport bed
 		return nil, fmt.Errorf("%w: Bedrock Runtime factory is nil", ErrInvalidAdapter)
 	}
 	return func(ctx context.Context, plan modelrouter.Plan) (OpenAIChatCompletionsBinding, error) {
-		if err := validateBindingPlan(plan, modelrouter.ProtocolOpenAIChatCompletions); err != nil {
+		if err := validateProviderPlan(plan, modelrouter.ProtocolOpenAIChatCompletions,
+			modelrouter.ProviderAWSBedrock, agenttrace.SystemBedrock, agenttrace.SystemBedrock); err != nil {
 			return OpenAIChatCompletionsBinding{}, err
-		}
-		if plan.Provider() != modelrouter.ProviderAWSBedrock {
-			return OpenAIChatCompletionsBinding{}, fmt.Errorf("%w: Bedrock Chat Completions adapter received provider %q", ErrInvalidBinding, plan.Provider())
-		}
-		attribution := plan.Attribution()
-		if attribution.ProviderName != agenttrace.SystemBedrock || attribution.LegacySystem != agenttrace.SystemBedrock {
-			return OpenAIChatCompletionsBinding{}, fmt.Errorf("%w: Bedrock Chat Completions attribution must use the Bedrock provider and legacy system", ErrInvalidBinding)
 		}
 		transport, err := newTransport(ctx, cfg)
 		if err != nil {
