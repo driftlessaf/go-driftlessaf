@@ -47,9 +47,7 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 		payloadRaw = coerced
 	}
 
-	clog.InfoContext(ctx, "Submitting result",
-		"reasoning", reasoning,
-	)
+	clog.InfoContextf(ctx, "Submitting result")
 
 	parsed, err := parsePayload[Response](payloadRaw)
 	if err != nil {

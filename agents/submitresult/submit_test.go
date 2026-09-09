@@ -6,15 +6,39 @@ SPDX-License-Identifier: Apache-2.0
 package submitresult
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go"
 	"google.golang.org/genai"
 )
+
+func TestSubmissionDoesNotLogReasoning(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(&logs, nil)))
+	reasoning := rand.Text()
+	args := validInput()
+	args["reasoning"] = reasoning
+	opts := Options[sampleResult]{PayloadFieldName: "analysis"}
+	opts.setDefaults()
+	trace := agenttrace.NewDefaultTracer[sampleResult](ctx).NewTrace(ctx, "fixture")
+	out := buildOutcome(ctx, opts, trace, "submit", "submit_result", args)
+	if !out.Accepted || out.Reasoning != reasoning {
+		t.Fatalf("outcome: got accepted = %v, reasoning preserved = %v, want both true", out.Accepted, out.Reasoning == reasoning)
+	}
+	if strings.Contains(logs.String(), reasoning) || !strings.Contains(logs.String(), "Submitting result") {
+		t.Error("submission log: want operational message without reasoning")
+	}
+}
 
 // validInput is a well-formed {reasoning, analysis} payload for sampleResult.
 func validInput() map[string]any {

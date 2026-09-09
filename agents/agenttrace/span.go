@@ -175,6 +175,7 @@ func (lt *LLMTurn[T]) buildRecordedSpan() (RecordedSpan, bool) {
 	tokenCounts, _ := json.Marshal(map[string]int64{
 		"input":       lt.record.InputTokens,
 		"output":      lt.record.OutputTokens,
+		"reasoning":   lt.record.ReasoningTokens,
 		"cache_read":  lt.record.CacheReadTokens,
 		"cache_write": lt.record.CacheCreationTokens,
 	})

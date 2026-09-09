@@ -21,13 +21,14 @@ import (
 // ErrInvalidRouter identifies a nil or incomplete explicit router.
 var ErrInvalidRouter = errors.New("invalid model router")
 
-// AdapterRegistries groups the three protocol-fixed adapter registries. A nil
+// AdapterRegistries groups the protocol-fixed adapter registries. A nil
 // registry is allowed when an application declares no routes for that
 // protocol; selecting one of those routes returns ErrAdapterNotFound.
 type AdapterRegistries struct {
 	GoogleGenAI           *GoogleGenAIAdapterRegistry
 	AnthropicMessages     *AnthropicMessagesAdapterRegistry
 	OpenAIChatCompletions *OpenAIChatCompletionsAdapterRegistry
+	OpenAIResponses       *OpenAIResponsesAdapterRegistry
 }
 
 // Router combines an immutable route registry with explicitly constructed,
@@ -219,6 +220,12 @@ func NewRouted[Req promptbuilder.Bindable, Resp, CB any](
 			return nil, err
 		}
 		return newRoutedOpenAIChatCompletionsAgent[Req, Resp, CB](binding, config)
+	case modelrouter.ProtocolOpenAIResponses:
+		binding, err := resolution.bindOpenAIResponses(ctx, requirements)
+		if err != nil {
+			return nil, err
+		}
+		return newRoutedResponsesAgent[Req, Resp, CB](binding, config)
 
 	default:
 		// Registry resolution already validates the controlled protocol set. Keep
@@ -318,6 +325,8 @@ func validateSubmitToolForProtocol[Resp, CB any](protocol modelrouter.Protocol, 
 		_, err = submitresult.ClaudeTool(submitOptions(config))
 	case modelrouter.ProtocolOpenAIChatCompletions:
 		_, err = submitresult.OpenAITool(submitOptions(config))
+	case modelrouter.ProtocolOpenAIResponses:
+		_, err = submitresult.ResponsesTool(submitOptions(config))
 	}
 	if err != nil {
 		return fmt.Errorf("building submit tool: %w", err)

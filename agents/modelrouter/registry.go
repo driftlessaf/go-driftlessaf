@@ -223,7 +223,7 @@ func planRoute(route Route) (Plan, error) {
 		return Plan{}, fmt.Errorf("%w: logical model %q isn't recognized by agents/model", ErrInvalidRoute, route.Selection.LogicalModel)
 	}
 	wantProtocol := protocolForBackend(info.Backend)
-	if route.Protocol != wantProtocol {
+	if route.Protocol != wantProtocol && (info.Backend != model.BackendOpenAICompat || route.Protocol != ProtocolOpenAIResponses) {
 		return Plan{}, fmt.Errorf("%w: logical model %q resolves to backend %q, which requires protocol %q, not %q",
 			ErrInvalidRoute, route.Selection.LogicalModel, info.Backend, wantProtocol, route.Protocol)
 	}

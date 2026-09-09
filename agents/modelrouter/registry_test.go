@@ -122,7 +122,7 @@ func TestNewRegistryRejectsInvalidRoutesDeterministically(t *testing.T) {
 			name:    "unsupported protocol",
 			route:   newRoute(modelrouter.ProviderVertexAI, "claude-sonnet-5", "anthropic-responses", "claude-sonnet-5"),
 			wantErr: modelrouter.ErrInvalidRoute,
-			want:    `route 0: invalid route: unsupported protocol "anthropic-responses" (want "google-gen-ai", "anthropic-messages", or "openai-chat-completions")`,
+			want:    `route 0: invalid route: unsupported protocol "anthropic-responses" (want "google-gen-ai", "anthropic-messages", "openai-chat-completions", or "openai-responses")`,
 		},
 		{
 			name:    "empty provider model ID",

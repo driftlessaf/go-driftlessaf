@@ -26,6 +26,21 @@ func ExampleStartTrace() {
 	// Output: Trace completed: analysis done
 }
 
+func ExampleLLMTurn_RecordReasoningTokens() {
+	tracer := agenttrace.ByCode[string](func(trace *agenttrace.Trace[string]) {
+		turn := trace.Turns[0]
+		fmt.Printf("output=%d reasoning-subset=%d\n", turn.OutputTokens, turn.ReasoningTokens)
+	})
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
+	trace, done := agenttrace.StartTrace[string](ctx, "synthetic fixture")
+	turn := trace.BeginTurn(0, "fixture-model", "fixture-provider")
+	turn.RecordTokens(100, 30)
+	turn.RecordReasoningTokens(10)
+	turn.End()
+	done("done", nil)
+	// Output: output=30 reasoning-subset=10
+}
+
 // ExampleWithExecutionContext demonstrates attaching execution context to a
 // context for trace enrichment.
 func ExampleWithExecutionContext() {

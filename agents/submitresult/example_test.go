@@ -28,3 +28,15 @@ func ExampleClaudeTool() {
 	fmt.Println("tool name:", tool.Definition.Name)
 	// Output: tool name: submit_result
 }
+
+func ExampleResponsesTool() {
+	type Result struct {
+		Summary string `json:"summary"`
+	}
+	tool, err := submitresult.ResponsesTool(submitresult.OptionsForResponse[Result]())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(tool.Definition.Name)
+	// Output: submit_result
+}

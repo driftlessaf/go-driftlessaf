@@ -44,6 +44,7 @@
       {"name": "output_tokens", "type": "INTEGER", "mode": "NULLABLE"},
       {"name": "cache_read_tokens", "type": "INTEGER", "mode": "NULLABLE"},
       {"name": "cache_creation_tokens", "type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "reasoning_tokens", "type": "INTEGER", "mode": "NULLABLE"},
       {"name": "start_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
       {"name": "end_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
       {"name": "error", "type": "STRING", "mode": "NULLABLE"},

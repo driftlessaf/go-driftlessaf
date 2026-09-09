@@ -89,6 +89,9 @@ func protocolCapabilities(protocol Protocol) Capabilities {
 		return common
 	case ProtocolOpenAIChatCompletions:
 		return common
+	case ProtocolOpenAIResponses:
+		common.SamplingParameters = false
+		return common
 	default:
 		return Capabilities{}
 	}

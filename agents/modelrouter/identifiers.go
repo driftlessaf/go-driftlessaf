@@ -55,16 +55,18 @@ const (
 	// ProtocolOpenAIChatCompletions uses the OpenAI Chat Completions request and
 	// response contract.
 	ProtocolOpenAIChatCompletions Protocol = "openai-chat-completions"
+	// ProtocolOpenAIResponses uses the native streaming Responses contract.
+	ProtocolOpenAIResponses Protocol = "openai-responses"
 )
 
 // Validate returns an error unless p identifies a protocol implemented by a
 // DriftlessAF executor.
 func (p Protocol) Validate() error {
 	switch p {
-	case ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions:
+	case ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses:
 		return nil
 	default:
-		return fmt.Errorf("unsupported protocol %q (want %q, %q, or %q)", p, ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions)
+		return fmt.Errorf("unsupported protocol %q (want %q, %q, %q, or %q)", p, ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses)
 	}
 }
 

@@ -162,6 +162,7 @@ type RecordedTurn struct {
 	Protocol            string    `json:"protocol,omitempty"`
 	InputTokens         int64     `json:"input_tokens,omitempty"`
 	OutputTokens        int64     `json:"output_tokens,omitempty"`
+	ReasoningTokens     int64     `json:"reasoning_tokens,omitempty"` // Subset of output tokens.
 	CacheReadTokens     int64     `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64     `json:"cache_creation_tokens,omitempty"`
 	StartTime           time.Time `json:"start_time"`
@@ -493,6 +494,15 @@ func (lt *LLMTurn[T]) RecordTokens(inputTokens, outputTokens int64) {
 	}
 	lt.record.InputTokens = inputTokens
 	lt.record.OutputTokens = outputTokens
+}
+
+// RecordReasoningTokens records the reasoning subset of output tokens. Consumers
+// must not add this count to output tokens when computing total usage or cost.
+func (lt *LLMTurn[T]) RecordReasoningTokens(tokens int64) {
+	if lt.span != nil {
+		lt.span.SetAttributes(attribute.Int64("driftlessaf.usage.reasoning_tokens", tokens))
+	}
+	lt.record.ReasoningTokens = tokens
 }
 
 // RecordCacheTokens sets prompt cache token counts as span attributes on the
