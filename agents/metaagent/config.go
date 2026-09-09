@@ -147,7 +147,10 @@ type Config[Resp, CB any] struct {
 	SuspendToolName string
 
 	// SuspendToolDescription is the friend-facing description advertised to the
-	// model for the suspend tool. Ignored when SuspendToolName is empty.
+	// model for the suspend tool. The tool's schema declares two string
+	// properties: question (required) and context (optional), and this
+	// description is what prompts the model to fill context, so name it here.
+	// Ignored when SuspendToolName is empty.
 	SuspendToolDescription string
 
 	// OmitResultSchemaFields lists JSON property names the terminal submit
@@ -177,10 +180,18 @@ func submitOptions[Resp, CB any](config Config[Resp, CB]) submitresult.Options[R
 	return opts
 }
 
-// suspendQuestionProperty is the single input property the suspend tool schema
-// declares: the friend-facing question text. checkpoint.QuestionFromPending
-// reads the same key ("question") when deriving a Question from a pending
-// suspend call, so the schema and the extraction can never drift. Backends
-// that gain suspend support later must build their schemas from this same
-// constant.
+// suspendQuestionProperty is the required input property the suspend tool
+// schema declares: the friend-facing question text.
+// checkpoint.QuestionFromPending reads the same key ("question") when
+// deriving a Question from a pending suspend call, so the schema and the
+// extraction can never drift. Backends that gain suspend support later must
+// build their schemas from these same constants.
 const suspendQuestionProperty = "question"
+
+// suspendContextProperty is the suspend tool's optional second input
+// property: what the agent tried and the failing output, so the friend can
+// answer without replaying the run. checkpoint.ContextFromPending reads the
+// same key ("context") from a pending suspend call's InputJSON, so the schema
+// and the extraction can never drift; the checkpoint package attaches no
+// meaning to the value.
+const suspendContextProperty = "context"

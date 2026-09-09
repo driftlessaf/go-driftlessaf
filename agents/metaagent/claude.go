@@ -38,6 +38,31 @@ type claudeAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 	config   Config[Resp, CB]
 }
 
+// suspendToolParam builds the suspend tool's schema: a required question and
+// an optional context. Only question is required, so a caller or model that
+// sends question alone keeps working exactly as before the context property
+// existed; checkpoint.QuestionFromPending reads the same required key.
+func suspendToolParam(name, desc string) anthropic.ToolParam {
+	return anthropic.ToolParam{
+		Name:        name,
+		Description: anthropic.String(desc),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Type: "object",
+			Properties: map[string]any{
+				suspendQuestionProperty: map[string]any{
+					"type":        "string",
+					"description": "The specific, answerable question for the human.",
+				},
+				suspendContextProperty: map[string]any{
+					"type":        "string",
+					"description": "What you tried and the failing output, so the human can answer without replaying the run.",
+				},
+			},
+			Required: []string{suspendQuestionProperty},
+		},
+	}
+}
+
 func newClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	ctx context.Context,
 	projectID, region, model string,
@@ -153,14 +178,7 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 	if config.SuspendToolName != "" {
 		name, desc := config.SuspendToolName, config.SuspendToolDescription
 		executorOpts = append(executorOpts, claudeexecutor.WithSuspendTool[Req, Resp](func() (anthropic.ToolParam, error) {
-			return anthropic.ToolParam{
-				Name:        name,
-				Description: anthropic.String(desc),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Type:       "object",
-					Properties: map[string]any{suspendQuestionProperty: map[string]any{"type": "string"}},
-				},
-			}, nil
+			return suspendToolParam(name, desc), nil
 		}))
 	}
 

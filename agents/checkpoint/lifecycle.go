@@ -40,6 +40,10 @@ const DefaultAnswerMaxBytes = 16384
 // friend-facing question text in an ask-a-friend suspend call.
 const questionInputKey = "question"
 
+// contextInputKey is the optional input property carrying supporting context
+// alongside the question in an ask-a-friend suspend call.
+const contextInputKey = "context"
+
 // NewAskAFriendSuspension assembles the Suspension an executor returns when the
 // model calls its held-out ask-a-friend tool: it stamps the schema version,
 // clamps the remaining-turns budget (turn is 0-based, so turn+1 turns are
@@ -78,6 +82,25 @@ func QuestionFromPending(calls []PendingToolCall) string {
 		}
 		if q, ok := args[questionInputKey].(string); ok && q != "" {
 			return q
+		}
+	}
+	return ""
+}
+
+// ContextFromPending extracts the supporting context text from the first
+// pending tool call whose input carries a "context" string property (the
+// ask-a-friend tool convention, see contextInputKey). The checkpoint package
+// attaches no meaning to the value; the helper only centralizes the key so
+// tool schemas and readers cannot drift. It returns "" when no pending call
+// carries one, since the property is optional.
+func ContextFromPending(calls []PendingToolCall) string {
+	for _, pc := range calls {
+		var args map[string]any
+		if err := json.Unmarshal(pc.InputJSON, &args); err != nil {
+			continue
+		}
+		if c, ok := args[contextInputKey].(string); ok && c != "" {
+			return c
 		}
 	}
 	return ""
