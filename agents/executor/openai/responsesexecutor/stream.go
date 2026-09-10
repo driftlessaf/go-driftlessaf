@@ -8,7 +8,6 @@ package responsesexecutor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -18,14 +17,6 @@ import (
 )
 
 const maxPayloadBytes = 8 << 20
-
-// httpFailure deliberately excludes provider bodies, URLs, and headers, which
-// may contain secrets. Preserve only the status needed by retry and telemetry.
-type httpFailure struct{ status int }
-
-func (e *httpFailure) Error() string {
-	return fmt.Sprintf("responses request failed (HTTP %d)", e.status)
-}
 
 func statusCode(err error) int {
 	if err == nil {
@@ -132,7 +123,7 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 	}
 	if err := stream.Err(); err != nil {
 		if api, ok := errors.AsType[*openai.Error](err); ok && events == 0 {
-			return nil, &httpFailure{status: api.StatusCode}
+			return nil, safeHTTPFailure(api)
 		}
 		return nil, errors.New("responses stream transport or decoding failure; usage may be unavailable")
 	}

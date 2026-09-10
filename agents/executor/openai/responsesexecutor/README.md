@@ -43,7 +43,12 @@ in a parallel batch. Only an accepted, validated submission commits a result.
   payloads, unknown tools, and refusals.
 - HTTP 429, 500, 502, 503, and 504 responses can retry twice before a stream starts.
   Partial streams don't retry: completion and usage may be unknown. The SDK's
-  own retries are disabled. Error diagnostics omit provider bodies and headers.
+  own retries are disabled. Error diagnostics omit raw provider bodies, messages,
+  URLs, and headers. Before streaming starts, HTTP failures retain allowlisted
+  error codes and request IDs with a canonical UUID or `req_` plus 32 hexadecimal
+  digits. Unknown codes and other ID formats are omitted. A recognized access
+  denial suggests checking IAM, model access, and retention eligibility; it does
+  not identify which check failed. Use the request ID for provider-side support.
 
 Choose timeout budgets before comparing models, allowing for reasoning and the
 configured output-token limit. Deadline expiration remains an execution error,
