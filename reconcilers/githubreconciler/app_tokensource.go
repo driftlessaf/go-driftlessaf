@@ -9,11 +9,15 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
+	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-github/v88/github"
 	"github.com/octo-sts/app/pkg/gcpkms"
 	"golang.org/x/oauth2"
@@ -24,6 +28,7 @@ import (
 // Construct one with NewApp and use its methods.
 type App struct {
 	atr    *ghinstallation.AppsTransport
+	signer ghinstallation.Signer
 	client *github.Client
 	mu     sync.RWMutex
 	cache  map[string]int64
@@ -34,9 +39,13 @@ type App struct {
 // version, or file:// for a local PEM-encoded private key. The returned App
 // caches installation ID lookups for the lifetime of the instance.
 func NewApp(ctx context.Context, appID int64, keyURI string) (*App, error) {
-	atr, err := newAppTransport(ctx, appID, keyURI)
+	signer, err := newSigner(ctx, keyURI)
 	if err != nil {
 		return nil, err
+	}
+	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, appID, ghinstallation.WithSigner(signer))
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub App transport: %w", err)
 	}
 	client, err := github.NewClient(github.WithTransport(atr))
 	if err != nil {
@@ -44,6 +53,7 @@ func NewApp(ctx context.Context, appID int64, keyURI string) (*App, error) {
 	}
 	return &App{
 		atr:    atr,
+		signer: signer,
 		client: client,
 		cache:  make(map[string]int64),
 	}, nil
@@ -52,6 +62,17 @@ func NewApp(ctx context.Context, appID int64, keyURI string) (*App, error) {
 // ID returns the GitHub App ID.
 func (a *App) ID() int64 {
 	return a.atr.AppID()
+}
+
+// AppTokenSource returns a token source minting the App's own JWTs — the
+// credential GitHub requires on the endpoints that describe the App and its
+// installations, where an installation token is refused. Each JWT is
+// short-lived (the same window ghinstallation's AppsTransport uses) and
+// reused until it nears expiry, so a burst of App-authenticated calls costs
+// one signature, not one per call. For go-github callers, [App.Client]
+// signs the same way per request.
+func (a *App) AppTokenSource() oauth2.TokenSource {
+	return oauth2.ReuseTokenSourceWithExpiry(nil, &appJWTSource{appID: a.ID(), signer: a.signer}, appJWTRefreshBefore)
 }
 
 // Client returns a GitHub client authenticated as the app using a JWT (not an
@@ -131,10 +152,10 @@ func (a *App) InstallationTokenSource(ctx context.Context, installID int64, repo
 	return &appTokenSource{ctx: ctx, itr: itr}
 }
 
-// newAppTransport creates a *ghinstallation.AppsTransport from a key URI:
-// gcpkms:// (a Cloud KMS key version, signing remotely so the key never
-// leaves KMS) or file:// (a local PEM-encoded private key, for local runs).
-func newAppTransport(ctx context.Context, appID int64, keyURI string) (*ghinstallation.AppsTransport, error) {
+// newSigner builds the App's JWT signer from a key URI: gcpkms:// (a Cloud
+// KMS key version, signing remotely so the key never leaves KMS) or file://
+// (a local PEM-encoded RSA private key, for development).
+func newSigner(ctx context.Context, keyURI string) (ghinstallation.Signer, error) {
 	scheme, rest, ok := strings.Cut(keyURI, "://")
 	if !ok {
 		return nil, fmt.Errorf("unsupported key URI %q: want gcpkms:// or file://", keyURI)
@@ -145,24 +166,52 @@ func newAppTransport(ctx context.Context, appID int64, keyURI string) (*ghinstal
 		if err != nil {
 			return nil, err
 		}
-		signer, err := gcpkms.New(ctx, kmsClient, rest)
-		if err != nil {
-			return nil, err
-		}
-		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, appID, ghinstallation.WithSigner(signer))
-		if err != nil {
-			return nil, fmt.Errorf("create GitHub App transport: %w", err)
-		}
-		return atr, nil
+		return gcpkms.New(ctx, kmsClient, rest)
 	case "file":
-		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, appID, rest)
+		pemBytes, err := os.ReadFile(rest)
 		if err != nil {
-			return nil, fmt.Errorf("create GitHub App transport from %q: %w", keyURI, err)
+			return nil, fmt.Errorf("reading GitHub App key %q: %w", keyURI, err)
 		}
-		return atr, nil
+		key, err := jwt.ParseRSAPrivateKeyFromPEM(pemBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing GitHub App key %q: %w", keyURI, err)
+		}
+		return ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key), nil
 	default:
 		return nil, fmt.Errorf("unsupported key URI %q: want gcpkms:// or file://", keyURI)
 	}
+}
+
+const (
+	// appJWTLifetime is how long a minted App JWT is valid, measured from an
+	// issued-at stamped slightly in the past to absorb clock skew between
+	// here and GitHub — the same window ghinstallation's AppsTransport uses.
+	appJWTLifetime = 2 * time.Minute
+	appJWTSkew     = 30 * time.Second
+	// appJWTRefreshBefore is how close to expiry a cached App JWT is replaced.
+	appJWTRefreshBefore = 30 * time.Second
+)
+
+// appJWTSource mints App JWTs; wrap it in oauth2.ReuseTokenSourceWithExpiry
+// (see App.AppTokenSource) so tokens are reused while valid.
+type appJWTSource struct {
+	appID  int64
+	signer ghinstallation.Signer
+}
+
+func (s *appJWTSource) Token() (*oauth2.Token, error) {
+	// GitHub rejects fractional timestamps, so truncate to whole seconds.
+	iss := time.Now().Add(-appJWTSkew).Truncate(time.Second)
+	exp := iss.Add(appJWTLifetime)
+	signed, err := s.signer.Sign(&jwt.RegisteredClaims{
+		IssuedAt:  jwt.NewNumericDate(iss),
+		ExpiresAt: jwt.NewNumericDate(exp),
+		Issuer:    strconv.FormatInt(s.appID, 10),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("signing GitHub App JWT: %w", err)
+	}
+	return &oauth2.Token{AccessToken: signed, TokenType: "Bearer", Expiry: exp}, nil
 }
 
 // appTokenSource adapts a *ghinstallation.Transport to oauth2.TokenSource.
