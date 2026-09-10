@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	chainguard.dev/apko v1.2.44
 	chainguard.dev/go-grpc-kit v0.18.0
-	chainguard.dev/sdk v0.1.257
+	chainguard.dev/sdk v0.1.224
 	cloud.google.com/go/aiplatform v1.126.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.33.0
@@ -16,10 +16,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.34
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chainguard-dev/terraform-infra-common v1.40.4
+	github.com/chainguard-dev/terraform-infra-common v1.25.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.19
 	github.com/cloudevents/sdk-go/v2 v2.16.2
-	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-git/go-billy/v5 v5.9.1
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/google/go-cmp v0.7.0
@@ -33,7 +33,7 @@ require (
 	github.com/olekukonko/tablewriter v1.1.4
 	github.com/openai/openai-go v1.12.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/client_model v0.6.3
 	github.com/sethvargo/go-envconfig v1.4.3
 	github.com/shurcooL/githubv4 v0.0.0-20260209031235-2402fdf4a9ed
 	github.com/sigstore/cosign/v3 v3.1.3
@@ -169,7 +169,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.20 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
@@ -262,7 +262,7 @@ require (
 	go.lsp.dev/uri v1.0.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.45.0 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0 // indirect
@@ -285,12 +285,16 @@ require (
 	golang.org/x/tools v0.49.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260727163830-6c54dddc4772 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
 
 // TEMPORARY: sigstore-go v1.3.0 added GetLogEntryByUUID to sign.RekorClient,
 // which gitsign's validatingRekorClient does not implement, so every module
