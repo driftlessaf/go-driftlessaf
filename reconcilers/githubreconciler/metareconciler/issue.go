@@ -8,6 +8,7 @@ package metareconciler
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -76,6 +77,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		clog.InfoContext(ctx, "Issue missing required label, closing any outstanding PRs", "required_label", r.requiredLabel)
 		r.giveUp.Clear(ctx, changeSession)
+		// A human took the issue back. Drop any issue-side give-up comment too,
+		// so re-labeling the issue (the usual way to ask for another attempt)
+		// starts from a clean slate rather than a stale explanation.
+		r.clearIssueGiveUp(ctx, issue, changeSession)
 		prURL := changeSession.PRURL()
 		if err := changeSession.CloseAnyOutstanding(ctx, "Closing PR because the issue no longer has the required label."); err != nil {
 			return err
@@ -153,7 +158,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		// The PR is green: drop any give-up comment from a prior iteration, since
 		// the PR recovered without the agent needing to push a fix. Clear is a
 		// no-op when no comment exists, so this is safe to run on every green pass.
+		// The issue side gets the same treatment: the clear that runs when the PR
+		// opens swallows its errors, so this is the retry that keeps a stale
+		// "nothing to materialize" from outliving the PR that disproved it.
 		r.giveUp.Clear(ctx, changeSession)
+		r.clearIssueGiveUp(ctx, issue, changeSession)
 		return nil
 
 	case !state.HasPR():
@@ -278,7 +287,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	if err != nil {
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
-			if agentRan {
+			switch {
+			case !agentRan:
+				// Upsert skipped the closure (PR already up to date): result
+				// is the zero value, so there is nothing to surface.
+			case state.HasPR():
 				// SurfaceResult applies the give-up label when the result
 				// carries an explanation; the session's label cache reflects
 				// that immediately, so the before/after pair is the "newly
@@ -294,6 +307,16 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 					r.emitTransition(ctx, issue, changeSession.PRURL(),
 						statemachine.StatusFailed, statemachine.FailureModeNoDiff, statemachine.TriggerNoDiff)
 				}
+			default:
+				// The agent gave up before any PR existed, so there is no PR
+				// to comment on: surface the explanation on the issue, or the
+				// filer sees the start comment and then silence. A rewrite
+				// (new issue content, new give-up) is the edge to emit on;
+				// SurfaceResultOnIssue dedups the rest.
+				if r.giveUp.SurfaceResultOnIssue(ctx, changeSession, issueRevision(issue), result) {
+					r.emitTransition(ctx, issue, "",
+						statemachine.StatusFailed, statemachine.FailureModeNoDiff, statemachine.TriggerNoDiff)
+				}
 			}
 			return nil
 		}
@@ -301,8 +324,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	}
 
 	// The agent pushed a fix: clear any stale give-up comment from a prior
-	// iteration where it had nothing to do.
+	// iteration where it had nothing to do — on the PR, and on the issue if
+	// an earlier attempt gave up before any PR existed (the PR now supersedes
+	// that explanation). Only this run can have opened the first PR, so with a
+	// PR already in hand there is no issue-side comment to look for.
 	r.giveUp.Clear(ctx, changeSession)
+	if !state.HasPR() {
+		r.clearIssueGiveUp(ctx, issue, changeSession)
+	}
 
 	// Every push is a genuine transition (back) to active: the initial run
 	// that created the PR, a findings iteration, or a post-conflict
@@ -388,6 +417,28 @@ func (r *Reconciler[Req, Resp, CB]) draftForIssue(issue *github.Issue) bool {
 // Keeping the label after promotion would misrepresent a ready PR as still draft.
 func (r *Reconciler[Req, Resp, CB]) shouldClearDraftLabel(issue *github.Issue, hasPR, prIsDraft bool) bool {
 	return r.draftLabel != "" && hasPR && !prIsDraft && hasLabel(issue, r.draftLabel)
+}
+
+// clearIssueGiveUp drops the give-up comment from the source issue. Finding it
+// means listing the issue's comments, and reconcileIssue runs on every issue
+// event in the repo, most for issues this bot never touched — so skip the call
+// when the issue has no comments at all, since the comment to delete is itself
+// one.
+func (r *Reconciler[Req, Resp, CB]) clearIssueGiveUp(ctx context.Context, issue *github.Issue, session *changemanager.Session[PRData[Req]]) {
+	if issue.GetComments() == 0 {
+		return
+	}
+	r.giveUp.ClearIssue(ctx, session)
+}
+
+// issueRevision identifies the issue content the agent is asked to act on — the
+// title and body that buildRequest hands it — as a hex digest. It keys the
+// issue-side give-up comment (see GiveUpComment.SurfaceResultOnIssue): the same
+// revision means the agent saw the same request, so a repeat give-up on it is
+// not news, while an edit to either field is.
+func issueRevision(issue *github.Issue) string {
+	sum := sha256.Sum256([]byte(issue.GetTitle() + "\n" + issue.GetBody()))
+	return hex.EncodeToString(sum[:])
 }
 
 // hasLabel checks if an issue has a specific label.

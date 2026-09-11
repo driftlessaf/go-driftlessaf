@@ -172,6 +172,22 @@ func newIssueMarkerSession(client *github.Client, issueNumber int) *Session[test
 	}
 }
 
+// newPathMarkerSession builds a session on a path resource, where the
+// issue-targeting marker comment methods must all no-op.
+func newPathMarkerSession(client *github.Client) *Session[testData] {
+	return &Session[testData]{
+		client: client,
+		owner:  "test-owner",
+		repo:   "test-repo",
+		resource: &githubreconciler.Resource{
+			Owner: "test-owner",
+			Repo:  "test-repo",
+			Path:  "some/path",
+			Type:  githubreconciler.ResourceTypePath,
+		},
+	}
+}
+
 func TestUpsertIssueMarkerComment(t *testing.T) {
 	t.Run("posts once and dedups on repeat", func(t *testing.T) {
 		client, rec := newMarkerCommentServer(t)
@@ -215,23 +231,158 @@ func TestUpsertIssueMarkerComment(t *testing.T) {
 
 	t.Run("no-op on non-issue resource", func(t *testing.T) {
 		client, rec := newMarkerCommentServer(t)
-		s := &Session[testData]{
-			client: client,
-			owner:  "test-owner",
-			repo:   "test-repo",
-			resource: &githubreconciler.Resource{
-				Owner: "test-owner",
-				Repo:  "test-repo",
-				Path:  "some/path",
-				Type:  githubreconciler.ResourceTypePath,
-			},
-		}
+		s := newPathMarkerSession(client)
 
 		if err := s.UpsertIssueMarkerComment(t.Context(), testMarker, "starting work"); err != nil {
 			t.Fatalf("UpsertIssueMarkerComment: got error = %v, want = nil", err)
 		}
 		if len(rec.created) != 0 || len(rec.edited) != 0 {
 			t.Errorf("API mutated on a non-issue resource: created = %v, edited = %v", rec.created, rec.edited)
+		}
+	})
+}
+
+func TestUpsertIssueMarkerCommentForRevision(t *testing.T) {
+	const (
+		rev1 = "0f1e2d3c"
+		rev2 = "4b5a6978"
+	)
+	stamped := func(rev, body string) string {
+		return testMarker + "\n" + revisionMarker(rev) + "\n" + body
+	}
+
+	t.Run("creates when absent", func(t *testing.T) {
+		client, rec := newMarkerCommentServer(t)
+		s := newIssueMarkerSession(client, 12)
+
+		changed, err := s.UpsertIssueMarkerCommentForRevision(t.Context(), testMarker, rev1, "already fixed")
+		if err != nil {
+			t.Fatalf("UpsertIssueMarkerCommentForRevision: got error = %v, want = nil", err)
+		}
+		if !changed {
+			t.Error("changed: got = false, want = true on create")
+		}
+		want := stamped(rev1, "already fixed")
+		if len(rec.created) != 1 || rec.created[0] != want {
+			t.Errorf("created comments: got = %v, want = [%q]", rec.created, want)
+		}
+	})
+
+	// The whole point of the revision stamp: a repeat give-up on the same issue
+	// content must not rewrite the comment, even though the agent's wording
+	// differs, since a rewritten issue comment would re-trigger the reconcile.
+	t.Run("skips when revision unchanged and body differs", func(t *testing.T) {
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(stamped(rev1, "already fixed"))}
+		client, rec := newMarkerCommentServer(t, existing)
+		s := newIssueMarkerSession(client, 12)
+
+		changed, err := s.UpsertIssueMarkerCommentForRevision(t.Context(), testMarker, rev1, "nothing left to do here")
+		if err != nil {
+			t.Fatalf("UpsertIssueMarkerCommentForRevision: got error = %v, want = nil", err)
+		}
+		if changed {
+			t.Error("changed: got = true, want = false when the revision is unchanged")
+		}
+		if len(rec.created) != 0 || len(rec.edited) != 0 {
+			t.Errorf("API mutated for an unchanged revision: created = %v, edited = %v", rec.created, rec.edited)
+		}
+	})
+
+	t.Run("edits when revision changed", func(t *testing.T) {
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(stamped(rev1, "already fixed"))}
+		client, rec := newMarkerCommentServer(t, existing)
+		s := newIssueMarkerSession(client, 12)
+
+		changed, err := s.UpsertIssueMarkerCommentForRevision(t.Context(), testMarker, rev2, "out of scope")
+		if err != nil {
+			t.Fatalf("UpsertIssueMarkerCommentForRevision: got error = %v, want = nil", err)
+		}
+		if !changed {
+			t.Error("changed: got = false, want = true on edit")
+		}
+		want := stamped(rev2, "out of scope")
+		if got := rec.edited[42]; got != want {
+			t.Errorf("edited comment 42: got = %q, want = %q", got, want)
+		}
+		if len(rec.created) != 0 {
+			t.Errorf("created comments: got = %v, want none", rec.created)
+		}
+	})
+
+	// A comment posted by the unstamped UpsertIssueMarkerComment under the same
+	// marker carries no revision, so it counts as stale and is rewritten.
+	t.Run("edits when existing comment is unstamped", func(t *testing.T) {
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(testMarker + "\nalready fixed")}
+		client, rec := newMarkerCommentServer(t, existing)
+		s := newIssueMarkerSession(client, 12)
+
+		changed, err := s.UpsertIssueMarkerCommentForRevision(t.Context(), testMarker, rev1, "already fixed")
+		if err != nil {
+			t.Fatalf("UpsertIssueMarkerCommentForRevision: got error = %v, want = nil", err)
+		}
+		if !changed {
+			t.Error("changed: got = false, want = true when the existing comment has no revision")
+		}
+		if got, want := rec.edited[42], stamped(rev1, "already fixed"); got != want {
+			t.Errorf("edited comment 42: got = %q, want = %q", got, want)
+		}
+	})
+
+	t.Run("no-op on non-issue resource", func(t *testing.T) {
+		client, rec := newMarkerCommentServer(t)
+		s := newPathMarkerSession(client)
+
+		changed, err := s.UpsertIssueMarkerCommentForRevision(t.Context(), testMarker, rev1, "already fixed")
+		if err != nil {
+			t.Fatalf("UpsertIssueMarkerCommentForRevision: got error = %v, want = nil", err)
+		}
+		if changed {
+			t.Error("changed: got = true, want = false on a non-issue resource")
+		}
+		if len(rec.created) != 0 || len(rec.edited) != 0 {
+			t.Errorf("API mutated on a non-issue resource: created = %v, edited = %v", rec.created, rec.edited)
+		}
+	})
+}
+
+func TestDeleteIssueMarkerComment(t *testing.T) {
+	t.Run("deletes when present", func(t *testing.T) {
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(testMarker + "\nalready fixed")}
+		client, rec := newMarkerCommentServer(t, existing)
+		// prNumber is 0: the issue variant must still act, since clearing an
+		// explanation posted before any PR existed is the whole point.
+		s := newIssueMarkerSession(client, 12)
+
+		if err := s.DeleteIssueMarkerComment(t.Context(), testMarker); err != nil {
+			t.Fatalf("DeleteIssueMarkerComment: got error = %v, want = nil", err)
+		}
+		if len(rec.deleted) != 1 || rec.deleted[0] != 42 {
+			t.Errorf("deleted comments: got = %v, want = [42]", rec.deleted)
+		}
+	})
+
+	t.Run("no-op when absent", func(t *testing.T) {
+		client, rec := newMarkerCommentServer(t)
+		s := newIssueMarkerSession(client, 12)
+
+		if err := s.DeleteIssueMarkerComment(t.Context(), testMarker); err != nil {
+			t.Fatalf("DeleteIssueMarkerComment: got error = %v, want = nil", err)
+		}
+		if len(rec.deleted) != 0 {
+			t.Errorf("deleted comments: got = %v, want none", rec.deleted)
+		}
+	})
+
+	t.Run("no-op on non-issue resource", func(t *testing.T) {
+		existing := &github.IssueComment{ID: new(int64(42)), Body: new(testMarker + "\nalready fixed")}
+		client, rec := newMarkerCommentServer(t, existing)
+		s := newPathMarkerSession(client)
+
+		if err := s.DeleteIssueMarkerComment(t.Context(), testMarker); err != nil {
+			t.Fatalf("DeleteIssueMarkerComment: got error = %v, want = nil", err)
+		}
+		if len(rec.deleted) != 0 {
+			t.Errorf("deleted comments on a non-issue resource: got = %v, want none", rec.deleted)
 		}
 	})
 }

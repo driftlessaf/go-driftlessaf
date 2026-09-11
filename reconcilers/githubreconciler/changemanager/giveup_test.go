@@ -11,7 +11,9 @@ import (
 	"testing"
 )
 
-// fakeMarkerCommenter records GiveUpComment's calls into the marker primitives.
+// fakeMarkerCommenter records GiveUpComment's calls into the marker primitives,
+// on both the PR side (markerCommenter) and the issue side
+// (issueMarkerCommenter).
 type fakeMarkerCommenter struct {
 	upserted   map[string]string
 	deleted    []string
@@ -19,10 +21,33 @@ type fakeMarkerCommenter struct {
 	clearCalls int
 	upsertErr  error
 	clearErr   error
+
+	// issueUpserted records issue-side upserts as marker -> revision + "\n" + body.
+	issueUpserted  map[string]string
+	issueDeleted   []string
+	issueChanged   bool // what UpsertIssueMarkerCommentForRevision reports
+	issueUpsertErr error
+	issueDeleteErr error
 }
 
 func newFakeMarkerCommenter() *fakeMarkerCommenter {
-	return &fakeMarkerCommenter{upserted: map[string]string{}}
+	return &fakeMarkerCommenter{upserted: map[string]string{}, issueUpserted: map[string]string{}, issueChanged: true}
+}
+
+func (c *fakeMarkerCommenter) UpsertIssueMarkerCommentForRevision(_ context.Context, marker, revision, body string) (bool, error) {
+	if c.issueUpsertErr != nil {
+		return false, c.issueUpsertErr
+	}
+	c.issueUpserted[marker] = revision + "\n" + body
+	return c.issueChanged, nil
+}
+
+func (c *fakeMarkerCommenter) DeleteIssueMarkerComment(_ context.Context, marker string) error {
+	if c.issueDeleteErr != nil {
+		return c.issueDeleteErr
+	}
+	c.issueDeleted = append(c.issueDeleted, marker)
+	return nil
 }
 
 func (c *fakeMarkerCommenter) UpsertMarkerComment(_ context.Context, marker, body string) error {
@@ -162,6 +187,87 @@ func TestClearSkipsCommentOnLabelClearError(t *testing.T) {
 	}
 }
 
+func TestGiveUpCommentSurfaceResultOnIssue(t *testing.T) {
+	const revision = "a1b2c3d4"
+	tests := []struct {
+		name        string
+		result      any
+		changed     bool // what the fake session reports
+		upsertErr   error
+		want        string // revision + "\n" + rendered body; empty means nothing upserted
+		wantChanged bool
+	}{{
+		name:        "explainer with reason posts and reports the edge",
+		result:      explainable{reason: "already fixed on main"},
+		changed:     true,
+		want:        revision + "\nrender: already fixed on main",
+		wantChanged: true,
+	}, {
+		name:        "unchanged revision posts nothing new and reports no edge",
+		result:      explainable{reason: "already fixed on main"},
+		changed:     false,
+		want:        revision + "\nrender: already fixed on main",
+		wantChanged: false,
+	}, {
+		name:   "explainer empty reason",
+		result: explainable{reason: ""},
+	}, {
+		name:   "not an explainer",
+		result: struct{ commitMsg string }{commitMsg: "x"},
+	}, {
+		name:   "typed-nil explainer",
+		result: (*pointerExplainable)(nil),
+	}, {
+		name:      "upsert error is swallowed and reports no edge",
+		result:    explainable{reason: "already fixed on main"},
+		upsertErr: errors.New("boom"),
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newFakeMarkerCommenter()
+			c.issueChanged = tt.changed
+			c.issueUpsertErr = tt.upsertErr
+			got := testGiveUp().SurfaceResultOnIssue(t.Context(), c, revision, tt.result)
+
+			if got != tt.wantChanged {
+				t.Errorf("SurfaceResultOnIssue: got = %t, want = %t", got, tt.wantChanged)
+			}
+			if tt.want == "" {
+				if len(c.issueUpserted) != 0 {
+					t.Errorf("issueUpserted: got = %v, want none", c.issueUpserted)
+				}
+				return
+			}
+			if got := c.issueUpserted[giveUpMarker]; got != tt.want {
+				t.Errorf("issueUpserted: got = %q, want = %q", got, tt.want)
+			}
+			// The issue side never touches the PR: no PR comment, no label.
+			if len(c.upserted) != 0 || c.applyCalls != 0 {
+				t.Errorf("PR side touched from the issue surface: upserted = %v, applyCalls = %d", c.upserted, c.applyCalls)
+			}
+		})
+	}
+}
+
+func TestGiveUpCommentClearIssue(t *testing.T) {
+	c := newFakeMarkerCommenter()
+	testGiveUp().ClearIssue(t.Context(), c)
+
+	if len(c.issueDeleted) != 1 || c.issueDeleted[0] != giveUpMarker {
+		t.Errorf("issueDeleted: got = %v, want = [%q]", c.issueDeleted, giveUpMarker)
+	}
+	// The issue side never touches the PR comment or label.
+	if len(c.deleted) != 0 || c.clearCalls != 0 {
+		t.Errorf("PR side touched from ClearIssue: deleted = %v, clearCalls = %d", c.deleted, c.clearCalls)
+	}
+
+	// A delete failure is logged and swallowed, never panics or propagates.
+	c = newFakeMarkerCommenter()
+	c.issueDeleteErr = errors.New("boom")
+	testGiveUp().ClearIssue(t.Context(), c)
+}
+
 // TestGiveUpCommentNilRender verifies Surface is a no-op (rather than panicking)
 // when Render is nil, so a misconfigured GiveUpComment cannot crash a reconcile.
 func TestGiveUpCommentNilRender(t *testing.T) {
@@ -175,6 +281,13 @@ func TestGiveUpCommentNilRender(t *testing.T) {
 	if c.applyCalls != 0 {
 		t.Errorf("applyCalls: got = %d, want 0 when Render is nil", c.applyCalls)
 	}
+
+	if g.SurfaceResultOnIssue(t.Context(), c, "rev", explainable{reason: "blocked on foo"}) {
+		t.Error("SurfaceResultOnIssue: got = true, want = false when Render is nil")
+	}
+	if len(c.issueUpserted) != 0 {
+		t.Errorf("issueUpserted: got = %v, want none when Render is nil", c.issueUpserted)
+	}
 }
 
 // TestGiveUpCommentNilReceiver verifies a nil *GiveUpComment is a safe no-op, so
@@ -186,9 +299,16 @@ func TestGiveUpCommentNilReceiver(t *testing.T) {
 	g.SurfaceResult(t.Context(), c, explainable{reason: "x"})
 	g.Surface(t.Context(), c, "x")
 	g.Clear(t.Context(), c)
+	if g.SurfaceResultOnIssue(t.Context(), c, "rev", explainable{reason: "x"}) {
+		t.Error("SurfaceResultOnIssue on nil receiver: got = true, want = false")
+	}
+	g.ClearIssue(t.Context(), c)
 
 	if len(c.upserted) != 0 || len(c.deleted) != 0 {
 		t.Errorf("nil receiver mutated state: upserted = %v, deleted = %v", c.upserted, c.deleted)
+	}
+	if len(c.issueUpserted) != 0 || len(c.issueDeleted) != 0 {
+		t.Errorf("nil receiver mutated issue state: issueUpserted = %v, issueDeleted = %v", c.issueUpserted, c.issueDeleted)
 	}
 	if c.applyCalls != 0 || c.clearCalls != 0 {
 		t.Errorf("nil receiver touched labels: applyCalls = %d, clearCalls = %d", c.applyCalls, c.clearCalls)

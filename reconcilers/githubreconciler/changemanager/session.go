@@ -585,7 +585,9 @@ func (s *Session[T]) UpsertMarkerComment(ctx context.Context, marker, body strin
 		return nil
 	}
 
-	return s.upsertMarkerCommentOn(ctx, s.prNumber, marker, body)
+	want := marker + "\n" + body
+	_, err := s.upsertMarkerCommentOn(ctx, s.prNumber, marker, want, func(existing string) bool { return existing == want })
+	return err
 }
 
 // UpsertIssueMarkerComment posts or updates a single comment on the source
@@ -598,40 +600,69 @@ func (s *Session[T]) UpsertIssueMarkerComment(ctx context.Context, marker, body 
 	if s.resource == nil || s.resource.Type != githubreconciler.ResourceTypeIssue {
 		return nil
 	}
-	return s.upsertMarkerCommentOn(ctx, s.resource.Number, marker, body)
+	want := marker + "\n" + body
+	_, err := s.upsertMarkerCommentOn(ctx, s.resource.Number, marker, want, func(existing string) bool { return existing == want })
+	return err
 }
 
-// upsertMarkerCommentOn is the find-or-create body shared by UpsertMarkerComment
-// (targeting the PR) and UpsertIssueMarkerComment (targeting the issue). The
-// number is the issue/PR number to comment on.
-func (s *Session[T]) upsertMarkerCommentOn(ctx context.Context, number int, marker, body string) error {
-	want := marker + "\n" + body
+// revisionMarker renders the hidden line that stamps a marker comment with the
+// revision of its subject (see UpsertIssueMarkerCommentForRevision).
+func revisionMarker(revision string) string {
+	return "<!--revision:" + revision + "-->"
+}
 
+// UpsertIssueMarkerCommentForRevision is UpsertIssueMarkerComment for a body
+// that varies run to run while its subject does not — an agent's prose
+// explanation of the same issue, say. revision identifies the subject (e.g. a
+// hash of the issue body) and is stamped into the comment as a hidden line
+// after the marker. An existing comment carrying the same revision is left
+// untouched even when body differs; only a changed revision rewrites it. This
+// matters on issues in particular: an issue comment re-triggers the reconcile
+// that posted it, so a comment rewritten on every retry would loop the
+// reconciler on its own output. It reports whether the comment was created or
+// rewritten (false on a dedup, a tolerated permission error, or a non-issue
+// resource).
+func (s *Session[T]) UpsertIssueMarkerCommentForRevision(ctx context.Context, marker, revision, body string) (bool, error) {
+	if s.resource == nil || s.resource.Type != githubreconciler.ResourceTypeIssue {
+		return false, nil
+	}
+	prefix := marker + "\n" + revisionMarker(revision) + "\n"
+	return s.upsertMarkerCommentOn(ctx, s.resource.Number, marker, prefix+body, func(existing string) bool {
+		return strings.HasPrefix(existing, prefix)
+	})
+}
+
+// upsertMarkerCommentOn is the find-or-create body shared by the marker
+// comment upserts. number is the issue/PR number to comment on, want the full
+// comment body to write (marker included), and upToDate decides whether an
+// existing marker comment already says what want says, in which case no API
+// write is made. It reports whether a comment was created or edited.
+func (s *Session[T]) upsertMarkerCommentOn(ctx context.Context, number int, marker, want string, upToDate func(existing string) bool) (bool, error) {
 	existing, err := s.findMarkerComment(ctx, number, marker)
 	// ferr (not err) so the classified list error is what we return without
 	// shadowing the err reused by the edit/create calls below.
 	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, number, "listing comments", err); done {
-		return ferr
+		return false, ferr
 	}
 	if existing != nil {
-		if existing.GetBody() == want {
+		if upToDate(existing.GetBody()) {
 			clog.InfoContextf(ctx, "Marker comment already up to date on #%d, skipping", number)
-			return nil
+			return false, nil
 		}
 		clog.InfoContextf(ctx, "Updating marker comment on #%d", number)
 		_, _, err = s.client.Issues.EditComment(ctx, s.owner, s.repo, existing.GetID(), &github.IssueComment{
 			Body: new(want),
 		})
-		_, err = s.skipMarkerCommentIfForbidden(ctx, number, "editing marker comment", err)
-		return err
+		_, cerr := s.skipMarkerCommentIfForbidden(ctx, number, "editing marker comment", err)
+		return err == nil, cerr
 	}
 
 	clog.InfoContextf(ctx, "Posting marker comment on #%d", number)
 	_, _, err = s.client.Issues.CreateComment(ctx, s.owner, s.repo, number, &github.IssueComment{
 		Body: new(want),
 	})
-	_, err = s.skipMarkerCommentIfForbidden(ctx, number, "posting marker comment", err)
-	return err
+	_, cerr := s.skipMarkerCommentIfForbidden(ctx, number, "posting marker comment", err)
+	return err == nil, cerr
 }
 
 // DeleteMarkerComment removes the comment identified by marker, if present. It
@@ -642,18 +673,35 @@ func (s *Session[T]) DeleteMarkerComment(ctx context.Context, marker string) err
 	if s.prNumber == 0 {
 		return nil
 	}
+	return s.deleteMarkerCommentOn(ctx, s.prNumber, marker)
+}
 
-	existing, err := s.findMarkerComment(ctx, s.prNumber, marker)
-	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, s.prNumber, "listing comments", err); done {
+// DeleteIssueMarkerComment removes the comment identified by marker from the
+// source issue, if present. It is the inverse of UpsertIssueMarkerComment and
+// UpsertIssueMarkerCommentForRevision. This is a no-op on non-issue resources
+// or when no matching comment is found.
+func (s *Session[T]) DeleteIssueMarkerComment(ctx context.Context, marker string) error {
+	if s.resource == nil || s.resource.Type != githubreconciler.ResourceTypeIssue {
+		return nil
+	}
+	return s.deleteMarkerCommentOn(ctx, s.resource.Number, marker)
+}
+
+// deleteMarkerCommentOn is the find-and-delete body shared by
+// DeleteMarkerComment (targeting the PR) and DeleteIssueMarkerComment
+// (targeting the issue).
+func (s *Session[T]) deleteMarkerCommentOn(ctx context.Context, number int, marker string) error {
+	existing, err := s.findMarkerComment(ctx, number, marker)
+	if done, ferr := s.skipMarkerCommentIfForbidden(ctx, number, "listing comments", err); done {
 		return ferr
 	}
 	if existing == nil {
 		return nil
 	}
 
-	clog.InfoContextf(ctx, "Deleting stale marker comment on PR #%d", s.prNumber)
+	clog.InfoContextf(ctx, "Deleting stale marker comment on #%d", number)
 	_, err = s.client.Issues.DeleteComment(ctx, s.owner, s.repo, existing.GetID())
-	_, err = s.skipMarkerCommentIfForbidden(ctx, s.prNumber, "deleting marker comment", err)
+	_, err = s.skipMarkerCommentIfForbidden(ctx, number, "deleting marker comment", err)
 	return err
 }
 
@@ -693,8 +741,7 @@ func (s *Session[T]) skipMarkerCommentIfForbidden(ctx context.Context, number in
 	if err == nil {
 		return false, nil
 	}
-	var ge *github.ErrorResponse
-	if errors.As(err, &ge) && ge.Response != nil && ge.Response.StatusCode == http.StatusForbidden {
+	if ge, ok := errors.AsType[*github.ErrorResponse](err); ok && ge.Response != nil && ge.Response.StatusCode == http.StatusForbidden {
 		clog.WarnContext(ctx, "Skipping marker comment: insufficient permission", "number", number, "op", op)
 		return true, nil
 	}

@@ -601,3 +601,37 @@ func TestPRLabelsForIssue(t *testing.T) {
 		})
 	}
 }
+
+// TestIssueRevision verifies the give-up comment key follows the request the
+// agent sees: stable for the same title and body, different when either changes.
+func TestIssueRevision(t *testing.T) {
+	base := &github.Issue{Title: new("Add foo"), Body: new("We need foo because bar.")}
+	same := &github.Issue{Title: new("Add foo"), Body: new("We need foo because bar.")}
+	if got, want := issueRevision(base), issueRevision(same); got != want {
+		t.Errorf("issueRevision(same content): got = %q, want = %q", got, want)
+	}
+	tests := []struct {
+		name  string
+		issue *github.Issue
+	}{{
+		name:  "body edited",
+		issue: &github.Issue{Title: new("Add foo"), Body: new("We need foo because baz.")},
+	}, {
+		name:  "title edited",
+		issue: &github.Issue{Title: new("Add foo, urgently"), Body: new("We need foo because bar.")},
+	}, {
+		// Text moved out of the title is a different request. The separator
+		// does not make that hold in general — title "A" + body "B\nC" hashes
+		// the same as title "A\nB" + body "C" — but GitHub issue titles are
+		// single-line, so the ambiguous input never reaches issueRevision.
+		name:  "content moved between title and body",
+		issue: &github.Issue{Title: new("Add foo\nWe need"), Body: new(" foo because bar.")},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := issueRevision(tt.issue); got == issueRevision(base) {
+				t.Errorf("issueRevision: got = %q for changed content, want a different revision", got)
+			}
+		})
+	}
+}

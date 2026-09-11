@@ -152,7 +152,14 @@ func WithCopyIssueLabels[Req promptbuilder.Bindable, Resp Result, CB any]() Opti
 // changemanager.Explainer with a non-empty explanation, the reconciler upserts
 // a single comment (identified by marker) whose body is render(explanation).
 // Repeated identical give-ups rewrite nothing, and the comment is cleared when
-// the PR recovers. Off by default.
+// the PR recovers.
+//
+// When the agent gives up before any PR exists (a fresh run that finds nothing
+// to do), the same comment goes on the source issue instead, keyed on the issue
+// title and body so a retry on the unchanged issue rewrites nothing. The issue
+// comment is removed once the agent opens a PR or the required label is taken
+// off the issue; it stays when the issue is closed, as the record of why no PR
+// appeared. Off by default.
 func WithGiveUpComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func(explanation string) string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
