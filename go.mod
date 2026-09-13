@@ -5,18 +5,18 @@ go 1.27.0
 require (
 	chainguard.dev/apko v1.2.44
 	chainguard.dev/go-grpc-kit v0.18.0
-	chainguard.dev/sdk v0.1.264
+	chainguard.dev/sdk v0.1.224
 	cloud.google.com/go/aiplatform v1.126.0
 	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/kms v1.33.0
-	cloud.google.com/go/storage v1.64.0
+	cloud.google.com/go/storage v1.67.0
 	github.com/anthropics/anthropic-sdk-go v1.68.0
 	github.com/aws/aws-sdk-go-v2 v1.46.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.3
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.3
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chainguard-dev/terraform-infra-common v1.43.3
+	github.com/chainguard-dev/terraform-infra-common v1.25.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.4.19
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.21.0
@@ -67,7 +67,7 @@ require (
 	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.23.2 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/bigquery v1.79.0 // indirect
+	cloud.google.com/go/bigquery v1.83.0 // indirect
 	cloud.google.com/go/iam v1.13.0 // indirect
 	cloud.google.com/go/longrunning v1.2.0 // indirect
 	cloud.google.com/go/monitoring v1.30.0 // indirect
@@ -84,8 +84,8 @@ require (
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.36.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.59.0 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.35.0 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.59.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.37.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.61.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/apache/arrow/go/v15 v15.0.2 // indirect
@@ -291,6 +291,10 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
 
 // TEMPORARY: sigstore-go v1.3.0 added GetLogEntryByUUID to sign.RekorClient,
 // which gitsign's validatingRekorClient does not implement, so every module
