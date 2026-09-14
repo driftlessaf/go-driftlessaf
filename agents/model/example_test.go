@@ -36,3 +36,11 @@ func ExampleInfo_SupportsEffort() {
 	// false
 	// true
 }
+
+func ExampleResolve_automaticToolChoice() {
+	fmt.Println(model.Resolve("claude-fable-5-1").AutomaticToolChoiceOnly)
+	fmt.Println(model.Resolve("claude-sonnet-5").AutomaticToolChoiceOnly)
+	// Output:
+	// true
+	// false
+}

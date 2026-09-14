@@ -58,6 +58,9 @@ type Info struct {
 	// ExtendedThinkingBudget reports whether the Claude thinking.budget_tokens
 	// parameter is accepted.
 	ExtendedThinkingBudget bool
+	// AutomaticToolChoiceOnly reports that tool use cannot be forced to a
+	// specific tool (or to any tool). Callers must prompt with auto selection.
+	AutomaticToolChoiceOnly bool
 	// ThinkingControl is the Gemini thinking-knob generation the model takes.
 	ThinkingControl ThinkingControl
 }
@@ -150,6 +153,8 @@ func Resolve(id string) Info {
 // mirroring how the Anthropic API matches model names.
 func claudeInfo(id string) Info {
 	info := Info{Backend: BackendClaude}
+	base, _, _ := strings.Cut(id, "@")
+	info.AutomaticToolChoiceOnly = base == "claude-fable-5-1"
 	if !hasAnyPrefix(id, samplingParamsRemovedPrefixes) {
 		info.SamplingParams = true
 		info.ExtendedThinkingBudget = true

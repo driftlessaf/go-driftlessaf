@@ -246,6 +246,9 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 	// API rejects a forced tool_choice while thinking is active. Checked after
 	// all options are applied so the conflict is caught regardless of the order
 	// the two options were supplied in.
+	if e.forceSubmitToolChoice && model.Resolve(e.capabilityModelName).AutomaticToolChoiceOnly {
+		return nil, errors.New("WithForceSubmitToolChoice is unsupported by models that require automatic tool selection")
+	}
 	if e.forceSubmitToolChoice && e.thinkingBudgetTokens != nil {
 		return nil, errors.New("WithForceSubmitToolChoice is incompatible with WithThinking: the API rejects a forced tool_choice while extended thinking is active")
 	}
@@ -897,7 +900,7 @@ func (e *executor[Request, Response]) runConversation(
 			// Optional early-finalize nudge. When the investigative tool-call
 			// count reaches the configured threshold and a terminal tool is
 			// configured, inject a single instruction asking the model to emit
-			// its result now and force that tool on the next turn. This bounds
+			// its result now and force that tool where supported. This bounds
 			// runaway investigation by steering toward a result rather than
 			// aborting at maxTurns. Off when maxToolCallsBeforeFinalize is zero.
 			if shouldNudgeFinalize(e.maxToolCallsBeforeFinalize, liveToolCalls, finalizeNudged, submitToolName) {
@@ -912,7 +915,7 @@ func (e *executor[Request, Response]) runConversation(
 						anthropic.NewTextBlock(fmt.Sprintf("You have gathered enough evidence. Call the %s tool now to return your result based on what you have found so far.", submitToolName)),
 					},
 				})
-				params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
+				params.ToolChoice = submitToolChoice(e.capabilityModelName, submitToolName)
 			}
 
 			// Force the submit tool on the next turn once the deferral gate tool
@@ -924,7 +927,7 @@ func (e *executor[Request, Response]) runConversation(
 			// choice from a prior turn is already in place.
 			if submitToolName != "" && deferredGateResolved &&
 				params.ToolChoice.OfTool == nil {
-				params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
+				params.ToolChoice = submitToolChoice(e.capabilityModelName, submitToolName)
 			}
 
 			return response, false, nil
@@ -932,9 +935,9 @@ func (e *executor[Request, Response]) runConversation(
 
 		// When submit_result is configured, it is the only valid exit path.
 		// If Claude responds with text instead of calling submit_result,
-		// force it to call the tool on the next turn using tool_choice.
+		// redirect it on the next turn, forcing tool_choice where supported.
 		if e.submitTool.Handler != nil && textContent != "" {
-			clog.WarnContext(ctx, "Claude responded with text instead of calling submit_result, redirecting with tool_choice")
+			clog.WarnContextf(ctx, "Claude responded with text instead of calling submit_result, redirecting to terminal submission")
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
 			params.Messages = append(params.Messages, message.ToParam())
@@ -944,8 +947,8 @@ func (e *executor[Request, Response]) runConversation(
 					anthropic.NewTextBlock("You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary."),
 				},
 			})
-			// Force Claude to call the submit_result tool on the next turn.
-			params.ToolChoice = anthropic.ToolChoiceParamOfTool(submitToolName)
+			// Auto-only models receive the prompt without a forced tool choice.
+			params.ToolChoice = submitToolChoice(e.capabilityModelName, submitToolName)
 			return response, false, nil
 		}
 
@@ -1196,7 +1199,7 @@ func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string
 	// that tool first; the force is then applied on a later turn by the turn
 	// loop. See shouldForceSubmitOnFirstTurn for the exact condition.
 	if name := e.submitToolName(); name != "" && e.shouldForceSubmitOnFirstTurn(tools) {
-		params.ToolChoice = anthropic.ToolChoiceParamOfTool(name)
+		params.ToolChoice = submitToolChoice(e.capabilityModelName, name)
 	}
 
 	return params, dropTemperatureWarn, nil
@@ -1230,6 +1233,16 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, toolUse, trace),
 		trace, toolUse.ID, toolUse.Name, args,
 		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
+}
+
+// submitToolChoice steers terminal submission where the model permits it.
+// Auto-only models retain the existing redirect/nudge prompt and turn limit;
+// accepting a final result still requires the submit handler and validators.
+func submitToolChoice(modelName, toolName string) anthropic.ToolChoiceUnionParam {
+	if model.Resolve(modelName).AutomaticToolChoiceOnly {
+		return anthropic.ToolChoiceUnionParam{}
+	}
+	return anthropic.ToolChoiceParamOfTool(toolName)
 }
 
 // shouldForceSubmitOnFirstTurn reports whether the forced submit tool_choice

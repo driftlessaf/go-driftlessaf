@@ -7,6 +7,7 @@ package claudeexecutor
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -68,6 +69,18 @@ func TestForceSubmitToolChoiceRejectedWithThinking(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("New() with WithForceSubmitToolChoice and WithThinking: want error, got nil")
+	}
+}
+
+func TestForceSubmitToolChoiceRejectedWithAutoOnlyModel(t *testing.T) {
+	t.Parallel()
+	_, err := newTestExecutorErr(t,
+		WithModel[*testBindable, *testResponse]("claude-fable-5-1"),
+		WithSubmitResultProvider[*testBindable, *testResponse](submitProvider()),
+		WithForceSubmitToolChoice[*testBindable, *testResponse](""),
+	)
+	if err == nil || !strings.Contains(err.Error(), "automatic tool selection") {
+		t.Fatalf("New() error = %v, want unsupported forced tool selection", err)
 	}
 }
 

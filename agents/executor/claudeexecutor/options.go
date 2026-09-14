@@ -333,7 +333,8 @@ func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *
 // WithMaxToolCallsBeforeFinalize bounds the agentic loop with a soft cap: once
 // the model has made n investigative (non-terminal) tool calls, the executor
 // injects a single instruction asking it to call its terminal submit tool now
-// and forces that tool on the next turn.
+// and forces that tool on the next turn where supported. Auto-only models
+// retain automatic selection and receive the same instruction.
 //
 // This is distinct from WithMaxTurns, which aborts the run when exceeded. The
 // soft cap instead steers the model toward emitting a result based on the
@@ -378,6 +379,8 @@ func WithMaxToolCallsBeforeFinalize[Request promptbuilder.Bindable, Response any
 // so construction fails when both are set. The order in which the two options
 // are applied does not matter — the conflict is checked after all options are
 // applied.
+// Models that only support automatic tool selection also reject this option
+// at construction; the normal reactive redirect remains available.
 func WithForceSubmitToolChoice[Request promptbuilder.Bindable, Response any](deferUntilToolName string) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		e.forceSubmitToolChoice = true
