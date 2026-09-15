@@ -8,26 +8,17 @@ package clonemanager
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec"
+	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gitenv"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"golang.org/x/oauth2"
 )
-
-// minGitVersion is the oldest git the CLI backend accepts. The backend's
-// security posture rides on config-over-environment (GIT_CONFIG_COUNT et al,
-// git 2.31; GIT_CONFIG_GLOBAL, git 2.32), which OLDER git silently ignores —
-// the hook neutralization would fail open, not closed. New enforces this
-// with a version probe when the CLI backend is selected.
-const minGitMajor, minGitMinor = 2, 32
 
 // allowedProtocols is the GIT_ALLOW_PROTOCOL value for CLI git invocations.
 // The manager only ever constructs https URLs, so production pins https alone:
@@ -43,7 +34,8 @@ var allowedProtocols = "https"
 // checkout and reset walk the entire working tree where native git leans on
 // the index stat cache (measured ~10x on a 46k-file tree). All other
 // operations (branching, committing, signing, pushing) still go through
-// go-git. Requires git >= 2.32 on PATH; New fails otherwise.
+// go-git. Requires git >= gitenv.MinMajor.MinMinor on PATH; New fails
+// otherwise.
 func WithGitCLI() Option {
 	return func(m *Manager) {
 		m.backend = cliBackend{tokenSource: m.tokenSource}
@@ -168,94 +160,23 @@ func (b cliBackend) exec(ctx context.Context, dir, remote string, env []string, 
 	return gitexec.Run(ctx, args[0], cmd, opts...)
 }
 
-// env returns the environment for a git CLI invocation: the parent
-// environment with system and global git config disabled (only command-line
-// flags, config-over-environment, and the clone's own .git/config apply),
-// prompting disabled, transport protocols pinned, and hooks neutralized.
-// remote is the network URL for clone/fetch and empty for purely local git
-// runs, which then carry no credential at all and cannot fail on token
-// refresh. Config-over-environment requires git >= 2.31/2.32; older git
-// ignores it silently, which is why New enforces minGitVersion.
+// env returns the environment for a git CLI invocation (gitenv.Environ):
+// the parent environment with system and global git config disabled (only
+// command-line flags, config-over-environment, and the clone's own
+// .git/config apply), prompting disabled, transport protocols pinned to
+// allowedProtocols, and hooks neutralized. remote is the network URL for
+// clone/fetch and empty for purely local git runs, which then carry no
+// credential at all and cannot fail on token refresh. The command-scope
+// pins outrank anything in .git/config, including a config re-poisoned by
+// a still-running process AFTER resetGitConfig ran; a longer planted URL
+// prefix could still win a url.insteadOf tie, but resetGitConfig wipes it
+// first and GIT_ALLOW_PROTOCOL bounds where a survivor could point.
 func (b cliBackend) env(remote string) ([]string, error) {
-	// Hooks live under the attacker-writable .git/ of a pooled clone and
-	// would run with the manager's credentials in the environment, so point
-	// git at a path that can never contain one. http.proxy and
-	// credential.helper are pinned empty here too: config-over-environment
-	// is command scope, which outranks (proxy, last-wins) or clears
-	// (helper list) anything in .git/config — including a config re-poisoned
-	// by a still-running process AFTER resetGitConfig ran.
-	cfg := [][2]string{
-		{"core.hooksPath", os.DevNull},
-		{"http.proxy", ""},
-		{"credential.helper", ""},
-		// Auto gc must not fork into the background. A forked gc can still
-		// be repacking objects after this command returns and the caller
-		// reopens the go-git handle, so a later go-git read can land on a
-		// pack gc already removed. Keep auto gc itself on: it is what
-		// bounds a pooled clone's object store. Only forbid the detach, so
-		// a triggered run finishes inside this command instead.
-		{"gc.autoDetach", "false"},
-	}
-	if remote != "" {
-		// URL-scoped so they outrank a same-specificity .git/config pin, and
-		// token-independent so an empty-token fetch is covered too. A longer
-		// planted prefix could still win, but resetGitConfig wipes it first
-		// and GIT_ALLOW_PROTOCOL bounds where a survivor could point.
-		cfg = append(cfg,
-			[2]string{"http." + remote + ".proxy", ""},
-			[2]string{"url." + remote + ".insteadOf", remote},
-		)
-
-		token, err := b.tokenSource.Token()
-		if err != nil {
-			return nil, fmt.Errorf("getting token: %w", err)
-		}
-		if token.AccessToken != "" {
-			basic := base64.StdEncoding.EncodeToString([]byte("unused-when-using-access-tokens:" + token.AccessToken))
-			// URL-scoped so a rewrite off the trusted host does not carry the token.
-			cfg = append(cfg, [2]string{"http." + remote + ".extraheader", "Authorization: Basic " + basic})
-		}
-	}
-
-	env := append(os.Environ(),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ALLOW_PROTOCOL="+allowedProtocols,
-		fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(cfg)),
-	)
-	for i, kv := range cfg {
-		env = append(env,
-			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, kv[0]),
-			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, kv[1]),
-		)
-	}
-	return env, nil
-}
-
-// gitVersionRegex extracts the major.minor pair from `git version` output,
-// e.g. "git version 2.39.5 (Apple Git-154)".
-var gitVersionRegex = regexp.MustCompile(`git version (\d+)\.(\d+)`)
-
-// checkGitVersion fails when the git binary is missing or predates
-// minGitVersion, so a silently-ignored GIT_CONFIG_* environment (the CLI
-// backend's hook and config defenses) is caught at construction instead of
-// failing open at fetch time.
-func checkGitVersion(ctx context.Context) error {
-	out, err := gitexec.Output(ctx, "version", gitexec.CommandContext(ctx, "version"))
-	if err != nil {
-		return fmt.Errorf("running git version (the CLI backend requires git >= %d.%d on PATH): %w", minGitMajor, minGitMinor, err)
-	}
-	m := gitVersionRegex.FindSubmatch(out)
-	if m == nil {
-		return fmt.Errorf("parsing git version output %q", out)
-	}
-	major, _ := strconv.Atoi(string(m[1]))
-	minor, _ := strconv.Atoi(string(m[2]))
-	if major > minGitMajor || (major == minGitMajor && minor >= minGitMinor) {
-		return nil
-	}
-	return fmt.Errorf("git %d.%d is too old for the CLI backend: config-over-environment needs git >= %d.%d (older git ignores it silently, disabling the hook and config defenses)", major, minor, minGitMajor, minGitMinor)
+	return gitenv.Environ(gitenv.Options{
+		Remote:           remote,
+		TokenSource:      b.tokenSource,
+		AllowedProtocols: allowedProtocols,
+	})
 }
 
 // remoteRefHash resolves name in repo, returning plumbing.ZeroHash when the

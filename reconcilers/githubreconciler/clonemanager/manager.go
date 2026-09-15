@@ -17,6 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gitenv"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gogit"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
@@ -173,7 +174,9 @@ func New(ctx context.Context, tokenSource oauth2.TokenSource, identity string, s
 		opt(m)
 	}
 	if _, ok := m.backend.(cliBackend); ok {
-		if err := checkGitVersion(ctx); err != nil {
+		// A git that ignores the environment the CLI backend hardens with
+		// would fail open, not closed, so refuse it at construction.
+		if err := gitenv.CheckVersion(ctx); err != nil {
 			return nil, err
 		}
 	}
