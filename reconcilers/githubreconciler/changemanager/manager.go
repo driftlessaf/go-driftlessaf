@@ -146,6 +146,29 @@ func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
 	}
 }
 
+// WithTrustedReviewAuthors extends the trusted set with GitHub login names
+// whose review comments and review bodies are consumed regardless of author
+// association. A comment or review is trusted when its association is one of
+// OWNER, MEMBER, COLLABORATOR OR its author login is in this allowlist. Use it
+// for GitHub App reviewers whose association is NONE, e.g. "some-reviewer[bot]".
+// GitHub reserves the "[bot]" login suffix to Apps, so a login allowlist cannot
+// be spoofed by a user account. Matching is exact. The default (empty allowlist)
+// keeps association-only filtering.
+func WithTrustedReviewAuthors[T any](logins ...string) Option[T] {
+	return func(cm *CM[T]) {
+		if len(logins) == 0 {
+			return
+		}
+		set := make(map[string]struct{}, len(logins))
+		for _, l := range logins {
+			if l != "" {
+				set[l] = struct{}{}
+			}
+		}
+		cm.trustedReviewAuthors = set
+	}
+}
+
 // WithManagedLabels declares the set of labels this reconciler owns. On an
 // update, any managed label present on the PR but absent from the desired
 // labels passed to Upsert is removed, while labels added by humans or other
@@ -174,6 +197,9 @@ type CM[T any] struct {
 	closeOnEmptyDiff    bool
 	managedLabels       []string
 	traceDashboardURL   string
+	// trustedReviewAuthors are GitHub login names trusted regardless of
+	// author association; see WithTrustedReviewAuthors.
+	trustedReviewAuthors map[string]struct{}
 }
 
 // GraphQL types for querying check runs
@@ -273,6 +299,18 @@ var trustedAuthorAssociations = map[string]struct{}{
 	"OWNER":        {},
 	"MEMBER":       {},
 	"COLLABORATOR": {},
+}
+
+// authorTrusted reports whether a comment or review is trusted: its association
+// is in trustedAuthorAssociations, or its author login is in trustedAuthors
+// (see WithTrustedReviewAuthors). A nil or empty trustedAuthors leaves
+// association-only filtering.
+func authorTrusted(association, login string, trustedAuthors map[string]struct{}) bool {
+	if _, ok := trustedAuthorAssociations[association]; ok {
+		return true
+	}
+	_, ok := trustedAuthors[login]
+	return ok
 }
 
 // New creates a new CM with the given identity and templates.
@@ -508,10 +546,10 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect unresolved review thread findings from trusted authors
-		findings = append(findings, collectThreadFindings(ctx, pr.ReviewThreads)...)
+		findings = append(findings, collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors)...)
 
 		// Collect review body findings from trusted authors on the current commit
-		findings = append(findings, collectReviewBodyFindings(ctx, pr.HeadRefOid, pr.Reviews)...)
+		findings = append(findings, collectReviewBodyFindings(ctx, pr.HeadRefOid, pr.Reviews, cm.trustedReviewAuthors)...)
 
 		// Recover the embedded metadata (e.g. the commit-budget baseline);
 		// absent on PRs whose body predates this block.
@@ -549,15 +587,11 @@ func (cm *CM[T]) NewSession(
 	}, nil
 }
 
-//go:fix inline
-func ptrTo[T any](v T) *T {
-	return new(v)
-}
-
 // collectThreadFindings extracts findings from unresolved review threads.
 // All unresolved threads are included regardless of which commit they were left on.
 // Only comments from trusted authors are included; threads with no trusted comments are skipped.
-func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection) []callbacks.Finding {
+// trustedAuthors names logins trusted regardless of association (see authorTrusted).
+func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}) []callbacks.Finding {
 	findings := make([]callbacks.Finding, 0, len(threads.Nodes))
 
 	for _, thread := range threads.Nodes {
@@ -569,7 +603,7 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 		// Filter to comments from trusted authors only
 		var trustedComments []gqlThreadComment
 		for _, c := range thread.Comments.Nodes {
-			if _, trusted := trustedAuthorAssociations[c.AuthorAssociation]; trusted {
+			if authorTrusted(c.AuthorAssociation, c.Author.Login, trustedAuthors) {
 				trustedComments = append(trustedComments, c)
 			} else {
 				clog.DebugContextf(ctx, "Skipping untrusted thread comment author=%s association=%s thread=%s", c.Author.Login, c.AuthorAssociation, thread.Id)
@@ -602,11 +636,12 @@ const reviewBodyIdentifierPrefix = "review-body:"
 // collectReviewBodyFindings extracts findings from non-empty review bodies by trusted
 // authors on the current commit. Review bodies lack a resolution concept, so they are
 // filtered by commit association: once the bot pushes a new commit, old bodies drop out.
-func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews gqlReviewBodiesConnection) []callbacks.Finding {
+// trustedAuthors names logins trusted regardless of association (see authorTrusted).
+func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews gqlReviewBodiesConnection, trustedAuthors map[string]struct{}) []callbacks.Finding {
 	var findings []callbacks.Finding
 
 	for _, review := range reviews.Nodes {
-		if _, trusted := trustedAuthorAssociations[review.AuthorAssociation]; !trusted {
+		if !authorTrusted(review.AuthorAssociation, review.Author.Login, trustedAuthors) {
 			clog.DebugContextf(ctx, "Skipping untrusted review body author=%s association=%s", review.Author.Login, review.AuthorAssociation)
 			continue
 		}
