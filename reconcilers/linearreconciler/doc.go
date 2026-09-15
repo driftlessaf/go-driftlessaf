@@ -11,4 +11,8 @@ SPDX-License-Identifier: Apache-2.0
 // ReconcilerFunc for each one. It handles rate limiting, label gating, and
 // team filtering, and supports persisting reconciler state as issue
 // attachments.
+//
+// A deployed bot's main parses Credentials from the environment, builds the
+// Client with Credentials.NewClient, wraps its ReconcilerFunc with New, and
+// serves the result with workqueue/serve.ListenAndServe.
 package linearreconciler
