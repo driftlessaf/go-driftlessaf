@@ -89,14 +89,18 @@ func (s *Store) Get(ctx context.Context, name string) ([]byte, blob.Gen, bool, e
 // ifGen > 0 it removes the object only if its generation matches. An
 // unconditional delete of an absent object is reported as blob.ErrNotExist; a
 // generation-conditional delete against an absent object or a differing
-// generation is reported as blob.ErrPreconditionFailed (GCS returns 412 — the
-// precondition can never hold).
+// generation is reported as blob.ErrPreconditionFailed.
 func (s *Store) Delete(ctx context.Context, name string, ifGen blob.Gen) error {
 	obj := s.bucket.Object(name)
 	if ifGen != 0 {
 		obj = obj.If(storage.Conditions{GenerationMatch: int64(ifGen)})
 	}
 	if err := mapErr(obj.Delete(ctx)); err != nil {
+		// GCS returns 404 for an absent object even with GenerationMatch.
+		// Its missing generation cannot satisfy the blob precondition.
+		if ifGen != 0 && errors.Is(err, blob.ErrNotExist) {
+			err = blob.ErrPreconditionFailed
+		}
 		return fmt.Errorf("blob delete %q: %w", name, err)
 	}
 	return nil

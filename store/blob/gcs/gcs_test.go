@@ -9,15 +9,81 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"cloud.google.com/go/storage"
+	"github.com/google/uuid"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"chainguard.dev/driftlessaf/store/blob"
 )
+
+// TestDelete drives the storage client with GCS's observed response for an
+// absent object: 404 even when the request includes ifGenerationMatch.
+func TestDelete(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		gen    blob.Gen
+		status int
+		want   error
+	}{{
+		name: "unconditional absent object", status: http.StatusNotFound, want: blob.ErrNotExist,
+	}, {
+		name: "conditional absent object", gen: 5, status: http.StatusNotFound, want: blob.ErrPreconditionFailed,
+	}, {
+		name: "stale generation", gen: 5, status: http.StatusPreconditionFailed, want: blob.ErrPreconditionFailed,
+	}, {
+		name: "matching generation", gen: 5, status: http.StatusNoContent,
+	}, {
+		name: "conditional permission denied", gen: 5, status: http.StatusForbidden, want: &googleapi.Error{Code: http.StatusForbidden},
+	}} {
+		t.Run(tt.name, func(t *testing.T) {
+			bucket, object := uuid.NewString(), uuid.NewString()
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodDelete || r.URL.Path != "/b/"+bucket+"/o/"+object {
+					t.Errorf("request: got = %s %s, want = DELETE /b/%s/o/%s", r.Method, r.URL.Path, bucket, object)
+				}
+				wantGen := ""
+				if tt.gen != 0 {
+					wantGen = strconv.FormatInt(int64(tt.gen), 10)
+				}
+				if got := r.URL.Query().Get("ifGenerationMatch"); got != wantGen {
+					t.Errorf("ifGenerationMatch: got = %q, want = %q", got, wantGen)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				if tt.status != http.StatusNoContent {
+					fmt.Fprintf(w, `{"error":{"code":%d,"message":"delete failed"}}`, tt.status)
+				}
+			}))
+			defer server.Close()
+			client, err := storage.NewClient(t.Context(), option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			err = New(client.Bucket(bucket)).Delete(t.Context(), object, tt.gen)
+			if want, ok := errors.AsType[*googleapi.Error](tt.want); ok {
+				got, ok := errors.AsType[*googleapi.Error](err)
+				if !ok || got.Code != want.Code {
+					t.Errorf("Delete: got = %v, want = HTTP %d", err, want.Code)
+				}
+			} else if !errors.Is(err, tt.want) {
+				t.Errorf("Delete: got = %v, want = %v", err, tt.want)
+			}
+			if calls != 1 {
+				t.Errorf("delete requests: got = %d, want = 1", calls)
+			}
+		})
+	}
+}
 
 // TestMapErr pins the translation of real GCS client errors into the blob
 // sentinels: not-found (404 / storage.ErrObjectNotExist) → ErrNotExist,
