@@ -186,7 +186,7 @@ func TestRunAgentPassesFanOut(t *testing.T) {
 	}}
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
 
-	outcome, err := r.runAgentPasses(context.Background(), nil, fanCB{}, req, orig)
+	outcome, err := r.runAgentPasses(t.Context(), nil, fanCB{}, req, orig)
 	if err != nil {
 		t.Fatalf("runAgentPasses: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestBudgetChecker(t *testing.T) {
 
 	t.Run("no capability is unbounded", func(t *testing.T) {
 		t.Parallel()
-		ok := budgetChecker(context.Background(), struct{}{})
+		ok := budgetChecker(t.Context(), struct{}{})
 		if !ok() {
 			t.Error("a request without the budget capability must be unbounded")
 		}
@@ -235,7 +235,7 @@ func TestBudgetChecker(t *testing.T) {
 
 	t.Run("no deadline is unbounded", func(t *testing.T) {
 		t.Parallel()
-		ok := budgetChecker(context.Background(), &fanReqBudget{margin: time.Minute})
+		ok := budgetChecker(t.Context(), &fanReqBudget{margin: time.Minute})
 		if !ok() {
 			t.Error("a context without a deadline must be unbounded")
 		}
@@ -243,7 +243,7 @@ func TestBudgetChecker(t *testing.T) {
 
 	t.Run("within and beyond the margin", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 		defer cancel()
 		if ok := budgetChecker(ctx, &fanReqBudget{margin: time.Minute}); !ok() {
 			t.Error("an hour left against a one-minute margin must be within budget")

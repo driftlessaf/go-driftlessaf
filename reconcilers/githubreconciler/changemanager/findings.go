@@ -19,12 +19,35 @@ const (
 	maxQuotedBodyBytes = 4096
 	// truncationMarker is appended to a body cut at maxQuotedBodyBytes.
 	truncationMarker = "[truncated]"
+	// maxInlinePathBytes bounds a review-thread path placed on a finding's
+	// header line. A path to a file that exists in the checkout fits within
+	// the Linux PATH_MAX, so the cap never alters one.
+	maxInlinePathBytes = 4096
 )
 
-// untrustedMarkerRE matches the boundary tag in either open or close form,
-// case-insensitively, so a quoted body cannot reproduce the wrapper it is
-// placed inside.
-var untrustedMarkerRE = regexp.MustCompile(`(?i)</?untrusted-content`)
+var (
+	// untrustedMarkerRE matches the boundary tag in either open or close form,
+	// case-insensitively, so a quoted body cannot reproduce the wrapper it is
+	// placed inside.
+	untrustedMarkerRE = regexp.MustCompile(`(?i)</?untrusted-content`)
+	// controlRunRE matches a run of characters that render as nothing or as a
+	// line break: Unicode control (Cc, the C0 and C1 sets, NEL included),
+	// format (Cf: bidirectional controls, zero-width characters, the byte
+	// order mark), and the line and paragraph separators (Zl, Zp). A file
+	// path has no legitimate use for any of them.
+	controlRunRE = regexp.MustCompile(`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+`)
+)
+
+// sanitizeInlinePath returns a review-thread path fit for a finding's header
+// line and name, which sit outside the untrusted-content wrapper around the
+// comment bodies. The path names a file in the pull request's tree, so a
+// contributor controls it byte for byte: control-character runs collapse to
+// one space so the path cannot start a new line of the finding, any boundary
+// marker is neutralized so it cannot forge a wrapper, and the result is
+// bounded.
+func sanitizeInlinePath(p string) string {
+	return truncateOnRune(neutralizeUntrustedMarkers(controlRunRE.ReplaceAllString(p, " ")), maxInlinePathBytes)
+}
 
 // wrapQuoted bounds a quoted body and encloses it in a boundary element tagged
 // with its source, giving a downstream model a fixed anchor for "this span is
@@ -83,13 +106,15 @@ func formatCheckRunDetails(name, status, conclusion, title, summary, text, detai
 
 // formatThreadDetails builds a human-readable details string for a review thread.
 // Includes commit SHA and outdated status so the agent can contextualize via history tools.
+// The path is sanitized here because it is written outside the wrapper that
+// encloses each comment body.
 func formatThreadDetails(path string, line int, isOutdated bool, comments []gqlThreadComment) string {
 	var sb strings.Builder
 
 	first := comments[0]
 
 	fmt.Fprintf(&sb, "Review thread by @%s (%s)\n", displayReviewAuthor(first.Author.Login, first.Author.Typename), first.AuthorAssociation)
-	fmt.Fprintf(&sb, "Path: %s:%d\n", path, line)
+	fmt.Fprintf(&sb, "Path: %s:%d\n", sanitizeInlinePath(path), line)
 
 	commitAnnotation := first.Commit.Oid
 	if isOutdated {

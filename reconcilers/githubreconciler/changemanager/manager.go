@@ -771,9 +771,11 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 			continue
 		}
 
-		threadName := thread.Path
+		// The finding name is model-facing text outside any wrapper, so the
+		// contributor-controlled path is sanitized before it becomes the name.
+		threadName := sanitizeInlinePath(thread.Path)
 		if thread.Line > 0 {
-			threadName = fmt.Sprintf("%s:%d", thread.Path, thread.Line)
+			threadName = fmt.Sprintf("%s:%d", threadName, thread.Line)
 		}
 		findings = append(findings, callbacks.Finding{
 			Kind:       callbacks.FindingKindReview,
