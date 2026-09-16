@@ -22,6 +22,10 @@ type ReadResult struct {
 	// Remaining is the number of bytes remaining after NextOffset.
 	// 0 when EOF was reached.
 	Remaining int64
+
+	// Offset is the byte offset Content starts at. It precedes the requested
+	// offset when the window was aligned to the start of its line.
+	Offset int64
 }
 
 // DirEntry represents a single entry in a directory listing.
@@ -85,6 +89,10 @@ type SearchResult struct {
 type EditResult struct {
 	// Replacements is the number of occurrences that were replaced.
 	Replacements int
+
+	// Note describes an adjustment the edit made to match, such as an
+	// indentation shift. Empty for an exact match.
+	Note string
 }
 
 // WorktreeCallbacks provides callback functions for file operations on a

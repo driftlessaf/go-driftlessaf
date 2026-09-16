@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package clonemanager
 
 import (
-	"context"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -78,7 +77,7 @@ func writeTestFile(t *testing.T, dir, relPath, content string, mode os.FileMode)
 func TestReadFile(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name          string
@@ -180,7 +179,7 @@ func TestReadFile(t *testing.T) {
 func TestReadFileContinuation(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Read big.txt in chunks and reassemble.
 	var assembled strings.Builder
@@ -208,7 +207,7 @@ func TestReadFileContinuation(t *testing.T) {
 func TestWriteFile(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	content := fmt.Sprintf("written-%d", rand.Int64())
 
@@ -267,7 +266,7 @@ func TestWriteFile(t *testing.T) {
 func TestWriteFile_MultiWriteTurnStagesOnceAtCommit(t *testing.T) {
 	wt, dir := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	indexPath := filepath.Join(dir, ".git", "index")
 	before, err := os.ReadFile(indexPath)
@@ -300,7 +299,7 @@ func TestWriteFile_MultiWriteTurnStagesOnceAtCommit(t *testing.T) {
 		t.Fatalf("status after writes (index corrupted?): %v", err)
 	}
 	if status.IsClean() {
-		t.Fatal("expected pending changes after writes, got clean status")
+		t.Fatal("status after writes: got = clean, want = pending changes")
 	}
 
 	// Mirror commitChanges: stage all in one shot, then commit.
@@ -351,7 +350,7 @@ func TestWriteFile_MultiWriteTurnStagesOnceAtCommit(t *testing.T) {
 func TestWriteFile_ConcurrentWritesStageOnce(t *testing.T) {
 	wt, dir := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const n = 32
 	var wg sync.WaitGroup
@@ -379,7 +378,7 @@ func TestWriteFile_ConcurrentWritesStageOnce(t *testing.T) {
 		t.Fatalf("status after concurrent writes (index corrupted?): %v", err)
 	}
 	if status.IsClean() {
-		t.Fatal("expected pending changes after writes, got clean status")
+		t.Fatal("status after writes: got = clean, want = pending changes")
 	}
 
 	// Stage once, commit, and confirm every file reached the commit tree.
@@ -420,7 +419,7 @@ func TestWriteFile_ConcurrentWritesStageOnce(t *testing.T) {
 func TestDeleteFile(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if err := cb.DeleteFile(ctx, "hello.txt"); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -449,7 +448,7 @@ func TestDeleteFile(t *testing.T) {
 func TestMoveFile(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if err := cb.MoveFile(ctx, "hello.txt", "moved/hello.txt"); err != nil {
 		t.Fatalf("move: %v", err)
@@ -475,7 +474,7 @@ func TestMoveFile(t *testing.T) {
 func TestCopyFile(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if err := cb.CopyFile(ctx, "script.sh", "copy.sh"); err != nil {
 		t.Fatalf("copy: %v", err)
@@ -510,7 +509,7 @@ func TestCopyFile(t *testing.T) {
 func TestCreateSymlink(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if err := cb.CreateSymlink(ctx, "link.txt", "hello.txt"); err != nil {
 		t.Fatalf("create symlink: %v", err)
@@ -530,7 +529,7 @@ func TestCreateSymlink(t *testing.T) {
 func TestCreateSymlinkEscape(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name    string
@@ -570,7 +569,7 @@ func TestCreateSymlinkEscape(t *testing.T) {
 func TestChmod(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if err := cb.Chmod(ctx, "hello.txt", 0o755); err != nil {
 		t.Fatalf("chmod: %v", err)
@@ -590,7 +589,7 @@ func TestChmod(t *testing.T) {
 func TestListDirectory(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name          string
@@ -688,7 +687,7 @@ func TestListDirectory(t *testing.T) {
 func TestListDirectoryMetadata(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	result, err := cb.ListDirectory(ctx, ".", "", 0, 100)
 	if err != nil {
@@ -728,7 +727,7 @@ func TestListDirectoryMetadata(t *testing.T) {
 func TestSearchCodebase(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name          string
@@ -836,7 +835,7 @@ func TestSearchCodebase(t *testing.T) {
 func TestSearchCodebasePagination(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// big.txt has "abcdefghij" repeated 100 times. Search for "abc" which
 	// should match 100 times.
@@ -881,7 +880,7 @@ func TestSearchCodebasePagination(t *testing.T) {
 func TestSearchCodebaseMatchOffsets(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	result, err := cb.SearchCodebase(ctx, ".", "World", "hello.txt", 0, 100)
 	if err != nil {
@@ -1103,7 +1102,7 @@ func TestAdjustUTF8Boundary(t *testing.T) {
 func TestEditFile(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tests := []struct {
 		name             string
@@ -1234,7 +1233,7 @@ func TestEditFile(t *testing.T) {
 func TestEditFilePreservesMode(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// script.sh is 0755 — verify edit preserves the executable bit.
 	_, err := cb.EditFile(ctx, "script.sh", "echo hi", "echo bye", false)
@@ -1262,7 +1261,7 @@ func TestEditFilePreservesMode(t *testing.T) {
 func TestEditFileDuplicateErrorContainsOffsets(t *testing.T) {
 	wt, _ := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// big.txt = "abcdefghij" * 100. "abc" appears at offsets 0, 10, 20, ...
 	_, err := cb.EditFile(ctx, "big.txt", "abc", "XYZ", false)
@@ -1293,7 +1292,7 @@ func TestEditFileBoundarySpanning(t *testing.T) {
 	// "BCDE" + chunk 2 data, allowing bytes.Index to find the match.
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	pattern := "ABCDEFGH"
 	replacement := fmt.Sprintf("REPLACED-%d", rand.Int64())
@@ -1354,7 +1353,7 @@ func TestEditFileReplaceAllBoundary(t *testing.T) {
 	//   └─────────────────────────┴─────────────────────────┘
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	pattern := "XYZXYZ"
 	replacement := "NEW"
@@ -1418,5 +1417,255 @@ func assertUnstagedChange(t *testing.T, wt *gogit.Worktree, path string) {
 	}
 	if st.Staging != gogit.Untracked && st.Staging != gogit.Unmodified {
 		t.Errorf("path %q staging: got = %v, wanted unstaged (callbacks must not stage)", path, st.Staging)
+	}
+}
+
+// indentFixture is a tab-indented block whose inner lines an agent may copy
+// with the wrong indentation. Byte offsets:
+//
+//	 0: "func f() {\n"
+//	11: "\tif a {\n"
+//	19: "\t\tb()\n"
+//	25: "\n"
+//	26: "\t\tc()\n"
+//	32: "\t}\n"
+//	35: "}\n"
+const indentFixture = "func f() {\n\tif a {\n\t\tb()\n\n\t\tc()\n\t}\n}\n"
+
+func TestEditFileIndentationShift(t *testing.T) {
+	ctx := t.Context()
+
+	tests := []struct {
+		name        string
+		content     string
+		oldString   string
+		newString   string
+		wantContent string
+		wantNote    string
+		wantErr     []string
+	}{{
+		name:        "exact match wins over a shifted region",
+		content:     "\tx()\n\ty()\n---\n\t\tx()\n\t\ty()\n",
+		oldString:   "\tx()\n\ty()",
+		newString:   "\tz()",
+		wantContent: "\tz()\n---\n\t\tx()\n\t\ty()\n",
+	}, {
+		name:        "file has one more tab than old_string",
+		content:     indentFixture,
+		oldString:   "if a {\n\tb()\n\n\tc()\n}",
+		newString:   "if a {\n\tb2()\n\n\tc2()\n}",
+		wantContent: "func f() {\n\tif a {\n\t\tb2()\n\n\t\tc2()\n\t}\n}\n",
+		wantNote:    "old_string matched after adjusting indentation (added 1 tab); new_string was shifted the same way",
+	}, {
+		name:        "file has one fewer tab than old_string",
+		content:     indentFixture,
+		oldString:   "\t\tif a {\n\t\t\tb()\n\n\t\t\tc()\n\t\t}",
+		newString:   "\t\tif a {\n\t\t\tb2()\n\t\t}",
+		wantContent: "func f() {\n\tif a {\n\t\tb2()\n\t}\n}\n",
+		wantNote:    "old_string matched after adjusting indentation (removed 1 tab); new_string was shifted the same way",
+	}, {
+		name:        "only line endings differ yields no note",
+		content:     "a\r\n\tb\r\nc\r\n",
+		oldString:   "\tb\n",
+		newString:   "\tB\n",
+		wantContent: "a\r\n\tB\nc\r\n",
+	}, {
+		name:      "ambiguous shifted regions",
+		content:   "\tx()\n\ty()\n---\n\t\tx()\n\t\ty()\n",
+		oldString: "x()\ny()",
+		newString: "z()",
+		wantErr:   []string{"old_string not found in file", "at least 2 regions", "byte offsets 0 and 14"},
+	}, {
+		name:      "inconsistent shift",
+		content:   "\tx()\n\t\ty()\n",
+		oldString: "x()\ny()",
+		newString: "z()",
+		wantErr:   []string{"old_string not found in file", "not the same on every line"},
+	}, {
+		name:      "no match names the first line's location",
+		content:   indentFixture,
+		oldString: "if a {\n\tzzz()\n}",
+		newString: "z()",
+		wantErr:   []string{"old_string not found in file", "line 2 (byte offset 11)"},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wt, root := initWorktree(t)
+			writeTestFile(t, root, "indent.txt", tc.content, 0o644)
+			cb := WorktreeCallbacks(wt)
+
+			result, err := cb.EditFile(ctx, "indent.txt", tc.oldString, tc.newString, false)
+			got, readErr := os.ReadFile(filepath.Join(root, "indent.txt"))
+			if readErr != nil {
+				t.Fatalf("read back: %v", readErr)
+			}
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("EditFile: got error = nil, want non-nil")
+				}
+				for _, w := range tc.wantErr {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("error: got = %q, want it to contain %q", err, w)
+					}
+				}
+				if string(got) != tc.content {
+					t.Errorf("content after failed edit: got = %q, want unchanged %q", got, tc.content)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EditFile: %v", err)
+			}
+			if result.Replacements != 1 {
+				t.Errorf("replacements: got = %d, want = 1", result.Replacements)
+			}
+			if result.Note != tc.wantNote {
+				t.Errorf("note: got = %q, want = %q", result.Note, tc.wantNote)
+			}
+			if string(got) != tc.wantContent {
+				t.Errorf("content: got = %q, want = %q", got, tc.wantContent)
+			}
+		})
+	}
+}
+
+// linesFixture holds three whole lines. Byte offsets:
+//
+//	 0: "line one\n"    (9 bytes)
+//	 9: "line two\n"    (9 bytes)
+//	18: "line three\n"  (11 bytes)
+const linesFixture = "line one\nline two\nline three\n"
+
+func TestReadFileLineAlignment(t *testing.T) {
+	wt, root := initWorktree(t)
+	writeTestFile(t, root, "lines.txt", linesFixture, 0o644)
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	tests := []struct {
+		name          string
+		offset        int64
+		limit         int
+		wantContent   string
+		wantOffset    int64
+		wantNext      int64 // -1 for nil
+		wantRemaining int64
+	}{{
+		name:          "offset mid-line moves back to the line start",
+		offset:        12,
+		limit:         4,
+		wantContent:   "line two\n",
+		wantOffset:    9,
+		wantNext:      18,
+		wantRemaining: 11,
+	}, {
+		// No newline precedes the first line, so its start is left where
+		// the caller put it; a file without newlines reads byte for byte.
+		name:          "offset on the first line is not moved back",
+		offset:        3,
+		limit:         5,
+		wantContent:   "e one\n",
+		wantOffset:    3,
+		wantNext:      9,
+		wantRemaining: 20,
+	}, {
+		name:          "offset at a line start stays put",
+		offset:        9,
+		limit:         4,
+		wantContent:   "line two\n",
+		wantOffset:    9,
+		wantNext:      18,
+		wantRemaining: 11,
+	}, {
+		name:          "window end extends through the newline",
+		offset:        0,
+		limit:         5,
+		wantContent:   "line one\n",
+		wantOffset:    0,
+		wantNext:      9,
+		wantRemaining: 20,
+	}, {
+		name:        "window reaching EOF is not extended",
+		offset:      12,
+		limit:       100,
+		wantContent: "line two\nline three\n",
+		wantOffset:  9,
+		wantNext:    -1,
+	}, {
+		name:        "offset within the last line",
+		offset:      20,
+		limit:       -1,
+		wantContent: "line three\n",
+		wantOffset:  18,
+		wantNext:    -1,
+	}, {
+		name:        "whole file",
+		offset:      0,
+		limit:       -1,
+		wantContent: linesFixture,
+		wantOffset:  0,
+		wantNext:    -1,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cb.ReadFile(ctx, "lines.txt", tc.offset, tc.limit)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if got.Content != tc.wantContent {
+				t.Errorf("content: got = %q, want = %q", got.Content, tc.wantContent)
+			}
+			if got.Offset != tc.wantOffset {
+				t.Errorf("offset: got = %d, want = %d", got.Offset, tc.wantOffset)
+			}
+			if got.Remaining != tc.wantRemaining {
+				t.Errorf("remaining: got = %d, want = %d", got.Remaining, tc.wantRemaining)
+			}
+			switch {
+			case tc.wantNext < 0 && got.NextOffset != nil:
+				t.Errorf("next_offset: got = %d, want = nil", *got.NextOffset)
+			case tc.wantNext >= 0 && got.NextOffset == nil:
+				t.Errorf("next_offset: got = nil, want = %d", tc.wantNext)
+			case tc.wantNext >= 0 && *got.NextOffset != tc.wantNext:
+				t.Errorf("next_offset: got = %d, want = %d", *got.NextOffset, tc.wantNext)
+			}
+		})
+	}
+}
+
+func TestReadFileLineAlignedWalk(t *testing.T) {
+	wt, root := initWorktree(t)
+	writeTestFile(t, root, "lines.txt", linesFixture, 0o644)
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	// A small limit forces one line per window; the walk must reassemble
+	// the file exactly with next_offset and remaining agreeing on the size.
+	var assembled strings.Builder
+	var offset int64
+	for range 100 {
+		got, err := cb.ReadFile(ctx, "lines.txt", offset, 4)
+		if err != nil {
+			t.Fatalf("ReadFile at %d: %v", offset, err)
+		}
+		if got.Offset != offset {
+			t.Errorf("offset: got = %d, want = %d", got.Offset, offset)
+		}
+		assembled.WriteString(got.Content)
+		if got.NextOffset == nil {
+			if got.Remaining != 0 {
+				t.Errorf("remaining at EOF: got = %d, want = 0", got.Remaining)
+			}
+			break
+		}
+		if sum := *got.NextOffset + got.Remaining; sum != int64(len(linesFixture)) {
+			t.Errorf("next_offset + remaining: got = %d, want = %d", sum, len(linesFixture))
+		}
+		offset = *got.NextOffset
+	}
+	if assembled.String() != linesFixture {
+		t.Errorf("reassembled: got = %q, want = %q", assembled.String(), linesFixture)
 	}
 }

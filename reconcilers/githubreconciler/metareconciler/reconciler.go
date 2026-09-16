@@ -7,6 +7,7 @@ package metareconciler
 
 import (
 	"context"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -57,6 +58,13 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// Unlike prLabels (a fixed set always stamped), this lets labels be applied
 	// to the PR situationally, by labeling the issue.
 	copyIssueLabels bool
+
+	// unknownMergeabilityRequeueAfter, when positive, requeues a reconcile after
+	// that delay when GitHub has not yet computed the PR's mergeability and
+	// nothing else needs acting on, instead of resetting the PR from the
+	// default branch. Zero (the default) keeps the optimistic reset. See
+	// WithRequeueOnUnknownMergeability.
+	unknownMergeabilityRequeueAfter time.Duration
 
 	// giveUp, when set, surfaces an agent's deliberate no-op explanation on the
 	// PR as a single marker comment. Nil is a safe no-op receiver. See
@@ -223,6 +231,17 @@ func WithStateTransitionEmission[Req promptbuilder.Bindable, Resp Result, CB any
 func WithStartComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func() string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.startComment = &startComment{marker: marker, render: render}
+	}
+}
+
+// WithRequeueOnUnknownMergeability requeues after the given delay when GitHub
+// has not yet computed a PR's mergeability and there is nothing else to act on
+// (no findings, no pending checks), instead of resetting the PR from the
+// default branch and re-running the agent for nothing. A non-positive delay
+// disables it (the default).
+func WithRequeueOnUnknownMergeability[Req promptbuilder.Bindable, Resp Result, CB any](after time.Duration) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.unknownMergeabilityRequeueAfter = after
 	}
 }
 

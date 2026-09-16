@@ -99,3 +99,64 @@ func TestWorktreeToolsOffsetSchemaMinimum(t *testing.T) {
 		})
 	}
 }
+
+// TestWorktreeToolsReadFileReportsOffset checks that read_file relays the
+// window's actual start, which precedes the requested offset when the window
+// was aligned to the beginning of its line.
+func TestWorktreeToolsReadFileReportsOffset(t *testing.T) {
+	next := int64(40)
+	cb := callbacks.WorktreeCallbacks{
+		ReadFile: func(_ context.Context, _ string, offset int64, _ int) (callbacks.ReadResult, error) {
+			return callbacks.ReadResult{Content: "line\n", Offset: offset - 3, NextOffset: &next, Remaining: 10}, nil
+		},
+	}
+	tool := worktreeToolDefs[string](cb)["read_file"]
+	trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+	resp := tool.Handler(t.Context(), ToolCall{ID: "r1", Name: "read_file", Args: map[string]any{"path": "a.go", "offset": float64(10)}}, trace, nil)
+
+	if got, want := resp["offset"], int64(7); got != want {
+		t.Errorf("offset: got = %v, want = %v", got, want)
+	}
+	if got, want := resp["next_offset"], int64(40); got != want {
+		t.Errorf("next_offset: got = %v, want = %v", got, want)
+	}
+	if got, want := resp["remaining"], int64(10); got != want {
+		t.Errorf("remaining: got = %v, want = %v", got, want)
+	}
+}
+
+// TestWorktreeToolsEditFileNote checks that edit_file relays the callback's
+// Note only when the edit made an adjustment.
+func TestWorktreeToolsEditFileNote(t *testing.T) {
+	tests := []struct {
+		name     string
+		note     string
+		wantNote bool
+	}{
+		{name: "exact match omits note", note: "", wantNote: false},
+		{name: "adjusted match includes note", note: "old_string matched after adjusting indentation (added 1 tab); new_string was shifted the same way", wantNote: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cb := callbacks.WorktreeCallbacks{
+				EditFile: func(context.Context, string, string, string, bool) (callbacks.EditResult, error) {
+					return callbacks.EditResult{Replacements: 1, Note: tc.note}, nil
+				},
+			}
+			tool := worktreeToolDefs[string](cb)["edit_file"]
+			trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+			resp := tool.Handler(t.Context(), ToolCall{ID: "e1", Name: "edit_file", Args: map[string]any{"path": "a.go", "old_string": "x", "new_string": "y"}}, trace, nil)
+
+			got, ok := resp["note"]
+			if ok != tc.wantNote {
+				t.Fatalf("note present: got = %v, want = %v (resp = %v)", ok, tc.wantNote, resp)
+			}
+			if tc.wantNote && got != tc.note {
+				t.Errorf("note: got = %q, want = %q", got, tc.note)
+			}
+			if got, want := resp["replacements"], 1; got != want {
+				t.Errorf("replacements: got = %v, want = %v", got, want)
+			}
+		})
+	}
+}

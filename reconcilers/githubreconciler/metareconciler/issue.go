@@ -17,6 +17,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"chainguard.dev/driftlessaf/reconcilers/statemachine"
+	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v88/github"
@@ -137,14 +138,6 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		clog.InfoContext(ctx, "PR hit turn limit but has unresolved reviews, iterating with fresh commit budget")
 		usePRBranch = true
 
-	// Historically we delayed here (commented code below), but in high-volume
-	// repositories github can take a long time to compute mergeability, so we
-	// are choosing to optimistically proceed as-if there isn't a rebase needed
-	// when github has not computed mergeability.
-	// case state.IsUnknown():
-	// 	log.Info("PR merge status unknown, requeuing to check again shortly")
-	// 	return workqueue.RequeueAfter(2 * time.Minute)
-
 	case state.HasFindings():
 		log.With("findings", len(changeSession.Findings())).Info("PR has CI findings, iterating")
 		usePRBranch = true
@@ -152,6 +145,16 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	case state.HasPendingChecks():
 		log.With("pending_checks", changeSession.PendingChecks()).Info("PR has pending checks, skipping")
 		return nil
+
+	// Mergeability not yet computed, with nothing else to act on (findings and
+	// pending checks handled above). By default the reconcile proceeds as if no
+	// rebase were needed, because in a high-volume repository GitHub can take
+	// long to compute mergeability. A reconciler that opts in requeues to
+	// re-check instead: falling through resets the PR from the default branch
+	// and re-runs the agent for nothing.
+	case state.IsUnknown() && r.unknownMergeabilityRequeueAfter > 0:
+		log.With("after", r.unknownMergeabilityRequeueAfter).Info("PR mergeability still being computed by GitHub, requeuing")
+		return workqueue.RequeueAfter(r.unknownMergeabilityRequeueAfter)
 
 	case state.HasNoConflicts():
 		log.Info("PR is green, leaving it for human review")

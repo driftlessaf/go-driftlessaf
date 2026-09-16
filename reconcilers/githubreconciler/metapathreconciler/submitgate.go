@@ -49,6 +49,11 @@ import (
 // in-tree fixing analyzer does; a tool handler that writes without staging
 // reopens that gap.
 //
+// Diagnostics become findings through [Diagnostic.AsSanitizedFinding]: a
+// reviewer quotes source text (identifiers, literals, paths the change
+// controls), so control runs collapse, each field is bounded, and the details
+// are enclosed in an untrusted-content element before they reach the model.
+//
 // The gate is stateless: every diagnostic reported blocks, every evaluation
 // is independent, and nothing is passed as Analyze's prior. A
 // nondeterministic reviewer (an agent-based audit) may therefore report
@@ -92,7 +97,7 @@ func SubmitGate[Resp any](reviewer Analyzer) callbacks.ResultValidator[Resp] {
 					"path", d.Path)
 				continue
 			}
-			findings = append(findings, d.AsFinding())
+			findings = append(findings, d.AsSanitizedFinding(analyzerSource))
 		}
 		if len(findings) > 0 {
 			// The executor already counts rejections (the

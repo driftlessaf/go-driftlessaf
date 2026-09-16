@@ -1044,20 +1044,21 @@ func (s *Session[T]) Upsert(
 		return "", fmt.Errorf("executing body template: %w", err)
 	}
 
-	body += fmt.Sprintf("\n\n> **Note:** If you need to make manual changes to this PR, apply the `skip:%s` label. This gives full control of the PR to human operators: the automation will not post updates, close the PR, or delete the branch.", s.manager.identity)
+	suffix := fmt.Sprintf("\n\n> **Note:** If you need to make manual changes to this PR, apply the `skip:%s` label. This gives full control of the PR to human operators: the automation will not post updates, close the PR, or delete the branch.", s.manager.identity)
 
 	// Append trace ID so developers can map this PR back to the agent trace.
 	if spanCtx := trace.SpanFromContext(ctx).SpanContext(); spanCtx.IsValid() {
-		body += s.manager.traceFooter(ctx, spanCtx.TraceID().String())
+		suffix += s.manager.traceFooter(ctx, spanCtx.TraceID().String())
 	}
 
 	// Persist the caller's data and changemanager metadata in one block; carrying
 	// the metadata keeps the commit-budget baseline and the reasoning log across
 	// body regenerations.
-	body, err = s.manager.templateExecutor.Embed(body, &embeddedData[T]{Data: *data, Meta: s.meta})
+	tail, err := s.manager.templateExecutor.Embed("", &embeddedData[T]{Data: *data, Meta: s.meta})
 	if err != nil {
 		return "", fmt.Errorf("embedding data: %w", err)
 	}
+	body = fitPRBody(ctx, body, suffix, tail)
 
 	if s.prNumber == 0 {
 		// Create new PR

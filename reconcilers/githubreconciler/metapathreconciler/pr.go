@@ -7,7 +7,10 @@ package metapathreconciler
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -22,8 +25,6 @@ import (
 //  2. Our identity prefix on branch → report neutral status + re-queue path
 //  3. Other PRs → run analyzer on changed files, report findings as check annotations
 func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
-	log := clog.FromContext(ctx)
-
 	// Fetch the PR to get the head branch name and SHA.
 	pr, _, err := gh.PullRequests.Get(ctx, res.Owner, res.Repo, res.Number)
 	if err != nil {
@@ -38,7 +39,7 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 
 	sha := pr.GetHead().GetSHA()
 	ctx = clog.WithValues(ctx, "sha", sha)
-	log = clog.FromContext(ctx)
+	log := clog.FromContext(ctx)
 	session := r.statusManager.NewSession(gh, res, sha)
 
 	// reportNeutral posts a completed/neutral status for this SHA, but only
@@ -114,6 +115,13 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 	// the line ranges needed for filtering diagnostics.
 	raw, _, err := gh.PullRequests.GetRaw(ctx, res.Owner, res.Repo, res.Number, github.RawOptions{Type: github.Diff})
 	if err != nil {
+		// GitHub refuses to serve a diff over its size limit for as long as the
+		// head SHA stands, so retrying cannot help: record a terminal status and
+		// complete the key.
+		if isDiffTooLarge(err) {
+			log.With("error", err).Info("PR diff exceeds GitHub's size limit, reporting neutral status")
+			return reportNeutral("Diff too large to analyze")
+		}
 		return fmt.Errorf("get PR diff: %w", err)
 	}
 	pd, err := parseDiff(raw)
@@ -247,4 +255,18 @@ func selectReviewFiles(mode Mode, cfg *fullRepoConfig, files []string) (keep []s
 		}
 	}
 	return files, "", nil
+}
+
+// isDiffTooLarge reports whether err is GitHub declining to serve a pull
+// request diff because it exceeds the API's size limit: an HTTP 406 response,
+// or an error entry with the too_large code.
+func isDiffTooLarge(err error) bool {
+	ghErr, ok := errors.AsType[*github.ErrorResponse](err)
+	if !ok {
+		return false
+	}
+	if ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotAcceptable {
+		return true
+	}
+	return slices.ContainsFunc(ghErr.Errors, func(e github.Error) bool { return e.Code == "too_large" })
 }

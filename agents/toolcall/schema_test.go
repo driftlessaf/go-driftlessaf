@@ -13,11 +13,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-// ptr helpers make pointer literals concise in table tests.
-//
-//go:fix inline
-func f64(v float64) *float64 { return new(v) }
-
 // roundTripJSON normalises map[string]any through JSON marshal/unmarshal so
 // that numeric types are consistently float64 (the same shape produced by
 // parsing JSON from the wire).
@@ -171,11 +166,11 @@ func TestSchemaToMap(t *testing.T) {
 		want: map[string]any{"type": "integer", "enum": []any{float64(1), float64(2), float64(3)}},
 	}, {
 		name: "numeric minimum and maximum",
-		in:   &toolcall.Schema{Type: "number", Minimum: f64(0), Maximum: f64(100)},
+		in:   &toolcall.Schema{Type: "number", Minimum: new(float64(0)), Maximum: new(float64(100))},
 		want: map[string]any{"type": "number", "minimum": float64(0), "maximum": float64(100)},
 	}, {
 		name: "exclusive minimum and maximum",
-		in:   &toolcall.Schema{Type: "number", ExclusiveMinimum: f64(0), ExclusiveMaximum: f64(100)},
+		in:   &toolcall.Schema{Type: "number", ExclusiveMinimum: new(float64(0)), ExclusiveMaximum: new(float64(100))},
 		want: map[string]any{"type": "number", "exclusiveMinimum": float64(0), "exclusiveMaximum": float64(100)},
 	}, {
 		name: "multipleOf",
@@ -339,8 +334,8 @@ func TestParameterToMap(t *testing.T) {
 		in: toolcall.Parameter{
 			Name:    "score",
 			Type:    "number",
-			Minimum: f64(0),
-			Maximum: f64(1),
+			Minimum: new(float64(0)),
+			Maximum: new(float64(1)),
 		},
 		want: map[string]any{"type": "number", "minimum": float64(0), "maximum": float64(1)},
 	}, {
@@ -382,7 +377,7 @@ func TestSchemaRoundTripViaJSON(t *testing.T) {
 		Description: "Top-level object",
 		Properties: map[string]*toolcall.Schema{
 			"name":    {Type: "string", Description: "Name"},
-			"count":   {Type: "integer", Minimum: f64(0)},
+			"count":   {Type: "integer", Minimum: new(float64(0))},
 			"enabled": {Type: "boolean", Default: true},
 			"tags": {
 				Type:  "array",

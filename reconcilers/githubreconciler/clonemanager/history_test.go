@@ -920,7 +920,7 @@ func TestPaginateDiff(t *testing.T) {
 		limit:          5,
 		wantDiff:       "abcde",
 		wantRemaining:  5,
-		wantNextOffset: int64Ptr(5),
+		wantNextOffset: new(int64(5)),
 	}, {
 		name:           "partial read with offset",
 		diff:           "abcdefghij",
@@ -928,7 +928,7 @@ func TestPaginateDiff(t *testing.T) {
 		limit:          4,
 		wantDiff:       "defg",
 		wantRemaining:  3,
-		wantNextOffset: int64Ptr(7),
+		wantNextOffset: new(int64(7)),
 	}, {
 		name:           "read to end with offset",
 		diff:           "abcdefghij",
@@ -964,7 +964,7 @@ func TestPaginateDiff(t *testing.T) {
 		limit:          1,
 		wantDiff:       "a",
 		wantRemaining:  9,
-		wantNextOffset: int64Ptr(1),
+		wantNextOffset: new(int64(1)),
 	}, {
 		name:           "limit exactly matches remaining",
 		diff:           "abcdefghij",
@@ -1127,4 +1127,3 @@ func TestCollectCommitsWithMerge(t *testing.T) {
 }
 
 //go:fix inline
-func int64Ptr(v int64) *int64 { return new(v) }

@@ -18,8 +18,13 @@ import (
 	"unicode/utf8"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
+	"chainguard.dev/driftlessaf/internal/textedit"
 	gogit "github.com/go-git/go-git/v5"
 )
+
+// lineBound caps how far ReadFile scans for a newline when aligning a window
+// to whole lines. A line longer than this is left cut.
+const lineBound = 64 << 10
 
 // WorktreeCallbacks creates callbacks.WorktreeCallbacks bound to a git worktree.
 // All file operations are scoped to the worktree root directory.
@@ -74,43 +79,43 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 				return callbacks.ReadResult{}, nil
 			}
 
-			// Determine how many bytes to read.
-			readSize := int64(limit)
-			if limit < 0 {
-				readSize = fileSize - offset
+			// Determine the window, then align it to whole lines so the
+			// agent never sees a first line with its indentation cut off.
+			start, end := offset, fileSize
+			if limit >= 0 && int64(limit) < fileSize-offset {
+				end = offset + int64(limit)
 			}
-			if remaining := fileSize - offset; readSize > remaining {
-				readSize = remaining
+			if start > 0 {
+				if start, err = textedit.LineStart(f, start, lineBound); err != nil {
+					return callbacks.ReadResult{}, err
+				}
 			}
-
-			if offset > 0 {
-				if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			if end < fileSize {
+				if end, err = textedit.LineEnd(f, end, fileSize, lineBound); err != nil {
 					return callbacks.ReadResult{}, err
 				}
 			}
 
-			buf := make([]byte, readSize)
-			n, err := io.ReadFull(f, buf)
-			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			buf := make([]byte, end-start)
+			n, err := f.ReadAt(buf, start)
+			if err != nil && !errors.Is(err, io.EOF) {
 				return callbacks.ReadResult{}, err
 			}
 			buf = buf[:n]
 
-			// If we truncated mid-file, adjust to avoid splitting a UTF-8 character.
-			bytesAfterRead := fileSize - offset - int64(n)
-			if bytesAfterRead > 0 {
+			// If the window ends before EOF, avoid splitting a UTF-8 character.
+			if start+int64(n) < fileSize {
 				buf = adjustUTF8Boundary(buf)
 			}
 
-			actualRead := int64(len(buf))
-			afterRead := offset + actualRead
-			bytesRemaining := fileSize - afterRead
-
-			var result callbacks.ReadResult
-			result.Content = string(buf)
-			result.Remaining = bytesRemaining
-			if bytesRemaining > 0 {
-				result.NextOffset = &afterRead
+			end = start + int64(len(buf))
+			result := callbacks.ReadResult{
+				Content:   string(buf),
+				Offset:    start,
+				Remaining: fileSize - end,
+			}
+			if end < fileSize {
+				result.NextOffset = &end
 			}
 			return result, nil
 		},
@@ -120,7 +125,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 				return err
 			}
 			return os.WriteFile(fullPath, []byte(content), mode)
@@ -143,7 +148,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(dstFull), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
 				return err
 			}
 			return os.Rename(srcFull, dstFull)
@@ -166,7 +171,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(dstFull), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
 				return err
 			}
 			return os.WriteFile(dstFull, data, srcInfo.Mode()) //nolint:gosec // G703: path from git worktree
@@ -180,7 +185,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := validateSymlinkTarget(root, fullPath, target); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 				return err
 			}
 			return os.Symlink(target, fullPath)
@@ -270,7 +275,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 				return callbacks.EditResult{}, err
 			}
 			if len(offsets) == 0 {
-				return callbacks.EditResult{}, errors.New("old_string not found in file")
+				return editIgnoringIndentation(fullPath, oldString, newString)
 			}
 
 			// Execute: stream the file again, replacing at recorded offsets.
@@ -592,6 +597,35 @@ func planReplacements(path string, pattern []byte, replaceAll bool) ([]int64, er
 	}
 
 	return offsets, nil
+}
+
+// editIgnoringIndentation is the fallback for an EditFile whose old_string has
+// no exact match: it accepts a unique region that differs from old_string only
+// by a constant indentation shift and shifts new_string the same way. Its
+// errors begin with "old_string not found in file".
+func editIgnoringIndentation(path, oldString, newString string) (callbacks.EditResult, error) {
+	m, err := matchIgnoringIndentation(path, oldString)
+	if err != nil {
+		return callbacks.EditResult{}, err
+	}
+	if err := executeReplacements(path, []int64{m.Start}, int(m.End-m.Start), []byte(textedit.ShiftIndentation(newString, m.Shift))); err != nil {
+		return callbacks.EditResult{}, err
+	}
+	result := callbacks.EditResult{Replacements: 1}
+	if m.Shift.Whitespace != "" {
+		result.Note = fmt.Sprintf("old_string matched after adjusting indentation (%s); new_string was shifted the same way", m.Shift)
+	}
+	return result, nil
+}
+
+// matchIgnoringIndentation opens path read-only for the streaming scan.
+func matchIgnoringIndentation(path, oldString string) (textedit.Match, error) {
+	f, err := os.Open(path) // #nosec G304 -- path is confined to the worktree by validatePath
+	if err != nil {
+		return textedit.Match{}, err
+	}
+	defer f.Close()
+	return textedit.MatchIgnoringIndentation(f, oldString)
 }
 
 // executeReplacements streams the file and writes a new version with the

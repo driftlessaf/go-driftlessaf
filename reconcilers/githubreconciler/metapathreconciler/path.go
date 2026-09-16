@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -205,6 +206,19 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		// on making CI pass without fighting analyzer suggestions.
 		findings = session.Findings()
 	} else {
+		// A path key outlives its file: a module or package removed from the
+		// default branch keeps arriving through retries and resyncs. Nothing
+		// remains to analyze, so complete the key and close any PR opened for it.
+		exists, err := pathExists(wt, res.Path)
+		if err != nil {
+			return fmt.Errorf("stat path: %w", err)
+		}
+		if !exists {
+			log.Info("Path no longer exists on the default branch, closing stale PR if any")
+			r.giveUp.Clear(ctx, session)
+			return session.CloseAnyOutstanding(ctx, "Closing this PR: the path no longer exists on the base branch.")
+		}
+
 		// First pass: run the analyzer. The analyzer may modify files in
 		// the worktree to fix some diagnostics, marking them as Fixed.
 		// Those modifications persist through createFreshBranch (same-SHA
@@ -230,9 +244,11 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		if allFixed {
 			log.With("fixed", len(diagnostics)).Info("All diagnostics fixed by analyzer")
 		} else {
+			// Analyzer text quotes the source under review, so it is bounded
+			// and wrapped as untrusted data before it reaches the agent.
 			findings = make([]callbacks.Finding, 0, len(unfixed))
 			for _, d := range unfixed {
-				findings = append(findings, d.AsFinding())
+				findings = append(findings, d.AsSanitizedFinding(analyzerSource))
 			}
 		}
 	}
@@ -425,4 +441,17 @@ func (r *PRReconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *
 		return false, fmt.Errorf("get worktree status: %w", err)
 	}
 	return !status.IsClean(), nil
+}
+
+// pathExists reports whether rel exists in the worktree. A missing path is a
+// result, not an error, so the caller can complete a key whose file is gone.
+func pathExists(wt *gogit.Worktree, rel string) (bool, error) {
+	_, err := wt.Filesystem.Stat(rel)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	}
+	return false, err
 }

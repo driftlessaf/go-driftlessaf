@@ -822,16 +822,20 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 	var findings []callbacks.Finding
 
 	for _, review := range reviews.Nodes {
+		// An empty body carries nothing to act on regardless of who wrote it.
+		// GitHub records one for every reply posted through the REST API, so
+		// the bot's own thread replies arrive here as empty reviews under its
+		// login; checking the body first keeps them out of the trust log.
+		if review.Body == "" {
+			clog.DebugContextf(ctx, "Skipping review body with empty body author=%s", review.Author.Login)
+			continue
+		}
 		if !authorTrusted(review.AuthorAssociation, review.Author.Login, review.Author.Typename, trustedAuthors) {
 			logUntrustedSkip(ctx, trustedAuthors, "Skipping untrusted review body author=%s association=%s", displayReviewAuthor(review.Author.Login, review.Author.Typename), review.AuthorAssociation)
 			continue
 		}
 		if review.Commit.Oid != headRefOid {
 			clog.DebugContextf(ctx, "Skipping review body on stale commit author=%s commit=%s head=%s", review.Author.Login, review.Commit.Oid, headRefOid)
-			continue
-		}
-		if review.Body == "" {
-			clog.DebugContextf(ctx, "Skipping review body with empty body author=%s", review.Author.Login)
 			continue
 		}
 

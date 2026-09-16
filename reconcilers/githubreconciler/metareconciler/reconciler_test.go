@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"slices"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -631,6 +632,44 @@ func TestIssueRevision(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := issueRevision(tt.issue); got == issueRevision(base) {
 				t.Errorf("issueRevision: got = %q for changed content, want a different revision", got)
+			}
+		})
+	}
+}
+
+func TestWithRequeueOnUnknownMergeability(t *testing.T) {
+	newRec := func(opts ...Option[*testRequest, *testResult, testCallbacks]) *Reconciler[*testRequest, *testResult, testCallbacks] {
+		return New[*testRequest, *testResult, testCallbacks](
+			"test-identity",
+			nil,
+			nil,
+			nil,
+			&fakeAgent{},
+			func(_ context.Context, _ *github.Issue, _ *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
+				return &testRequest{}, nil
+			},
+			func(_ context.Context, _ *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (testCallbacks, error) {
+				return testCallbacks{}, nil
+			},
+			opts...,
+		)
+	}
+	tests := []struct {
+		name string
+		opts []Option[*testRequest, *testResult, testCallbacks]
+		want time.Duration
+	}{
+		{name: "disabled by default", want: 0},
+		{name: "opted in", opts: []Option[*testRequest, *testResult, testCallbacks]{WithRequeueOnUnknownMergeability[*testRequest, *testResult, testCallbacks](30 * time.Second)}, want: 30 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newRec(tc.opts...)
+			if rec == nil {
+				t.Fatal("New() returned nil")
+			}
+			if got := rec.unknownMergeabilityRequeueAfter; got != tc.want {
+				t.Errorf("unknownMergeabilityRequeueAfter: got = %v, want = %v", got, tc.want)
 			}
 		})
 	}

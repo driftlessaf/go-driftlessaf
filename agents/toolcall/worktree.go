@@ -89,11 +89,11 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 	return Tool[Resp]{
 		Def: Definition{
 			Name:        "read_file",
-			Description: "Read content from a file starting at a byte offset. Returns the content, next_offset to continue reading, and remaining bytes. Use list_directory to check file size before reading large files.",
+			Description: "Read content from a file starting at a byte offset. The window is aligned to whole lines: the start moves back to the beginning of its line and the end extends to the end of a line, so the response's offset is the actual start of the content. Returns the content, offset, next_offset to continue reading, and remaining bytes. Use list_directory to check file size before reading large files.",
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file to read (relative to repository root)", Required: true},
-				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0)", Required: false, Minimum: Ptr[float64](0)},
-				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). Pass -1 to read the entire file, but avoid this if you don't know the file size as it may be very large.", Required: false},
+				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0). The window starts at the beginning of the line containing this offset; the response's offset reports the actual start.", Required: false, Minimum: new(float64(0))},
+				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). The window extends to the end of the line it would otherwise cut, so the content may run slightly past this limit. Pass -1 to read the entire file, but avoid this if you don't know the file size as it may be very large.", Required: false},
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
@@ -125,6 +125,7 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 			resp := map[string]any{
 				"path":    path,
 				"content": result.Content,
+				"offset":  result.Offset,
 			}
 			if result.NextOffset != nil {
 				resp["next_offset"] = *result.NextOffset
@@ -140,7 +141,7 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 	return Tool[Resp]{
 		Def: Definition{
 			Name:        "edit_file",
-			Description: "Edit a file by replacing exact text. The old_string must appear exactly once in the file unless replace_all is true. Use this instead of write_file for modifying existing files to avoid sending the entire file through context.",
+			Description: "Edit a file by replacing exact text. The old_string must appear exactly once in the file unless replace_all is true. Use this instead of write_file for modifying existing files to avoid sending the entire file through context. When old_string differs from the file only by a constant indentation shift on every line, the edit still applies, new_string is shifted the same way, and the response notes the adjustment.",
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file to edit (relative to repository root)", Required: true},
 				{Name: "old_string", Type: "string", Description: "The exact text to find and replace. Maximum 32KB; use write_file for larger replacements.", Required: true},
@@ -178,6 +179,9 @@ func editFileTool[Resp any](editFile func(context.Context, string, string, strin
 			}
 
 			resp := map[string]any{"path": path, "replacements": result.Replacements}
+			if result.Note != "" {
+				resp["note"] = result.Note
+			}
 			tc.Complete(resp, nil)
 			return resp
 		},
@@ -214,9 +218,9 @@ func writeFileTool[Resp any](writeFile func(context.Context, string, string, os.
 
 			executable, _ := OptionalParam[bool](call, "executable", false)
 
-			mode := os.FileMode(0644)
+			mode := os.FileMode(0o644)
 			if executable {
-				mode = 0755
+				mode = 0o755
 			}
 
 			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": path, "size": len(content), "executable": executable})
@@ -433,7 +437,7 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the directory to list (relative to repository root, use '.' for root)", Required: true},
 				{Name: "filter", Type: "string", Description: "Filter entries by glob pattern (e.g., \"*.go\") or exact filename (e.g., \"main.go\"). Only * wildcards are supported.", Required: false},
-				{Name: "offset", Type: "integer", Description: "Number of entries to skip (default: 0)", Required: false, Minimum: Ptr[float64](0)},
+				{Name: "offset", Type: "integer", Description: "Number of entries to skip (default: 0)", Required: false, Minimum: new(float64(0))},
 				{Name: "limit", Type: "integer", Description: "Maximum entries to return (default: 50)", Required: false},
 			},
 			Annotations: &ToolAnnotations{
@@ -480,7 +484,7 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 				{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
 				{Name: "path", Type: "string", Description: "Directory to search within (relative to repository root, default: \".\")", Required: false},
 				{Name: "filter", Type: "string", Description: "File filter — glob with * wildcards (e.g., \"*.go\") or exact filename (e.g., \"Makefile\")", Required: false},
-				{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false, Minimum: Ptr[float64](0)},
+				{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false, Minimum: new(float64(0))},
 				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 50)", Required: false},
 			},
 			Annotations: &ToolAnnotations{

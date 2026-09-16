@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package callbacks
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -13,7 +14,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"chainguard.dev/driftlessaf/internal/textedit"
 )
+
+// lineBound caps how far ReadFile scans for a newline when aligning a window
+// to whole lines. A line longer than this is left cut.
+const lineBound = 64 << 10
 
 // LocalWorktree returns a WorktreeCallbacks backed by r, an os.Root that
 // sandboxes all file operations within a single directory tree. Path traversal
@@ -28,20 +35,32 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			if err != nil {
 				return ReadResult{}, err
 			}
-			if offset > int64(len(data)) {
+			size := int64(len(data))
+			if offset >= size {
 				return ReadResult{}, nil
 			}
-			data = data[offset:]
-			if limit < 0 || int64(limit) >= int64(len(data)) {
-				return ReadResult{Content: string(data)}, nil
+			start, end := offset, size
+			if limit >= 0 && offset+int64(limit) < size {
+				end = offset + int64(limit)
 			}
-			next := offset + int64(limit)
-			remaining := int64(len(data)) - int64(limit)
-			return ReadResult{
-				Content:    string(data[:limit]),
-				NextOffset: &next,
-				Remaining:  remaining,
-			}, nil
+			// Align the window to whole lines so the agent never sees a
+			// first line with its indentation cut off.
+			if start > 0 {
+				if start, err = textedit.LineStart(bytes.NewReader(data), start, lineBound); err != nil {
+					return ReadResult{}, err
+				}
+			}
+			if end < size {
+				if end, err = textedit.LineEnd(bytes.NewReader(data), end, size, lineBound); err != nil {
+					return ReadResult{}, err
+				}
+			}
+			result := ReadResult{Content: string(data[start:end]), Offset: start}
+			if end < size {
+				result.NextOffset = &end
+				result.Remaining = size - end
+			}
+			return result, nil
 		},
 
 		WriteFile: func(_ context.Context, path, content string, mode os.FileMode) error {
@@ -58,17 +77,29 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			}
 			content := string(data)
 			count := strings.Count(content, oldString)
-			if count == 0 {
-				return EditResult{}, fmt.Errorf("string not found in %q", path)
-			}
 			if !replaceAll && count > 1 {
 				return EditResult{}, fmt.Errorf("string found %d times in %q; use replace_all=true to replace all occurrences", count, path)
 			}
-			var updated string
-			if replaceAll {
+			var (
+				updated string
+				result  EditResult
+			)
+			switch {
+			case count == 0:
+				// No exact match: accept a region that differs only by a
+				// constant indentation shift and shift newString the same way.
+				m, err := textedit.MatchIgnoringIndentation(bytes.NewReader(data), oldString)
+				if err != nil {
+					return EditResult{}, err
+				}
+				updated = content[:m.Start] + textedit.ShiftIndentation(newString, m.Shift) + content[m.End:]
+				result = EditResult{Replacements: 1, Note: indentationNote(m.Shift)}
+			case replaceAll:
 				updated = strings.ReplaceAll(content, oldString, newString)
-			} else {
+				result = EditResult{Replacements: count}
+			default:
 				updated = strings.Replace(content, oldString, newString, 1)
+				result = EditResult{Replacements: 1}
 			}
 			info, err := r.Stat(path)
 			if err != nil {
@@ -77,11 +108,7 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			if err := r.WriteFile(path, []byte(updated), info.Mode()); err != nil {
 				return EditResult{}, err
 			}
-			replacements := 1
-			if replaceAll {
-				replacements = count
-			}
-			return EditResult{Replacements: replacements}, nil
+			return result, nil
 		},
 
 		DeleteFile: func(_ context.Context, path string) error {
@@ -201,6 +228,15 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			return SearchResult{Matches: allMatches}, nil
 		},
 	}
+}
+
+// indentationNote renders the EditResult.Note for an edit that matched after
+// an indentation shift; it is empty for the zero shift.
+func indentationNote(shift textedit.Shift) string {
+	if shift.Whitespace == "" {
+		return ""
+	}
+	return fmt.Sprintf("old_string matched after adjusting indentation (%s); new_string was shifted the same way", shift)
 }
 
 // checkOffset rejects a negative pagination offset. Offsets reach these

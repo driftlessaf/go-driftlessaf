@@ -66,22 +66,27 @@ func TestLocalWorktree_ReadFile(t *testing.T) {
 		}
 	})
 
-	t.Run("partial read with next_offset", func(t *testing.T) {
-		limit := 4
-		got, err := cb.ReadFile(ctx, "file.txt", 0, limit)
+	t.Run("partial read extends to the end of the line", func(t *testing.T) {
+		// A limit that would cut the first line is extended through its
+		// newline so the window holds whole lines.
+		got, err := cb.ReadFile(ctx, "file.txt", 0, 4)
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
-		if got.Content != content[:limit] {
-			t.Errorf("content: got = %q, want = %q", got.Content, content[:limit])
+		lineEnd := int64(strings.IndexByte(content, '\n')) + 1
+		if got.Content != content[:lineEnd] {
+			t.Errorf("content: got = %q, want = %q", got.Content, content[:lineEnd])
+		}
+		if got.Offset != 0 {
+			t.Errorf("offset: got = %d, want = 0", got.Offset)
 		}
 		if got.NextOffset == nil {
 			t.Fatal("next_offset: got = nil, want non-nil")
 		}
-		if *got.NextOffset != int64(limit) {
-			t.Errorf("next_offset: got = %d, want = %d", *got.NextOffset, limit)
+		if *got.NextOffset != lineEnd {
+			t.Errorf("next_offset: got = %d, want = %d", *got.NextOffset, lineEnd)
 		}
-		want := int64(len(content) - limit)
+		want := int64(len(content)) - lineEnd
 		if got.Remaining != want {
 			t.Errorf("remaining: got = %d, want = %d", got.Remaining, want)
 		}
@@ -121,6 +126,144 @@ func TestLocalWorktree_ReadFile(t *testing.T) {
 			t.Error("want error for path traversal, got nil")
 		}
 	})
+}
+
+// linesFixture holds three whole lines. Byte offsets:
+//
+//	 0: "line one\n"    (9 bytes)
+//	 9: "line two\n"    (9 bytes)
+//	18: "line three\n"  (11 bytes)
+const linesFixture = "line one\nline two\nline three\n"
+
+func TestLocalWorktree_ReadFileLineAlignment(t *testing.T) {
+	r := openTestRoot(t, map[string]string{"lines.txt": linesFixture})
+	cb := callbacks.LocalWorktree(r)
+	ctx := t.Context()
+
+	tests := []struct {
+		name          string
+		offset        int64
+		limit         int
+		wantContent   string
+		wantOffset    int64
+		wantNext      int64 // -1 for nil
+		wantRemaining int64
+	}{{
+		name:          "offset mid-line moves back to the line start",
+		offset:        12,
+		limit:         4,
+		wantContent:   "line two\n",
+		wantOffset:    9,
+		wantNext:      18,
+		wantRemaining: 11,
+	}, {
+		// No newline precedes the first line, so its start is left where
+		// the caller put it; a file without newlines reads byte for byte.
+		name:          "offset on the first line is not moved back",
+		offset:        3,
+		limit:         5,
+		wantContent:   "e one\n",
+		wantOffset:    3,
+		wantNext:      9,
+		wantRemaining: 20,
+	}, {
+		name:          "offset at a line start stays put",
+		offset:        9,
+		limit:         4,
+		wantContent:   "line two\n",
+		wantOffset:    9,
+		wantNext:      18,
+		wantRemaining: 11,
+	}, {
+		name:          "window end extends through the newline",
+		offset:        0,
+		limit:         5,
+		wantContent:   "line one\n",
+		wantOffset:    0,
+		wantNext:      9,
+		wantRemaining: 20,
+	}, {
+		name:        "window reaching EOF is not extended",
+		offset:      12,
+		limit:       100,
+		wantContent: "line two\nline three\n",
+		wantOffset:  9,
+		wantNext:    -1,
+	}, {
+		name:        "offset within the last line",
+		offset:      20,
+		limit:       -1,
+		wantContent: "line three\n",
+		wantOffset:  18,
+		wantNext:    -1,
+	}, {
+		name:        "whole file",
+		offset:      0,
+		limit:       -1,
+		wantContent: linesFixture,
+		wantOffset:  0,
+		wantNext:    -1,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cb.ReadFile(ctx, "lines.txt", tc.offset, tc.limit)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if got.Content != tc.wantContent {
+				t.Errorf("content: got = %q, want = %q", got.Content, tc.wantContent)
+			}
+			if got.Offset != tc.wantOffset {
+				t.Errorf("offset: got = %d, want = %d", got.Offset, tc.wantOffset)
+			}
+			if got.Remaining != tc.wantRemaining {
+				t.Errorf("remaining: got = %d, want = %d", got.Remaining, tc.wantRemaining)
+			}
+			switch {
+			case tc.wantNext < 0 && got.NextOffset != nil:
+				t.Errorf("next_offset: got = %d, want = nil", *got.NextOffset)
+			case tc.wantNext >= 0 && got.NextOffset == nil:
+				t.Errorf("next_offset: got = nil, want = %d", tc.wantNext)
+			case tc.wantNext >= 0 && *got.NextOffset != tc.wantNext:
+				t.Errorf("next_offset: got = %d, want = %d", *got.NextOffset, tc.wantNext)
+			}
+		})
+	}
+}
+
+func TestLocalWorktree_ReadFileChunkedWalk(t *testing.T) {
+	r := openTestRoot(t, map[string]string{"lines.txt": linesFixture})
+	cb := callbacks.LocalWorktree(r)
+	ctx := t.Context()
+
+	// A small limit forces one line per window; the walk must reassemble
+	// the file exactly with next_offset and remaining agreeing on the size.
+	var assembled strings.Builder
+	var offset int64
+	for range 100 {
+		got, err := cb.ReadFile(ctx, "lines.txt", offset, 4)
+		if err != nil {
+			t.Fatalf("ReadFile at %d: %v", offset, err)
+		}
+		if got.Offset != offset {
+			t.Errorf("offset: got = %d, want = %d", got.Offset, offset)
+		}
+		assembled.WriteString(got.Content)
+		if got.NextOffset == nil {
+			if got.Remaining != 0 {
+				t.Errorf("remaining at EOF: got = %d, want = 0", got.Remaining)
+			}
+			break
+		}
+		if sum := *got.NextOffset + got.Remaining; sum != int64(len(linesFixture)) {
+			t.Errorf("next_offset + remaining: got = %d, want = %d", sum, len(linesFixture))
+		}
+		offset = *got.NextOffset
+	}
+	if assembled.String() != linesFixture {
+		t.Errorf("reassembled: got = %q, want = %q", assembled.String(), linesFixture)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +381,117 @@ func TestLocalWorktree_EditFile(t *testing.T) {
 			t.Error("want error for missing file, got nil")
 		}
 	})
+}
+
+// indentFixture is a tab-indented block whose inner lines an agent may copy
+// with the wrong indentation. Byte offsets:
+//
+//	 0: "func f() {\n"
+//	11: "\tif a {\n"
+//	19: "\t\tb()\n"
+//	25: "\n"
+//	26: "\t\tc()\n"
+//	32: "\t}\n"
+//	35: "}\n"
+const indentFixture = "func f() {\n\tif a {\n\t\tb()\n\n\t\tc()\n\t}\n}\n"
+
+func TestLocalWorktree_EditFileIndentationShift(t *testing.T) {
+	r := openTestRoot(t, nil)
+	cb := callbacks.LocalWorktree(r)
+	ctx := t.Context()
+
+	tests := []struct {
+		name        string
+		content     string
+		oldString   string
+		newString   string
+		wantContent string
+		wantNote    string
+		wantErr     []string
+	}{{
+		name:        "exact match wins over a shifted region",
+		content:     "\tx()\n\ty()\n---\n\t\tx()\n\t\ty()\n",
+		oldString:   "\tx()\n\ty()",
+		newString:   "\tz()",
+		wantContent: "\tz()\n---\n\t\tx()\n\t\ty()\n",
+	}, {
+		name:        "file has one more tab than old_string",
+		content:     indentFixture,
+		oldString:   "if a {\n\tb()\n\n\tc()\n}",
+		newString:   "if a {\n\tb2()\n\n\tc2()\n}",
+		wantContent: "func f() {\n\tif a {\n\t\tb2()\n\n\t\tc2()\n\t}\n}\n",
+		wantNote:    "old_string matched after adjusting indentation (added 1 tab); new_string was shifted the same way",
+	}, {
+		name:        "file has one fewer tab than old_string",
+		content:     indentFixture,
+		oldString:   "\t\tif a {\n\t\t\tb()\n\n\t\t\tc()\n\t\t}",
+		newString:   "\t\tif a {\n\t\t\tb2()\n\t\t}",
+		wantContent: "func f() {\n\tif a {\n\t\tb2()\n\t}\n}\n",
+		wantNote:    "old_string matched after adjusting indentation (removed 1 tab); new_string was shifted the same way",
+	}, {
+		name:        "only line endings differ yields no note",
+		content:     "a\r\n\tb\r\nc\r\n",
+		oldString:   "\tb\n",
+		newString:   "\tB\n",
+		wantContent: "a\r\n\tB\nc\r\n",
+	}, {
+		name:      "ambiguous shifted regions",
+		content:   "\tx()\n\ty()\n---\n\t\tx()\n\t\ty()\n",
+		oldString: "x()\ny()",
+		newString: "z()",
+		wantErr:   []string{"old_string not found in file", "at least 2 regions", "byte offsets 0 and 14"},
+	}, {
+		name:      "inconsistent shift",
+		content:   "\tx()\n\t\ty()\n",
+		oldString: "x()\ny()",
+		newString: "z()",
+		wantErr:   []string{"old_string not found in file", "not the same on every line"},
+	}, {
+		name:      "no match names the first line's location",
+		content:   indentFixture,
+		oldString: "if a {\n\tzzz()\n}",
+		newString: "z()",
+		wantErr:   []string{"old_string not found in file", "line 2 (byte offset 11)"},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := r.WriteFile("indent.txt", []byte(tc.content), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			res, err := cb.EditFile(ctx, "indent.txt", tc.oldString, tc.newString, false)
+			got, readErr := r.ReadFile("indent.txt")
+			if readErr != nil {
+				t.Fatalf("ReadFile: %v", readErr)
+			}
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("EditFile: got error = nil, want non-nil")
+				}
+				for _, w := range tc.wantErr {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("error: got = %q, want it to contain %q", err, w)
+					}
+				}
+				if string(got) != tc.content {
+					t.Errorf("content after failed edit: got = %q, want unchanged %q", got, tc.content)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EditFile: %v", err)
+			}
+			if res.Replacements != 1 {
+				t.Errorf("replacements: got = %d, want = 1", res.Replacements)
+			}
+			if res.Note != tc.wantNote {
+				t.Errorf("note: got = %q, want = %q", res.Note, tc.wantNote)
+			}
+			if string(got) != tc.wantContent {
+				t.Errorf("content: got = %q, want = %q", got, tc.wantContent)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
