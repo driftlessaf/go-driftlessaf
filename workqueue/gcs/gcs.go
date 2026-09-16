@@ -333,149 +333,220 @@ var enumerateAttrSelection = []string{"Name", "Created", "Generation", "Metagene
 
 // Enumerate implements workqueue.Interface.
 func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
-	labels := w.baseLabels()
+	return w.enumerate(ctx, nil)
+}
 
+// EnumerateWithCapacity implements workqueue.CapacityAware. totalCapacity is
+// the dispatcher's total worker capacity, before any per-owner limit. It always reads
+// the in-progress set so an orphaned lease can be recovered. When all of the
+// supplied capacity is occupied, it avoids the full queued listing, probes a
+// bounded queued-depth lower bound, and refreshes the dead-letter gauge from
+// its scoped prefix. When a slot is available, it reads those prefixes
+// separately, preserving the existing ordering and metrics while avoiding a
+// full bucket listing.
+func (w *wq) EnumerateWithCapacity(ctx context.Context, totalCapacity int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
+	return w.enumerate(ctx, &totalCapacity)
+}
+
+type enumerationState struct {
+	w            *wq
+	labels       prometheus.Labels
+	wip          []workqueue.ObservedInProgressKey
+	qd           []*queuedKey
+	dl           []workqueue.DeadLetteredKey
+	queued       int
+	notbefore    int
+	deadlettered int
+	ownerCounts  map[string]int
+	maxAttempts  int
+}
+
+func (w *wq) enumerate(ctx context.Context, capacity *int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
+	labels := w.baseLabels()
 	start := time.Now()
 	defer func() {
 		mEnumerateLatency.With(labels).Observe(time.Since(start).Seconds())
 	}()
 
-	q := &storage.Query{}
-	if err := q.SetAttrSelection(enumerateAttrSelection); err != nil {
-		return nil, nil, nil, fmt.Errorf("SetAttrSelection() = %w", err)
+	state := &enumerationState{
+		w:           w,
+		labels:      labels,
+		wip:         make([]workqueue.ObservedInProgressKey, 0, w.limit),
+		qd:          make([]*queuedKey, 0, w.limit+1),
+		ownerCounts: map[string]int{},
 	}
-	iter := w.client.Objects(ctx, q)
+	readQueued := capacity == nil
+	readDead := capacity == nil
 
-	wip := make([]workqueue.ObservedInProgressKey, 0, w.limit)
-	qd := make([]*queuedKey, 0, w.limit+1)
-	var dl []workqueue.DeadLetteredKey
-
-	queued, notbefore, deadlettered := 0, 0, 0
-	ownerCounts := map[string]int{}
-	maxAttempts := 0 // Track the maximum number of attempts
-	for {
-		objAttrs, err := iter.Next()
-		if errors.Is(err, iterator.Done) {
-			break
-		} else if err != nil {
-			return nil, nil, nil, fmt.Errorf("Next() = %w", err)
+	if capacity == nil {
+		if err := w.enumeratePrefix(ctx, state, ""); err != nil {
+			return nil, nil, nil, err
 		}
-		attrs := newKeyAttrs(objAttrs)
-		var priority int64
-		if p, ok := attrs.Metadata[priorityMetadataKey]; ok {
-			priority = parsePriority(p)
+	} else {
+		// The in-progress set is bounded by the dispatcher's concurrency in the
+		// healthy case, but list it completely so an arbitrary number of orphaned
+		// leases cannot strand work.
+		if err := w.enumeratePrefix(ctx, state, inProgressPrefix); err != nil {
+			return nil, nil, nil, err
 		}
-		// Only check for max attempts if this is not a deadlettered item
-		if !strings.HasPrefix(attrs.Name, deadLetterPrefix) {
-			// Check for attempts and track maximum
-			if att, ok := attrs.Metadata[attemptsMetadataKey]; ok && att != "" {
-				attempts, err := strconv.Atoi(att)
-				if err != nil {
-					clog.WarnContextf(ctx, "Failed to parse attempts: %v", err)
-				} else if attempts > maxAttempts {
-					maxAttempts = attempts
-				}
+		active := 0
+		for _, key := range state.wip {
+			if !key.IsOrphaned() {
+				active++
 			}
 		}
-
-		switch {
-		case strings.HasPrefix(attrs.Name, inProgressPrefix):
-			ipk := &inProgressKey{
-				client:    w.client,
-				attrs:     attrs,
-				priority:  priority,
-				queueName: w.name,
+		if active < *capacity {
+			readQueued = true
+			readDead = true
+			if err := w.enumeratePrefix(ctx, state, queuedPrefix); err != nil {
+				return nil, nil, nil, err
 			}
-			wip = append(wip, ipk)
-
-			// Keys started before owner recording existed (or by a queue
-			// without an owner) count as "unknown".
-			if owner, ok := attrs.Metadata[ownerMetadataKey]; ok && owner != "" {
-				ownerCounts[owner]++
+			if err := w.enumeratePrefix(ctx, state, deadLetterPrefix); err != nil {
+				return nil, nil, nil, err
+			}
+		} else {
+			// Dead letters are the backing signal for an active alert, so keep
+			// that scoped gauge current even while the dispatcher is saturated.
+			// A failure here must not block orphan recovery or an already-full
+			// dispatcher; the next pass will retry the metric read.
+			readDead = true
+			if err := w.enumeratePrefix(ctx, state, deadLetterPrefix); err != nil {
+				readDead = false
+				errorLabels := w.baseLabels()
+				errorLabels["operation"] = "dead-letter"
+				mCapacityAwareEnumerationErrors.With(errorLabels).Inc()
+				clog.WarnContextf(ctx, "Failed to enumerate dead letters while at capacity: %v", err)
+			}
+			depthLimit := max(w.limit, 1)
+			if depth, err := QueuedDepth(ctx, w.client, w.name, depthLimit); err != nil {
+				errorLabels := w.baseLabels()
+				errorLabels["operation"] = "queued-depth"
+				mCapacityAwareEnumerationErrors.With(errorLabels).Inc()
+				clog.WarnContextf(ctx, "Failed to measure queued depth while at capacity: %v", err)
 			} else {
-				ownerCounts["unknown"]++
+				mQueuedKeysLowerBound.With(labels).Set(float64(depth))
 			}
-
-			// Record lease age for active (non-orphaned) keys
-			if !ipk.IsOrphaned() {
-				leaseAge := time.Since(attrs.Created)
-				mLeaseAge.With(labels).Observe(leaseAge.Seconds())
-			}
-
-		case strings.HasPrefix(attrs.Name, queuedPrefix):
-			// Calculate time until eligible for all queued keys
-			timeUntilEligible := 0.0 // Default: immediately eligible
-			if nbf, ok := attrs.Metadata[notBeforeMetadataKey]; ok && nbf != "" && nbf != noNotBefore {
-				if notBefore, err := time.Parse(time.RFC3339, nbf); err != nil {
-					clog.WarnContextf(ctx, "Failed to parse not-before: %v", err)
-				} else {
-					timeUntilEligible = notBefore.Sub(time.Now().UTC()).Seconds()
-					if time.Now().UTC().Before(notBefore) {
-						clog.DebugContextf(ctx, "Skipping key %q until %v", attrs.Name, notBefore)
-						notbefore++
-						// Record metric before skipping
-						mTimeUntilEligible.With(labels).Observe(timeUntilEligible)
-						continue
-					}
-				}
-			}
-			// Record metric for immediately eligible keys
-			mTimeUntilEligible.With(labels).Observe(timeUntilEligible)
-
-			qd = append(qd, &queuedKey{
-				client:                        w.client,
-				attrs:                         attrs,
-				priority:                      priority,
-				queueName:                     w.name,
-				identity:                      w.identity,
-				scheduledWaitWarningThreshold: w.scheduledWaitWarningThreshold,
-			})
-			sort.Slice(qd, func(i, j int) bool {
-				if lhs, rhs := qd[i].Priority(), qd[j].Priority(); lhs != rhs {
-					// First consider priority.
-					return lhs > rhs
-				}
-				if !qd[i].attrs.Created.Equal(qd[j].attrs.Created) {
-					return qd[i].attrs.Created.Before(qd[j].attrs.Created)
-				}
-				return qd[i].attrs.Name < qd[j].attrs.Name
-			})
-			if len(qd) > w.limit {
-				qd = qd[:w.limit]
-			}
-			queued++
-
-		case strings.HasPrefix(attrs.Name, deadLetterPrefix):
-			// Collect and count the dead-lettered keys
-			dl = append(dl, &deadLetteredKey{
-				attrs:    attrs,
-				priority: priority,
-			})
-			deadlettered++
 		}
 	}
 
-	qk := make([]workqueue.QueuedKey, 0, len(qd))
-	for _, qi := range qd {
+	qk := make([]workqueue.QueuedKey, 0, len(state.qd))
+	for _, qi := range state.qd {
 		qk = append(qk, qi)
 	}
 
-	// Set all metrics
-	mInProgressKeys.With(labels).Set(float64(len(wip)))
-	// Delete before setting so an owner that no longer holds any keys drops
-	// out of the metric instead of freezing at its last value.
+	// In-progress metrics are always current because that prefix is always read.
+	// When the dispatcher is full, the exact queued/not-before/max-attempts
+	// gauges intentionally retain their last complete values because queued
+	// metadata was not read; the lower-bound gauge is the fresh depth signal.
+	mInProgressKeys.With(labels).Set(float64(len(state.wip)))
 	mInProgressKeysByOwner.DeletePartialMatch(labels)
-	for owner, count := range ownerCounts {
+	for owner, count := range state.ownerCounts {
 		l := w.baseLabels()
 		l["owner"] = owner
 		mInProgressKeysByOwner.With(l).Set(float64(count))
 	}
-	mQueuedKeys.With(labels).Set(float64(queued))
-	mNotBeforeKeys.With(labels).Set(float64(notbefore))
-	mDeadLetteredKeys.With(labels).Set(float64(deadlettered))
-	// Set the max attempts metric
-	mMaxAttempts.With(labels).Set(float64(maxAttempts))
-	return wip, qk, dl, nil
+	if readQueued {
+		mQueuedKeys.With(labels).Set(float64(state.queued))
+		mQueuedKeysLowerBound.With(labels).Set(float64(state.queued + state.notbefore))
+		mNotBeforeKeys.With(labels).Set(float64(state.notbefore))
+		mMaxAttempts.With(labels).Set(float64(state.maxAttempts))
+	}
+	if readDead {
+		mDeadLetteredKeys.With(labels).Set(float64(state.deadlettered))
+	}
+	return state.wip, qk, state.dl, nil
+}
+
+func (w *wq) enumeratePrefix(ctx context.Context, state *enumerationState, prefix string) error {
+	q := &storage.Query{Prefix: prefix}
+	if err := q.SetAttrSelection(enumerateAttrSelection); err != nil {
+		return fmt.Errorf("SetAttrSelection() = %w", err)
+	}
+	iter := w.client.Objects(ctx, q)
+	for {
+		objAttrs, err := iter.Next()
+		if errors.Is(err, iterator.Done) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("Next() = %w", err)
+		}
+		state.add(ctx, newKeyAttrs(objAttrs))
+	}
+}
+
+func (s *enumerationState) add(ctx context.Context, attrs *keyAttrs) {
+	w := s.w
+	var priority int64
+	if p, ok := attrs.Metadata[priorityMetadataKey]; ok {
+		priority = parsePriority(p)
+	}
+	if !strings.HasPrefix(attrs.Name, deadLetterPrefix) {
+		if att, ok := attrs.Metadata[attemptsMetadataKey]; ok && att != "" {
+			attempts, err := strconv.Atoi(att)
+			if err != nil {
+				clog.WarnContextf(ctx, "Failed to parse attempts: %v", err)
+			} else if attempts > s.maxAttempts {
+				s.maxAttempts = attempts
+			}
+		}
+	}
+
+	switch {
+	case strings.HasPrefix(attrs.Name, inProgressPrefix):
+		ipk := &inProgressKey{client: w.client, attrs: attrs, priority: priority, queueName: w.name}
+		s.wip = append(s.wip, ipk)
+		if owner, ok := attrs.Metadata[ownerMetadataKey]; ok && owner != "" {
+			s.ownerCounts[owner]++
+		} else {
+			s.ownerCounts["unknown"]++
+		}
+		if !ipk.IsOrphaned() {
+			mLeaseAge.With(s.labels).Observe(time.Since(attrs.Created).Seconds())
+		}
+
+	case strings.HasPrefix(attrs.Name, queuedPrefix):
+		timeUntilEligible := 0.0
+		if nbf, ok := attrs.Metadata[notBeforeMetadataKey]; ok && nbf != "" && nbf != noNotBefore {
+			if notBefore, err := time.Parse(time.RFC3339, nbf); err != nil {
+				clog.WarnContextf(ctx, "Failed to parse not-before: %v", err)
+			} else {
+				timeUntilEligible = notBefore.Sub(time.Now().UTC()).Seconds()
+				if time.Now().UTC().Before(notBefore) {
+					clog.DebugContextf(ctx, "Skipping key %q until %v", attrs.Name, notBefore)
+					s.notbefore++
+					mTimeUntilEligible.With(s.labels).Observe(timeUntilEligible)
+					return
+				}
+			}
+		}
+		mTimeUntilEligible.With(s.labels).Observe(timeUntilEligible)
+		s.qd = append(s.qd, &queuedKey{
+			client:                        w.client,
+			attrs:                         attrs,
+			priority:                      priority,
+			queueName:                     w.name,
+			identity:                      w.identity,
+			scheduledWaitWarningThreshold: w.scheduledWaitWarningThreshold,
+		})
+		sort.Slice(s.qd, func(i, j int) bool {
+			if lhs, rhs := s.qd[i].Priority(), s.qd[j].Priority(); lhs != rhs {
+				return lhs > rhs
+			}
+			if !s.qd[i].attrs.Created.Equal(s.qd[j].attrs.Created) {
+				return s.qd[i].attrs.Created.Before(s.qd[j].attrs.Created)
+			}
+			return s.qd[i].attrs.Name < s.qd[j].attrs.Name
+		})
+		if len(s.qd) > w.limit {
+			s.qd = s.qd[:w.limit]
+		}
+		s.queued++
+
+	case strings.HasPrefix(attrs.Name, deadLetterPrefix):
+		s.dl = append(s.dl, &deadLetteredKey{attrs: attrs, priority: priority})
+		s.deadlettered++
+	}
 }
 
 type objectAttrs struct {

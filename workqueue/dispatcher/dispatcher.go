@@ -76,8 +76,22 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	if cfg.ownerConcurrency > 0 && identity == "" {
 		return func() error { return fmt.Errorf("owner concurrency requires a non-empty queue identity") }
 	}
-	// Enumerate the state of the queue.
-	wip, next, _, err := wq.Enumerate(ctx)
+	// Enumerate the state of the queue. Capacity-aware implementations can
+	// avoid a full listing of the unbounded queued set when all worker slots are
+	// already occupied, while still reading every in-progress key for orphan
+	// recovery and any bounded telemetry reads they need.
+	// Capacity-aware queues need the dispatcher's total capacity to decide
+	// whether queued work can affect this pass. Owner-specific limits are
+	// applied after enumeration and must not suppress a globally available slot.
+	totalCapacity := concurrency
+	var wip []workqueue.ObservedInProgressKey
+	var next []workqueue.QueuedKey
+	var err error
+	if bounded, ok := wq.(workqueue.CapacityAware); ok {
+		wip, next, _, err = bounded.EnumerateWithCapacity(ctx, totalCapacity)
+	} else {
+		wip, next, _, err = wq.Enumerate(ctx)
+	}
 	if err != nil {
 		return func() error { return fmt.Errorf("enumerate() = %w", err) }
 	}

@@ -54,6 +54,13 @@ var (
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)
+	mQueuedKeysLowerBound = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "workqueue_queued_keys_lower_bound",
+			Help: "The number of queued objects refreshed on every capacity-aware pass; exact when capacity is available and a bounded lower bound while dispatch is at capacity.",
+		},
+		[]string{"service_name", "revision_name", "queue_name"},
+	)
 	mNotBeforeKeys = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "workqueue_notbefore_keys",
@@ -184,6 +191,13 @@ var (
 			Help: "The number of QueuedDepth() calls that failed to read the queue's depth.",
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
+	)
+	mCapacityAwareEnumerationErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "workqueue_capacity_aware_enumeration_errors_total",
+			Help: "The number of bounded capacity-aware enumeration reads that failed while dispatch was at capacity.",
+		},
+		[]string{"service_name", "revision_name", "queue_name", "operation"},
 	)
 )
 

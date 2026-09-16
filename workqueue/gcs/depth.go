@@ -30,9 +30,9 @@ const maxPageSize = 1000
 // the answer has to be a function of N rather than of the size of the backlog.
 //
 // Enumerate is the wrong call for that. It lists every object in the bucket, in
-// every state, and sorts as it goes — the dispatcher can afford that because it
-// runs once per dispatch and needs the whole picture. A producer holding several
-// million keys back cannot.
+// every state, and sorts as it goes. A producer holding several million keys
+// back cannot afford that, and a capacity-aware dispatcher now avoids that read
+// when its worker slots are full too.
 //
 // queueName labels the metrics this emits, and should be the name the queue was
 // built with (see WithName). Pass "" for a queue that has none.

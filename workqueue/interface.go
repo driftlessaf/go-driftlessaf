@@ -55,6 +55,18 @@ type Interface interface {
 	Get(ctx context.Context, key string) (*KeyState, error)
 }
 
+// CapacityAware is an optional optimization for dispatchers that can avoid a
+// full queued listing when all worker slots are occupied. Implementations may
+// still use a bounded or scoped read for fresh telemetry, and must enumerate
+// every in-progress key so orphaned work can be recovered. Implementations that
+// do not provide this optimization are handled by the dispatcher through
+// Interface.Enumerate.
+type CapacityAware interface {
+	// totalCapacity is the dispatcher's total worker capacity, before any
+	// per-owner limit is applied.
+	EnumerateWithCapacity(ctx context.Context, totalCapacity int) ([]ObservedInProgressKey, []QueuedKey, []DeadLetteredKey, error)
+}
+
 // Options is a set of options that can be passed when queuing a key.
 type Options struct {
 	// Priority is the priority of the key.

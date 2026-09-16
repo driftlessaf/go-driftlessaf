@@ -18,6 +18,8 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"chainguard.dev/driftlessaf/workqueue"
 	"chainguard.dev/driftlessaf/workqueue/conformance"
@@ -248,5 +250,263 @@ func TestEnumeratedObservedKeyRequeuePreservesPreconditions(t *testing.T) {
 	}
 	if got := del.query.Get("ifMetagenerationMatch"); got != strconv.FormatInt(metagen, 10) {
 		t.Errorf("delete ifMetagenerationMatch: got = %q, want = %d", got, metagen)
+	}
+}
+
+func TestEnumerateWithCapacitySkipsBacklogWhenFull(t *testing.T) {
+	const (
+		active     = "in-progress/active"
+		queued     = "queued/queued"
+		deadObject = "dead-letter/dead"
+	)
+	f := &fakeGCS{
+		handler: func(call gcsCall) (int, string) {
+			switch call.query.Get("prefix") {
+			case inProgressPrefix:
+				return http.StatusOK, fmt.Sprintf(
+					`{"items":[{"name":%q,"generation":"1","metageneration":"1",`+
+						`"timeCreated":"2026-01-01T00:00:00Z","metadata":{"lease-expiration":%q}}]}`,
+					active, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			case queuedPrefix:
+				return http.StatusOK, listPageJSON("", queued)
+			case deadLetterPrefix:
+				return http.StatusOK, listPageJSON("", deadObject)
+			default:
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}
+		},
+	}
+	wq := NewWorkQueue(newTestClient(t, f), 1)
+	bounded, ok := wq.(workqueue.CapacityAware)
+	if !ok {
+		t.Fatal("GCS workqueue does not implement CapacityAware")
+	}
+
+	wip, next, dead, err := bounded.EnumerateWithCapacity(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("EnumerateWithCapacity() = %v", err)
+	}
+	if len(wip) != 1 {
+		t.Fatalf("in-progress keys = %d, want 1", len(wip))
+	}
+	if len(next) != 0 || len(dead) != 1 || dead[0].Name() != "dead" {
+		t.Fatalf("full queue returned backlog: queued=%d dead=%v", len(next), dead)
+	}
+
+	for _, call := range f.recorded() {
+		if got := call.query.Get("prefix"); got == "" {
+			t.Errorf("full enumeration made an unscoped listing: %v", call.query)
+		}
+	}
+}
+
+func TestEnumerateWithCapacityRefreshesBoundedBacklogMetrics(t *testing.T) {
+	const queueName = "capacity-metrics-test"
+	full := false
+	f := &fakeGCS{
+		handler: func(call gcsCall) (int, string) {
+			switch call.query.Get("prefix") {
+			case inProgressPrefix:
+				if !full {
+					return http.StatusOK, listPageJSON("")
+				}
+				return http.StatusOK, fmt.Sprintf(
+					`{"items":[{"name":"in-progress/active","generation":"1","metageneration":"1",`+
+						`"timeCreated":"2026-01-01T00:00:00Z","metadata":{"lease-expiration":%q}}]}`,
+					time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			case queuedPrefix:
+				if full {
+					return http.StatusOK, listPageJSON("", "queued/a", "queued/b", "queued/c")
+				}
+				return http.StatusOK, fmt.Sprintf(
+					`{"items":[`+
+						`{"name":"queued/a","generation":"1","metageneration":"1","timeCreated":"2026-01-01T00:00:00Z"},`+
+						`{"name":"queued/b","generation":"1","metageneration":"1","timeCreated":"2026-01-01T00:00:00Z"},`+
+						`{"name":"queued/later","generation":"1","metageneration":"1","timeCreated":"2026-01-01T00:00:00Z",`+
+						`"metadata":{"not-before":%q}}]}`,
+					time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			case deadLetterPrefix:
+				if full {
+					return http.StatusOK, listPageJSON("", "dead-letter/a", "dead-letter/b")
+				}
+				return http.StatusOK, listPageJSON("", "dead-letter/a")
+			default:
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}
+		},
+	}
+	wq := NewWorkQueue(newTestClient(t, f), 1, WithName(queueName))
+	bounded := wq.(workqueue.CapacityAware)
+
+	if _, _, _, err := bounded.EnumerateWithCapacity(t.Context(), 1); err != nil {
+		t.Fatalf("open-slot EnumerateWithCapacity() = %v", err)
+	}
+	labels := prometheus.Labels{
+		"service_name":  baseServiceName,
+		"revision_name": baseRevisionName,
+		"queue_name":    queueName,
+	}
+	if got := testutil.ToFloat64(mQueuedKeys.With(labels)); got != 2 {
+		t.Fatalf("queued keys after open-slot enumeration = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(mDeadLetteredKeys.With(labels)); got != 1 {
+		t.Fatalf("dead-lettered keys after open-slot enumeration = %v, want 1", got)
+	}
+
+	full = true
+	if _, _, _, err := bounded.EnumerateWithCapacity(t.Context(), 1); err != nil {
+		t.Fatalf("full EnumerateWithCapacity() = %v", err)
+	}
+	// The exact queued count is intentionally last-known at capacity; the
+	// bounded gauge is refreshed instead and reports at least one queued key.
+	if got := testutil.ToFloat64(mQueuedKeys.With(labels)); got != 2 {
+		t.Errorf("queued keys at capacity = %v, want last-known 2", got)
+	}
+	if got := testutil.ToFloat64(mQueuedKeysLowerBound.With(labels)); got != 1 {
+		t.Errorf("queued keys lower bound at capacity = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(mDeadLetteredKeys.With(labels)); got != 2 {
+		t.Errorf("dead-lettered keys at capacity = %v, want refreshed 2", got)
+	}
+
+	full = false
+	if _, _, _, err := bounded.EnumerateWithCapacity(t.Context(), 1); err != nil {
+		t.Fatalf("open-slot re-enumeration = %v", err)
+	}
+	if got := testutil.ToFloat64(mQueuedKeysLowerBound.With(labels)); got != 3 {
+		t.Errorf("queued keys lower bound after capacity opens = %v, want exact 3", got)
+	}
+}
+
+func TestEnumerateWithCapacityReadsBacklogAfterOrphanReleasesCapacity(t *testing.T) {
+	const (
+		orphan = "in-progress/orphan"
+		queued = "queued/reclaimable"
+		dead   = "dead-letter/old"
+	)
+	f := &fakeGCS{
+		handler: func(call gcsCall) (int, string) {
+			switch call.query.Get("prefix") {
+			case inProgressPrefix:
+				return http.StatusOK, fmt.Sprintf(
+					`{"items":[{"name":%q,"generation":"1","metageneration":"1",`+
+						`"timeCreated":"2026-01-01T00:00:00Z","metadata":{"lease-expiration":%q}}]}`,
+					orphan, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339))
+			case queuedPrefix:
+				return http.StatusOK, listPageJSON("", queued)
+			case deadLetterPrefix:
+				return http.StatusOK, listPageJSON("", dead)
+			default:
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}
+		},
+	}
+	wq := NewWorkQueue(newTestClient(t, f), 1)
+	bounded := wq.(workqueue.CapacityAware)
+
+	wip, next, deadKeys, err := bounded.EnumerateWithCapacity(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("EnumerateWithCapacity() = %v", err)
+	}
+	if len(wip) != 1 || !wip[0].IsOrphaned() {
+		t.Fatalf("in-progress keys = %v, want one orphan", wip)
+	}
+	if len(next) != 1 || next[0].Name() != "reclaimable" {
+		t.Fatalf("queued keys = %v, want [reclaimable]", next)
+	}
+	if len(deadKeys) != 1 || deadKeys[0].Name() != "old" {
+		t.Fatalf("dead-lettered keys = %v, want [old]", deadKeys)
+	}
+
+	seen := make(map[string]struct{}, 3)
+	for _, call := range f.recorded() {
+		seen[call.query.Get("prefix")] = struct{}{}
+	}
+	for _, prefix := range []string{inProgressPrefix, queuedPrefix, deadLetterPrefix} {
+		if _, ok := seen[prefix]; !ok {
+			t.Errorf("orphan recovery did not list prefix %q", prefix)
+		}
+	}
+}
+
+func TestEnumerateWithCapacityCountsBoundedReadErrors(t *testing.T) {
+	const queueName = "capacity-error-metrics-test"
+	f := &fakeGCS{
+		handler: func(call gcsCall) (int, string) {
+			switch call.query.Get("prefix") {
+			case inProgressPrefix:
+				return http.StatusOK, fmt.Sprintf(
+					`{"items":[{"name":"in-progress/active","generation":"1","metageneration":"1",`+
+						`"timeCreated":"2026-01-01T00:00:00Z","metadata":{"lease-expiration":%q}}]}`,
+					time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			case queuedPrefix, deadLetterPrefix:
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			default:
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}
+		},
+	}
+	wq := NewWorkQueue(newTestClient(t, f), 1, WithName(queueName))
+	bounded := wq.(workqueue.CapacityAware)
+	labels := func(operation string) prometheus.Labels {
+		return prometheus.Labels{
+			"service_name":  baseServiceName,
+			"revision_name": baseRevisionName,
+			"queue_name":    queueName,
+			"operation":     operation,
+		}
+	}
+	deadBefore := testutil.ToFloat64(mCapacityAwareEnumerationErrors.With(labels("dead-letter")))
+	depthBefore := testutil.ToFloat64(mCapacityAwareEnumerationErrors.With(labels("queued-depth")))
+
+	if _, _, _, err := bounded.EnumerateWithCapacity(t.Context(), 1); err != nil {
+		t.Fatalf("EnumerateWithCapacity() = %v, want bounded reads to be best effort", err)
+	}
+	if got := testutil.ToFloat64(mCapacityAwareEnumerationErrors.With(labels("dead-letter"))); got != deadBefore+1 {
+		t.Errorf("dead-letter bounded read errors = %v, want %v", got, deadBefore+1)
+	}
+	if got := testutil.ToFloat64(mCapacityAwareEnumerationErrors.With(labels("queued-depth"))); got != depthBefore+1 {
+		t.Errorf("queued-depth bounded read errors = %v, want %v", got, depthBefore+1)
+	}
+}
+
+func TestEnumerateWithCapacityReadsBacklogWhenSlotIsOpen(t *testing.T) {
+	f := &fakeGCS{
+		handler: func(call gcsCall) (int, string) {
+			switch call.query.Get("prefix") {
+			case inProgressPrefix:
+				return http.StatusOK, listPageJSON("")
+			case queuedPrefix:
+				return http.StatusOK, fmt.Sprintf(
+					`{"items":[{"name":"queued/next","generation":"1","metageneration":"1",` +
+						`"timeCreated":"2026-01-01T00:00:00Z","metadata":{"priority":"00000001"}}]}`)
+			case deadLetterPrefix:
+				return http.StatusOK, listPageJSON("", "dead-letter/old")
+			default:
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}
+		},
+	}
+	wq := NewWorkQueue(newTestClient(t, f), 1)
+	bounded := wq.(workqueue.CapacityAware)
+	_, next, dead, err := bounded.EnumerateWithCapacity(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("EnumerateWithCapacity() = %v", err)
+	}
+	if len(next) != 1 || next[0].Name() != "next" {
+		t.Fatalf("queued keys = %v, want [next]", next)
+	}
+	if len(dead) != 1 || dead[0].Name() != "old" {
+		t.Fatalf("dead-lettered keys = %v, want [old]", dead)
+	}
+
+	seen := make(map[string]struct{}, 3)
+	for _, call := range f.recorded() {
+		seen[call.query.Get("prefix")] = struct{}{}
+	}
+	for _, prefix := range []string{inProgressPrefix, queuedPrefix, deadLetterPrefix} {
+		if _, ok := seen[prefix]; !ok {
+			t.Errorf("open-slot enumeration did not list prefix %q", prefix)
+		}
 	}
 }

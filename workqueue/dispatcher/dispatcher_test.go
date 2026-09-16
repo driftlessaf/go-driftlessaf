@@ -111,6 +111,16 @@ type mockQueue struct {
 	failKey  string // If set, Queue will fail for this key
 }
 
+type capacityAwareQueue struct {
+	mockQueue
+	capacity int
+}
+
+func (m *capacityAwareQueue) EnumerateWithCapacity(ctx context.Context, capacity int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
+	m.capacity = capacity
+	return m.Enumerate(ctx)
+}
+
 func (m *mockQueue) Identity() string { return m.identity }
 
 func (m *mockQueue) Enumerate(context.Context) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
@@ -145,6 +155,19 @@ func TestHandleAsync_EnumerateError(t *testing.T) {
 	future := HandleAsync(context.Background(), q, 1, 0, func(context.Context, string, workqueue.Options) error { return nil }, 0)
 	if err := future(); err == nil || err.Error() != "enumerate() = fail" {
 		t.Errorf("expected enumerate error, got %v", err)
+	}
+}
+
+func TestHandleAsync_UsesCapacityAwareEnumeration(t *testing.T) {
+	q := &capacityAwareQueue{}
+	future := HandleAsync(t.Context(), q, 7, 0, func(context.Context, string, workqueue.Options) error {
+		return nil
+	}, 0)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if q.capacity != 7 {
+		t.Errorf("capacity passed to enumeration = %d, want 7", q.capacity)
 	}
 }
 
