@@ -6,12 +6,15 @@ SPDX-License-Identifier: Apache-2.0
 package responsesexecutor
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/responses"
 )
 
 // httpFailure retains only allowlisted error categories and a narrowly validated
@@ -60,12 +63,7 @@ func safeHTTPFailure(api *openai.Error) *httpFailure {
 				}
 			}
 		}
-		for _, header := range []string{"X-Amzn-Requestid", "X-Request-Id"} {
-			if id := safeRequestID(api.Response.Header.Get(header)); id != "" {
-				failure.requestID = id
-				break
-			}
-		}
+		failure.requestID = safeHeaderRequestID(api.Response.Header)
 	}
 	candidates := []string{api.Code, aws.Type}
 	if api.Response != nil {
@@ -87,6 +85,89 @@ func safeHTTPFailure(api *openai.Error) *httpFailure {
 		}
 	}
 	return failure
+}
+
+func safeHeaderRequestID(header http.Header) string {
+	return cmp.Or(safeRequestID(header.Get("X-Amzn-Requestid")), safeRequestID(header.Get("X-Request-Id")))
+}
+
+// streamFailure deliberately carries no HTTP status or underlying SDK error:
+// terminal events must never replay a potentially billable partial stream.
+type streamFailure struct {
+	eventType  string
+	code       string
+	reason     string
+	requestID  string
+	responseID string
+}
+
+func (e *streamFailure) Error() string {
+	message := "responses stream failed or ended incomplete; event=" + e.eventType
+	if e.code != "" {
+		message += "; code=" + e.code
+	}
+	if e.reason != "" {
+		message += "; incomplete_reason=" + e.reason
+	}
+	if e.requestID != "" {
+		message += "; request_id=" + e.requestID
+	}
+	if e.responseID != "" {
+		message += "; response_id=" + e.responseID
+	}
+	return message + "; usage may be unavailable"
+}
+
+// Called only for the three recognized terminal event types. Retain no raw
+// event, provider message, output, or credentials in the returned error.
+func safeStreamFailure(event responses.ResponseStreamEventUnion, response *http.Response, responseID string) *streamFailure {
+	failure := &streamFailure{eventType: event.Type, responseID: responseID}
+	if response != nil {
+		failure.requestID = safeHeaderRequestID(response.Header)
+	}
+	code := string(event.Response.Error.Code)
+	if event.Type == "error" {
+		code = event.Code
+	}
+	switch code {
+	case "server_error", "rate_limit_exceeded", "invalid_prompt", "vector_store_timeout",
+		"invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url",
+		"image_too_large", "image_too_small", "image_parse_error", "image_content_policy_violation",
+		"invalid_image_mode", "image_file_too_large", "unsupported_image_media_type", "empty_image_file",
+		"failed_to_download_image", "image_file_not_found", "invalid_request_error":
+		failure.code = code
+	}
+	if event.Type == "response.incomplete" {
+		switch reason := event.Response.IncompleteDetails.Reason; reason {
+		case "max_output_tokens", "max_tokens", "content_filter":
+			failure.reason = reason
+		}
+	}
+	return failure
+}
+
+// Accept only UUIDs or resp_ followed by a known hexadecimal ID length.
+// Other formats are omitted rather than risking an echoed prompt or secret.
+func safeResponseID(id string) string {
+	if value, ok := strings.CutPrefix(id, "resp_"); ok {
+		switch len(value) {
+		case 32, 48, 64:
+		default:
+			return ""
+		}
+		for _, c := range value {
+			switch {
+			case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+			default:
+				return ""
+			}
+		}
+		return id
+	}
+	if strings.HasPrefix(id, "req_") {
+		return ""
+	}
+	return safeRequestID(id)
 }
 
 // Accept canonical UUIDs (AWS) and req_ followed by 32 hexadecimal digits.

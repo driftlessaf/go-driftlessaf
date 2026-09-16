@@ -49,6 +49,14 @@ in a parallel batch. Only an accepted, validated submission commits a result.
   digits. Unknown codes and other ID formats are omitted. A recognized access
   denial suggests checking IAM, model access, and retention eligibility; it does
   not identify which check failed. Use the request ID for provider-side support.
+- Terminal `response.failed`, `response.incomplete`, and `error` events retain
+  their event type, allowlisted error code or incomplete reason, and validated
+  request and response IDs. Response IDs must be canonical UUIDs or `resp_`
+  followed by 32, 48, or 64 hexadecimal digits. Unknown codes, reasons, and ID
+  formats are omitted. These diagnostics appear in execution and turn errors,
+  but never include provider messages or partial output. Even a terminal
+  `rate_limit_exceeded` or `server_error` event doesn't retry. Usage may be
+  unavailable when the stream fails.
 
 Choose timeout budgets before comparing models, allowing for reasoning and the
 configured output-token limit. Deadline expiration remains an execution error,

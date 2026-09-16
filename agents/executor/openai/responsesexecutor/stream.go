@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package responsesexecutor
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -88,15 +89,18 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 	}
 	// Retry ownership belongs to the executor. Never replay a partially
 	// consumed stream: neither usage nor the remote completion is known.
-	stream := e.client.NewStreaming(ctx, params, option.WithMaxRetries(0), option.WithMiddleware(boundWire))
+	var httpResponse *http.Response
+	stream := e.client.NewStreaming(ctx, params, option.WithMaxRetries(0), option.WithMiddleware(boundWire), option.WithResponseInto(&httpResponse))
 	defer stream.Close()
 	events := 0
+	responseID := ""
 	for stream.Next() {
 		events++
 		if events > 32768 {
 			return nil, errors.New("responses stream exceeds event limit")
 		}
 		event := stream.Current()
+		responseID = cmp.Or(safeResponseID(event.Response.ID), responseID)
 		switch event.Type {
 		case "response.completed":
 			if event.Response.Status != "completed" || event.Response.ID == "" {
@@ -107,7 +111,7 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 			}
 			return &event.Response, nil
 		case "response.failed", "response.incomplete", "error":
-			return nil, errors.New("responses stream failed or ended incomplete")
+			return nil, safeStreamFailure(event, httpResponse, responseID)
 		case "response.created", "response.in_progress", "response.output_item.added", "response.output_item.done",
 			"response.content_part.added", "response.content_part.done", "response.output_text.delta", "response.output_text.done",
 			"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.refusal.delta", "response.refusal.done",
