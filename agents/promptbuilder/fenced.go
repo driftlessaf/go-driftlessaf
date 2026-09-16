@@ -39,8 +39,42 @@ type rawFencedBinding struct {
 }
 
 func (b *rawFencedBinding) value(*buildState) (string, error) {
+	return fenceUntrustedFrom(cmp.Or(b.entropy, rand.Reader), b.val)
+}
+
+// FenceUntrusted wraps content in a nonce-delimited untrusted-content fence
+// and returns it, for a caller that composes a prompt section itself rather
+// than binding a placeholder.
+//
+// [Prompt.BindRawFenced] is the right entry point when the content is bound to
+// a template placeholder, and it renders through the same implementation, so
+// the two forms cannot drift. This one exists for a caller that assembles one prompt
+// field out of several regions — the caller's own labels interleaved with
+// untrusted content from several sources — where the fence has to go around
+// each region rather than around the whole field.
+//
+// The content renders byte-identical inside markers embedding a fresh 128-bit
+// crypto/rand nonce, so content authored before the call cannot forge its own
+// boundary, and the preamble line inside the fence states the data contract at
+// the boundary rather than relying on the model recalling an abstract rule many
+// tokens later. Lines carrying the marker shape are loudly neutralized
+// ([UntrustedMarkerShaped] reports them in advance).
+//
+// Bound the content BEFORE fencing it, never after: truncating a fenced block
+// is how the closing marker gets cut and the fence silently opened.
+func FenceUntrusted(content string) (string, error) {
+	return fenceUntrustedFrom(rand.Reader, content)
+}
+
+// fenceUntrustedFrom is [FenceUntrusted] over an injectable entropy source, so
+// the fail-closed path is testable without touching process-global state.
+//
+// Unexported deliberately: no caller outside this package needs to choose the
+// randomness, and this package is published, where withdrawing a symbol later
+// is a breaking change.
+func fenceUntrustedFrom(entropy io.Reader, content string) (string, error) {
 	var nonce [rawFenceNonceBytes]byte
-	if _, err := io.ReadFull(cmp.Or(b.entropy, rand.Reader), nonce[:]); err != nil {
+	if _, err := io.ReadFull(entropy, nonce[:]); err != nil {
 		// Fail closed: rendering the content behind a predictable boundary
 		// would let a value embedding the static marker escape the fence.
 		return "", fmt.Errorf("raw fence nonce: %w", err)
@@ -48,8 +82,19 @@ func (b *rawFencedBinding) value(*buildState) (string, error) {
 	token := hex.EncodeToString(nonce[:])
 	return rawFenceBeginPrefix + " [" + token + "] -----\n" +
 		rawFencePreamble + "\n" +
-		neutralizeRawFenceMarkers(b.val) +
+		neutralizeRawFenceMarkers(content) +
 		"\n" + rawFenceEndPrefix + " [" + token + "] -----", nil
+}
+
+// UntrustedMarkerShaped reports whether content carries the fence marker shape
+// on any line — the boundary-forging attempt [FenceUntrusted] neutralizes.
+//
+// Fencing already contains such content, so a caller needs this only to treat
+// the attempt as a signal in its own right: content trying to close its own
+// fence is evidence about that content, and a caller that can act on it should
+// not have to re-derive the marker shape to notice.
+func UntrustedMarkerShaped(content string) bool {
+	return strings.Contains(content, rawFenceBeginPrefix) || strings.Contains(content, rawFenceEndPrefix)
 }
 
 // neutralizeRawFenceMarkers rewrites every content line that carries the
@@ -59,7 +104,7 @@ func (b *rawFencedBinding) value(*buildState) (string, error) {
 // than lossy: an attempted fence escape stays legible as evidence. All other
 // content passes through byte-identical.
 func neutralizeRawFenceMarkers(content string) string {
-	if !strings.Contains(content, rawFenceBeginPrefix) && !strings.Contains(content, rawFenceEndPrefix) {
+	if !UntrustedMarkerShaped(content) {
 		return content
 	}
 	lines := strings.Split(content, "\n")
