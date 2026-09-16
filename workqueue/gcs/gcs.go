@@ -121,8 +121,11 @@ var RefreshInterval = 5 * time.Minute
 // variable so tests can shorten it.
 var heartbeatRetryInterval = 30 * time.Second
 
-// The minimum number of attempts before tracking work attempts.
-// This is to minimize the cardinality of the metric.
+// TrackWorkAttemptMinThreshold was the threshold for the removed per-task
+// attempts metric.
+//
+// Deprecated: per-task retry metrics are no longer emitted. This variable is
+// retained for source compatibility and has no effect.
 var TrackWorkAttemptMinThreshold = 20
 
 const (
@@ -372,17 +375,8 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 				} else if attempts > maxAttempts {
 					maxAttempts = attempts
 				}
-				if attempts > TrackWorkAttemptMinThreshold {
-					l := w.baseLabels()
-					l["task_id"] = attrs.Name
-					mTaskMaxAttempts.With(l).Set(float64(attempts))
-				}
 			}
 		}
-		// Ensure metric has a value.
-		l := w.baseLabels()
-		l["task_id"] = "placeholder"
-		mTaskMaxAttempts.With(l).Set(float64(0))
 
 		switch {
 		case strings.HasPrefix(attrs.Name, inProgressPrefix):

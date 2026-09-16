@@ -8,6 +8,9 @@ package gcs
 import (
 	"fmt"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestPriorityClass(t *testing.T) {
@@ -34,5 +37,38 @@ func TestPriorityClass(t *testing.T) {
 				t.Errorf("priorityClass(%d) = %q, want %q", tt.priority, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnumerateMaxAttemptsUsesBoundedGauge(t *testing.T) {
+	f := &fakeGCS{handler: func(gcsCall) (int, string) {
+		return 200, `{"kind":"storage#objects","items":[
+			{"kind":"storage#object","bucket":"test-bucket","name":"queued/low","generation":"1","metageneration":"1","metadata":{"attempts":"7"}},
+			{"kind":"storage#object","bucket":"test-bucket","name":"in-progress/high","generation":"1","metageneration":"1","metadata":{"attempts":"25"}},
+			{"kind":"storage#object","bucket":"test-bucket","name":"dead-letter/higher","generation":"1","metageneration":"1","metadata":{"attempts":"100"}}
+		]}`
+	}}
+	const queueName = "bounded-max-attempts-test"
+	wq := NewWorkQueue(newTestClient(t, f), 10, WithName(queueName))
+	if _, _, _, err := wq.Enumerate(t.Context()); err != nil {
+		t.Fatalf("Enumerate() = %v", err)
+	}
+
+	labels := prometheus.Labels{
+		"service_name":  baseServiceName,
+		"revision_name": baseRevisionName,
+		"queue_name":    queueName,
+	}
+	if got := testutil.ToFloat64(mMaxAttempts.With(labels)); got != 25 {
+		t.Errorf("workqueue_max_attempts = %v, want 25", got)
+	}
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather() = %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() == "workqueue_task_max_attempts" {
+			t.Fatal("workqueue_task_max_attempts must not be registered")
+		}
 	}
 }

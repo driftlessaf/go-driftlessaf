@@ -17,7 +17,6 @@ SPDX-License-Identifier: Apache-2.0
 //   - workqueue_queued_keys: The number of keys currently in the backlog
 //   - workqueue_notbefore_keys: The number of keys waiting on a 'not before' time
 //   - workqueue_max_attempts: The maximum number of attempts for any queued or in-progress task
-//   - workqueue_task_max_attempts: The maximum number of attempts for a given task above 20
 //   - workqueue_process_latency_seconds: The duration taken to process a key
 //   - workqueue_wait_latency_seconds: The duration the key waited to start
 //   - workqueue_added_keys: The total number of queue requests
