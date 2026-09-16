@@ -7,6 +7,7 @@ package toolcall
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -324,4 +325,106 @@ func TestFindingToolsConcurrentDuplicateCalls(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+func TestReplyToolRegistration(t *testing.T) {
+	base := callbacks.FindingCallbacks{
+		Resolve: func(context.Context, string) error { return nil },
+	}
+	if _, ok := findingToolDefs[string](base)["reply_to_finding"]; ok {
+		t.Error("reply_to_finding registered without a Reply callback")
+	}
+
+	withReply := callbacks.FindingCallbacks{
+		Reply: func(context.Context, string, string) error { return nil },
+	}
+	if _, ok := findingToolDefs[string](withReply)["reply_to_finding"]; !ok {
+		t.Error("reply_to_finding not registered when Reply callback is present")
+	}
+}
+
+func TestReplyFindingTool(t *testing.T) {
+	t.Run("posts the reply and reports replied", func(t *testing.T) {
+		var gotID, gotBody string
+		tool := replyFindingTool[string](func(_ context.Context, id, body string) error {
+			gotID, gotBody = id, body
+			return nil
+		})
+		trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+		resp := tool.Handler(t.Context(), ToolCall{
+			ID:   "reply-1",
+			Name: "reply_to_finding",
+			Args: map[string]any{"identifier": "PRRT_1", "body": "Fixed by bounding the read."},
+		}, trace, nil)
+
+		if gotID != "PRRT_1" || gotBody != "Fixed by bounding the read." {
+			t.Errorf("reply args: got id=%q body=%q", gotID, gotBody)
+		}
+		if resp["replied"] != true {
+			t.Errorf("response: got = %v, want replied=true", resp)
+		}
+	})
+
+	t.Run("surfaces a reply error", func(t *testing.T) {
+		tool := replyFindingTool[string](func(context.Context, string, string) error {
+			return errors.New("thread not found")
+		})
+		trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+		resp := tool.Handler(t.Context(), ToolCall{
+			ID:   "reply-2",
+			Name: "reply_to_finding",
+			Args: map[string]any{"identifier": "PRRT_2", "body": "x"},
+		}, trace, nil)
+		if _, ok := resp["error"]; !ok {
+			t.Errorf("response: got = %v, want an error", resp)
+		}
+	})
+
+	t.Run("deduplicates an identical reply", func(t *testing.T) {
+		var calls atomic.Int64
+		tool := replyFindingTool[string](func(context.Context, string, string) error {
+			calls.Add(1)
+			return nil
+		})
+		trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+		call := ToolCall{ID: "reply-3", Name: "reply_to_finding", Args: map[string]any{"identifier": "PRRT_3", "body": "same"}}
+		tool.Handler(t.Context(), call, trace, nil)
+		resp := tool.Handler(t.Context(), call, trace, nil)
+		if got := calls.Load(); got != 1 {
+			t.Errorf("reply callback invocations: got = %d, want 1", got)
+		}
+		if _, ok := resp["error"]; !ok {
+			t.Errorf("second identical reply: got = %v, want a duplicate error", resp)
+		}
+	})
+}
+
+func TestBoundReplyBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         string
+		wantSame   bool
+		wantMarker bool
+	}{
+		{name: "short body unchanged", in: "one sentence.", wantSame: true},
+		{name: "at limit unchanged", in: strings.Repeat("a", maxFindingReplyBytes), wantSame: true},
+		{name: "over limit truncated with marker", in: strings.Repeat("a", maxFindingReplyBytes+50), wantMarker: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := boundReplyBody(tc.in)
+			if tc.wantSame {
+				if got != tc.in {
+					t.Errorf("body changed: got len = %d, want %d", len(got), len(tc.in))
+				}
+				return
+			}
+			if len(got) > maxFindingReplyBytes {
+				t.Errorf("body over cap: got len = %d, want <= %d", len(got), maxFindingReplyBytes)
+			}
+			if tc.wantMarker && !strings.HasSuffix(got, findingReplyTruncationMarker) {
+				t.Errorf("truncated body missing marker: %q", got[max(len(got)-40, 0):])
+			}
+		})
+	}
 }

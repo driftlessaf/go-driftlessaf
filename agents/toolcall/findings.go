@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"strings"
 	"sync"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -22,7 +23,16 @@ const (
 	maxFindingReadLimit     = 1_000_000
 	maxFindingPatternLength = 512
 	maxFindingSearchMatches = 1000
+
+	// maxFindingReplyBytes bounds a model-authored review-thread reply before it
+	// is posted to GitHub. The prompt asks for one or two sentences; the cap is
+	// a backstop against an unbounded body reaching the API.
+	maxFindingReplyBytes = 4_000
 )
+
+// findingReplyTruncationMarker is appended to a reply body that exceeded
+// maxFindingReplyBytes, so a truncated reply reads as deliberately shortened.
+const findingReplyTruncationMarker = "\n\n[reply truncated]"
 
 // callGuard detects duplicate tool calls with identical arguments to prevent
 // infinite loops. The mutex guards seen: a turn's tool calls may be
@@ -90,6 +100,9 @@ func findingToolDefs[Resp any](cb callbacks.FindingCallbacks) map[string]Tool[Re
 	}
 	if cb.HasResolve() {
 		defs["resolve_finding"] = resolveFindingTool[Resp](cb.Resolve)
+	}
+	if cb.HasReply() {
+		defs["reply_to_finding"] = replyFindingTool[Resp](cb.Reply)
 	}
 	if cb.HasRetry() {
 		defs["retry_finding"] = retryFindingTool[Resp](cb.Retry)
@@ -186,6 +199,79 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 			return result
 		},
 	}
+}
+
+func replyFindingTool[Resp any](reply func(context.Context, string, string) error) Tool[Resp] {
+	type replyCall struct{ identifier, body string }
+	guard := newCallGuard[replyCall]()
+
+	return Tool[Resp]{
+		Def: Definition{
+			Name: "reply_to_finding",
+			Description: "Reply in a review thread finding's thread with a short disposition (one or two sentences): the fix you made before resolving it, or the refutation when you leave an automated finding open. " +
+				"Only works for review thread findings, not CI checks or review bodies.",
+			Parameters: []Parameter{
+				{Name: "identifier", Type: "string", Description: "The identifier of the review thread finding to reply to (from the request's findings list)", Required: true},
+				{Name: "body", Type: "string", Description: "The reply text (one or two sentences)", Required: true},
+			},
+			Annotations: &ToolAnnotations{
+				Destructive: new(false),
+				// reply_to_finding posts a comment scoped to the current PR's
+				// review thread using a pre-authenticated client; it does not
+				// open arbitrary external connections.
+				OpenWorld: new(false),
+			},
+		},
+		Handler: func(ctx context.Context, call ToolCall, trace *agenttrace.Trace[Resp], _ *Resp) map[string]any {
+			identifier, errResp := Param[string](call, trace, "identifier")
+			if errResp != nil {
+				return errResp
+			}
+			body, errResp := Param[string](call, trace, "body")
+			if errResp != nil {
+				return errResp
+			}
+			body = boundReplyBody(body)
+
+			// Detect duplicate calls to prevent an identical reply from being
+			// posted in a loop.
+			if guard.duplicate(replyCall{identifier: identifier, body: body}) {
+				clog.WarnContext(ctx, "Duplicate reply_to_finding call detected", "identifier", identifier)
+				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"identifier": identifier})
+				resp := map[string]any{
+					"error":      "duplicate call — this exact reply was already posted. Resolve the finding or move on instead of replying again.",
+					"identifier": identifier,
+				}
+				tc.Complete(resp, nil)
+				return resp
+			}
+
+			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"identifier": identifier})
+
+			if err := reply(ctx, identifier, body); err != nil {
+				return completeError(ctx, tc, "Failed to reply to finding", err, "identifier", identifier)
+			}
+
+			result := map[string]any{
+				"identifier": identifier,
+				"replied":    true,
+			}
+			tc.Complete(result, nil)
+			return result
+		},
+	}
+}
+
+// boundReplyBody caps a model-authored review-thread reply. The reply is
+// untrusted text posted to GitHub, so its length is bounded before it leaves the
+// process. A body over the cap keeps a valid-UTF8 prefix and gains a truncation
+// marker.
+func boundReplyBody(s string) string {
+	if len(s) <= maxFindingReplyBytes {
+		return s
+	}
+	keep := max(maxFindingReplyBytes-len(findingReplyTruncationMarker), 0)
+	return strings.ToValidUTF8(s[:keep], "") + findingReplyTruncationMarker
 }
 
 func retryFindingTool[Resp any](retry func(context.Context, callbacks.FindingKind, string) error) Tool[Resp] {

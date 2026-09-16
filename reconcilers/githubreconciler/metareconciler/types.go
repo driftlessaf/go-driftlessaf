@@ -19,6 +19,15 @@ type Result interface {
 	GetCommitMessage() string
 }
 
+// worktreeRootSetter is an optional capability a request may implement to
+// receive the absolute path of the checked-out worktree before the agent runs.
+// It lets an agent-side post-execute step operate on the checkout. A request
+// that does not implement it is unaffected, so this is fully backward
+// compatible.
+type worktreeRootSetter interface {
+	SetWorktreeRoot(root string)
+}
+
 // RequestBuilder builds an agent request from an issue and session.
 type RequestBuilder[Req any, Data any] func(context.Context, *github.Issue, *changemanager.Session[Data]) (Req, error)
 

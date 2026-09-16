@@ -103,6 +103,7 @@ func TestHasUnresolvedReviews(t *testing.T) {
 	tests := []struct {
 		name     string
 		findings []callbacks.Finding
+		awaiting map[string]struct{}
 		want     bool
 	}{{
 		name:     "no findings",
@@ -113,17 +114,31 @@ func TestHasUnresolvedReviews(t *testing.T) {
 		findings: []callbacks.Finding{{Kind: callbacks.FindingKindCICheck, Identifier: "1"}},
 		want:     false,
 	}, {
-		name: "review finding among CI findings",
+		name: "review thread awaiting the bot",
 		findings: []callbacks.Finding{
 			{Kind: callbacks.FindingKindCICheck, Identifier: "1"},
 			{Kind: callbacks.FindingKindReview, Identifier: "thread-abc"},
+		},
+		awaiting: map[string]struct{}{"thread-abc": {}},
+		want:     true,
+	}, {
+		name: "review thread the bot answered last does not count",
+		findings: []callbacks.Finding{
+			{Kind: callbacks.FindingKindReview, Identifier: "thread-abc"},
+		},
+		awaiting: nil,
+		want:     false,
+	}, {
+		name: "review body always counts",
+		findings: []callbacks.Finding{
+			{Kind: callbacks.FindingKindReview, Identifier: reviewBodyIdentifierPrefix + "9"},
 		},
 		want: true,
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := Session[testData]{findings: tt.findings}
+			s := Session[testData]{findings: tt.findings, reviewThreadsAwaitingReply: tt.awaiting}
 			if got := s.HasUnresolvedReviews(); got != tt.want {
 				t.Errorf("HasUnresolvedReviews(): got = %v, want = %v", got, tt.want)
 			}
@@ -209,6 +224,147 @@ func TestResetCommitBudget(t *testing.T) {
 			s.ResetCommitBudget(t.Context())
 			if s.meta.CommitBudgetBaseline != tt.want {
 				t.Errorf("baseline: got = %d, want = %d", s.meta.CommitBudgetBaseline, tt.want)
+			}
+		})
+	}
+}
+
+// TestResetCommitBudgetCap checks that the per-PR reset cap bounds budget
+// renewal: three resets renew the budget, the fourth is refused, and a cap of 0
+// falls back to the default of 3.
+func TestResetCommitBudgetCap(t *testing.T) {
+	configs := []struct {
+		name            string
+		maxBudgetResets int
+	}{
+		{name: "explicit cap of 3", maxBudgetResets: 3},
+		{name: "zero falls back to default", maxBudgetResets: 0},
+	}
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			s := &Session[testData]{
+				manager:  &CM[testData]{dynamicCommitBudget: true, maxBudgetResets: cfg.maxBudgetResets},
+				prNumber: 7,
+				meta:     metadata{CommitBudgetBaseline: 0},
+			}
+
+			// Each round adds commits, then renews the budget.
+			for i := 1; i <= 3; i++ {
+				s.commitCount = 10 * i
+				s.ResetCommitBudget(t.Context())
+				if s.meta.BudgetResetCount != i {
+					t.Fatalf("reset %d: BudgetResetCount got = %d, want = %d", i, s.meta.BudgetResetCount, i)
+				}
+				if s.meta.CommitBudgetBaseline != s.commitCount {
+					t.Fatalf("reset %d: baseline got = %d, want = %d", i, s.meta.CommitBudgetBaseline, s.commitCount)
+				}
+			}
+
+			// The fourth reset is refused: the cap holds the baseline and count.
+			s.commitCount = 40
+			s.ResetCommitBudget(t.Context())
+			if s.meta.BudgetResetCount != 3 {
+				t.Errorf("after cap: BudgetResetCount got = %d, want = 3", s.meta.BudgetResetCount)
+			}
+			if s.meta.CommitBudgetBaseline != 30 {
+				t.Errorf("after cap: baseline got = %d, want = 30 (unchanged from the third reset)", s.meta.CommitBudgetBaseline)
+			}
+		})
+	}
+}
+
+// TestResetCommitBudgetDerivedFromCommits checks that the reset cap is enforced
+// against the larger of the stored count and the count the PR's commit history
+// implies, so the stored count in the body cannot be edited to unlock more
+// budget than the commits already prove. With WithMaxCommits set to N, a PR
+// with C commits has consumed at least floor((C-1)/N) resets.
+func TestResetCommitBudgetDerivedFromCommits(t *testing.T) {
+	tests := []struct {
+		name            string
+		maxCommits      int
+		maxBudgetResets int
+		commitCount     int
+		baseline        int
+		stored          int
+		wantBaseline    int
+		wantResets      int
+	}{{
+		// 31 commits over a 10-commit budget prove 3 resets already, so a
+		// body edited down to 0 is still refused a fourth.
+		name:            "lowered stored refused when commits prove the cap",
+		maxCommits:      10,
+		maxBudgetResets: 3,
+		commitCount:     31,
+		baseline:        20,
+		stored:          0,
+		wantBaseline:    20,
+		wantResets:      0,
+	}, {
+		// A stored count above the derived bound is honored, and the cap
+		// still applies to it: at the cap the reset is refused.
+		name:            "raised stored at cap still refused",
+		maxCommits:      10,
+		maxBudgetResets: 3,
+		commitCount:     15,
+		baseline:        10,
+		stored:          3,
+		wantBaseline:    10,
+		wantResets:      3,
+	}, {
+		// A stored count above the derived bound but below the cap is honored
+		// and the reset is granted, persisting stored+1.
+		name:            "raised stored below cap honored and granted",
+		maxCommits:      10,
+		maxBudgetResets: 3,
+		commitCount:     15,
+		baseline:        10,
+		stored:          2,
+		wantBaseline:    15,
+		wantResets:      3,
+	}, {
+		// A negative stored count is treated as zero; with few commits the
+		// derived bound is zero, so the reset is granted and persists 1 (a raw
+		// increment of the negative would persist a negative count).
+		name:            "negative stored clamped to zero",
+		maxCommits:      10,
+		maxBudgetResets: 3,
+		commitCount:     5,
+		baseline:        0,
+		stored:          -5,
+		wantBaseline:    5,
+		wantResets:      1,
+	}, {
+		// With no commit limit configured the derived bound is zero, so only
+		// the stored count governs and behavior matches a reset without limits.
+		name:            "no commit limit derives zero",
+		maxCommits:      0,
+		maxBudgetResets: 3,
+		commitCount:     100,
+		baseline:        0,
+		stored:          1,
+		wantBaseline:    100,
+		wantResets:      2,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session[testData]{
+				manager: &CM[testData]{
+					dynamicCommitBudget: true,
+					maxCommits:          tt.maxCommits,
+					maxBudgetResets:     tt.maxBudgetResets,
+				},
+				prNumber:    7,
+				commitCount: tt.commitCount,
+				meta:        metadata{CommitBudgetBaseline: tt.baseline, BudgetResetCount: tt.stored},
+			}
+			s.ResetCommitBudget(t.Context())
+			if s.meta.CommitBudgetBaseline != tt.wantBaseline {
+				t.Errorf("baseline: got = %d, want = %d", s.meta.CommitBudgetBaseline, tt.wantBaseline)
+			}
+			if s.meta.BudgetResetCount != tt.wantResets {
+				t.Errorf("BudgetResetCount: got = %d, want = %d", s.meta.BudgetResetCount, tt.wantResets)
 			}
 		})
 	}

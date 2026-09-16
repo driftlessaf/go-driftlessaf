@@ -97,6 +97,12 @@ type Session[T any] struct {
 	findings      []callbacks.Finding // CI failures detected on the existing PR
 	pendingChecks []string            // Names of checks that are not yet complete
 	meta          metadata            // Changemanager state embedded in the PR body
+
+	// reviewThreadsAwaitingReply holds the node ids of unresolved review threads
+	// whose most recent relevant comment is not this bot's own reply, so the bot
+	// still owes a response. HasUnresolvedReviews consults it so a thread the bot
+	// has already answered does not renew the commit budget.
+	reviewThreadsAwaitingReply map[string]struct{}
 }
 
 // skipLabel returns the skip label for this session's identity.
@@ -315,6 +321,20 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 // Gate the reset on review state that clears once addressed (e.g.
 // HasUnresolvedReviews): if the gating signal never clears, the budget renews
 // every round and maxCommits becomes a per-turn rather than total limit.
+//
+// A per-PR cap (WithMaxBudgetResets, default 3) bounds how many times the budget
+// renews, so even a review signal that never clears cannot extend the turn limit
+// without bound. The reset count is persisted in the PR body, so it holds across
+// reconciles. Once the cap is reached the reset is a logged no-op.
+//
+// The cap applies to an effective reset count, not to the stored value alone:
+// the count persisted in the body is combined with a lower bound the commit
+// history implies (with WithMaxCommits set to N, a PR with C commits proves at
+// least floor((C-1)/N) resets), and the larger governs. Editing the body to
+// lower the count therefore cannot renew the budget more than one extra time
+// beyond what the commits already prove, and adding commits only tightens the
+// bound. Negative stored counts are treated as zero. The effective value is
+// persisted, so a lowered count is corrected on the next renewal.
 func (s *Session[T]) ResetCommitBudget(ctx context.Context) {
 	if s.prNumber == 0 || !s.manager.dynamicCommitBudget {
 		return
@@ -322,8 +342,37 @@ func (s *Session[T]) ResetCommitBudget(ctx context.Context) {
 	if s.meta.CommitBudgetBaseline == s.commitCount {
 		return
 	}
-	clog.InfoContext(ctx, "Resetting dynamic commit budget", "pr", s.prNumber, "baseline", s.commitCount, "previous", s.meta.CommitBudgetBaseline)
+	limit := s.manager.maxBudgetResets
+	if limit <= 0 {
+		limit = defaultMaxBudgetResets
+	}
+	resets := s.effectiveBudgetResets()
+	if resets >= limit {
+		clog.InfoContext(ctx, "Commit budget reset cap reached, not renewing", "pr", s.prNumber, "resets", resets, "cap", limit)
+		return
+	}
+	s.meta.BudgetResetCount = resets + 1
+	clog.InfoContext(ctx, "Resetting dynamic commit budget", "pr", s.prNumber, "baseline", s.commitCount, "previous", s.meta.CommitBudgetBaseline, "resets", s.meta.BudgetResetCount, "cap", limit)
 	s.meta.CommitBudgetBaseline = s.commitCount
+}
+
+// effectiveBudgetResets returns the reset count the WithMaxBudgetResets cap is
+// enforced against. It never trusts the PR body alone: the stored count
+// (negative values treated as zero) is combined with a lower bound the commit
+// history implies. With WithMaxCommits set to N, each budget admits at most N
+// commits, so a PR with C commits has already consumed at least floor((C-1)/N)
+// resets. The larger of the stored and derived counts is returned, so a body
+// edited to lower the stored count cannot claim fewer resets than the commits
+// prove, and adding commits only raises the derived bound. With no commit limit
+// configured (WithMaxCommits unset, so N == 0) the derived bound is zero and
+// only the stored count applies.
+func (s *Session[T]) effectiveBudgetResets() int {
+	stored := max(s.meta.BudgetResetCount, 0)
+	derived := 0
+	if s.manager.maxCommits > 0 && s.commitCount > 0 {
+		derived = (s.commitCount - 1) / s.manager.maxCommits
+	}
+	return max(stored, derived)
 }
 
 // maxReasoningEntries caps the reasoning log persisted in the PR body so the
@@ -770,59 +819,111 @@ func (s *Session[T]) Findings() []callbacks.Finding {
 	return s.findings
 }
 
-// HasUnresolvedReviews reports whether the PR has any review findings: an
-// unresolved review thread, or a review body on the current head commit — in
-// either case from a trusted author. These represent human review feedback the
-// bot has not yet addressed. Returns false if no PR exists.
+// HasUnresolvedReviews reports whether the PR carries review feedback the bot
+// still owes a response to. A review body on the current head commit always
+// counts: bodies carry no reply or resolution and drop out once the bot pushes a
+// new commit, so a body still present is unaddressed feedback. A review thread
+// counts only while it awaits the bot, meaning its most recent relevant comment
+// is not the bot's own reply (see threadAwaitsReply); a thread the bot answered
+// last is settled until a trusted author replies again, and a resolved thread is
+// never a finding. Returns false if no PR exists.
+//
+// Callers gate ResetCommitBudget on this so review feedback grants a fresh
+// commit budget. Because a thread the bot has answered no longer counts, a
+// refuted finding the bot replied to and left open cannot renew the budget every
+// round.
 func (s *Session[T]) HasUnresolvedReviews() bool {
 	for _, f := range s.findings {
-		if f.Kind == callbacks.FindingKindReview {
+		if f.Kind != callbacks.FindingKindReview {
+			continue
+		}
+		if strings.HasPrefix(f.Identifier, reviewBodyIdentifierPrefix) {
+			return true
+		}
+		if _, awaiting := s.reviewThreadsAwaitingReply[f.Identifier]; awaiting {
 			return true
 		}
 	}
 	return false
 }
 
+// findingByID returns the session finding matching kind and identifier, or an
+// error naming the identifier when the session carries no such finding. It is
+// the shared lookup behind every finding callback: a callback acts only on a
+// finding this session discovered, so a caller-supplied identifier (which may
+// originate from model output derived from untrusted review text) that matches
+// no finding is refused before any GitHub read or write.
+func (s *Session[T]) findingByID(kind callbacks.FindingKind, identifier string) (callbacks.Finding, error) {
+	for _, f := range s.findings {
+		if f.Kind == kind && f.Identifier == identifier {
+			return f, nil
+		}
+	}
+	return callbacks.Finding{}, fmt.Errorf("finding not found: %s/%s", kind, identifier)
+}
+
 // FindingCallbacks returns callbacks for fetching finding details.
 // The returned callbacks can be embedded into agent tool callbacks.
 // Since all details are pre-fetched in NewSession, this just does a lookup.
+//
+// Every callback validates its identifier against the session's own findings
+// before acting, so a caller cannot direct a GitHub read or mutation at a
+// finding this session never surfaced.
+//
+// Reply is set only when the manager enabled it (WithFindingReplies). Left nil,
+// the reply tool is not registered, so a consumer whose prompt never mentions
+// replies does not carry the capability.
 func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
-	return callbacks.FindingCallbacks{
+	cb := callbacks.FindingCallbacks{
 		Findings: s.findings,
 		GetDetails: func(_ context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
-			for _, f := range s.findings {
-				if f.Kind == kind && f.Identifier == identifier {
-					return f.Details, nil
-				}
+			f, err := s.findingByID(kind, identifier)
+			if err != nil {
+				return "", err
 			}
-			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
+			return f.Details, nil
 		},
 		GetLogs: func(ctx context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
-			for _, f := range s.findings {
-				if f.Kind == kind && f.Identifier == identifier {
-					return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f)
-				}
+			f, err := s.findingByID(kind, identifier)
+			if err != nil {
+				return "", err
 			}
-			return "", fmt.Errorf("finding not found: %s/%s", kind, identifier)
+			return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f)
 		},
 		Retry: func(ctx context.Context, kind callbacks.FindingKind, identifier string) error {
 			if kind != callbacks.FindingKindCICheck {
 				return fmt.Errorf("retry is only supported for CI check findings, got: %s", kind)
 			}
-			for _, f := range s.findings {
-				if f.Kind == kind && f.Identifier == identifier {
-					return rerunCICheck(ctx, s.client, s.owner, s.repo, f)
-				}
+			f, err := s.findingByID(kind, identifier)
+			if err != nil {
+				return err
 			}
-			return fmt.Errorf("finding not found: %s/%s", kind, identifier)
+			return rerunCICheck(ctx, s.client, s.owner, s.repo, f)
 		},
 		Resolve: func(ctx context.Context, identifier string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
 				return errors.New("cannot resolve review body findings, only review thread findings can be resolved")
 			}
+			if _, err := s.findingByID(callbacks.FindingKindReview, identifier); err != nil {
+				return err
+			}
 			return resolveReviewThread(ctx, s.gqlClient, identifier)
 		},
 	}
+
+	if s.manager != nil && s.manager.findingReplies {
+		cb.Reply = func(ctx context.Context, identifier, body string) error {
+			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
+				return errors.New("cannot reply to review body findings, only review thread findings can be replied to")
+			}
+			if _, err := s.findingByID(callbacks.FindingKindReview, identifier); err != nil {
+				return err
+			}
+			return replyToReviewThread(ctx, s.gqlClient, identifier, sanitizeReplyBody(body))
+		}
+	}
+
+	return cb
 }
 
 // resolveReviewThread calls the GitHub resolveReviewThread GraphQL mutation.
@@ -838,6 +939,33 @@ func resolveReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLCl
 
 	return gqlClient.Mutate(ctx, "ResolveReviewThread", &mutation, githubv4.ResolveReviewThreadInput{
 		ThreadID: githubv4.ID(threadID),
+	}, nil)
+}
+
+// replyToReviewThread posts a reply in a review thread via the GitHub
+// addPullRequestReviewThreadReply GraphQL mutation. The thread's node ID is the
+// finding identifier already carried from NewSession, so no comment lookup is
+// needed — this uses less new client surface than the REST reply-in-thread call,
+// which would need the root comment's databaseId, the PR number, and owner/repo.
+func replyToReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, threadID, body string) error {
+	if threadID == "" {
+		return errors.New("empty review thread id")
+	}
+	if body == "" {
+		return errors.New("empty reply body")
+	}
+
+	var mutation struct {
+		AddPullRequestReviewThreadReply struct {
+			Comment struct {
+				Id string
+			}
+		} `graphql:"addPullRequestReviewThreadReply(input: $input)"`
+	}
+
+	return gqlClient.Mutate(ctx, "AddPullRequestReviewThreadReply", &mutation, githubv4.AddPullRequestReviewThreadReplyInput{
+		PullRequestReviewThreadID: githubv4.ID(threadID),
+		Body:                      githubv4.String(body),
 	}, nil)
 }
 

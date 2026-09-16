@@ -64,6 +64,11 @@ type FindingCallbacks struct {
 	// GitHub resolveReviewThread mutation.
 	Resolve func(ctx context.Context, identifier string) error
 
+	// Reply posts a reply in a review thread finding's thread, e.g. a short
+	// disposition before resolving it or a refutation when leaving it open.
+	// body is the reply text; the callback bounds its length.
+	Reply func(ctx context.Context, identifier, body string) error
+
 	// Retry triggers a retry of a failed finding (e.g., rerunning a flaky CI check).
 	Retry func(ctx context.Context, kind FindingKind, identifier string) error
 }
@@ -81,6 +86,11 @@ func (f FindingCallbacks) HasGetLogs() bool {
 // HasResolve returns true if the Resolve callback is available.
 func (f FindingCallbacks) HasResolve() bool {
 	return f.Resolve != nil
+}
+
+// HasReply returns true if the Reply callback is available.
+func (f FindingCallbacks) HasReply() bool {
+	return f.Reply != nil
 }
 
 // HasRetry returns true if the Retry callback is available.

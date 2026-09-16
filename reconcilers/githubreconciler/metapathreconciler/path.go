@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"slices"
 
-	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
@@ -255,10 +254,11 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		labels = append(labels, r.labelFn(ctx, res, diagnostics, findings)...)
 	}
 
-	// agentResult captures the agent's output for the no-change path below, where
-	// ErrNoChanges short-circuits before Upsert returns it. agentRan guards
-	// against surfacing a zero result when the agent never ran (e.g. allFixed).
-	var agentResult Resp
+	// giveUpExplanation captures the agent's aggregated no-change explanation for
+	// the no-change path below, where ErrNoChanges short-circuits before Upsert
+	// returns. agentRan guards against surfacing anything when the agent never ran
+	// (e.g. allFixed).
+	var giveUpExplanation string
 	var agentRan bool
 
 	// Upsert PR with changes (analyzer fixes, agent fixes, or both). prData is
@@ -271,12 +271,6 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		Request:  request,
 	}
 	prURL, err := session.Upsert(ctx, prData, false, labels, func(ctx context.Context, branchName string) error {
-		// Tee the agent's completed trace so the PR body template can render
-		// a per-commit rationale log via {{.ReasoningSummary}} (see
-		// ReasoningSummarySnippet): per-action tool-call reasoning when
-		// present, falling back to extended-thinking blocks. No-op when the
-		// run produced neither.
-		ctx, captured := agenttrace.CaptureTrace[Resp](ctx)
 		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
 			// If the analyzer already fixed everything, commit its changes
 			// directly without invoking the agent. The commit contributes no
@@ -296,14 +290,39 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 				return "", fmt.Errorf("build callbacks: %w", err)
 			}
 
-			result, err := r.agent.Execute(ctx, request, cbs)
-			if err != nil {
-				return "", fmt.Errorf("execute agent: %w", err)
+			// A request that carries the checked-out worktree root has it set
+			// here, where the worktree exists, so an agent-side post-execute step
+			// can operate on the checkout. Requests that do not implement the
+			// setter are unaffected.
+			if s, ok := any(request).(worktreeRootSetter); ok {
+				s.SetWorktreeRoot(wt.Filesystem.Root())
 			}
-			agentResult = result
-			agentRan = true
 
-			// Check if the agent left the worktree clean (no actual file changes).
+			// A request that scopes work to the change receives the base commit
+			// here, where the lease is known. A zero base (root commit, or no PR
+			// commits to diff) is withheld so a consumer can treat an empty value
+			// as "no scoping". Requests that do not implement the setter are
+			// unaffected.
+			if s, ok := any(request).(baseCommitSetter); ok {
+				if base := lease.BaseCommit(); !base.IsZero() {
+					s.SetBaseCommit(base.String())
+				}
+			}
+
+			// Run the agent, optionally split into per-family passes with a
+			// local-verification loop after each; every pass edits the same
+			// checkout, so all edits land in this single commit. runAgentPasses
+			// mutates neither the session nor prData, so a run that changes
+			// nothing (below) leaves the reasoning log untouched.
+			outcome, err := r.runAgentPasses(ctx, wt, cbs, request, findings)
+			if err != nil {
+				return "", err
+			}
+			giveUpExplanation = outcome.giveUpExplanation
+			agentRan = true
+			msg := outcome.commitMessage
+
+			// Check if the passes left the worktree clean (no actual file changes).
 			status, err := wt.Status()
 			if err != nil {
 				return "", fmt.Errorf("get worktree status: %w", err)
@@ -312,15 +331,15 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 				return "", changemanager.ErrNoChanges
 			}
 
-			// A commit is certain: log this run's reasoning under the
-			// commit's headline and render the accumulated log — prior
-			// iterations' entries plus this one — for the PR body. The
-			// title headline anchors to the log's first entry while that
-			// primary commit remains on the branch. A fresh-from-default
-			// force-push uses the current headline because the old primary
-			// commit and its change are no longer present.
-			msg := result.GetCommitMessage()
-			session.AppendReasoning(commitHeadline(msg), agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars))
+			// A commit is certain: record each pass's reasoning and render the
+			// accumulated log — prior iterations' entries plus these — for the
+			// PR body. The title headline anchors to the log's first entry while
+			// that primary commit remains on the branch. A fresh-from-default
+			// force-push uses the current headline because the old primary commit
+			// and its change are no longer present.
+			for _, e := range outcome.entries {
+				session.AppendReasoning(e.headline, e.summary)
+			}
 			prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
 			prData.Headline = prHeadline(session.ReasoningLog(), commitHeadline(msg), usePRBranch)
 
@@ -331,7 +350,7 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
 			if agentRan {
-				r.giveUp.SurfaceResult(ctx, session, agentResult)
+				r.giveUp.Surface(ctx, session, giveUpExplanation)
 			}
 			return nil
 		}

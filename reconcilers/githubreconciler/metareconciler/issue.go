@@ -115,16 +115,27 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		clog.InfoContext(ctx, "PR needs rebase, starting fresh from default branch")
 
 	case state.HitMaxCommits():
-		clog.InfoContext(ctx, "PR hit turn limit")
-		// The label edge is the transition: ApplyTurnLimit is idempotent, so
-		// only the reconcile that newly applies the label emits.
-		newlyLimited := !changeSession.HasTurnLimitLabel()
-		prURL, err := changeSession.ApplyTurnLimit(ctx)
-		if err == nil && newlyLimited {
-			r.emitTransition(ctx, issue, prURL,
-				statemachine.StatusFailed, statemachine.FailureModeMaxTurns, statemachine.TriggerMaxTurns)
+		// Unresolved review feedback grants a fresh commit budget (a no-op
+		// unless WithDynamicCommitBudget is enabled). If the limit still holds
+		// after the reset, the turn limit stands; otherwise iterate on the
+		// existing PR to address the review.
+		if changeSession.HasUnresolvedReviews() {
+			changeSession.ResetCommitBudget(ctx)
 		}
-		return err
+		if changeSession.State().HitMaxCommits() {
+			clog.InfoContext(ctx, "PR hit turn limit")
+			// The label edge is the transition: ApplyTurnLimit is idempotent, so
+			// only the reconcile that newly applies the label emits.
+			newlyLimited := !changeSession.HasTurnLimitLabel()
+			prURL, err := changeSession.ApplyTurnLimit(ctx)
+			if err == nil && newlyLimited {
+				r.emitTransition(ctx, issue, prURL,
+					statemachine.StatusFailed, statemachine.FailureModeMaxTurns, statemachine.TriggerMaxTurns)
+			}
+			return err
+		}
+		clog.InfoContext(ctx, "PR hit turn limit but has unresolved reviews, iterating with fresh commit budget")
+		usePRBranch = true
 
 	// Historically we delayed here (commented code below), but in high-volume
 	// repositories github can take a long time to compute mergeability, so we
@@ -257,6 +268,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 			cbs, err := r.buildCallbacks(ctx, changeSession, lease)
 			if err != nil {
 				return "", fmt.Errorf("build callbacks: %w", err)
+			}
+
+			// A request that carries the checked-out worktree root has it set
+			// here, where the worktree exists, so an agent-side post-execute step
+			// can operate on the checkout. Requests that do not implement the
+			// setter are unaffected.
+			if s, ok := any(request).(worktreeRootSetter); ok {
+				s.SetWorktreeRoot(wt.Filesystem.Root())
 			}
 
 			result, err = r.agent.Execute(ctx, request, cbs)

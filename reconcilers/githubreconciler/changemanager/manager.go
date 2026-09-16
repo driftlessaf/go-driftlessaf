@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -52,6 +53,20 @@ func WithFindingsIteration[T any]() Option[T] {
 	}
 }
 
+// WithFindingReplies lets the fixer post a reply in a review thread, e.g. a
+// short disposition before resolving one or a refutation when leaving one open.
+// Off by default: the reply tool is registered only for a bot whose prompt
+// directs it to use one, so a consumer that never mentions replies does not
+// carry the capability. When enabled, reply bodies are sanitized before they
+// reach GitHub (see sanitizeReplyBody): a body that begins with an @mention line
+// carries a reviewer command, an embedded image or off-site link is untrusted
+// content, and a secret-shaped string must never be echoed back onto a PR.
+func WithFindingReplies[T any]() Option[T] {
+	return func(cm *CM[T]) {
+		cm.findingReplies = true
+	}
+}
+
 // WithMaxCommits sets the maximum number of commits allowed on a PR before
 // the session reports StateMaxCommits. Each commit triggers a CI run, so this
 // limits how many times the bot can iterate on a PR. A value of 0 (default)
@@ -69,6 +84,31 @@ func WithMaxCommits[T any](n int) Option[T] {
 func WithDynamicCommitBudget[T any]() Option[T] {
 	return func(cm *CM[T]) {
 		cm.dynamicCommitBudget = true
+	}
+}
+
+// defaultMaxBudgetResets bounds how many times Session.ResetCommitBudget renews a
+// PR's commit budget when WithMaxBudgetResets is not set. It caps total commits
+// at roughly (defaultMaxBudgetResets+1) * WithMaxCommits even when a review
+// thread the bot cannot satisfy stays open.
+const defaultMaxBudgetResets = 3
+
+// WithMaxBudgetResets caps how many times Session.ResetCommitBudget renews a
+// PR's commit budget (see WithDynamicCommitBudget). Once the cap is reached the
+// budget stops renewing, so an unresolved review thread cannot extend the turn
+// limit without bound. A value <= 0 keeps the default of 3. Operators typically
+// wire this from an environment variable, alongside WithMaxCommits.
+//
+// The cap is enforced against an effective reset count that does not trust the
+// PR body alone. The stored count is combined with a lower bound the commit
+// history implies: with WithMaxCommits set to N, each budget admits at most N
+// commits, so a PR with C commits has already consumed at least
+// floor((C-1)/N) resets. The larger of the two governs, so lowering the stored
+// count in the body can never unlock more than one budget beyond what the
+// commits already prove, and adding commits only tightens the bound.
+func WithMaxBudgetResets[T any](n int) Option[T] {
+	return func(cm *CM[T]) {
+		cm.maxBudgetResets = n
 	}
 }
 
@@ -91,6 +131,13 @@ type metadata struct {
 	// CommitBudgetBaseline is the total commit count at the last
 	// ResetCommitBudget call; see WithDynamicCommitBudget.
 	CommitBudgetBaseline int `json:"commit_budget_baseline"`
+
+	// BudgetResetCount counts how many times ResetCommitBudget has renewed the
+	// commit budget on this PR. ResetCommitBudget stops renewing once it reaches
+	// the configured cap (WithMaxBudgetResets), bounding total commits even when
+	// a review thread stays open. omitempty keeps older bodies parseable and
+	// byte-identical when no reset has happened.
+	BudgetResetCount int `json:"budget_reset_count,omitempty"`
 
 	// ReasoningLog accumulates one agent-reasoning entry per commit the bot
 	// created, oldest first; see Session.AppendReasoning. omitempty keeps
@@ -149,11 +196,18 @@ func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
 // WithTrustedReviewAuthors extends the trusted set with GitHub login names
 // whose review comments and review bodies are consumed regardless of author
 // association. A comment or review is trusted when its association is one of
-// OWNER, MEMBER, COLLABORATOR OR its author login is in this allowlist. Use it
-// for GitHub App reviewers whose association is NONE, e.g. "some-reviewer[bot]".
-// GitHub reserves the "[bot]" login suffix to Apps, so a login allowlist cannot
-// be spoofed by a user account. Matching is exact. The default (empty allowlist)
-// keeps association-only filtering.
+// OWNER, MEMBER, COLLABORATOR OR its author is a bot named in this allowlist.
+// Use it for GitHub App reviewers whose association is NONE, e.g.
+// "some-reviewer[bot]".
+//
+// The allowlist matches only a bot actor: a GitHub App (__typename "Bot") or a
+// login carrying the reserved "[bot]" suffix. A human User account is never
+// matched against the allowlist, even when its login equals an entry, so a user
+// named like an allowlisted App cannot borrow its trust. A bot may be named in
+// either form, "some-reviewer" or "some-reviewer[bot]", and matches whether the
+// author arrives suffixed (the REST shape) or bare with __typename "Bot" (the
+// GraphQL shape GitHub returns for an App). The default (empty allowlist) keeps
+// association-only filtering.
 func WithTrustedReviewAuthors[T any](logins ...string) Option[T] {
 	return func(cm *CM[T]) {
 		if len(logins) == 0 {
@@ -192,8 +246,10 @@ type CM[T any] struct {
 	owner               string
 	repo                string
 	handlesFindings     bool
+	findingReplies      bool
 	maxCommits          int
 	dynamicCommitBudget bool
+	maxBudgetResets     int
 	closeOnEmptyDiff    bool
 	managedLabels       []string
 	traceDashboardURL   string
@@ -247,12 +303,26 @@ var pendingCheckStatuses = map[string]struct{}{
 
 // GraphQL types for querying review threads
 type gqlThreadComment struct {
-	Author            struct{ Login string }
+	Author            gqlActor
 	AuthorAssociation string
 	Body              string
 	Url               string
 	Commit            struct{ Oid string }
 	CreatedAt         string
+	// ViewerDidAuthor reports whether the authenticated token (this bot's
+	// installation) wrote the comment, so a thread the bot answered can be told
+	// apart from one still awaiting it without knowing the bot's login string.
+	ViewerDidAuthor bool `graphql:"viewerDidAuthor"`
+}
+
+// gqlActor selects a comment or review author's login and its GraphQL type.
+// GitHub reports a GitHub App author two ways: the REST API appends a "[bot]"
+// suffix to the login, while GraphQL drops the suffix and reports the type as
+// "Bot" instead (Typename). Both are needed to match an App reviewer against
+// an allowlist regardless of which API surfaced the author.
+type gqlActor struct {
+	Login    string
+	Typename string `graphql:"__typename"`
 }
 
 type gqlReviewThread struct {
@@ -277,7 +347,7 @@ type gqlReviewThreadsConnection struct {
 // GraphQL types for querying review bodies (top-level review text only)
 type gqlReviewBodyNode struct {
 	DatabaseId        int64
-	Author            struct{ Login string }
+	Author            gqlActor
 	AuthorAssociation string
 	State             string
 	Body              string
@@ -301,16 +371,79 @@ var trustedAuthorAssociations = map[string]struct{}{
 	"COLLABORATOR": {},
 }
 
-// authorTrusted reports whether a comment or review is trusted: its association
-// is in trustedAuthorAssociations, or its author login is in trustedAuthors
-// (see WithTrustedReviewAuthors). A nil or empty trustedAuthors leaves
-// association-only filtering.
-func authorTrusted(association, login string, trustedAuthors map[string]struct{}) bool {
+// botLoginSuffix is the "[bot]" login suffix GitHub appends to a GitHub App's
+// login in REST responses. GraphQL drops the suffix and reports the actor's
+// __typename as "Bot" instead. Normalizing across the two shapes lets an
+// allowlist entry match an App reviewer regardless of which API surfaced it.
+const botLoginSuffix = "[bot]"
+
+// authorTrusted reports whether a comment or review is trusted. Trust comes
+// from one of two sources: the author's association is in
+// trustedAuthorAssociations, or the author is a bot named in trustedAuthors (see
+// WithTrustedReviewAuthors). typename is the author's GraphQL __typename ("Bot"
+// for a GitHub App).
+//
+// The allowlist matches only a bot actor: a GitHub App (typename "Bot") or a
+// login carrying the reserved "[bot]" suffix. A human User account is never
+// matched against the allowlist, even when its login equals an allowlist entry,
+// so a user named like an allowlisted App cannot borrow its trust; human trust
+// comes only from association. An allowlist entry may name a bot in either form,
+// "some-reviewer" or "some-reviewer[bot]", and matches whether the author
+// arrives bare with typename "Bot" (GraphQL shape) or suffixed (REST shape). A
+// nil or empty trustedAuthors leaves association-only filtering.
+func authorTrusted(association, login, typename string, trustedAuthors map[string]struct{}) bool {
 	if _, ok := trustedAuthorAssociations[association]; ok {
 		return true
 	}
-	_, ok := trustedAuthors[login]
-	return ok
+	// Beyond association, only a bot actor can be trusted via the allowlist.
+	// GitHub reserves the "[bot]" suffix to Apps, so either the GraphQL type or
+	// the suffix identifies a bot; a human User matches neither.
+	if typename != "Bot" && !strings.HasSuffix(login, botLoginSuffix) {
+		return false
+	}
+	// Match either author shape against either allowlist form: bare "reviewer"
+	// or suffixed "reviewer[bot]".
+	if _, ok := trustedAuthors[login]; ok {
+		return true
+	}
+	// A GitHub App author arrives bare with typename "Bot" from GraphQL; the
+	// allowlist may carry the suffixed "[bot]" form.
+	if typename == "Bot" {
+		if _, ok := trustedAuthors[login+botLoginSuffix]; ok {
+			return true
+		}
+	}
+	// A suffixed author (REST shape) may match a bare allowlist entry.
+	if base, ok := strings.CutSuffix(login, botLoginSuffix); ok {
+		if _, ok := trustedAuthors[base]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// displayReviewAuthor renders an author's login for model-facing finding
+// details. A GitHub App author arrives bare with typename "Bot" from GraphQL,
+// but the fixer prompt recognizes an automated reviewer by the "[bot]" suffix,
+// so the suffix is restored here. A login already carrying the suffix, or a
+// non-Bot author, is returned unchanged.
+func displayReviewAuthor(login, typename string) string {
+	if typename == "Bot" && !strings.HasSuffix(login, botLoginSuffix) {
+		return login + botLoginSuffix
+	}
+	return login
+}
+
+// logUntrustedSkip records a dropped comment or review from an untrusted
+// author. When the operator configured an allowlist, the drop is logged at Info
+// so the operator can see which authors were filtered; otherwise it stays at
+// Debug.
+func logUntrustedSkip(ctx context.Context, trustedAuthors map[string]struct{}, format string, args ...any) {
+	if len(trustedAuthors) > 0 {
+		clog.InfoContextf(ctx, format, args...)
+		return
+	}
+	clog.DebugContextf(ctx, format, args...)
 }
 
 // New creates a new CM with the given identity and templates.
@@ -455,6 +588,8 @@ func (cm *CM[T]) NewSession(
 		findings      []callbacks.Finding
 		pendingChecks []string
 		meta          metadata
+
+		awaitingReviewThreads map[string]struct{}
 	)
 
 	// Initial query for PR and first page of check suites/runs
@@ -546,7 +681,9 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect unresolved review thread findings from trusted authors
-		findings = append(findings, collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors)...)
+		threadFindings, awaiting := collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors)
+		findings = append(findings, threadFindings...)
+		awaitingReviewThreads = awaiting
 
 		// Collect review body findings from trusted authors on the current commit
 		findings = append(findings, collectReviewBodyFindings(ctx, pr.HeadRefOid, pr.Reviews, cm.trustedReviewAuthors)...)
@@ -584,15 +721,27 @@ func (cm *CM[T]) NewSession(
 		findings:      findings,
 		pendingChecks: pendingChecks,
 		meta:          meta,
+
+		reviewThreadsAwaitingReply: awaitingReviewThreads,
 	}, nil
 }
 
 // collectThreadFindings extracts findings from unresolved review threads.
-// All unresolved threads are included regardless of which commit they were left on.
-// Only comments from trusted authors are included; threads with no trusted comments are skipped.
-// trustedAuthors names logins trusted regardless of association (see authorTrusted).
-func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}) []callbacks.Finding {
+// A thread is included regardless of which commit it was left on, but only
+// while it still awaits this bot: its most recent relevant comment is a trusted
+// author's, not the bot's own reply (see threadAwaitsReply). A thread the bot
+// answered last is settled and produces no finding until a trusted author
+// replies again, so a refuted finding the bot replied to and left open does not
+// resurface every reconcile as an identical finding, which drove one duplicate
+// reply per cycle. Only comments from trusted authors are included; threads with
+// no trusted comments are skipped. trustedAuthors names logins trusted
+// regardless of association (see authorTrusted).
+// It also returns the set of thread node ids the returned findings cover, all of
+// which await this bot. HasUnresolvedReviews consults it so a thread the bot has
+// already answered does not keep renewing the commit budget.
+func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}) ([]callbacks.Finding, map[string]struct{}) {
 	findings := make([]callbacks.Finding, 0, len(threads.Nodes))
+	awaiting := make(map[string]struct{})
 
 	for _, thread := range threads.Nodes {
 		if thread.IsResolved {
@@ -603,14 +752,22 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 		// Filter to comments from trusted authors only
 		var trustedComments []gqlThreadComment
 		for _, c := range thread.Comments.Nodes {
-			if authorTrusted(c.AuthorAssociation, c.Author.Login, trustedAuthors) {
+			if authorTrusted(c.AuthorAssociation, c.Author.Login, c.Author.Typename, trustedAuthors) {
 				trustedComments = append(trustedComments, c)
 			} else {
-				clog.DebugContextf(ctx, "Skipping untrusted thread comment author=%s association=%s thread=%s", c.Author.Login, c.AuthorAssociation, thread.Id)
+				logUntrustedSkip(ctx, trustedAuthors, "Skipping untrusted thread comment author=%s association=%s thread=%s", displayReviewAuthor(c.Author.Login, c.Author.Typename), c.AuthorAssociation, thread.Id)
 			}
 		}
 		if len(trustedComments) == 0 {
 			clog.DebugContextf(ctx, "Skipping review thread with no trusted comments id=%s path=%s", thread.Id, thread.Path)
+			continue
+		}
+
+		// A settled thread (the bot's own reply is its latest relevant comment)
+		// is excluded so the fixer does not see, and reply to, a finding it has
+		// already answered. A trusted reply after the bot's reopens it.
+		if !threadAwaitsReply(thread.Comments.Nodes, trustedAuthors) {
+			clog.DebugContextf(ctx, "Skipping settled review thread (bot replied last) id=%s path=%s", thread.Id, thread.Path)
 			continue
 		}
 
@@ -625,9 +782,31 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 			Details:    formatThreadDetails(thread.Path, thread.Line, thread.IsOutdated, trustedComments),
 			DetailsURL: trustedComments[0].Url,
 		})
+		awaiting[thread.Id] = struct{}{}
 	}
 
-	return findings
+	return findings, awaiting
+}
+
+// threadAwaitsReply reports whether an unresolved review thread is still waiting
+// on this bot. It walks the thread's comments in chronological order and tracks
+// the last one that is relevant: either the bot's own comment (ViewerDidAuthor)
+// or a comment from a trusted author. The thread awaits the bot when that last
+// relevant comment is not the bot's own. A thread the bot answered last is
+// settled until a trusted author replies again, so a refuted finding the bot
+// replied to and left open no longer renews the commit budget. Untrusted
+// comments neither settle nor reopen a thread.
+func threadAwaitsReply(comments []gqlThreadComment, trustedAuthors map[string]struct{}) bool {
+	awaiting := false
+	for _, c := range comments {
+		switch {
+		case c.ViewerDidAuthor:
+			awaiting = false
+		case authorTrusted(c.AuthorAssociation, c.Author.Login, c.Author.Typename, trustedAuthors):
+			awaiting = true
+		}
+	}
+	return awaiting
 }
 
 // reviewBodyIdentifierPrefix distinguishes review body findings from thread findings.
@@ -641,8 +820,8 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 	var findings []callbacks.Finding
 
 	for _, review := range reviews.Nodes {
-		if !authorTrusted(review.AuthorAssociation, review.Author.Login, trustedAuthors) {
-			clog.DebugContextf(ctx, "Skipping untrusted review body author=%s association=%s", review.Author.Login, review.AuthorAssociation)
+		if !authorTrusted(review.AuthorAssociation, review.Author.Login, review.Author.Typename, trustedAuthors) {
+			logUntrustedSkip(ctx, trustedAuthors, "Skipping untrusted review body author=%s association=%s", displayReviewAuthor(review.Author.Login, review.Author.Typename), review.AuthorAssociation)
 			continue
 		}
 		if review.Commit.Oid != headRefOid {
@@ -657,7 +836,7 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 		findings = append(findings, callbacks.Finding{
 			Kind:       callbacks.FindingKindReview,
 			Identifier: reviewBodyIdentifierPrefix + fmt.Sprintf("%d", review.DatabaseId),
-			Name:       "@" + review.Author.Login,
+			Name:       "@" + displayReviewAuthor(review.Author.Login, review.Author.Typename),
 			Details:    formatReviewBodyDetails(review),
 			DetailsURL: review.Url,
 		})
