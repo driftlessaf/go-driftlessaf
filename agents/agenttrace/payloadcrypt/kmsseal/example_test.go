@@ -7,7 +7,8 @@ package kmsseal_test
 
 import (
 	"context"
-	"log"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace/payloadcrypt/kmsseal"
 )
@@ -21,7 +22,7 @@ func ExampleNew() {
 	enc, closeFn, err := kmsseal.New(ctx,
 		"projects/p/locations/us-central1/keyRings/argos/cryptoKeys/agent-trace-payload-key")
 	if err != nil {
-		log.Fatalf("kmsseal.New: %v", err)
+		clog.FatalContextf(ctx, "kmsseal.New: %v", err)
 	}
 	defer func() { _ = closeFn() }()
 

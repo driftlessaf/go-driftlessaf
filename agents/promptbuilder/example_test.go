@@ -6,18 +6,21 @@ SPDX-License-Identifier: Apache-2.0
 package promptbuilder_test
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"strings"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 )
 
 // ExampleNewPrompt demonstrates creating a new prompt template
 func ExampleNewPrompt() {
+	ctx := context.Background()
 	p, err := promptbuilder.NewPrompt(`Hello {{name}}, welcome to {{service}}!`)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	bindings := p.GetBindings()
@@ -37,23 +40,24 @@ func ExampleMustNewPrompt() {
 
 // ExamplePrompt_BindStringLiteral demonstrates binding literal string values
 func ExamplePrompt_BindStringLiteral() {
+	ctx := context.Background()
 	p := promptbuilder.MustNewPrompt(`System: {{instructions}}
 User: {{query}}`)
 
 	// Bind developer-provided literal strings
 	p, err := p.BindStringLiteral("instructions", "You are a helpful assistant.")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	p, err = p.BindStringLiteral("query", "What is the weather?")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	result, err := p.Build()
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Println(result)
@@ -63,6 +67,7 @@ User: {{query}}`)
 
 // ExamplePrompt_BindJSON demonstrates binding structured data as JSON
 func ExamplePrompt_BindJSON() {
+	ctx := context.Background()
 	p := promptbuilder.MustNewPrompt(`Process this user data:
 {{user_data}}`)
 
@@ -74,12 +79,12 @@ func ExamplePrompt_BindJSON() {
 
 	p, err := p.BindJSON("user_data", userData)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	result, err := p.Build()
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Println(result)
@@ -96,6 +101,7 @@ func ExamplePrompt_BindJSON() {
 
 // ExamplePrompt_BindXML demonstrates binding structured data as XML
 func ExamplePrompt_BindXML() {
+	ctx := context.Background()
 	type User struct {
 		Name string `xml:"name"`
 		Age  int    `xml:"age"`
@@ -108,12 +114,12 @@ func ExamplePrompt_BindXML() {
 
 	p, err := p.BindXML("profile", user)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	result, err := p.Build()
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Println(result)
@@ -126,6 +132,7 @@ func ExamplePrompt_BindXML() {
 
 // ExamplePrompt_BindYAML demonstrates binding structured data as YAML
 func ExamplePrompt_BindYAML() {
+	ctx := context.Background()
 	p := promptbuilder.MustNewPrompt(`Configuration:
 {{config}}`)
 
@@ -139,12 +146,12 @@ func ExamplePrompt_BindYAML() {
 
 	p, err := p.BindYAML("config", config)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	result, err := p.Build()
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Println(result)
@@ -157,6 +164,7 @@ func ExamplePrompt_BindYAML() {
 
 // ExamplePrompt_MustBindStringLiteral demonstrates the Must variant for binding literals
 func ExamplePrompt_MustBindStringLiteral() {
+	ctx := context.Background()
 	p := promptbuilder.MustNewPrompt(`Hello {{name}}!`)
 
 	// Chain Must methods for fluent API when you know bindings will succeed
@@ -164,7 +172,7 @@ func ExamplePrompt_MustBindStringLiteral() {
 
 	result, err := p.Build()
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Println(result)
@@ -175,17 +183,18 @@ func ExamplePrompt_MustBindStringLiteral() {
 // inside a nonce-delimited untrusted-content fence. The nonce differs on
 // every Build, so the example prints structure rather than the raw output.
 func ExamplePrompt_BindRawFenced() {
+	ctx := context.Background()
 	p := promptbuilder.MustNewPrompt(`Evidence:
 {{evidence}}`)
 
 	p, err := p.BindRawFenced("evidence", `if a < b && c > "d" { exfiltrate() }`)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	result, err := p.Build()
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	// The bound value is preserved byte-identical inside the fence.
@@ -200,11 +209,12 @@ func ExamplePrompt_BindRawFenced() {
 // differs on every call, so the example prints structure rather than the raw
 // output.
 func ExampleFenceUntrusted() {
+	ctx := context.Background()
 	// The label naming the region stays outside the fence: it is the one part
 	// of the pairing the region must not be able to author for itself.
 	region, err := promptbuilder.FenceUntrusted("version: latest\nallow: [libfoo.so]")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	field := "build manifest under review:\n" + region
 

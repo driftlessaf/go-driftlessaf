@@ -8,6 +8,7 @@ package claudebackend
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
@@ -15,7 +16,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
-	"github.com/sethvargo/go-envconfig"
 )
 
 type backend string
@@ -59,9 +59,9 @@ func Resolve(ctx context.Context, projectID, region, model string) (Resolved, er
 }
 
 func configFromEnv(ctx context.Context) (config, error) {
-	var env environment
-	if err := envconfig.Process(ctx, &env); err != nil {
-		return config{}, fmt.Errorf("reading Claude backend environment: %w", err)
+	env := environment{
+		Backend:          os.Getenv(envBackend),
+		AnthropicProfile: os.Getenv(anthropicauth.EnvProfile),
 	}
 
 	switch selected := backend(env.Backend); selected {

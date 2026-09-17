@@ -8,8 +8,9 @@ package githubquestions_test
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/suspend"
 	"chainguard.dev/driftlessaf/agents/suspend/githubquestions"
@@ -34,11 +35,11 @@ func ExampleNew() {
 		Prompt:  "Deploy to staging or production?",
 		AskedAt: time.Now().UTC(),
 	}); err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	if q, ok, err := questions.Pending(ctx, key); err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	} else if ok {
 		fmt.Println("pending:", q.Prompt)
 	}
@@ -47,12 +48,12 @@ func ExampleNew() {
 	// surfaces it, bound to the pending question's nonce.
 	ans, ok, err := questions.Answer(ctx, key)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	if ok {
 		fmt.Println("resume with:", ans.Text)
 		if err := questions.Consume(ctx, key, ans.QuestionID); err != nil {
-			log.Fatal(err)
+			clog.FatalContextf(ctx, "%v", err)
 		}
 	}
 }

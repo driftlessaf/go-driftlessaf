@@ -6,8 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 package openaiexecutor_test
 
 import (
+	"context"
 	"fmt"
-	"log"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -28,6 +30,7 @@ type myResponse struct {
 }
 
 func ExampleNew() {
+	ctx := context.Background()
 	prompt := promptbuilder.MustNewPrompt("Summarize: {{input}}")
 
 	client := openai.NewClient(
@@ -40,7 +43,7 @@ func ExampleNew() {
 		openaiexecutor.WithTemperature[myRequest, myResponse](0.1),
 	)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("executor created: %v\n", exec != nil)
@@ -48,6 +51,7 @@ func ExampleNew() {
 }
 
 func ExampleWithModel() {
+	ctx := context.Background()
 	prompt := promptbuilder.MustNewPrompt("Analyze: {{input}}")
 
 	client := openai.NewClient(
@@ -58,7 +62,7 @@ func ExampleWithModel() {
 		openaiexecutor.WithModel[myRequest, myResponse]("deepseek-ai/deepseek-v3.2-maas"),
 	)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("executor created: %v\n", exec != nil)
@@ -66,6 +70,7 @@ func ExampleWithModel() {
 }
 
 func ExampleWithMaxTurns() {
+	ctx := context.Background()
 	prompt := promptbuilder.MustNewPrompt("Process: {{input}}")
 
 	client := openai.NewClient(
@@ -76,7 +81,7 @@ func ExampleWithMaxTurns() {
 		openaiexecutor.WithMaxTurns[myRequest, myResponse](50),
 	)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("executor created: %v\n", exec != nil)
@@ -84,6 +89,7 @@ func ExampleWithMaxTurns() {
 }
 
 func ExampleWithTemperature() {
+	ctx := context.Background()
 	prompt := promptbuilder.MustNewPrompt("Summarize: {{input}}")
 
 	client := openai.NewClient(
@@ -94,7 +100,7 @@ func ExampleWithTemperature() {
 		openaiexecutor.WithTemperature[myRequest, myResponse](0.5),
 	)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("executor created: %v\n", exec != nil)

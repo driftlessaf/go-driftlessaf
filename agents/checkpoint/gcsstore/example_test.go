@@ -9,9 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	"cloud.google.com/go/storage"
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/checkpoint/gcsstore"
@@ -25,7 +25,7 @@ func ExampleNew() {
 
 	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	bucket := client.Bucket("my-checkpoint-bucket")
 
@@ -39,12 +39,12 @@ func ExampleNew() {
 		ProviderState: json.RawMessage(`{"model":"claude-fable-5"}`),
 	}
 	if err := store.Save(ctx, env.ReconcilerKey, env); err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	loaded, tok, ok, err := store.Load(ctx, env.ReconcilerKey)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	if !ok {
 		fmt.Println("no envelope parked")
@@ -55,6 +55,6 @@ func ExampleNew() {
 	// Delete with the Load token claims the envelope exactly once; a
 	// concurrent waker holding a stale token loses with ErrTokenMismatch.
 	if err := store.Delete(ctx, env.ReconcilerKey, tok); err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 }

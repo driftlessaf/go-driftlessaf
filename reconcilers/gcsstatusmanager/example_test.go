@@ -8,7 +8,8 @@ package gcsstatusmanager_test
 import (
 	"context"
 	"fmt"
-	"log"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/reconcilers/gcsstatusmanager"
 	"cloud.google.com/go/storage"
@@ -24,7 +25,7 @@ func ExampleNew() {
 
 	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	bucket := client.Bucket("my-status-bucket")
 
@@ -32,12 +33,12 @@ func ExampleNew() {
 
 	session, err := m.NewSession("resources/my-resource")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	status, err := session.ObservedState(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	if status == nil {
 		fmt.Println("no existing status")
@@ -49,7 +50,7 @@ func ExampleNewReadOnly() {
 
 	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	bucket := client.Bucket("my-status-bucket")
 
@@ -57,12 +58,12 @@ func ExampleNewReadOnly() {
 
 	session, err := ro.NewSession("resources/my-resource")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	status, err := session.ObservedState(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	if status != nil {
 		fmt.Println("phase:", status.Details.Phase)
@@ -74,7 +75,7 @@ func ExampleSession_SetActualState() {
 
 	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	bucket := client.Bucket("my-status-bucket")
 
@@ -82,7 +83,7 @@ func ExampleSession_SetActualState() {
 
 	session, err := m.NewSession("resources/my-resource")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	if err := session.SetActualState(ctx, &gcsstatusmanager.Status[reconcileDetails]{
@@ -92,7 +93,7 @@ func ExampleSession_SetActualState() {
 			Message: "reconciliation succeeded",
 		},
 	}); err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 }
 
@@ -101,7 +102,7 @@ func ExampleSession_ObservedState() {
 
 	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	bucket := client.Bucket("my-status-bucket")
 
@@ -109,12 +110,12 @@ func ExampleSession_ObservedState() {
 
 	session, err := m.NewSession("resources/my-resource")
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	status, err := session.ObservedState(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 	if status == nil {
 		fmt.Println("no status recorded yet")

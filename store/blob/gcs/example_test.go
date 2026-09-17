@@ -9,9 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"cloud.google.com/go/storage"
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/store/blob"
 	"chainguard.dev/driftlessaf/store/blob/gcs"
@@ -24,7 +24,7 @@ func ExampleNew() {
 
 	client, err := storage.NewClient(ctx)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	store := gcs.New(client.Bucket("my-notes-bucket"))
@@ -34,7 +34,7 @@ func ExampleNew() {
 	case errors.Is(err, blob.ErrPreconditionFailed):
 		fmt.Println("already stored")
 	case err != nil:
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	default:
 		fmt.Println("stored at generation", gen)
 	}

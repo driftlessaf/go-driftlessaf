@@ -6,8 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 package result_test
 
 import (
+	"context"
 	"fmt"
-	"log"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/result"
 )
@@ -67,6 +69,7 @@ No data available.`
 
 // ExampleExtract demonstrates type-safe extraction and unmarshaling.
 func ExampleExtract() {
+	ctx := context.Background()
 	// AI response with structured data
 	response := `I've analyzed your request. Here are the results:
 
@@ -102,7 +105,7 @@ This analysis is based on the provided context.`
 	// Extract and unmarshal
 	data, err := result.Extract[Response](response)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("Sentiment: %s (%.0f%% confidence)\n",
@@ -143,6 +146,7 @@ func ExampleExtract_errorHandling() {
 
 // ExampleExtract_fileOperations demonstrates extracting file modification instructions.
 func ExampleExtract_fileOperations() {
+	ctx := context.Background()
 	// AI response with file modifications
 	response := `I'll fix the issue in your code:
 
@@ -177,7 +181,7 @@ These changes should resolve the compilation error.`
 
 	ops, err := result.Extract[FileOperation](response)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("Summary: %s\n", ops.Summary)
@@ -193,6 +197,7 @@ These changes should resolve the compilation error.`
 
 // ExampleExtract_arrayResponse demonstrates extracting array responses.
 func ExampleExtract_arrayResponse() {
+	ctx := context.Background()
 	// AI response with array of items
 	response := `Here are the search results:
 
@@ -213,7 +218,7 @@ func ExampleExtract_arrayResponse() {
 
 	results, err := result.Extract[[]SearchResult](response)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	for _, r := range results {
@@ -252,6 +257,7 @@ Second dataset:
 
 // ExampleExtract_complexStructure demonstrates extracting deeply nested structures.
 func ExampleExtract_complexStructure() {
+	ctx := context.Background()
 	// AI response with complex nested structure
 	response := `Analysis complete:
 
@@ -304,7 +310,7 @@ func ExampleExtract_complexStructure() {
 
 	analysis, err := result.Extract[ProjectAnalysis](response)
 	if err != nil {
-		log.Fatal(err)
+		clog.FatalContextf(ctx, "%v", err)
 	}
 
 	fmt.Printf("Project: %s (%s)\n", analysis.Project.Name, analysis.Project.Language)

@@ -8,11 +8,11 @@ package awsauth
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/sethvargo/go-envconfig"
 )
 
 const (
@@ -58,10 +58,18 @@ type environment struct {
 
 // ConfigFromEnv reads and validates an AWS SSO or web-identity configuration.
 // Static AWS credentials and Bedrock API keys are rejected.
-func ConfigFromEnv(ctx context.Context) (Config, error) {
-	var env environment
-	if err := envconfig.Process(ctx, &env); err != nil {
-		return Config{}, fmt.Errorf("reading AWS auth environment: %w", err)
+func ConfigFromEnv(_ context.Context) (Config, error) {
+	env := environment{
+		Region:               os.Getenv(EnvRegion),
+		Profile:              os.Getenv(EnvProfile),
+		RoleARN:              os.Getenv(EnvRoleARN),
+		WebIdentityTokenFile: os.Getenv(EnvWebIdentityTokenFile),
+		AccessKeyID:          os.Getenv(envAccessKeyID),
+		SecretAccessKey:      os.Getenv(envSecretAccessKey),
+		SessionToken:         os.Getenv(envSessionToken),
+		SecurityToken:        os.Getenv(envSecurityToken),
+		BearerToken:          os.Getenv(envBearerToken),
+		AnthropicAPIKey:      os.Getenv(envAnthropicAPIKey),
 	}
 	if env.Region == "" {
 		return Config{}, fmt.Errorf("AWS authentication requires %s", EnvRegion)

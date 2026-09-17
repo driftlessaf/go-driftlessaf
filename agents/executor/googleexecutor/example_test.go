@@ -9,7 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+
+	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -48,7 +49,7 @@ func Example() {
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		clog.FatalContextf(ctx, "Failed to create client: %v", err)
 	}
 
 	// Create prompt template
@@ -62,7 +63,7 @@ Solve this and respond in JSON format:
   "reasoning": "brief explanation"
 }`)
 	if err != nil {
-		log.Fatalf("Failed to create prompt: %v", err)
+		clog.FatalContextf(ctx, "Failed to create prompt: %v", err)
 	}
 
 	// Create executor with default settings
@@ -71,14 +72,14 @@ Solve this and respond in JSON format:
 		prompt,
 	)
 	if err != nil {
-		log.Fatalf("Failed to create executor: %v", err)
+		clog.FatalContextf(ctx, "Failed to create executor: %v", err)
 	}
 
 	// Execute a request
 	request := &MathRequest{Problem: "What is 15 + 27?"}
 	response, err := executor.Execute(ctx, request, nil)
 	if err != nil {
-		log.Fatalf("Execute failed: %v", err)
+		clog.FatalContextf(ctx, "Execute failed: %v", err)
 	}
 
 	fmt.Printf("Answer: %s\n", response.Answer)
@@ -94,12 +95,12 @@ func Example_withOptions() {
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		clog.FatalContextf(ctx, "Failed to create client: %v", err)
 	}
 
 	prompt, err := promptbuilder.NewPrompt(`Solve: {{problem}}`)
 	if err != nil {
-		log.Fatalf("Failed to create prompt: %v", err)
+		clog.FatalContextf(ctx, "Failed to create prompt: %v", err)
 	}
 
 	// Create executor with custom options
@@ -112,13 +113,13 @@ func Example_withOptions() {
 		googleexecutor.WithResponseMIMEType[*MathRequest, *MathResponse]("application/json"),
 	)
 	if err != nil {
-		log.Fatalf("Failed to create executor: %v", err)
+		clog.FatalContextf(ctx, "Failed to create executor: %v", err)
 	}
 
 	request := &MathRequest{Problem: "What is 42 * 13?"}
 	response, err := executor.Execute(ctx, request, nil)
 	if err != nil {
-		log.Fatalf("Execute failed: %v", err)
+		clog.FatalContextf(ctx, "Execute failed: %v", err)
 	}
 
 	fmt.Printf("Answer: %s\n", response.Answer)
@@ -134,12 +135,12 @@ func Example_withThinking() {
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		clog.FatalContextf(ctx, "Failed to create client: %v", err)
 	}
 
 	prompt, err := promptbuilder.NewPrompt(`Solve this complex problem: {{problem}}`)
 	if err != nil {
-		log.Fatalf("Failed to create prompt: %v", err)
+		clog.FatalContextf(ctx, "Failed to create prompt: %v", err)
 	}
 
 	// Enable thinking mode with a 2048 token budget
@@ -152,13 +153,13 @@ func Example_withThinking() {
 		googleexecutor.WithResponseMIMEType[*MathRequest, *MathResponse]("application/json"),
 	)
 	if err != nil {
-		log.Fatalf("Failed to create executor: %v", err)
+		clog.FatalContextf(ctx, "Failed to create executor: %v", err)
 	}
 
 	request := &MathRequest{Problem: "What is the square root of 144?"}
 	response, err := executor.Execute(ctx, request, nil)
 	if err != nil {
-		log.Fatalf("Execute failed: %v", err)
+		clog.FatalContextf(ctx, "Execute failed: %v", err)
 	}
 
 	fmt.Printf("Answer: %s\n", response.Answer)
@@ -174,7 +175,7 @@ func Example_withSystemInstructions() {
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		clog.FatalContextf(ctx, "Failed to create client: %v", err)
 	}
 
 	// Create system instructions
@@ -182,12 +183,12 @@ func Example_withSystemInstructions() {
 Always show your work step by step.
 Provide clear, concise explanations.`)
 	if err != nil {
-		log.Fatalf("Failed to create system prompt: %v", err)
+		clog.FatalContextf(ctx, "Failed to create system prompt: %v", err)
 	}
 
 	prompt, err := promptbuilder.NewPrompt(`Problem: {{problem}}`)
 	if err != nil {
-		log.Fatalf("Failed to create prompt: %v", err)
+		clog.FatalContextf(ctx, "Failed to create prompt: %v", err)
 	}
 
 	// Create executor with system instructions
@@ -198,13 +199,13 @@ Provide clear, concise explanations.`)
 		googleexecutor.WithResponseMIMEType[*MathRequest, *MathResponse]("application/json"),
 	)
 	if err != nil {
-		log.Fatalf("Failed to create executor: %v", err)
+		clog.FatalContextf(ctx, "Failed to create executor: %v", err)
 	}
 
 	request := &MathRequest{Problem: "What is 25% of 80?"}
 	response, err := executor.Execute(ctx, request, nil)
 	if err != nil {
-		log.Fatalf("Execute failed: %v", err)
+		clog.FatalContextf(ctx, "Execute failed: %v", err)
 	}
 
 	fmt.Printf("Answer: %s\n", response.Answer)
