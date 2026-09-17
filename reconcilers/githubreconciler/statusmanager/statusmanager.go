@@ -48,6 +48,7 @@ type StatusManager[T any] struct {
 	readOnly         bool
 	detailsURLFunc   DetailsURLFunc
 	publisherAppID   int64
+	skipUnchanged    bool
 	templateExecutor *internaltemplate.Template[Status[T]]
 }
 
@@ -64,6 +65,7 @@ type Option func(*config)
 type config struct {
 	detailsURL     DetailsURLFunc
 	publisherAppID int64
+	skipUnchanged  bool
 }
 
 // WithDetailsURL overrides how the check run "Details" link is built. By default
@@ -89,6 +91,35 @@ func WithoutDetailsURL() Option {
 // aren't distinguishable this way; that needs a distinct check name instead.
 func WithPublisherAppID(appID int64) Option {
 	return func(c *config) { c.publisherAppID = appID }
+}
+
+// WithSkipUnchangedUpdates stops SetActualState from writing a check run that
+// would be left exactly as it already is. The session compares the update it
+// is about to send against what ObservedState read back in the same session —
+// name, status, conclusion, details URL, output title and summary — and when
+// every one of them matches, it returns without calling GitHub.
+//
+// This exists because a reconciler that polls a long-running job re-derives
+// the same state on every wake-up: the run has not changed phase, so the title
+// and the embedded status are byte-identical to the ones already on the check
+// run, and the update spends a write from the App installation's hourly budget
+// to store what is already stored. A poll every five minutes over a run's
+// lifetime is most of a reconciler's check-run traffic.
+//
+// It is off by default, and deliberately conservative when on:
+//
+//   - Only the UPDATE path is ever skipped. With no check run observed in this
+//     session there is nothing to compare against, so the create proceeds.
+//   - An update carrying annotations is never skipped. GitHub appends
+//     annotations rather than replacing them, and a check run's listing does
+//     not carry their content — only a count — so equal counts do not mean
+//     equal annotations. Reconcilers that publish annotations keep today's
+//     behaviour exactly.
+//
+// A skipped write leaves GitHub's state untouched by construction, so the
+// session's view of it stays accurate for any later write in the same session.
+func WithSkipUnchangedUpdates() Option {
+	return func(c *config) { c.skipUnchanged = true }
 }
 
 // NewStatusManager creates a new status manager with the given identity
@@ -134,6 +165,7 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 		readOnly:         readOnly,
 		detailsURLFunc:   cfg.detailsURL,
 		publisherAppID:   cfg.publisherAppID,
+		skipUnchanged:    cfg.skipUnchanged,
 		templateExecutor: templateExecutor,
 	}, nil
 }
@@ -147,7 +179,39 @@ type Session[T any] struct {
 	readOnly bool
 
 	mu         sync.Mutex
-	checkRunID *int64 // Set when we find an existing check run
+	checkRunID *int64        // Set when we find an existing check run
+	live       *checkRunFace // What the check run currently shows; see WithSkipUnchangedUpdates
+}
+
+// checkRunFace is the part of a check run an update sets: everything
+// SetActualState puts in the request, and nothing else. Two equal values mean
+// an update would leave GitHub exactly as it found it.
+//
+// Comparable on purpose — every field is a string, so equality is `==` and
+// cannot silently miss a field the way a hand-written comparison drifts into
+// doing when a new field is added to the request.
+type checkRunFace struct {
+	name       string
+	status     string
+	conclusion string
+	detailsURL string
+	title      string
+	summary    string
+}
+
+// getLive returns what the check run is known to show, or nil when this
+// session has neither read nor written it.
+func (s *Session[T]) getLive() *checkRunFace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.live
+}
+
+// setLive records what the check run shows, after a read or a write.
+func (s *Session[T]) setLive(face checkRunFace) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.live = &face
 }
 
 // NewSession creates a new reconciliation session for a GitHub resource and SHA.
@@ -258,6 +322,18 @@ func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 	// Record the check run ID for potential updates
 	s.setCheckRunID(run.GetID())
 
+	// Record what the run currently shows, so a later SetActualState can tell
+	// whether it would change anything (see WithSkipUnchangedUpdates). This is
+	// free: the listing above already carried every one of these fields.
+	s.setLive(checkRunFace{
+		name:       run.GetName(),
+		status:     run.GetStatus(),
+		conclusion: run.GetConclusion(),
+		detailsURL: run.GetDetailsURL(),
+		title:      run.GetOutput().GetTitle(),
+		summary:    run.GetOutput().GetSummary(),
+	})
+
 	// Extract status from output
 	return s.manager.extractStatusFromOutput(run.Output)
 }
@@ -308,8 +384,9 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 
 	// Build the details URL for logs. An empty URL (e.g. an externally-facing
 	// bot that opted out) is omitted rather than sent as a blank link.
+	detailsURL := s.buildDetailsURL()
 	var detailsURLPtr *string
-	if detailsURL := s.buildDetailsURL(); detailsURL != "" {
+	if detailsURL != "" {
 		detailsURLPtr = &detailsURL
 	}
 
@@ -334,8 +411,33 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		}
 	}
 
+	// Everything this request would set. Compared against what the check run
+	// already shows to decide whether the request is worth making at all.
+	desired := checkRunFace{
+		name:       name,
+		status:     status.Status,
+		conclusion: status.Conclusion,
+		detailsURL: detailsURL,
+		title:      title,
+		summary:    output,
+	}
+
 	// Check if we have a check run ID from ObservedState
 	if checkRunID := s.getCheckRunID(); checkRunID != nil {
+		// A write that would change nothing is not worth a call against the
+		// App installation's hourly budget. Opt-in, and never when the update
+		// carries annotations — GitHub appends those and a listing reports
+		// only their count, so equal counts would not mean equal annotations.
+		// See WithSkipUnchangedUpdates.
+		if s.manager.skipUnchanged && len(checkOutput.Annotations) == 0 {
+			if live := s.getLive(); live != nil && *live == desired {
+				mCheckRunWrites.WithLabelValues("unchanged").Inc()
+				clog.DebugContext(ctx, "check run already shows this state; skipping the update",
+					"check_run_id", *checkRunID, "sha", s.sha)
+				return nil
+			}
+		}
+
 		// Update existing check run
 		_, _, err = s.client.Checks.UpdateCheckRun(ctx, s.resource.Owner, s.resource.Repo, *checkRunID, github.UpdateCheckRunOptions{
 			Name:       name,
@@ -348,6 +450,11 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		if err != nil {
 			return fmt.Errorf("updating check run: %w", err)
 		}
+
+		// The check run now shows what was just written, so a later write in
+		// this session compares against the truth rather than a stale read.
+		s.setLive(desired)
+		mCheckRunWrites.WithLabelValues("updated").Inc()
 
 		return nil
 	}
@@ -368,6 +475,8 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 
 	// Store the ID for future updates
 	s.setCheckRunID(checkRun.GetID())
+	s.setLive(desired)
+	mCheckRunWrites.WithLabelValues("created").Inc()
 
 	return nil
 }
