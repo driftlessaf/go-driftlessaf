@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -103,6 +104,13 @@ type Session[T any] struct {
 	// still owes a response. HasUnresolvedReviews consults it so a thread the bot
 	// has already answered does not renew the commit budget.
 	reviewThreadsAwaitingReply map[string]struct{}
+
+	// threads queues the review-thread actions the agent requests during the
+	// run; Upsert applies them once the run's outcome is known (see
+	// flushThreadActions), so a thread is never marked fixed ahead of, or
+	// without, the change that fixes it. NewSession sets it; FindingCallbacks
+	// creates it for a session built without one.
+	threads *threadActions
 }
 
 // skipLabel returns the skip label for this session's identity.
@@ -873,7 +881,17 @@ func (s *Session[T]) findingByID(kind callbacks.FindingKind, identifier string) 
 // Reply is set only when the manager enabled it (WithFindingReplies). Left nil,
 // the reply tool is not registered, so a consumer whose prompt never mentions
 // replies does not carry the capability.
+//
+// Resolve and Reply do not touch GitHub when called. They queue the action on
+// the session, and Upsert applies the queue once the run's commit has been
+// pushed (a run that pushes nothing posts only its refutations), so a thread is
+// never marked fixed ahead of, or without, the change that fixes it.
 func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
+	// Built on the reconciler goroutine before any tool runs, so the lazy
+	// creation is not racing the tool calls that use the queue.
+	if s.threads == nil {
+		s.threads = &threadActions{}
+	}
 	cb := callbacks.FindingCallbacks{
 		Findings: s.findings,
 		GetDetails: func(_ context.Context, kind callbacks.FindingKind, identifier string) (string, error) {
@@ -900,30 +918,172 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			}
 			return rerunCICheck(ctx, s.client, s.owner, s.repo, f)
 		},
-		Resolve: func(ctx context.Context, identifier string) error {
+		Resolve: func(_ context.Context, identifier string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
 				return errors.New("cannot resolve review body findings, only review thread findings can be resolved")
 			}
 			if _, err := s.findingByID(callbacks.FindingKindReview, identifier); err != nil {
 				return err
 			}
-			return resolveReviewThread(ctx, s.gqlClient, identifier)
+			s.threads.addResolve(identifier)
+			return nil
 		},
 	}
 
 	if s.manager != nil && s.manager.findingReplies {
-		cb.Reply = func(ctx context.Context, identifier, body string) error {
+		cb.Reply = func(_ context.Context, identifier, body string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
 				return errors.New("cannot reply to review body findings, only review thread findings can be replied to")
 			}
 			if _, err := s.findingByID(callbacks.FindingKindReview, identifier); err != nil {
 				return err
 			}
-			return replyToReviewThread(ctx, s.gqlClient, identifier, sanitizeReplyBody(body))
+			body = sanitizeReplyBody(body)
+			if body == "" {
+				return errors.New("empty reply body")
+			}
+			s.threads.addReply(identifier, body)
+			return nil
 		}
 	}
 
 	return cb
+}
+
+// threadReply is a reply the agent asked to post in a review thread, held until
+// the run's outcome is known.
+type threadReply struct {
+	threadID string
+	body     string
+}
+
+// threadActions queues the review-thread replies and resolutions an agent
+// requests during a run until Upsert knows the run's outcome. It carries its
+// own lock, so a Session stays copyable and tool calls may run concurrently.
+type threadActions struct {
+	mu       sync.Mutex
+	replies  []threadReply
+	resolves []string
+}
+
+// addReply queues a review-thread reply.
+func (q *threadActions) addReply(threadID, body string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.replies = append(q.replies, threadReply{threadID: threadID, body: body})
+}
+
+// addResolve queues a review-thread resolution; a thread is queued once however
+// many times the agent asks.
+func (q *threadActions) addResolve(threadID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !slices.Contains(q.resolves, threadID) {
+		q.resolves = append(q.resolves, threadID)
+	}
+}
+
+// mark records how many actions are queued, so a later truncate can discard
+// everything queued after it.
+func (q *threadActions) mark() (replies, resolves int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.replies), len(q.resolves)
+}
+
+// truncate discards the actions queued after the given mark.
+func (q *threadActions) truncate(replies, resolves int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.replies = q.replies[:min(replies, len(q.replies))]
+	q.resolves = q.resolves[:min(resolves, len(q.resolves))]
+}
+
+// take removes and returns the queued actions. A nil queue holds nothing.
+func (q *threadActions) take() ([]threadReply, []string) {
+	if q == nil {
+		return nil, nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	replies, resolves := q.replies, q.resolves
+	q.replies, q.resolves = nil, nil
+	return replies, resolves
+}
+
+// BeginThreadActionScope opens a scope over the review-thread actions the agent
+// queues from now on and returns the function that discards them. A reconciler
+// that reverts an agent pass's edits calls discard so the pass's replies and
+// resolutions are reverted with them; a pass whose edits stay never calls it,
+// and Upsert applies the queue as usual. Scopes nest: discarding an inner
+// scope leaves what was queued before it began.
+func (s *Session[T]) BeginThreadActionScope() (discard func()) {
+	if s.threads == nil {
+		s.threads = &threadActions{}
+	}
+	q := s.threads
+	replies, resolves := q.mark()
+	return func() { q.truncate(replies, resolves) }
+}
+
+// flushThreadActions applies the review-thread replies and resolutions the
+// agent requested during the run, now that the run's outcome is known.
+// committed reports whether the run's commit reached the branch. When it did,
+// every reply is posted and every requested thread resolved, replies first so
+// a resolved thread carries its disposition. When nothing was committed, only
+// replies on threads the agent did not ask to resolve are posted: those are
+// refutations that stand without a change, whereas a "fixed" disposition or a
+// resolution with no commit behind it would tell the reviewer the thread is
+// handled when it is not, so those are dropped and logged. Failures are logged
+// rather than returned: the commit is already on the branch, and a thread left
+// unresolved resurfaces as a finding on the next pass.
+func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
+	replies, resolves := s.threads.take()
+	if len(replies) == 0 && len(resolves) == 0 {
+		return
+	}
+	if !committed {
+		kept := make([]threadReply, 0, len(replies))
+		for _, r := range replies {
+			if !slices.Contains(resolves, r.threadID) {
+				kept = append(kept, r)
+			}
+		}
+		if dropped := len(replies) - len(kept); dropped > 0 || len(resolves) > 0 {
+			clog.WarnContext(ctx, "dropping review-thread actions the agent requested: the run produced no commit", "resolutions", len(resolves), "replies", dropped)
+		}
+		replies, resolves = kept, nil
+	}
+	// A thread is resolved only once its disposition is on it: a resolution
+	// without the reply would hide the finding from later passes with nothing
+	// on the thread to say why, so a failed reply leaves its thread open.
+	unreplied := make(map[string]struct{})
+	for _, r := range replies {
+		if err := replyToReviewThread(ctx, s.gqlClient, r.threadID, r.body); err != nil {
+			clog.WarnContext(ctx, "failed to post a review-thread reply", "thread", r.threadID, "error", err.Error())
+			unreplied[r.threadID] = struct{}{}
+		}
+	}
+	for _, id := range resolves {
+		if _, failed := unreplied[id]; failed {
+			clog.WarnContext(ctx, "leaving a review thread open: its disposition reply did not post", "thread", id)
+			continue
+		}
+		if err := resolveReviewThread(ctx, s.gqlClient, id); err != nil {
+			clog.WarnContext(ctx, "failed to resolve a review thread", "thread", id, "error", err.Error())
+		}
+	}
+}
+
+// dropThreadActions discards the queued thread actions of a run that failed
+// before its change was pushed: the run is retried from scratch, and the retry
+// records its own.
+func (s *Session[T]) dropThreadActions(ctx context.Context) {
+	replies, resolves := s.threads.take()
+	if len(replies) == 0 && len(resolves) == 0 {
+		return
+	}
+	clog.WarnContext(ctx, "dropping review-thread actions the agent requested: the run failed before its change was pushed", "resolutions", len(resolves), "replies", len(replies))
 }
 
 // resolveReviewThread calls the GitHub resolveReviewThread GraphQL mutation.
@@ -1013,11 +1173,20 @@ func (s *Session[T]) Upsert(
 	// surfaced when MakeAndPushChanges runs an updateFn that produces no diff;
 	// translate it into the standard ErrNoChanges so callers only have to
 	// check for one sentinel.
-	if err := makeChanges(ctx, s.branchName); errors.Is(err, ErrNoChanges) || errors.Is(err, clonemanager.ErrNothingToCommit) {
+	// Review-thread replies and resolutions the agent requested while making
+	// changes are applied only now that the outcome is known: in full after
+	// the push, only the refutations on a no-change run, and not at all on a
+	// failed run (see flushThreadActions).
+	err = makeChanges(ctx, s.branchName)
+	switch {
+	case errors.Is(err, ErrNoChanges) || errors.Is(err, clonemanager.ErrNothingToCommit):
+		s.flushThreadActions(ctx, false)
 		return "", fmt.Errorf("upsert %s: %w", s.branchName, ErrNoChanges)
-	} else if err != nil {
+	case err != nil:
+		s.dropThreadActions(ctx)
 		return "", fmt.Errorf("making changes: %w", err)
 	}
+	s.flushThreadActions(ctx, true)
 
 	// Catch agent-revert: makeChanges pushed commits, but they net-zero against
 	// base. When closeOnEmptyDiff is false, fall through to update so the body

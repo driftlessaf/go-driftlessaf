@@ -218,7 +218,7 @@ func TestRunAgentPassesFanOut(t *testing.T) {
 	}}
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
 
-	outcome, err := r.runAgentPasses(t.Context(), nil, fanCB{}, req, orig)
+	outcome, err := r.runAgentPasses(t.Context(), nil, fanCB{}, req, orig, nil)
 	if err != nil {
 		t.Fatalf("runAgentPasses: %v", err)
 	}
@@ -349,10 +349,14 @@ func TestRunAgentPassesRevertsExhaustedGroup(t *testing.T) {
 		errs: map[int]error{1: fmt.Errorf("%w (200)", executor.ErrMaxTurns)},
 	}
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
+	scope := &fakeScope{}
 
-	outcome, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all)
+	outcome, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all, scope.begin)
 	if err != nil {
 		t.Fatalf("runAgentPasses: %v", err)
+	}
+	if scope.begun != 3 || scope.discarded != 1 {
+		t.Errorf("scope begun=%d discarded=%d, want one scope per pass (3) and one discard for the exhausted pass", scope.begun, scope.discarded)
 	}
 	if agent.calls != 3 {
 		t.Errorf("agent ran %d times, want 3: the groups after an exhausted one still run", agent.calls)
@@ -394,7 +398,7 @@ func TestRunAgentPassesAllGroupsExhaustedIsAnExplainedNoChange(t *testing.T) {
 	}
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
 
-	outcome, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all)
+	outcome, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all, nil)
 	if err != nil {
 		t.Fatalf("runAgentPasses: %v", err)
 	}
@@ -425,7 +429,7 @@ func TestRunAgentPassesMaxTurnsWithoutCheckoutStillFails(t *testing.T) {
 	agent := &fanAgent{perCall: []*fanResult{{msg: "fix: never"}}, errs: map[int]error{0: executor.ErrMaxTurns}}
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
 
-	_, err := r.runAgentPasses(t.Context(), nil, fanCB{}, req, all)
+	_, err := r.runAgentPasses(t.Context(), nil, fanCB{}, req, all, nil)
 	if !errors.Is(err, executor.ErrMaxTurns) {
 		t.Errorf("error: got = %v, want the turn-limit error when there is no checkout to revert", err)
 	}
@@ -440,7 +444,7 @@ func TestRunAgentPassesOtherErrorsStillFail(t *testing.T) {
 	agent := &fanAgent{root: root, perCall: []*fanResult{{msg: "fix: never"}}, errs: map[int]error{0: boom}}
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
 
-	_, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all)
+	_, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all, nil)
 	if !errors.Is(err, boom) {
 		t.Errorf("error: got = %v, want the agent error propagated unchanged", err)
 	}
@@ -461,7 +465,8 @@ func TestVerifyPassRevertsExhaustedReRun(t *testing.T) {
 	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
 	initial := &fanResult{msg: "fix: pass"}
 
-	result, summaries, remaining, err := r.verifyPass(t.Context(), wt, fanCB{}, req, initial, nil)
+	scope := &fakeScope{}
+	result, summaries, remaining, err := r.verifyPass(t.Context(), wt, fanCB{}, req, initial, nil, scope.begin)
 	if err != nil {
 		t.Fatalf("verifyPass: %v", err)
 	}
@@ -478,4 +483,18 @@ func TestVerifyPassRevertsExhaustedReRun(t *testing.T) {
 	if !slices.Contains(summaries, reRunRevertedSummary) {
 		t.Errorf("summaries %q should record the reverted re-run", summaries)
 	}
+	if scope.begun != 1 || scope.discarded != 1 {
+		t.Errorf("scope begun=%d discarded=%d, want 1 and 1: the reverted re-run's queued actions go with its edits", scope.begun, scope.discarded)
+	}
+}
+
+// fakeScope counts the pass scopes the reconciler opened and discarded.
+type fakeScope struct {
+	begun     int
+	discarded int
+}
+
+func (f *fakeScope) begin() func() {
+	f.begun++
+	return func() { f.discarded++ }
 }

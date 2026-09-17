@@ -16,10 +16,10 @@ import (
 
 // TestFindingCallbacksResolveReplyValidateIdentifier checks that the Resolve
 // and Reply callbacks act only on an identifier this session discovered. A
-// known review thread identifier reaches the GraphQL mutation; an identifier
-// the session never surfaced, or a review-body identifier, is refused before
-// any request is sent, so a caller cannot steer a mutation at an arbitrary
-// review thread.
+// known review thread identifier is queued and reaches the GraphQL mutation
+// when the session flushes after a push; an identifier the session never
+// surfaced, or a review-body identifier, is refused before anything is queued,
+// so a caller cannot steer a mutation at an arbitrary review thread.
 func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 	const knownThread = "PRRT_known"
 	reviewBodyID := reviewBodyIdentifierPrefix + "5"
@@ -31,10 +31,10 @@ func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 		wantErr    string
 		wantSent   bool
 	}{
-		{name: "resolve known thread invokes mutation", op: "resolve", identifier: knownThread, wantSent: true},
+		{name: "resolve known thread is queued and sent on flush", op: "resolve", identifier: knownThread, wantSent: true},
 		{name: "resolve unknown thread rejected", op: "resolve", identifier: "PRRT_unknown", wantErr: "finding not found"},
 		{name: "resolve review body rejected", op: "resolve", identifier: reviewBodyID, wantErr: "cannot resolve review body findings"},
-		{name: "reply known thread invokes mutation", op: "reply", identifier: knownThread, wantSent: true},
+		{name: "reply known thread is queued and sent on flush", op: "reply", identifier: knownThread, wantSent: true},
 		{name: "reply unknown thread rejected", op: "reply", identifier: "PRRT_unknown", wantErr: "finding not found"},
 		{name: "reply review body rejected", op: "reply", identifier: reviewBodyID, wantErr: "cannot reply to review body findings"},
 	}
@@ -80,8 +80,12 @@ func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", tc.op, err)
 			}
+			if sent {
+				t.Errorf("GraphQL request sent during %s of %q; thread actions must wait for the push", tc.op, tc.identifier)
+			}
+			s.flushThreadActions(t.Context(), true)
 			if tc.wantSent && !sent {
-				t.Errorf("no GraphQL request sent for %s of %q", tc.op, tc.identifier)
+				t.Errorf("no GraphQL request sent for %s of %q after the flush", tc.op, tc.identifier)
 			}
 		})
 	}

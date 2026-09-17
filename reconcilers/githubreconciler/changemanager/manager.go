@@ -723,6 +723,7 @@ func (cm *CM[T]) NewSession(
 		meta:          meta,
 
 		reviewThreadsAwaitingReply: awaitingReviewThreads,
+		threads:                    &threadActions{},
 	}, nil
 }
 

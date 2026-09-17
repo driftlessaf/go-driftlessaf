@@ -330,7 +330,7 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			// checkout, so all edits land in this single commit. runAgentPasses
 			// mutates neither the session nor prData, so a run that changes
 			// nothing (below) leaves the reasoning log untouched.
-			outcome, err := r.runAgentPasses(ctx, wt, cbs, request, findings)
+			outcome, err := r.runAgentPasses(ctx, wt, cbs, request, findings, session.BeginThreadActionScope)
 			if err != nil {
 				return "", err
 			}

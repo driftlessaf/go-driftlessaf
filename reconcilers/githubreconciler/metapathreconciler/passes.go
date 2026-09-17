@@ -48,7 +48,7 @@ type passesOutcome struct {
 // passes that did complete are still committed. It mutates neither the session
 // nor prData beyond restoring the request's full finding set on return; the
 // caller applies the entries once it confirms a commit.
-func (r *PRReconciler[Req, Resp, CB]) runAgentPasses(ctx context.Context, wt *gogit.Worktree, cbs CB, request Req, findings []callbacks.Finding) (passesOutcome, error) {
+func (r *PRReconciler[Req, Resp, CB]) runAgentPasses(ctx context.Context, wt *gogit.Worktree, cbs CB, request Req, findings []callbacks.Finding, scope passScope) (passesOutcome, error) {
 	groups := groupsForRequest(any(request), findings)
 	fo, hasFanOut := any(request).(fanOut)
 	withinBudget := budgetChecker(ctx, any(request))
@@ -73,6 +73,7 @@ func (r *PRReconciler[Req, Resp, CB]) runAgentPasses(ctx context.Context, wt *go
 		if err != nil {
 			return passesOutcome{}, fmt.Errorf("snapshot checkout before agent pass: %w", err)
 		}
+		discard := scope.begin()
 		result, summary, err := r.executeCaptured(ctx, request, cbs)
 		if err != nil {
 			if !errors.Is(err, executor.ErrMaxTurns) || snap == nil {
@@ -84,11 +85,12 @@ func (r *PRReconciler[Req, Resp, CB]) runAgentPasses(ctx context.Context, wt *go
 			if rerr := snap.restore(wt); rerr != nil {
 				return passesOutcome{}, fmt.Errorf("execute agent: %w; restoring the checkout after the failed pass: %w", err, rerr)
 			}
+			discard()
 			clog.WarnContext(ctx, "agent pass exhausted its turn budget; its edits were reverted", "group", groupLabel(g), "findings", len(g.Findings))
 			exhausted = append(exhausted, g)
 			continue
 		}
-		result, verifySummaries, remaining, err := r.verifyPass(ctx, wt, cbs, request, result, withinBudget)
+		result, verifySummaries, remaining, err := r.verifyPass(ctx, wt, cbs, request, result, withinBudget, scope)
 		if err != nil {
 			return passesOutcome{}, err
 		}
@@ -151,7 +153,7 @@ func (r *PRReconciler[Req, Resp, CB]) executeCaptured(ctx context.Context, reque
 // its turn budget is the exception: its edits are reverted to the state before
 // it ran, the pass keeps its result, and the findings it was addressing are
 // reported as remaining.
-func (r *PRReconciler[Req, Resp, CB]) verifyPass(ctx context.Context, wt *gogit.Worktree, cbs CB, request Req, initial Resp, withinBudget func() bool) (Resp, []string, []callbacks.Finding, error) {
+func (r *PRReconciler[Req, Resp, CB]) verifyPass(ctx context.Context, wt *gogit.Worktree, cbs CB, request Req, initial Resp, withinBudget func() bool, scope passScope) (Resp, []string, []callbacks.Finding, error) {
 	lv, ok := any(request).(localVerifier)
 	if !ok || lv.MaxLocalRounds() <= 0 {
 		return initial, nil, nil, nil
@@ -162,6 +164,7 @@ func (r *PRReconciler[Req, Resp, CB]) verifyPass(ctx context.Context, wt *gogit.
 			var zero Resp
 			return zero, "", fmt.Errorf("snapshot checkout before verification re-run: %w", err)
 		}
+		discard := scope.begin()
 		res, summary, err := r.executeCaptured(ctx, request, cbs)
 		if err == nil || !errors.Is(err, executor.ErrMaxTurns) || snap == nil {
 			return res, summary, err
@@ -169,6 +172,7 @@ func (r *PRReconciler[Req, Resp, CB]) verifyPass(ctx context.Context, wt *gogit.
 		if rerr := snap.restore(wt); rerr != nil {
 			return res, "", fmt.Errorf("%w; restoring the checkout after the failed re-run: %w", err, rerr)
 		}
+		discard()
 		return res, "", errReRunReverted
 	}
 	result, rounds, summaries, remaining, err := runVerification(
@@ -190,6 +194,25 @@ func (r *PRReconciler[Req, Resp, CB]) verifyPass(ctx context.Context, wt *gogit.
 		clog.InfoContext(ctx, "local verification findings remain after the cap", "rounds", rounds, "remaining", len(remaining))
 	}
 	return result, summaries, remaining, nil
+}
+
+// passScope opens a scope over the side effects an agent execution queues
+// outside the checkout — its review-thread replies and resolutions — and
+// returns the function that discards them. The reconciler begins a scope
+// before every execution and discards it when it reverts that execution's
+// edits, so a reverted pass leaves no queued action behind to be applied on
+// the strength of work that is no longer there. changemanager's
+// Session.BeginThreadActionScope is the production implementation; a nil
+// passScope is a no-op.
+type passScope func() (discard func())
+
+// begin opens the scope, or a no-op one when the reconciler runs without a
+// session.
+func (s passScope) begin() func() {
+	if s == nil {
+		return func() {}
+	}
+	return s()
 }
 
 // errReRunReverted marks a verification re-run that exhausted its turn budget

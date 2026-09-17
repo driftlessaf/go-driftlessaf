@@ -163,7 +163,7 @@ func resolveFindingTool[Resp any](resolve func(context.Context, string) error) T
 	return Tool[Resp]{
 		Def: Definition{
 			Name:        "resolve_finding",
-			Description: "Resolve a finding after addressing the feedback. Only works for review thread findings, not CI checks or review bodies.",
+			Description: "Resolve a finding after addressing the feedback. Only works for review thread findings, not CI checks or review bodies. The resolution is applied once your change has been pushed; a run that pushes no change leaves the thread open.",
 			Parameters: []Parameter{{
 				Name:        "identifier",
 				Type:        "string",
@@ -209,7 +209,7 @@ func replyFindingTool[Resp any](reply func(context.Context, string, string) erro
 		Def: Definition{
 			Name: "reply_to_finding",
 			Description: "Reply in a review thread finding's thread with a short disposition (one or two sentences): the fix you made before resolving it, or the refutation when you leave an automated finding open. " +
-				"Only works for review thread findings, not CI checks or review bodies.",
+				"Only works for review thread findings, not CI checks or review bodies. A reply describing a fix is posted once the change has been pushed; a refutation is posted even when nothing changes.",
 			Parameters: []Parameter{
 				{Name: "identifier", Type: "string", Description: "The identifier of the review thread finding to reply to (from the request's findings list)", Required: true},
 				{Name: "body", Type: "string", Description: "The reply text (one or two sentences)", Required: true},
