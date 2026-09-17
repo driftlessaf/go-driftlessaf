@@ -9,15 +9,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v88/github"
+	"github.com/shurcooL/githubv4"
 )
 
 // reconcilePullRequest handles PR events with a three-way branch:
@@ -72,22 +75,37 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 	}
 
 	// Case 2: Our PR → report neutral status + re-queue the path for processing.
+	// The branch-name prefix alone does not prove ownership: anyone with push
+	// access can open a pull request on a branch that borrows the "<identity>/"
+	// prefix, and treating it as ours would attach the managed status and the
+	// re-queue (and, downstream, the bot's label, fixer, and signed commits) to a
+	// branch the bot never created. Confirm ownership against GitHub before
+	// claiming it: the authenticated app must have authored the pull request and
+	// its head branch must live in this repository, not a fork. A pull request
+	// that only borrows the prefix falls through to Case 3.
 	branch := pr.GetHead().GetRef()
 	prefix := r.identity + "/"
 	if strings.HasPrefix(branch, prefix) {
-		if err := reportNeutral("Managed by " + r.identity); err != nil {
-			return fmt.Errorf("set managed status: %w", err)
+		owned, err := r.viewerOwnsPR(ctx, gh, res)
+		if err != nil {
+			return fmt.Errorf("determine pull request ownership: %w", err)
 		}
+		if owned {
+			if err := reportNeutral("Managed by " + r.identity); err != nil {
+				return fmt.Errorf("set managed status: %w", err)
+			}
 
-		path := githubreconciler.BranchSuffixToPath(strings.TrimPrefix(branch, prefix))
-		base := pr.GetBase().GetRef()
-		pathURL := fmt.Sprintf("https://github.com/%s/%s/blob/%s/%s", res.Owner, res.Repo, base, path)
+			path := githubreconciler.BranchSuffixToPath(strings.TrimPrefix(branch, prefix))
+			base := pr.GetBase().GetRef()
+			pathURL := fmt.Sprintf("https://github.com/%s/%s/blob/%s/%s", res.Owner, res.Repo, base, path)
 
-		log.With("path", path, "url", pathURL).Info("Re-queuing path from managed PR")
-		return workqueue.QueueKeys(workqueue.QueueKey{
-			Key:      pathURL,
-			Priority: 300, // Highest priority: completing existing PRs is more important than creating new ones.
-		})
+			log.With("path", path, "url", pathURL).Info("Re-queuing path from managed PR")
+			return workqueue.QueueKeys(workqueue.QueueKey{
+				Key:      pathURL,
+				Priority: 300, // Highest priority: completing existing PRs is more important than creating new ones.
+			})
+		}
+		log.With("branch", branch).Info("PR borrows the identity branch prefix but the app did not author it (or it is from a fork); treating as unrelated")
 	}
 
 	// Case 3: Other PR. In fix-only mode there is nothing to do for a PR that
@@ -207,6 +225,61 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 		Conclusion: "failure",
 		Details:    CheckDetails{Diagnostics: diagnostics, Identity: r.identity},
 	})
+}
+
+// ownsPR is the pure ownership decision for a pull request whose head branch
+// carries the reconciler's identity prefix. Ownership requires both that the
+// authenticated app authored the pull request (viewerDidAuthor, true only for a
+// pull request the app's own installation token opened) and that its head branch
+// is not cross-repository (a bot-created branch always lives in the base repo, so
+// a fork PR is never ours). Either condition failing means the branch merely
+// borrows the prefix.
+func ownsPR(viewerDidAuthor, isCrossRepository bool) bool {
+	return viewerDidAuthor && !isCrossRepository
+}
+
+// viewerOwnsPR reports whether the authenticated app owns this pull request: it
+// authored it and its head branch is not from a fork. The branch name is
+// attacker-controllable, so ownership is confirmed against GitHub. Both fields
+// are GraphQL-only, so this issues one extra query, reached only for a pull
+// request whose branch already matches the identity prefix (rare on a busy
+// repository), not for every event.
+func (r *core) viewerOwnsPR(ctx context.Context, gh *github.Client, res *githubreconciler.Resource) (bool, error) {
+	number, err := gqlPRNumber(res.Number)
+	if err != nil {
+		return false, err
+	}
+	var q struct {
+		Repository struct {
+			PullRequest *struct {
+				ViewerDidAuthor   bool
+				IsCrossRepository bool
+			} `graphql:"pullRequest(number: $number)"`
+		} `graphql:"repository(owner: $owner, name: $repo)"`
+	}
+	gql := graphqlclient.NewGraphQLClient(gh)
+	if err := gql.Query(ctx, "MetaPathReconcilerPROwnership", &q, map[string]any{
+		"owner":  githubv4.String(res.Owner),
+		"repo":   githubv4.String(res.Repo),
+		"number": number,
+	}); err != nil {
+		return false, fmt.Errorf("querying pull request ownership: %w", err)
+	}
+	prq := q.Repository.PullRequest
+	if prq == nil {
+		return false, nil
+	}
+	return ownsPR(prq.ViewerDidAuthor, prq.IsCrossRepository), nil
+}
+
+// gqlPRNumber converts a pull request number to the GraphQL Int scalar. GitHub
+// numbers fit int32; the bound check keeps the conversion from wrapping on a
+// corrupt resource.
+func gqlPRNumber(n int) (githubv4.Int, error) {
+	if n < 0 || n > math.MaxInt32 {
+		return 0, fmt.Errorf("pull request number %d outside int32", n)
+	}
+	return githubv4.Int(n), nil
 }
 
 // selectReviewFiles decides which files to analyze for a PR review and whether

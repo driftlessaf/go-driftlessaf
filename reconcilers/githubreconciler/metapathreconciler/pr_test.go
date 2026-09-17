@@ -78,3 +78,42 @@ func TestIsDiffTooLarge(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnsPR(t *testing.T) {
+	tests := []struct {
+		name              string
+		viewerDidAuthor   bool
+		isCrossRepository bool
+		want              bool
+	}{
+		{
+			name:            "app authored, same repo",
+			viewerDidAuthor: true,
+			want:            true,
+		},
+		{
+			name:              "app authored but from a fork",
+			viewerDidAuthor:   true,
+			isCrossRepository: true,
+			want:              false,
+		},
+		{
+			name:            "someone else authored on a same-repo branch borrowing the prefix",
+			viewerDidAuthor: false,
+			want:            false,
+		},
+		{
+			name:              "someone else authored from a fork",
+			viewerDidAuthor:   false,
+			isCrossRepository: true,
+			want:              false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ownsPR(tc.viewerDidAuthor, tc.isCrossRepository); got != tc.want {
+				t.Errorf("ownsPR(%v, %v): got = %v, want = %v", tc.viewerDidAuthor, tc.isCrossRepository, got, tc.want)
+			}
+		})
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/commitscope"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gitenv"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gogit"
@@ -84,6 +85,23 @@ func WithMaxFetches(n int) Option {
 	}
 }
 
+// WithCommitScopeGuard makes committed changes go through the commit-scope guard:
+// the commit set is the paths the edit-tool callbacks recorded plus modifications
+// to files already tracked at the base revision, minus the denylist, rather than
+// every change in the worktree. It targets agents that edit through
+// WorktreeCallbacks and run gates that litter the tree with build output, lock
+// files, and caches.
+//
+// The guard applies only to a run that used the managed callback layer; a run
+// that wrote to the worktree through some other path falls back to staging every
+// change, so this option is safe to set on a Manager shared by both kinds of
+// caller. Without it, staging is `git add -A`, the historical behavior.
+func WithCommitScopeGuard(denylist commitscope.Denylist) Option {
+	return func(m *Manager) {
+		m.commitGuard = &denylist
+	}
+}
+
 // Manager owns a pool of git clones that can be leased to callers for a single
 // reconciliation. Each lease is dedicated to a GitHub resource and ensures the
 // working tree is reset before being returned to the pool.
@@ -93,6 +111,10 @@ type Manager struct {
 	signer      git.Signer
 	maxFetches  int
 	backend     gitBackend
+	// commitGuard, when set, makes commitChanges stage the commit-scope guard's
+	// selected paths instead of every worktree change. Nil keeps the historical
+	// `git add -A` staging.
+	commitGuard *commitscope.Denylist
 
 	mu        sync.Mutex
 	available []*clone
@@ -493,7 +515,26 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 		return fmt.Errorf("getting worktree: %w", err)
 	}
 
-	commitMessage, err := updateFn(WithWorktree(ctx, worktree), worktree)
+	// Resolve the base tree before updateFn runs. The commit guard compares the
+	// worktree against it to decide which paths were tracked at the base; a run
+	// with write access to the worktree's .git could otherwise rewrite HEAD
+	// mid-run and make a planted artifact look tracked-at-base. Only the guard
+	// needs it, so it is resolved only when the guard is enabled.
+	var baseTree *object.Tree
+	if l.manager.commitGuard != nil {
+		baseTree, err = headTree(l.clone.repo)
+		if err != nil {
+			return fmt.Errorf("resolving base tree: %w", err)
+		}
+	}
+
+	// scope records the paths the edit-tool callbacks change during the run, so
+	// the commit guard can stage only those (plus tracked-file modifications) and
+	// leave gate artifacts uncommitted. It rides the context the callbacks
+	// receive; recording is a no-op when the guard is disabled.
+	scope := commitscope.NewScope()
+
+	commitMessage, err := updateFn(commitscope.WithScope(WithWorktree(ctx, worktree), scope), worktree)
 	if err != nil {
 		return fmt.Errorf("applying updates: %w", err)
 	}
@@ -502,7 +543,7 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 		return errors.New("commit message cannot be empty")
 	}
 
-	if err := l.manager.commitChanges(l.clone.repo, commitMessage); err != nil {
+	if err := l.manager.commitChanges(ctx, l.clone.repo, scope, baseTree, commitMessage); err != nil {
 		return fmt.Errorf("committing changes: %w", err)
 	}
 
@@ -555,7 +596,54 @@ func (l *Lease) createFreshBranch(branchName string) (plumbing.ReferenceName, er
 	return refName, nil
 }
 
-func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) error {
+// stageForCommit stages the changes the commit should include. When the
+// commit-scope guard is enabled and the run used the managed edit-tool callback
+// layer, it stages only the paths those tools recorded plus modifications to
+// tracked files, minus the denylist, leaving gate artifacts uncommitted;
+// otherwise it stages every change in the worktree.
+//
+// Staging runs once here, single-threaded, just before the commit. WorktreeCallbacks
+// deliberately does not stage per write: the executor may run a turn's tool
+// callbacks concurrently, and go-git's Worktree.Add rewrites .git/index
+// non-atomically (truncate in place, no lock), so concurrent Adds tear the index
+// and later reads fail with an "invalid checksum" error.
+//
+// baseTree is the tree of HEAD captured before the run; the guard compares the
+// worktree against it. It is nil on the fallback path, which does not use it.
+func (m *Manager) stageForCommit(ctx context.Context, worktree *git.Worktree, scope *commitscope.Scope, baseTree *object.Tree) error {
+	if m.commitGuard == nil || !scope.Active() {
+		if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+			return fmt.Errorf("staging changes: %w", err)
+		}
+		return nil
+	}
+
+	res, err := commitscope.Stage(ctx, worktree, baseTree, scope, *m.commitGuard)
+	if err != nil {
+		return fmt.Errorf("staging changes: %w", err)
+	}
+	if len(res.Staged) == 0 {
+		// Every change was an artifact or otherwise denied: nothing to commit.
+		return ErrNothingToCommit
+	}
+	return nil
+}
+
+// headTree returns the tree of the repository's current HEAD commit, the base the
+// commit-scope guard compares the worktree against.
+func headTree(repo *git.Repository) (*object.Tree, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("resolving HEAD: %w", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("reading HEAD commit: %w", err)
+	}
+	return commit.Tree()
+}
+
+func (m *Manager) commitChanges(ctx context.Context, repo *git.Repository, scope *commitscope.Scope, baseTree *object.Tree, commitMessage string) error {
 	worktree, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("getting worktree: %w", err)
@@ -569,16 +657,8 @@ func (m *Manager) commitChanges(repo *git.Repository, commitMessage string) erro
 		return ErrNothingToCommit
 	}
 
-	// Stage every change in one shot. WorktreeCallbacks deliberately does not
-	// stage per write: the executor may run a turn's tool callbacks
-	// concurrently, and go-git's Worktree.Add rewrites .git/index non-atomically
-	// (truncate in place, no lock), so concurrent Adds tear the index and later
-	// reads fail with "invalid checksum" (FUL-411). Staging once here,
-	// single-threaded, eliminates the race. AddWithOptions{All:true} is
-	// `git add -A` (adds, modifies, removes), writing the index exactly once
-	// before commit.
-	if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
-		return fmt.Errorf("staging changes: %w", err)
+	if err := m.stageForCommit(ctx, worktree, scope, baseTree); err != nil {
+		return err
 	}
 
 	email := m.identity

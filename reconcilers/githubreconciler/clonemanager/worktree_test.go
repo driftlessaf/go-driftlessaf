@@ -931,11 +931,82 @@ func TestValidatePath(t *testing.T) {
 		name:    "double dot middle",
 		path:    "a/b/../../../secret",
 		wantErr: "escapes worktree",
+	}, {
+		// validatePath is read-side confinement: it does not block .git (reads of
+		// the worktree, including .git, are allowed). The .git write block lives in
+		// validateWritePath; see TestValidateWritePath.
+		name: "git dir allowed for reads",
+		path: ".git/HEAD",
+	}, {
+		name: "gitignore file allowed",
+		path: ".gitignore",
+	}, {
+		name: "github workflow allowed",
+		path: ".github/workflows/x.yml",
 	}}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fullPath, err := validatePath(root, tc.path)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("error: got = nil, wanted containing %q", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error: got = %v, wanted containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.HasPrefix(fullPath, root) {
+				t.Errorf("path: got = %q, wanted prefix %q", fullPath, root)
+			}
+		})
+	}
+}
+
+// TestValidateWritePath covers the write-side confinement: a mutating callback
+// must refuse any path resolving into the repository's own .git directory, while
+// still allowing ordinary paths and files merely named like .gitignore/.github.
+func TestValidateWritePath(t *testing.T) {
+	root := t.TempDir()
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr string
+	}{{
+		name: "ordinary file",
+		path: "a/b/c.txt",
+	}, {
+		name:    "git dir at root",
+		path:    ".git/HEAD",
+		wantErr: ".git directory",
+	}, {
+		name:    "git dir nested",
+		path:    "foo/.git/config",
+		wantErr: ".git directory",
+	}, {
+		name:    "git dir uppercase",
+		path:    ".GIT/config",
+		wantErr: ".git directory",
+	}, {
+		name:    "parent escape still rejected",
+		path:    "../secret",
+		wantErr: "escapes worktree",
+	}, {
+		name: "gitignore file allowed",
+		path: ".gitignore",
+	}, {
+		name: "github workflow allowed",
+		path: ".github/workflows/x.yml",
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fullPath, err := validateWritePath(root, tc.path)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("error: got = nil, wanted containing %q", tc.wantErr)
@@ -986,6 +1057,20 @@ func TestValidateSymlinkTarget(t *testing.T) {
 		linkFullPath: filepath.Join(root, "a", "link.txt"),
 		target:       "../../secret",
 		wantErr:      "outside worktree",
+	}, {
+		name:         "target into git dir at root",
+		linkFullPath: filepath.Join(root, "link.txt"),
+		target:       ".git/hooks/pre-commit",
+		wantErr:      ".git directory",
+	}, {
+		name:         "target into git dir via subdir",
+		linkFullPath: filepath.Join(root, "a", "link.txt"),
+		target:       "../.git/config",
+		wantErr:      ".git directory",
+	}, {
+		name:         "target to gitignore allowed",
+		linkFullPath: filepath.Join(root, "link.txt"),
+		target:       ".gitignore",
 	}}
 
 	for _, tc := range tests {

@@ -19,6 +19,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/internal/textedit"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/commitscope"
 	gogit "github.com/go-git/go-git/v5"
 )
 
@@ -26,21 +27,34 @@ import (
 // to whole lines. A line longer than this is left cut.
 const lineBound = 64 << 10
 
+// recordTouch records the repo-relative paths an edit tool changed into the
+// commit scope carried by the context, when one is present. It is a no-op when no
+// scope is installed, so the callbacks work whether or not the commit guard is
+// enabled.
+func recordTouch(ctx context.Context, paths ...string) {
+	if s, ok := commitscope.ScopeFromContext(ctx); ok {
+		s.Touch(paths...)
+	}
+}
+
 // WorktreeCallbacks creates callbacks.WorktreeCallbacks bound to a git worktree.
 // All file operations are scoped to the worktree root directory.
 //
 // The mutating callbacks write to the worktree on disk only; they never touch
 // the git index. This keeps them safe for concurrent use within a single agent
 // turn, which claudeexecutor requires of tool handlers (it dispatches a turn's
-// tool calls in parallel). Staging is centralized in commitChanges, which runs
-// Worktree.AddWithOptions{All:true} once, single-threaded, just before the
-// commit. Per-write staging is unsafe here: go-git's Worktree.Add rewrites
-// .git/index non-atomically (truncate in place, no lock), so two callbacks
-// staging concurrently tear the index and a later read fails with "invalid
-// checksum" (FUL-411).
+// tool calls in parallel). Staging is centralized in commitChanges, single-
+// threaded, just before the commit. Per-write staging is unsafe here: go-git's
+// Worktree.Add rewrites .git/index non-atomically (truncate in place, no lock),
+// so two callbacks staging concurrently tear the index and a later read fails
+// with an "invalid checksum" error.
 //
-// Because staging is `git add -A` at commit time, two consequences follow that
-// consumers cannot discover any other way:
+// The mutating callbacks also record every path they change into the commit
+// scope carried by the context, so the commit guard (when enabled) stages only
+// those paths plus modifications to tracked files, and leaves artifacts a gate
+// dropped into the tree uncommitted. Without the guard, commitChanges stages
+// every worktree change (`git add -A`), which has two consequences a consumer
+// cannot discover any other way:
 //   - Any change in the worktree is committed, not only files written through
 //     these callbacks. If a consumer's agent runs commands that drop artifacts
 //     into the worktree, those artifacts land in the signed commit.
@@ -120,46 +134,58 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			return result, nil
 		},
 
-		WriteFile: func(_ context.Context, path, content string, mode os.FileMode) error {
-			fullPath, err := validatePath(root, path)
+		WriteFile: func(ctx context.Context, path, content string, mode os.FileMode) error {
+			fullPath, err := validateWritePath(root, path)
 			if err != nil {
 				return err
 			}
 			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 				return err
 			}
-			return os.WriteFile(fullPath, []byte(content), mode)
+			if err := os.WriteFile(fullPath, []byte(content), mode); err != nil {
+				return err
+			}
+			recordTouch(ctx, path)
+			return nil
 		},
 
-		DeleteFile: func(_ context.Context, path string) error {
-			fullPath, err := validatePath(root, path)
+		DeleteFile: func(ctx context.Context, path string) error {
+			fullPath, err := validateWritePath(root, path)
 			if err != nil {
 				return err
 			}
-			return os.Remove(fullPath)
+			if err := os.Remove(fullPath); err != nil {
+				return err
+			}
+			recordTouch(ctx, path)
+			return nil
 		},
 
-		MoveFile: func(_ context.Context, src, dst string) error {
-			srcFull, err := validatePath(root, src)
+		MoveFile: func(ctx context.Context, src, dst string) error {
+			srcFull, err := validateWritePath(root, src)
 			if err != nil {
 				return err
 			}
-			dstFull, err := validatePath(root, dst)
+			dstFull, err := validateWritePath(root, dst)
 			if err != nil {
 				return err
 			}
 			if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
 				return err
 			}
-			return os.Rename(srcFull, dstFull)
+			if err := os.Rename(srcFull, dstFull); err != nil {
+				return err
+			}
+			recordTouch(ctx, src, dst)
+			return nil
 		},
 
-		CopyFile: func(_ context.Context, src, dst string) error {
+		CopyFile: func(ctx context.Context, src, dst string) error {
 			srcFull, err := validatePath(root, src)
 			if err != nil {
 				return err
 			}
-			dstFull, err := validatePath(root, dst)
+			dstFull, err := validateWritePath(root, dst)
 			if err != nil {
 				return err
 			}
@@ -174,11 +200,15 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
 				return err
 			}
-			return os.WriteFile(dstFull, data, srcInfo.Mode()) //nolint:gosec // G703: path from git worktree
+			if err := os.WriteFile(dstFull, data, srcInfo.Mode()); err != nil { //nolint:gosec // G703: path from git worktree
+				return err
+			}
+			recordTouch(ctx, dst)
+			return nil
 		},
 
-		CreateSymlink: func(_ context.Context, path, target string) error {
-			fullPath, err := validatePath(root, path)
+		CreateSymlink: func(ctx context.Context, path, target string) error {
+			fullPath, err := validateWritePath(root, path)
 			if err != nil {
 				return err
 			}
@@ -188,15 +218,23 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 				return err
 			}
-			return os.Symlink(target, fullPath)
+			if err := os.Symlink(target, fullPath); err != nil {
+				return err
+			}
+			recordTouch(ctx, path)
+			return nil
 		},
 
-		Chmod: func(_ context.Context, path string, mode os.FileMode) error {
-			fullPath, err := validatePath(root, path)
+		Chmod: func(ctx context.Context, path string, mode os.FileMode) error {
+			fullPath, err := validateWritePath(root, path)
 			if err != nil {
 				return err
 			}
-			return os.Chmod(fullPath, mode)
+			if err := os.Chmod(fullPath, mode); err != nil {
+				return err
+			}
+			recordTouch(ctx, path)
+			return nil
 		},
 
 		ListDirectory: func(_ context.Context, path, filter string, offset, limit int) (callbacks.ListResult, error) {
@@ -253,7 +291,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			return result, nil
 		},
 
-		EditFile: func(_ context.Context, path, oldString, newString string, replaceAll bool) (callbacks.EditResult, error) {
+		EditFile: func(ctx context.Context, path, oldString, newString string, replaceAll bool) (callbacks.EditResult, error) {
 			if len(oldString) == 0 {
 				return callbacks.EditResult{}, errors.New("old_string must not be empty")
 			}
@@ -264,7 +302,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 				return callbacks.EditResult{}, fmt.Errorf("new_string is %d bytes; use write_file for large replacements", len(newString))
 			}
 
-			fullPath, err := validatePath(root, path)
+			fullPath, err := validateWritePath(root, path)
 			if err != nil {
 				return callbacks.EditResult{}, err
 			}
@@ -283,6 +321,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 				return callbacks.EditResult{}, err
 			}
 
+			recordTouch(ctx, path)
 			return callbacks.EditResult{Replacements: len(offsets)}, nil
 		},
 
@@ -376,7 +415,10 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 	}
 }
 
-// validatePath ensures path doesn't escape the worktree root via ".." traversal.
+// validatePath ensures path doesn't escape the worktree root via ".." traversal
+// and returns the confined absolute path. It is the confinement every callback
+// applies; the mutating callbacks additionally use [validateWritePath] to refuse
+// writes under the repository's own .git directory.
 func validatePath(root, path string) (string, error) {
 	fullPath := filepath.Join(root, filepath.Clean(path))
 	rel, err := filepath.Rel(root, fullPath)
@@ -387,6 +429,41 @@ func validatePath(root, path string) (string, error) {
 		return "", fmt.Errorf("path %q escapes worktree", path)
 	}
 	return fullPath, nil
+}
+
+// validateWritePath is validatePath for a mutating callback: it also refuses any
+// path that resolves into the repository's own .git directory. Writing, deleting,
+// moving, or chmod-ing under .git (HEAD, index, config, hooks, info/exclude) would
+// rewrite the repository's state, git config, or hooks — outside the tree the
+// tools are meant to touch, and a way to defeat commit scoping — so a path with a
+// ".git" component is refused. Read callbacks use validatePath, so reading the
+// worktree is unaffected.
+func validateWritePath(root, path string) (string, error) {
+	fullPath, err := validatePath(root, path)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, fullPath)
+	if err != nil {
+		return "", fmt.Errorf("path %q: %w", path, err)
+	}
+	if hasGitComponent(rel) {
+		return "", fmt.Errorf("path %q resolves into the .git directory", path)
+	}
+	return fullPath, nil
+}
+
+// hasGitComponent reports whether a slash- or OS-separated relative path contains
+// an exact ".git" path segment (case-insensitive, since a case-insensitive
+// filesystem treats ".GIT" as ".git"). A file merely named like ".gitignore" or a
+// directory named ".github" is not a match: only the whole ".git" segment is.
+func hasGitComponent(rel string) bool {
+	for seg := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
+		if strings.EqualFold(seg, ".git") {
+			return true
+		}
+	}
+	return false
 }
 
 // validateSymlinkTarget checks that a symlink target will not escape the
@@ -407,6 +484,9 @@ func validateSymlinkTarget(root, linkFullPath, target string) error {
 	}
 	if strings.HasPrefix(rel, "..") {
 		return fmt.Errorf("symlink target %q resolves outside worktree", target)
+	}
+	if hasGitComponent(rel) {
+		return fmt.Errorf("symlink target %q resolves into the .git directory", target)
 	}
 	return nil
 }
