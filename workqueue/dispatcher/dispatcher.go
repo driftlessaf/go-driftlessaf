@@ -225,6 +225,29 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 				clog.WarnContextf(ctx, "Failed callback for key %q: %v", oip.Name(), err)
 				attempts := oip.GetAttempts()
 
+				if ctx.Err() != nil {
+					// The dispatch context ended while the callback ran: the
+					// dispatcher is shutting down or its dispatch request was cut,
+					// so the callback was interrupted rather than failed. That is
+					// infrastructure's doing and must not consume the key's
+					// dead-letter budget. Requeue with Delay semantics, which reset
+					// the attempt count, on the drain schedule so the key returns
+					// shortly on a live dispatcher.
+					delay := interruptionDelay()
+					clog.InfoContextf(ctx, "Key %q interrupted by dispatcher shutdown (attempt %d), requeueing in %v without consuming an attempt", oip.Name(), attempts, delay)
+					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{Priority: oip.Priority(), Delay: delay}); err != nil {
+						return fmt.Errorf("requeue(after interrupted callback) = %w", err)
+					}
+					cfg.errors.emit(cleanupCtx, ErrorContext{
+						Key:            oip.Name(),
+						Err:            err,
+						Attempts:       attempts,
+						Action:         ErrorRequeued,
+						Infrastructure: true,
+					})
+					return nil
+				}
+
 				// If maxRetry is configured and we've reached or exceeded it, use Deadletter() instead of Requeue()
 				if maxRetry > 0 && attempts >= maxRetry {
 					clog.InfoContextf(ctx, "Key %q has reached max retry limit (%d/%d), failing permanently",
@@ -342,4 +365,15 @@ func retryBackoff(attempts int) time.Duration {
 		delay *= 2
 	}
 	return min(delay, workqueue.MaximumBackoffPeriod)
+}
+
+// interruptionDelay is the requeue delay for a callback the dispatcher's own
+// shutdown interrupted: the drain schedule, jittered so a retiring dispatcher's
+// in-flight keys do not all return at once.
+func interruptionDelay() time.Duration {
+	delay := workqueue.DrainRequeueDelay
+	if workqueue.DrainRequeueJitter > 0 {
+		delay += rand.N(workqueue.DrainRequeueJitter) //nolint:gosec // G404: jitter, not security-sensitive
+	}
+	return delay
 }

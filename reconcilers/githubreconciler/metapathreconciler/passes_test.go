@@ -7,12 +7,16 @@ package metapathreconciler
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	gogit "github.com/go-git/go-git/v5"
@@ -134,21 +138,32 @@ type fanResult struct {
 func (r *fanResult) GetCommitMessage() string       { return r.msg }
 func (r *fanResult) GetNoChangeExplanation() string { return r.expl }
 
-// fanReq opts into fan-out, local verification (disabled here), and the
-// once-before-commit finalizer, and records SetLocalFindings and Finalize calls.
+// fanReq opts into fan-out, local verification (rounds and the scripted
+// per-call verify findings), and the once-before-commit finalizer, and records
+// SetLocalFindings and Finalize calls.
 type fanReq struct {
 	findings  []callbacks.Finding
 	groups    []FanOutGroup
 	note      string
 	finalized int
+	rounds    int
+	verify    [][]callbacks.Finding
 }
 
 func (r *fanReq) Bind(p *promptbuilder.Prompt) (*promptbuilder.Prompt, error) { return p, nil }
 func (r *fanReq) FanOutGroups() []FanOutGroup                                 { return r.groups }
 func (r *fanReq) SetLocalFindings(f []callbacks.Finding)                      { r.findings = f }
-func (r *fanReq) MaxLocalRounds() int                                         { return 0 }
+func (r *fanReq) MaxLocalRounds() int                                         { return r.rounds }
+
+// LocalVerify returns the next scripted finding set, and none once the script
+// is exhausted.
 func (r *fanReq) LocalVerify(context.Context, *gogit.Worktree) []callbacks.Finding {
-	return nil
+	if len(r.verify) == 0 {
+		return nil
+	}
+	next := r.verify[0]
+	r.verify = r.verify[1:]
+	return next
 }
 
 func (r *fanReq) Finalize(context.Context, *gogit.Worktree) string {
@@ -156,16 +171,33 @@ func (r *fanReq) Finalize(context.Context, *gogit.Worktree) string {
 	return r.note
 }
 
-// fanAgent returns a scripted result per Execute call.
+// fanAgent returns a scripted result per Execute call. edits and errs, keyed
+// by call index, make a call write files under root before it returns and make
+// it fail — like an agent that edited files and then ran out of turns.
 type fanAgent struct {
 	perCall []*fanResult
 	calls   int
+	root    string
+	edits   map[int]map[string]string
+	errs    map[int]error
 }
 
 func (a *fanAgent) Execute(context.Context, *fanReq, fanCB) (*fanResult, error) {
-	res := a.perCall[min(a.calls, len(a.perCall)-1)]
+	call := a.calls
 	a.calls++
-	return res, nil
+	for name, content := range a.edits[call] {
+		full := filepath.Join(a.root, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.errs[call]; err != nil {
+		return nil, err
+	}
+	return a.perCall[min(call, len(a.perCall)-1)], nil
 }
 
 func TestRunAgentPassesFanOut(t *testing.T) {
@@ -291,5 +323,159 @@ func TestAppendCommitNote(t *testing.T) {
 				t.Errorf("appendCommitNote() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunAgentPassesRevertsExhaustedGroup(t *testing.T) {
+	t.Parallel()
+	wt, root := initCheckout(t, map[string]string{"base.txt": "base\n"})
+	all := []callbacks.Finding{finding("a"), finding("b1"), finding("b2"), finding("c")}
+	req := &fanReq{
+		findings: all,
+		groups: []FanOutGroup{
+			{Key: "skill/a", Findings: all[:1]},
+			{Key: "skill/b", Findings: all[1:3]},
+			{Key: "skill/c", Findings: all[3:]},
+		},
+	}
+	agent := &fanAgent{
+		root:    root,
+		perCall: []*fanResult{{msg: "fix: alpha"}, {msg: "fix: beta"}, {msg: "fix: gamma"}},
+		edits: map[int]map[string]string{
+			0: {"a.txt": "a\n"},
+			1: {"b.txt": "b\n", "base.txt": "clobbered\n"}, // written before the turn budget ran out
+			2: {"c.txt": "c\n"},
+		},
+		errs: map[int]error{1: fmt.Errorf("%w (200)", executor.ErrMaxTurns)},
+	}
+	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
+
+	outcome, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all)
+	if err != nil {
+		t.Fatalf("runAgentPasses: %v", err)
+	}
+	if agent.calls != 3 {
+		t.Errorf("agent ran %d times, want 3: the groups after an exhausted one still run", agent.calls)
+	}
+	// The completed passes' edits stay; the exhausted pass's edits, including
+	// its change to a committed file, are gone.
+	requireCheckout(t, root, map[string]string{"a.txt": "a\n", "c.txt": "c\n", "base.txt": "base\n"}, []string{"b.txt"})
+	if len(outcome.entries) != 2 {
+		t.Fatalf("entries = %d, want one per completed pass (2)", len(outcome.entries))
+	}
+	// The commit body pairs each completed family with its own headline and
+	// records the exhausted family separately.
+	for _, want := range []string{"- skill/a: fix: alpha", "- skill/c: fix: gamma", "skill/b: 2 finding(s)"} {
+		if !strings.Contains(outcome.commitMessage, want) {
+			t.Errorf("commit message missing %q:\n%s", want, outcome.commitMessage)
+		}
+	}
+	if strings.Contains(outcome.commitMessage, "- skill/b: fix") {
+		t.Errorf("commit message credits the exhausted family with a completed pass:\n%s", outcome.commitMessage)
+	}
+	if !slices.Equal(req.findings, all) {
+		t.Errorf("findings not restored after the passes: got %v, want %v", req.findings, all)
+	}
+}
+
+func TestRunAgentPassesAllGroupsExhaustedIsAnExplainedNoChange(t *testing.T) {
+	t.Parallel()
+	wt, root := initCheckout(t, map[string]string{"base.txt": "base\n"})
+	all := []callbacks.Finding{finding("a"), finding("b")}
+	req := &fanReq{
+		findings: all,
+		groups:   []FanOutGroup{{Key: "skill/a", Findings: all[:1]}, {Key: "skill/b", Findings: all[1:]}},
+	}
+	agent := &fanAgent{
+		root:    root,
+		perCall: []*fanResult{{msg: "fix: never"}},
+		edits:   map[int]map[string]string{0: {"a.txt": "a\n"}, 1: {"base.txt": "clobbered\n"}},
+		errs:    map[int]error{0: executor.ErrMaxTurns, 1: executor.ErrMaxTurns},
+	}
+	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
+
+	outcome, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all)
+	if err != nil {
+		t.Fatalf("runAgentPasses: %v", err)
+	}
+	status, err := wt.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !status.IsClean() {
+		t.Errorf("checkout should be clean when every pass was reverted: %v", status)
+	}
+	if len(outcome.entries) != 0 || outcome.commitMessage != "" {
+		t.Errorf("outcome should carry nothing to commit, got entries=%d message=%q", len(outcome.entries), outcome.commitMessage)
+	}
+	for _, want := range []string{"Every fixer pass exhausted its turn budget", "skill/a: 1 finding(s)", "skill/b: 1 finding(s)"} {
+		if !strings.Contains(outcome.giveUpExplanation, want) {
+			t.Errorf("give-up explanation missing %q:\n%s", want, outcome.giveUpExplanation)
+		}
+	}
+	if req.finalized != 0 {
+		t.Errorf("finalizer ran %d times, want 0 when nothing is committed", req.finalized)
+	}
+}
+
+func TestRunAgentPassesMaxTurnsWithoutCheckoutStillFails(t *testing.T) {
+	t.Parallel()
+	all := []callbacks.Finding{finding("a")}
+	req := &fanReq{findings: all, groups: []FanOutGroup{{Key: "skill/a", Findings: all}}}
+	agent := &fanAgent{perCall: []*fanResult{{msg: "fix: never"}}, errs: map[int]error{0: executor.ErrMaxTurns}}
+	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
+
+	_, err := r.runAgentPasses(t.Context(), nil, fanCB{}, req, all)
+	if !errors.Is(err, executor.ErrMaxTurns) {
+		t.Errorf("error: got = %v, want the turn-limit error when there is no checkout to revert", err)
+	}
+}
+
+func TestRunAgentPassesOtherErrorsStillFail(t *testing.T) {
+	t.Parallel()
+	wt, root := initCheckout(t, map[string]string{"base.txt": "base\n"})
+	all := []callbacks.Finding{finding("a")}
+	req := &fanReq{findings: all, groups: []FanOutGroup{{Key: "skill/a", Findings: all}}}
+	boom := errors.New("provider unavailable")
+	agent := &fanAgent{root: root, perCall: []*fanResult{{msg: "fix: never"}}, errs: map[int]error{0: boom}}
+	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
+
+	_, err := r.runAgentPasses(t.Context(), wt, fanCB{}, req, all)
+	if !errors.Is(err, boom) {
+		t.Errorf("error: got = %v, want the agent error propagated unchanged", err)
+	}
+}
+
+func TestVerifyPassRevertsExhaustedReRun(t *testing.T) {
+	t.Parallel()
+	wt, root := initCheckout(t, map[string]string{"base.txt": "base\n"})
+	// The pass itself already ran and wrote a.txt; the re-run is what runs here.
+	writeCheckoutFile(t, root, "a.txt", "a\n")
+	req := &fanReq{rounds: 2, verify: [][]callbacks.Finding{{finding("lint")}}}
+	agent := &fanAgent{
+		root:    root,
+		perCall: []*fanResult{{msg: "fix: rerun"}},
+		edits:   map[int]map[string]string{0: {"junk.txt": "half-done\n", "a.txt": "mangled\n"}},
+		errs:    map[int]error{0: executor.ErrMaxTurns},
+	}
+	r := &PRReconciler[*fanReq, *fanResult, fanCB]{agent: agent}
+	initial := &fanResult{msg: "fix: pass"}
+
+	result, summaries, remaining, err := r.verifyPass(t.Context(), wt, fanCB{}, req, initial, nil)
+	if err != nil {
+		t.Fatalf("verifyPass: %v", err)
+	}
+	if result != initial {
+		t.Errorf("result = %+v, want the pass's own result kept", result)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent ran %d times, want 1: no further round after a reverted re-run", agent.calls)
+	}
+	requireCheckout(t, root, map[string]string{"a.txt": "a\n", "base.txt": "base\n"}, []string{"junk.txt"})
+	if len(remaining) != 1 {
+		t.Errorf("remaining = %d, want the finding the reverted re-run was addressing", len(remaining))
+	}
+	if !slices.Contains(summaries, reRunRevertedSummary) {
+		t.Errorf("summaries %q should record the reverted re-run", summaries)
 	}
 }

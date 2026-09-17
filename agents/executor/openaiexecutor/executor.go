@@ -14,6 +14,7 @@ import (
 	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -540,7 +541,7 @@ func (e *executor[Request, Response]) Execute(
 
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
 	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
-	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+	return response, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.maxTurns)
 }
 
 // decodeToolArguments validates the wire-level function arguments before a

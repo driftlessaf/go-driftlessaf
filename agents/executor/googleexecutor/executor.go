@@ -17,6 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -888,7 +889,7 @@ func (e *executor[Request, Response]) Execute(
 		}
 		llmTurn.End()
 	}
-	return resp, fmt.Errorf("agent exceeded maximum conversation turns (%d)", e.maxTurns)
+	return resp, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.maxTurns)
 }
 
 func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentConfig {

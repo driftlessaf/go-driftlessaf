@@ -17,6 +17,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/effort"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -987,7 +988,7 @@ func (e *executor[Request, Response]) runConversation(
 	lastTurn := startTurn + turnBudget
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", turnBudget)
 	e.telemetry.RecordTurns(ctx, lastTurn, true)
-	return response, fmt.Errorf("agent exceeded maximum conversation turns (%d)", turnBudget)
+	return response, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, turnBudget)
 }
 
 // buildStaticParams builds the turn-invariant request prefix: the sorted tool

@@ -55,6 +55,7 @@ func (m *mockKey) Start(context.Context) (workqueue.OwnedInProgressKey, error) {
 	}
 	return &mockInProgressKey{mockKey: m}, nil
 }
+
 func (m *mockKey) Requeue(context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -89,6 +90,7 @@ func (m *mockInProgressKey) Complete(context.Context) error {
 	m.complete++
 	return nil
 }
+
 func (m *mockInProgressKey) Deadletter(context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1084,5 +1086,53 @@ func TestHandleAsync_AppFailure_NotInfrastructure(t *testing.T) {
 	}
 	if got.Infrastructure {
 		t.Error("infrastructure: got = true, want = false")
+	}
+}
+
+// TestHandleAsync_InterruptedByShutdown_DoesNotConsumeAttempt proves a callback
+// that fails after the dispatch context ended (the dispatcher is shutting down)
+// is requeued with attempt-resetting Delay semantics and never dead-lettered,
+// even at the retry limit: the interruption is infrastructure's doing.
+func TestHandleAsync_InterruptedByShutdown_DoesNotConsumeAttempt(t *testing.T) {
+	next := &mockKey{name: "interrupted", attempts: 5}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	future := HandleAsync(ctx, q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		cancel() // SIGTERM lands while the callback is in flight.
+		return context.Canceled
+	}, 5)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 0 {
+		t.Errorf("dead-lettered %d times, want 0: an interrupted attempt must not consume the retry budget", next.dead)
+	}
+	if next.requeueOpts != 1 {
+		t.Fatalf("RequeueWithOptions calls = %d, want 1", next.requeueOpts)
+	}
+	if next.lastReqOpts.Delay <= 0 || next.lastReqOpts.BackoffDelay != 0 {
+		t.Errorf("requeue options = %+v, want a Delay (attempt reset) and no BackoffDelay", next.lastReqOpts)
+	}
+}
+
+// TestHandleAsync_FailureWithLiveContext_ConsumesAttempt pins the boundary of
+// the interruption path: the same error under a live dispatch context is the
+// work's own failure and keeps the attempt-preserving backoff.
+func TestHandleAsync_FailureWithLiveContext_ConsumesAttempt(t *testing.T) {
+	next := &mockKey{name: "failed", attempts: 2}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return context.Canceled
+	}, 5)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.requeueOpts != 1 {
+		t.Fatalf("RequeueWithOptions calls = %d, want 1", next.requeueOpts)
+	}
+	if next.lastReqOpts.BackoffDelay <= 0 || next.lastReqOpts.Delay != 0 {
+		t.Errorf("requeue options = %+v, want a BackoffDelay (attempt kept) and no Delay", next.lastReqOpts)
 	}
 }
