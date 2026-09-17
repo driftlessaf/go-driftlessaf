@@ -885,7 +885,11 @@ func (s *Session[T]) findingByID(kind callbacks.FindingKind, identifier string) 
 // Resolve and Reply do not touch GitHub when called. They queue the action on
 // the session, and Upsert applies the queue once the run's commit has been
 // pushed (a run that pushes nothing posts only its refutations), so a thread is
-// never marked fixed ahead of, or without, the change that fixes it.
+// never marked fixed ahead of, or without, the change that fixes it. When Reply
+// is set, Resolve refuses a thread with no reply queued on it: a resolution
+// carries its disposition or does not happen (see flushThreadActions), and the
+// refusal tells the agent to post one rather than dropping its resolution at
+// the flush.
 func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 	// Built on the reconciler goroutine before any tool runs, so the lazy
 	// creation is not racing the tool calls that use the queue.
@@ -925,12 +929,15 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			if _, err := s.findingByID(callbacks.FindingKindReview, identifier); err != nil {
 				return err
 			}
+			if s.repliesEnabled() && !s.threads.hasReply(identifier) {
+				return errors.New("reply to the finding before resolving it: a thread is resolved only once a reply states its disposition")
+			}
 			s.threads.addResolve(identifier)
 			return nil
 		},
 	}
 
-	if s.manager != nil && s.manager.findingReplies {
+	if s.repliesEnabled() {
 		cb.Reply = func(_ context.Context, identifier, body string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
 				return errors.New("cannot reply to review body findings, only review thread findings can be replied to")
@@ -948,6 +955,13 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 	}
 
 	return cb
+}
+
+// repliesEnabled reports whether the manager gave the agent the reply tool
+// (WithFindingReplies), and so whether a resolution can, and must, carry a
+// disposition reply.
+func (s *Session[T]) repliesEnabled() bool {
+	return s.manager != nil && s.manager.findingReplies
 }
 
 // threadReply is a reply the agent asked to post in a review thread, held until
@@ -971,6 +985,13 @@ func (q *threadActions) addReply(threadID, body string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.replies = append(q.replies, threadReply{threadID: threadID, body: body})
+}
+
+// hasReply reports whether a reply is queued on the thread.
+func (q *threadActions) hasReply(threadID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return slices.ContainsFunc(q.replies, func(r threadReply) bool { return r.threadID == threadID })
 }
 
 // addResolve queues a review-thread resolution; a thread is queued once however
@@ -1037,6 +1058,17 @@ func (s *Session[T]) BeginThreadActionScope() (discard func()) {
 // handled when it is not, so those are dropped and logged. Failures are logged
 // rather than returned: the commit is already on the branch, and a thread left
 // unresolved resurfaces as a finding on the next pass.
+//
+// A resolution carries its disposition or does not happen. With replies
+// enabled, a thread is resolved only once a reply posted on it in this flush,
+// whether the agent never queued one or the post failed; a thread resolved with
+// nothing on it to say why would hide the finding from every later pass. Without
+// replies, the pushed commit is the only disposition a resolution can carry, so
+// it proceeds on that alone. A resolution that fails after its reply posted
+// retracts the reply (see retractReplies): the thread would otherwise stay open
+// with the bot's reply last, which the next pass reads as settled (see
+// threadAwaitsReply) and so never revisits, and a retracted reply hands the
+// thread back to the bot.
 func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
 	replies, resolves := s.threads.take()
 	if len(replies) == 0 && len(resolves) == 0 {
@@ -1054,23 +1086,58 @@ func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
 		}
 		replies, resolves = kept, nil
 	}
-	// A thread is resolved only once its disposition is on it: a resolution
-	// without the reply would hide the finding from later passes with nothing
-	// on the thread to say why, so a failed reply leaves its thread open.
-	unreplied := make(map[string]struct{})
+	// replied holds, per thread, the node ids of the replies that posted.
+	replied := make(map[string][]string, len(replies))
 	for _, r := range replies {
-		if err := replyToReviewThread(ctx, s.gqlClient, r.threadID, r.body); err != nil {
+		commentID, err := replyToReviewThread(ctx, s.gqlClient, r.threadID, r.body)
+		if err != nil {
 			clog.WarnContext(ctx, "failed to post a review-thread reply", "thread", r.threadID, "error", err.Error())
-			unreplied[r.threadID] = struct{}{}
-		}
-	}
-	for _, id := range resolves {
-		if _, failed := unreplied[id]; failed {
-			clog.WarnContext(ctx, "leaving a review thread open: its disposition reply did not post", "thread", id)
 			continue
 		}
-		if err := resolveReviewThread(ctx, s.gqlClient, id); err != nil {
-			clog.WarnContext(ctx, "failed to resolve a review thread", "thread", id, "error", err.Error())
+		replied[r.threadID] = append(replied[r.threadID], commentID)
+	}
+	for _, id := range resolves {
+		if s.repliesEnabled() && len(replied[id]) == 0 {
+			clog.WarnContext(ctx, "leaving a review thread open: no disposition reply posted on it", "thread", id)
+			continue
+		}
+		err := resolveReviewThread(ctx, s.gqlClient, id)
+		if err == nil {
+			continue
+		}
+		clog.WarnContext(ctx, "failed to resolve a review thread", "thread", id, "error", err.Error())
+		if len(replied[id]) > 0 {
+			s.retractReplies(ctx, id, replied[id])
+		}
+	}
+}
+
+// retractReplies removes the disposition replies posted on a thread whose
+// resolution reported an error, so the thread awaits the bot again instead of
+// reading as settled with the bot's reply last (see threadAwaitsReply). The
+// error is ambiguous: GitHub can commit the resolution and lose the response,
+// and retracting the reply from a thread that is in fact resolved would leave it
+// closed with nothing on it to say why. So the thread's state is read back
+// first, and the replies stay when the thread is resolved or its state cannot
+// be read: an open thread carrying the bot's reply is visible to a reviewer,
+// while a closed thread carrying nothing is not.
+func (s *Session[T]) retractReplies(ctx context.Context, threadID string, commentIDs []string) {
+	resolved, err := reviewThreadResolved(ctx, s.gqlClient, threadID)
+	switch {
+	case err != nil:
+		clog.ErrorContext(ctx, "cannot read a review thread's state after its resolution failed; keeping its disposition reply, which reads as settled until a trusted author replies if the thread is open", "thread", threadID, "error", err.Error())
+		return
+	case resolved:
+		clog.InfoContext(ctx, "review thread is resolved despite the reported error; keeping its disposition reply", "thread", threadID)
+		return
+	}
+	for _, commentID := range commentIDs {
+		if commentID == "" {
+			clog.ErrorContext(ctx, "cannot retract a review-thread reply: it posted but its comment id was not returned, so the thread reads as settled until a trusted author replies", "thread", threadID)
+			continue
+		}
+		if err := deleteReviewThreadComment(ctx, s.gqlClient, commentID); err != nil {
+			clog.ErrorContext(ctx, "failed to retract a review-thread reply: the thread reads as settled until a trusted author replies", "thread", threadID, "comment", commentID, "error", err.Error())
 		}
 	}
 }
@@ -1102,17 +1169,45 @@ func resolveReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLCl
 	}, nil)
 }
 
+// reviewThreadResolved reads back whether a review thread is resolved, via a
+// GraphQL node query on the thread's id. retractReplies consults it after a
+// resolution reports an error, since the resolution may have landed anyway.
+func reviewThreadResolved(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, threadID string) (bool, error) {
+	var query struct {
+		Node struct {
+			Thread struct {
+				IsResolved bool
+			} `graphql:"... on PullRequestReviewThread"`
+		} `graphql:"node(id: $id)"`
+	}
+
+	if err := gqlClient.Query(ctx, "ReviewThreadResolved", &query, map[string]any{
+		"id": githubv4.ID(threadID),
+	}); err != nil {
+		return false, err
+	}
+	return query.Node.Thread.IsResolved, nil
+}
+
 // replyToReviewThread posts a reply in a review thread via the GitHub
-// addPullRequestReviewThreadReply GraphQL mutation. The thread's node ID is the
-// finding identifier already carried from NewSession, so no comment lookup is
-// needed — this uses less new client surface than the REST reply-in-thread call,
-// which would need the root comment's databaseId, the PR number, and owner/repo.
-func replyToReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, threadID, body string) error {
+// addPullRequestReviewThreadReply GraphQL mutation and returns the posted
+// comment's node id, which deleteReviewThreadComment takes to retract it. A nil
+// error means the reply posted: the client surfaces the response's errors array
+// as an error, and a payload field is null only alongside an entry there. The id
+// is empty only if a successful payload omits the comment; the reply is on the
+// thread all the same, so the caller treats it as posted and merely cannot
+// retract it. Reporting that case as a failure would leave the thread open with
+// the bot's reply last, the settled state the caller's retraction exists to
+// avoid. The thread's node ID is the finding identifier already carried from
+// NewSession, so no comment lookup is needed — this uses less new client surface
+// than the REST reply-in-thread call, which would need the root comment's
+// databaseId, the PR number, and owner/repo.
+func replyToReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, threadID, body string) (string, error) {
 	if threadID == "" {
-		return errors.New("empty review thread id")
+		return "", errors.New("empty review thread id")
 	}
 	if body == "" {
-		return errors.New("empty reply body")
+		return "", errors.New("empty reply body")
 	}
 
 	var mutation struct {
@@ -1123,9 +1218,31 @@ func replyToReviewThread(ctx context.Context, gqlClient *graphqlclient.GraphQLCl
 		} `graphql:"addPullRequestReviewThreadReply(input: $input)"`
 	}
 
-	return gqlClient.Mutate(ctx, "AddPullRequestReviewThreadReply", &mutation, githubv4.AddPullRequestReviewThreadReplyInput{
+	if err := gqlClient.Mutate(ctx, "AddPullRequestReviewThreadReply", &mutation, githubv4.AddPullRequestReviewThreadReplyInput{
 		PullRequestReviewThreadID: githubv4.ID(threadID),
 		Body:                      githubv4.String(body),
+	}, nil); err != nil {
+		return "", err
+	}
+	return mutation.AddPullRequestReviewThreadReply.Comment.Id, nil
+}
+
+// deleteReviewThreadComment removes a review-thread comment the bot posted via
+// the GitHub deletePullRequestReviewComment GraphQL mutation. flushThreadActions
+// uses it to retract a disposition reply whose resolution then failed.
+func deleteReviewThreadComment(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, commentID string) error {
+	if commentID == "" {
+		return errors.New("empty review comment id")
+	}
+
+	var mutation struct {
+		DeletePullRequestReviewComment struct {
+			ClientMutationId string
+		} `graphql:"deletePullRequestReviewComment(input: $input)"`
+	}
+
+	return gqlClient.Mutate(ctx, "DeletePullRequestReviewComment", &mutation, githubv4.DeletePullRequestReviewCommentInput{
+		ID: githubv4.ID(commentID),
 	}, nil)
 }
 

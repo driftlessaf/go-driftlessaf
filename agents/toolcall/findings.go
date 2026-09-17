@@ -99,7 +99,7 @@ func findingToolDefs[Resp any](cb callbacks.FindingCallbacks) map[string]Tool[Re
 		maps.Copy(defs, findingLogTools[Resp](cb.GetLogs))
 	}
 	if cb.HasResolve() {
-		defs["resolve_finding"] = resolveFindingTool[Resp](cb.Resolve)
+		defs["resolve_finding"] = resolveFindingTool[Resp](cb.Resolve, cb.HasReply())
 	}
 	if cb.HasReply() {
 		defs["reply_to_finding"] = replyFindingTool[Resp](cb.Reply)
@@ -159,11 +159,18 @@ func getFindingDetailsTool[Resp any](getDetails func(context.Context, callbacks.
 	}
 }
 
-func resolveFindingTool[Resp any](resolve func(context.Context, string) error) Tool[Resp] {
+// resolveFindingTool builds the resolve_finding tool. withReply reports whether
+// reply_to_finding is also offered; the description then tells the agent to
+// reply first, since the resolve callback refuses a thread with no reply queued.
+func resolveFindingTool[Resp any](resolve func(context.Context, string) error, withReply bool) Tool[Resp] {
+	description := "Resolve a finding after addressing the feedback. Only works for review thread findings, not CI checks or review bodies. The resolution is applied once your change has been pushed; a run that pushes no change leaves the thread open."
+	if withReply {
+		description += " Reply to the finding with reply_to_finding first: a thread is resolved only with that disposition on it."
+	}
 	return Tool[Resp]{
 		Def: Definition{
 			Name:        "resolve_finding",
-			Description: "Resolve a finding after addressing the feedback. Only works for review thread findings, not CI checks or review bodies. The resolution is applied once your change has been pushed; a run that pushes no change leaves the thread open.",
+			Description: description,
 			Parameters: []Parameter{{
 				Name:        "identifier",
 				Type:        "string",

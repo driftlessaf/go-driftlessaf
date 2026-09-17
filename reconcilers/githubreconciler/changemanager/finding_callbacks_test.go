@@ -6,8 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package changemanager
 
 import (
-	"io"
-	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,16 +40,10 @@ func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var sent bool
-			gql := newTestGraphQLClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				sent = true
-				w.Header().Set("Content-Type", "application/json")
-				io.WriteString(w, `{"data":{}}`)
-			}))
-
+			rec := &mutationRecorder{threads: []string{knownThread}}
 			s := &Session[testData]{
 				manager:   &CM[testData]{findingReplies: true},
-				gqlClient: gql,
+				gqlClient: newTestGraphQLClient(t, recordMutations(rec)),
 				findings: []callbacks.Finding{
 					{Kind: callbacks.FindingKindReview, Identifier: knownThread},
 					{Kind: callbacks.FindingKindReview, Identifier: reviewBodyID},
@@ -61,6 +54,12 @@ func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 			var err error
 			switch tc.op {
 			case "resolve":
+				// A resolution needs a queued reply on its thread; the reply
+				// carries a valid identifier, so the check under test is the
+				// resolve's own.
+				if err := cb.Reply(t.Context(), knownThread, "a short disposition"); err != nil {
+					t.Fatalf("Reply(%s): %v", knownThread, err)
+				}
 				err = cb.Resolve(t.Context(), tc.identifier)
 			case "reply":
 				err = cb.Reply(t.Context(), tc.identifier, "a short disposition")
@@ -72,20 +71,20 @@ func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("error: got = %v, want containing %q", err, tc.wantErr)
 				}
-				if sent {
-					t.Errorf("GraphQL request sent for a refused %s of %q", tc.op, tc.identifier)
+				if len(rec.calls) != 0 {
+					t.Errorf("GraphQL request sent for a refused %s of %q: %v", tc.op, tc.identifier, rec.calls)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("%s: %v", tc.op, err)
 			}
-			if sent {
-				t.Errorf("GraphQL request sent during %s of %q; thread actions must wait for the push", tc.op, tc.identifier)
+			if len(rec.calls) != 0 {
+				t.Errorf("GraphQL request sent during %s of %q; thread actions must wait for the push: %v", tc.op, tc.identifier, rec.calls)
 			}
 			s.flushThreadActions(t.Context(), true)
-			if tc.wantSent && !sent {
-				t.Errorf("no GraphQL request sent for %s of %q after the flush", tc.op, tc.identifier)
+			if want := tc.op + ":" + knownThread; tc.wantSent && !slices.Contains(rec.calls, want) {
+				t.Errorf("no %s request sent after the flush: %v", want, rec.calls)
 			}
 		})
 	}

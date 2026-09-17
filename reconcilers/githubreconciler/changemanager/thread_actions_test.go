@@ -8,6 +8,7 @@ package changemanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,33 +22,81 @@ import (
 )
 
 // mutationRecorder is a GraphQL double that records, in order, which
-// review-thread mutation each request carried and for which known thread.
+// review-thread request each call carried and for which known thread.
+// omitCommentID answers a reply with a payload that carries no comment, and
+// resolved is the state reported for any thread whose state is read back.
 type mutationRecorder struct {
-	threads []string
-	calls   []string
+	threads       []string
+	calls         []string
+	omitCommentID bool
+	resolved      bool
 }
 
-// recordMutations returns the recorder's handler.
+// classifyMutation names the review-thread request a GraphQL body carries and
+// the known thread it targets: a reply, a resolution, or a read-back of the
+// thread's state name the thread, and a retraction names a comment whose id
+// embeds it (see replyCommentID).
+func classifyMutation(body string, threads []string) (kind, thread string) {
+	kind, thread = "other", "?"
+	switch {
+	case strings.Contains(body, "addPullRequestReviewThreadReply"):
+		kind = "reply"
+	case strings.Contains(body, "resolveReviewThread"):
+		kind = "resolve"
+	case strings.Contains(body, "deletePullRequestReviewComment"):
+		kind = "delete"
+	case strings.Contains(body, "on PullRequestReviewThread"):
+		kind = "state"
+	}
+	for _, id := range threads {
+		if strings.Contains(body, id) {
+			thread = id
+		}
+	}
+	return kind, thread
+}
+
+// replyCommentID is the node id the double assigns to the reply posted on a
+// thread. It embeds the thread id so a retraction of that comment classifies
+// under its thread.
+func replyCommentID(thread string) string { return "PRRC_" + thread }
+
+// recordMutations returns the recorder's handler. A reply is answered with the
+// comment id replyCommentID assigns to its thread, and a state read-back with
+// the recorder's resolved state.
 func recordMutations(m *mutationRecorder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		body := string(b)
-		kind := "other"
-		switch {
-		case strings.Contains(body, "addPullRequestReviewThreadReply"):
-			kind = "reply"
-		case strings.Contains(body, "resolveReviewThread"):
-			kind = "resolve"
-		}
-		thread := "?"
-		for _, id := range m.threads {
-			if strings.Contains(body, id) {
-				thread = id
-			}
-		}
+		kind, thread := classifyMutation(string(b), m.threads)
 		m.calls = append(m.calls, kind+":"+thread)
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"data":{}}`)
+		switch {
+		case kind == "reply" && !m.omitCommentID:
+			fmt.Fprintf(w, `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":%q}}}}`, replyCommentID(thread))
+		case kind == "state":
+			fmt.Fprintf(w, `{"data":{"node":{"isResolved":%t}}}`, m.resolved)
+		default:
+			io.WriteString(w, `{"data":{}}`)
+		}
+	})
+}
+
+// failMutations wraps the recorder's handler so each mutation named in fail
+// (as kind:thread) is recorded as kind-failed:thread and answered with a
+// gateway error; every other request reaches the recorder.
+func failMutations(m *mutationRecorder, fail ...string) http.Handler {
+	inner := recordMutations(m)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body := string(b)
+		kind, thread := classifyMutation(body, m.threads)
+		if slices.Contains(fail, kind+":"+thread) {
+			m.calls = append(m.calls, kind+"-failed:"+thread)
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		r.Body = io.NopCloser(strings.NewReader(body))
+		inner.ServeHTTP(w, r)
 	})
 }
 
@@ -213,41 +262,207 @@ func TestUpsertAppliesThreadActionsByOutcome(t *testing.T) {
 // stays open, while an unrelated thread is still resolved.
 func TestFlushThreadActionsLeavesThreadOpenWhenReplyFails(t *testing.T) {
 	rec := &mutationRecorder{threads: []string{"PRRT_a", "PRRT_b"}}
-	inner := recordMutations(rec)
-	failing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		body := string(b)
-		r.Body = io.NopCloser(strings.NewReader(body))
-		if strings.Contains(body, "addPullRequestReviewThreadReply") && strings.Contains(body, "PRRT_a") {
-			rec.calls = append(rec.calls, "reply-failed:PRRT_a")
-			http.Error(w, "upstream unavailable", http.StatusBadGateway)
-			return
-		}
-		inner.ServeHTTP(w, r)
-	})
 	s := &Session[testData]{
 		manager:   &CM[testData]{findingReplies: true},
-		gqlClient: newTestGraphQLClient(t, failing),
+		gqlClient: newTestGraphQLClient(t, failMutations(rec, "reply:PRRT_a")),
 		findings: []callbacks.Finding{
 			{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"},
 			{Kind: callbacks.FindingKindReview, Identifier: "PRRT_b"},
 		},
 	}
-	cb := s.FindingCallbacks()
-	for _, step := range []func() error{
-		func() error { return cb.Reply(t.Context(), "PRRT_a", "Fixed by bounding the read.") },
-		func() error { return cb.Resolve(t.Context(), "PRRT_a") },
-		func() error { return cb.Reply(t.Context(), "PRRT_b", "Fixed by checking the error.") },
-		func() error { return cb.Resolve(t.Context(), "PRRT_b") },
-	} {
-		if err := step(); err != nil {
-			t.Fatalf("recording thread action: %v", err)
-		}
-	}
+	recordFixedThreads(t, s.FindingCallbacks(), "PRRT_a", "PRRT_b")
 	s.flushThreadActions(t.Context(), true)
 	want := []string{"reply-failed:PRRT_a", "reply:PRRT_b", "resolve:PRRT_b"}
 	if !slices.Equal(rec.calls, want) {
 		t.Errorf("mutations: got = %v, want = %v (no resolve for the thread whose reply failed)", rec.calls, want)
+	}
+}
+
+// recordFixedThreads queues a fix reply and a resolution on each thread.
+func recordFixedThreads(t *testing.T, cb callbacks.FindingCallbacks, threads ...string) {
+	t.Helper()
+	for _, id := range threads {
+		if err := cb.Reply(t.Context(), id, "Fixed by checking the error."); err != nil {
+			t.Fatalf("Reply(%s): %v", id, err)
+		}
+		if err := cb.Resolve(t.Context(), id); err != nil {
+			t.Fatalf("Resolve(%s): %v", id, err)
+		}
+	}
+}
+
+// TestResolveRequiresQueuedReply proves that, with replies enabled, a
+// resolution is refused at the tool call, with an error the agent can act on,
+// until a reply is queued on the thread, so an agent that skips the reply is
+// told to post one rather than having its resolution dropped at the flush. A
+// consumer without replies has no disposition to post, so its resolution
+// stands on the pushed commit alone.
+func TestResolveRequiresQueuedReply(t *testing.T) {
+	tests := []struct {
+		name       string
+		replies    bool
+		replyFirst bool
+		wantErr    string
+	}{
+		{name: "replies enabled: resolving without a reply is refused", replies: true, wantErr: "reply to the finding before resolving it"},
+		{name: "replies enabled: resolving after a reply is queued", replies: true, replyFirst: true},
+		{name: "replies disabled: resolving needs no reply", replies: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &mutationRecorder{threads: []string{"PRRT_a"}}
+			s := &Session[testData]{
+				manager:   &CM[testData]{findingReplies: tc.replies},
+				gqlClient: newTestGraphQLClient(t, recordMutations(rec)),
+				findings:  []callbacks.Finding{{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"}},
+			}
+			cb := s.FindingCallbacks()
+			if tc.replyFirst {
+				if err := cb.Reply(t.Context(), "PRRT_a", "Fixed by bounding the read."); err != nil {
+					t.Fatalf("Reply: %v", err)
+				}
+			}
+			err := cb.Resolve(t.Context(), "PRRT_a")
+			s.flushThreadActions(t.Context(), true)
+			resolved := slices.Contains(rec.calls, "resolve:PRRT_a")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Resolve error: got = %v, want containing %q", err, tc.wantErr)
+				}
+				if resolved {
+					t.Errorf("a refused resolution reached GitHub: %v", rec.calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if !resolved {
+				t.Errorf("the resolution never reached GitHub: %v", rec.calls)
+			}
+		})
+	}
+}
+
+// TestFlushThreadActionsResolvesOnlyRepliedThreads proves the flush itself
+// gates a resolution on a posted reply when replies are enabled: a resolution
+// queued with no reply on its thread, however it got there, does not reach
+// GitHub. Without replies the pushed commit is the disposition and the
+// resolution proceeds.
+func TestFlushThreadActionsResolvesOnlyRepliedThreads(t *testing.T) {
+	tests := []struct {
+		name      string
+		replies   bool
+		wantCalls []string
+	}{
+		{name: "replies enabled: a resolution with no reply is not applied", replies: true},
+		{name: "replies disabled: the commit is the disposition", replies: false, wantCalls: []string{"resolve:PRRT_a"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &mutationRecorder{threads: []string{"PRRT_a"}}
+			s := &Session[testData]{
+				manager:   &CM[testData]{findingReplies: tc.replies},
+				gqlClient: newTestGraphQLClient(t, recordMutations(rec)),
+				threads:   &threadActions{},
+			}
+			// Queued directly, bypassing the callback's own check.
+			s.threads.addResolve("PRRT_a")
+			s.flushThreadActions(t.Context(), true)
+			if !slices.Equal(rec.calls, tc.wantCalls) {
+				t.Errorf("mutations: got = %v, want = %v", rec.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestFlushThreadActionsRetractsReplyWhenResolveFails proves a thread whose
+// disposition reply posted but whose resolution failed is not left open with
+// the bot's reply last, a state the next pass reads as settled and so never
+// revisits: once the thread's state confirms it is still open, the reply is
+// retracted so the thread awaits the bot again and the finding resurfaces. The
+// reply stays when the read-back shows the resolution landed despite the error,
+// or when the state cannot be read, since retracting it from a resolved thread
+// would leave the thread closed with nothing to say why. An unrelated thread is
+// still resolved, and a retraction that fails in turn is only logged.
+func TestFlushThreadActionsRetractsReplyWhenResolveFails(t *testing.T) {
+	tests := []struct {
+		name      string
+		fail      []string
+		resolved  bool
+		wantCalls []string
+	}{
+		{
+			name:      "the resolution fails and the thread is open: its reply is retracted",
+			fail:      []string{"resolve:PRRT_a"},
+			wantCalls: []string{"reply:PRRT_a", "reply:PRRT_b", "resolve-failed:PRRT_a", "state:PRRT_a", "delete:PRRT_a", "resolve:PRRT_b"},
+		},
+		{
+			name:      "the resolution reports an error but landed: the reply stays",
+			fail:      []string{"resolve:PRRT_a"},
+			resolved:  true,
+			wantCalls: []string{"reply:PRRT_a", "reply:PRRT_b", "resolve-failed:PRRT_a", "state:PRRT_a", "resolve:PRRT_b"},
+		},
+		{
+			name:      "the thread's state cannot be read: the reply stays",
+			fail:      []string{"resolve:PRRT_a", "state:PRRT_a"},
+			wantCalls: []string{"reply:PRRT_a", "reply:PRRT_b", "resolve-failed:PRRT_a", "state-failed:PRRT_a", "resolve:PRRT_b"},
+		},
+		{
+			name:      "the retraction fails as well: the other thread is still resolved",
+			fail:      []string{"resolve:PRRT_a", "delete:PRRT_a"},
+			wantCalls: []string{"reply:PRRT_a", "reply:PRRT_b", "resolve-failed:PRRT_a", "state:PRRT_a", "delete-failed:PRRT_a", "resolve:PRRT_b"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &mutationRecorder{threads: []string{"PRRT_a", "PRRT_b"}, resolved: tc.resolved}
+			s := &Session[testData]{
+				manager:   &CM[testData]{findingReplies: true},
+				gqlClient: newTestGraphQLClient(t, failMutations(rec, tc.fail...)),
+				findings: []callbacks.Finding{
+					{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"},
+					{Kind: callbacks.FindingKindReview, Identifier: "PRRT_b"},
+				},
+			}
+			recordFixedThreads(t, s.FindingCallbacks(), "PRRT_a", "PRRT_b")
+			s.flushThreadActions(t.Context(), true)
+			if !slices.Equal(rec.calls, tc.wantCalls) {
+				t.Errorf("mutations: got = %v, want = %v", rec.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestFlushThreadActionsWhenReplyPayloadOmitsComment proves a reply the
+// mutation accepted still counts as posted when the payload carries no comment
+// id: the resolution proceeds, since the disposition is on the thread, and if
+// the resolution then fails there is nothing to retract, so no delete is sent
+// with an empty id. Reporting the missing id as a failed reply would instead skip
+// the resolution and leave the thread settled with the bot's reply last.
+func TestFlushThreadActionsWhenReplyPayloadOmitsComment(t *testing.T) {
+	tests := []struct {
+		name      string
+		fail      []string
+		wantCalls []string
+	}{
+		{name: "the resolution proceeds", wantCalls: []string{"reply:PRRT_a", "resolve:PRRT_a"}},
+		{name: "a failed resolution sends no retraction", fail: []string{"resolve:PRRT_a"}, wantCalls: []string{"reply:PRRT_a", "resolve-failed:PRRT_a", "state:PRRT_a"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &mutationRecorder{threads: []string{"PRRT_a"}, omitCommentID: true}
+			s := &Session[testData]{
+				manager:   &CM[testData]{findingReplies: true},
+				gqlClient: newTestGraphQLClient(t, failMutations(rec, tc.fail...)),
+				findings:  []callbacks.Finding{{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"}},
+			}
+			recordFixedThreads(t, s.FindingCallbacks(), "PRRT_a")
+			s.flushThreadActions(t.Context(), true)
+			if !slices.Equal(rec.calls, tc.wantCalls) {
+				t.Errorf("mutations: got = %v, want = %v", rec.calls, tc.wantCalls)
+			}
+		})
 	}
 }
 

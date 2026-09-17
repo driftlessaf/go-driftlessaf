@@ -14,7 +14,8 @@ import (
 
 // TestReplyToReviewThread drives the reply mutation through a GraphQL double,
 // checking the thread node id and body reach the addPullRequestReviewThreadReply
-// input, and that an empty thread id or body is refused before any request.
+// input, that the posted comment's node id comes back, and that an empty thread
+// id or body is refused before any request.
 func TestReplyToReviewThread(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -38,7 +39,7 @@ func TestReplyToReviewThread(t *testing.T) {
 				io.WriteString(w, `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"C_1"}}}}`)
 			}))
 
-			err := replyToReviewThread(t.Context(), gql, tc.threadID, tc.body)
+			commentID, err := replyToReviewThread(t.Context(), gql, tc.threadID, tc.body)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("error: got = %v, want containing %q", err, tc.wantErr)
@@ -53,6 +54,9 @@ func TestReplyToReviewThread(t *testing.T) {
 			}
 			if !tc.wantSent {
 				return
+			}
+			if commentID != "C_1" {
+				t.Errorf("comment id: got = %q, want = %q", commentID, "C_1")
 			}
 			if !strings.Contains(gotBody, tc.threadID) {
 				t.Errorf("request missing thread id %q: %s", tc.threadID, gotBody)
