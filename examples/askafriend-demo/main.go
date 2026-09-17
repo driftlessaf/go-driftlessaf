@@ -51,8 +51,11 @@ import (
 	"github.com/sethvargo/go-envconfig"
 )
 
+// GCP_PROJECT_ID is required; enforced in main(). No required tag is used
+// here: a package-level MustProcess runs during package init, before TestMain,
+// so a required tag panics a same-package test binary before any test runs.
 var env = envconfig.MustProcess(context.Background(), &struct {
-	Project        string `env:"GCP_PROJECT_ID,required"`
+	Project        string `env:"GCP_PROJECT_ID"` // required; enforced in main()
 	Region         string `env:"GCP_REGION,default=global"`
 	Model          string `env:"AGENT_MODEL,default=claude-sonnet-4-6"`
 	CheckpointPath string `env:"CHECKPOINT_PATH,default=/tmp/askafriend-demo/checkpoints.jsonl"`
@@ -229,6 +232,10 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	if env.Project == "" {
+		fatal("GCP_PROJECT_ID is required")
+	}
 
 	for _, p := range []string{env.CheckpointPath, env.QuestionsPath} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
