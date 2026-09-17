@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor_test
 
 import (
+	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
@@ -55,4 +56,18 @@ func ExampleWithProvider() {
 	opt := claudeexecutor.WithProvider[promptbuilder.Noop, *struct{}](claudeexecutor.ProviderBedrock)
 	fmt.Printf("option is nil: %v\n", opt == nil)
 	// Output: option is nil: false
+}
+
+// ExampleMaxTokensError demonstrates telling a max_tokens stop with no content
+// apart from other Execute errors and reading the budget it reports. The error
+// is constructed here; Execute returns it wrapped in the same way.
+func ExampleMaxTokensError() {
+	err := fmt.Errorf("model turn: %w", &claudeexecutor.MaxTokensError{MaxTokens: 64000, OutputTokens: 64000})
+	if merr, ok := errors.AsType[*claudeexecutor.MaxTokensError](err); ok {
+		fmt.Printf("spent %d of %d output tokens\n", merr.OutputTokens, merr.MaxTokens)
+	}
+	fmt.Println(err)
+	// Output:
+	// spent 64000 of 64000 output tokens
+	// model turn: no content in Claude's response: stopped at max_tokens (max_tokens=64000, output_tokens=64000)
 }

@@ -968,6 +968,19 @@ func (e *executor[Request, Response]) runConversation(
 			return resp, true, nil
 		}
 
+		// A max_tokens stop with nothing to show for it means the output cap
+		// was spent before any content block landed (in practice, on
+		// thinking). It is reported as a typed error so callers can tell an
+		// exhausted budget from any other empty completion; the untyped
+		// fallback below stays for the remaining stop reasons.
+		if message.StopReason == anthropic.StopReasonMaxTokens {
+			clog.WarnContext(ctx, "Claude stopped at max_tokens with no content",
+				"stop_reason", message.StopReason,
+				"max_tokens", e.maxTokens,
+				"output_tokens", message.Usage.OutputTokens)
+			return response, true, &MaxTokensError{MaxTokens: e.maxTokens, OutputTokens: message.Usage.OutputTokens}
+		}
+
 		return response, true, errors.New("no content in Claude's response")
 	}
 
