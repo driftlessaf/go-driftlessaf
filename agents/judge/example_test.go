@@ -127,7 +127,7 @@ func ExampleNewVertex() {
 
 	// Create a Claude judge instance with resource labels for billing attribution
 	labels := map[string]string{"agent_name": "judge"}
-	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-east5", "claude-sonnet-4@20250514",
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "us-east5", "claude-sonnet-4-6",
 		claudeexecutor.WithResourceLabels[*judge.Request, *judge.Judgement](labels))
 	if err != nil {
 		fmt.Printf("Error creating judge: %v\n", err)

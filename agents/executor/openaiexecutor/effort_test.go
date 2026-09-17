@@ -57,7 +57,7 @@ func TestReasoningEffortRequestAssembly(t *testing.T) {
 	t.Parallel()
 
 	params := openai.ChatCompletionNewParams{
-		Model:               "google/gemini-2.5-flash",
+		Model:               "google/gemini-3.5-flash",
 		MaxCompletionTokens: param.NewOpt(int64(64)),
 		Temperature:         param.NewOpt(0.1),
 		Messages: []openai.ChatCompletionMessageParamUnion{

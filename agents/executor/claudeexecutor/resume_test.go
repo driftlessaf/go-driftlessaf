@@ -23,7 +23,7 @@ import (
 // defaultResumeModel is the executor's default model id (claudeexecutor.New
 // leaves it unset-to-default). A resume envelope must carry the same model or
 // the fail-closed check rejects it, so the fixtures below stamp this value.
-const defaultResumeModel = "claude-sonnet-4@20250514"
+const defaultResumeModel = "claude-sonnet-4-6"
 
 // liveConfigDigest reproduces the executor's turn-invariant static params for
 // the resume-test configuration — default model, default 8192 max tokens, no

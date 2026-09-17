@@ -62,7 +62,7 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 // WithoutTemperature omits sampling temperature from provider requests.
 // Explicit routes use this when their effective capabilities narrow sampling
 // parameters out, even if the logical model family normally supports them.
-// Direct and legacy construction continue to send the executor default.
+// The executor also omits temperature by default; WithTemperature opts in.
 func WithoutTemperature[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		e.omitTemperature = true

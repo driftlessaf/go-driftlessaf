@@ -38,7 +38,7 @@ func ExampleNew() {
 	)
 
 	exec, err := openaiexecutor.New[myRequest, myResponse](client, prompt,
-		openaiexecutor.WithModel[myRequest, myResponse]("google/gemini-2.5-flash"),
+		openaiexecutor.WithModel[myRequest, myResponse]("google/gemini-3.5-flash"),
 		openaiexecutor.WithMaxTokens[myRequest, myResponse](8192),
 		openaiexecutor.WithTemperature[myRequest, myResponse](0.1),
 	)

@@ -108,13 +108,14 @@ func New[Request promptbuilder.Bindable, Response any](
 	}
 
 	e := &executor[Request, Response]{
-		client:      client,
-		modelName:   "google/gemini-2.5-flash",
-		prompt:      prompt,
-		maxTokens:   8192,
-		maxTurns:    DefaultMaxTurns,
-		temperature: 0.1,
-		provider:    ProviderOpenAICompatible,
+		client:          client,
+		modelName:       "google/gemini-3.5-flash",
+		prompt:          prompt,
+		maxTokens:       8192,
+		maxTurns:        DefaultMaxTurns,
+		temperature:     0.1,
+		omitTemperature: true,
+		provider:        ProviderOpenAICompatible,
 		attribution: agenttrace.Attribution{
 			ProviderName: ProviderOpenAICompatible.metricName(),
 			System:       ProviderOpenAICompatible.traceSystem(),

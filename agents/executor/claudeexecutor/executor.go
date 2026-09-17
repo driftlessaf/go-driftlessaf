@@ -215,9 +215,9 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 
 	e := &executor[Request, Response]{
 		messages:            messages,
-		modelName:           "claude-sonnet-4@20250514", // Default to Sonnet 4
-		capabilityModelName: "claude-sonnet-4@20250514", // Same identity on the legacy path
-		provider:            ProviderVertex,             // matches NewClient's Vertex fallback; anthropicauth callers override
+		modelName:           "claude-sonnet-4-6", // Default to Sonnet 4.6
+		capabilityModelName: "claude-sonnet-4-6", // Same identity on the legacy path
+		provider:            ProviderVertex,      // matches NewClient's Vertex fallback; anthropicauth callers override
 		attribution: agenttrace.Attribution{
 			ProviderName: ProviderVertex.metricName(),
 			System:       ProviderVertex.traceSystem(),

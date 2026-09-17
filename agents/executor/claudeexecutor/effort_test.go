@@ -84,9 +84,11 @@ func TestWithEffortAssemblesOutputConfig(t *testing.T) {
 		t.Errorf("OutputConfig.Effort = %q, want %q (xhigh clamped for pre-xhigh model)", clampedParams.OutputConfig.Effort, anthropic.OutputConfigEffortHigh)
 	}
 
-	// The default test model (Sonnet 4) predates the effort parameter
+	// Sonnet 4 predates the effort parameter
 	// entirely, so the field is dropped rather than sent.
-	dropped := newTestExecutor(t, WithEffort[*testBindable, *testResponse](effort.High))
+	dropped := newTestExecutor(t,
+		WithModel[*testBindable, *testResponse]("claude-sonnet-4@20250514"),
+		WithEffort[*testBindable, *testResponse](effort.High))
 	droppedParams, _, err := dropped.assembleParams("p", "", nil)
 	if err != nil {
 		t.Fatalf("assembleParams (dropped): %v", err)
