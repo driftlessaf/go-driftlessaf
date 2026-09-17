@@ -136,8 +136,8 @@ func Resolve(id string) Info {
 	case strings.HasPrefix(lower, "claude-"):
 		return claudeInfo(id)
 	case strings.HasPrefix(lower, "gpt-"), strings.Contains(id, "/"):
-		// The executor clamps xhigh/max onto the provider's "high"
-		// reasoning_effort, so the whole scale is usable.
+		// Chat Completions maps xhigh/max to "high". Responses preserves
+		// native effort; its route declarations restrict model support.
 		return Info{
 			Backend:        BackendOpenAICompat,
 			Efforts:        slices.Clone(fullEfforts),

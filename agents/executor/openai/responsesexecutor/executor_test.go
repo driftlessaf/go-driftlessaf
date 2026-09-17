@@ -130,7 +130,7 @@ func TestNativeContinuation(t *testing.T) {
 				t.Errorf("unexpected %s", key)
 			}
 		}
-		if diff := cmp.Diff(map[string]any{"effort": "high"}, r["reasoning"]); diff != "" {
+		if diff := cmp.Diff(map[string]any{"effort": "xhigh"}, r["reasoning"]); diff != "" {
 			t.Error(diff)
 		}
 	}
@@ -147,6 +147,79 @@ func TestNativeContinuation(t *testing.T) {
 	def := requests[0]["tools"].([]any)[1].(map[string]any)["parameters"].(map[string]any)
 	if def["$defs"] == nil || def["x-fixture"] != true {
 		t.Error("tool schema extensions dropped")
+	}
+}
+
+func TestReasoningEffortWireAndEvidence(t *testing.T) {
+	t.Parallel()
+	for _, level := range []effort.Level{"", effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max} {
+		t.Run(string(level), func(t *testing.T) {
+			t.Parallel()
+			cfg := config(t)
+			cfg.Effort = level
+			reported := level
+			if reported == "" {
+				reported = effort.Medium
+			}
+			e := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Reasoning *struct {
+						Effort string `json:"effort"`
+					} `json:"reasoning"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				if level == "" {
+					if body.Reasoning != nil {
+						t.Errorf("reasoning: got = %+v, want = omitted", body.Reasoning)
+					}
+				} else if body.Reasoning == nil || body.Reasoning.Effort != string(level) {
+					t.Errorf("reasoning: got = %+v, want = %q without clamping", body.Reasoning, level)
+				}
+				emitEffort(w, string(reported))
+			}, cfg)
+			tracer := new(recordingTracer)
+			if _, err := e.Execute(agenttrace.WithTracer[answer](t.Context(), tracer), request{}, nil); err != nil {
+				t.Fatal(err)
+			}
+			want := []reasoningEffortEvidence{{Turn: 0, Requested: level, Reported: reported}}
+			if diff := cmp.Diff(want, tracer.trace.Metadata["responses_reasoning_effort"]); diff != "" {
+				t.Errorf("structural effort evidence (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Only the documented response reasoning metadata varies; output and usage
+// use the same completed SSE contract as emit.
+func emitEffort(w http.ResponseWriter, reported string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	b, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{
+		"id": "resp_effort", "status": "completed", "reasoning": map[string]any{"effort": reported},
+		"output": []any{submit("s", "done")}, "usage": map[string]any{"input_tokens": 100, "output_tokens": 30},
+	}})
+	_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", b)
+}
+
+func TestReasoningEffortMismatch(t *testing.T) {
+	t.Parallel()
+	for _, reported := range []string{"high", "none", "minimal"} {
+		t.Run(reported, func(t *testing.T) {
+			t.Parallel()
+			cfg := config(t)
+			cfg.Effort = effort.XHigh
+			e := serve(t, func(w http.ResponseWriter, _ *http.Request) { emitEffort(w, reported) }, cfg)
+			tracer := new(recordingTracer)
+			got, err := e.Execute(agenttrace.WithTracer[answer](t.Context(), tracer), request{}, nil)
+			if err == nil || !strings.Contains(err.Error(), "reasoning effort mismatch") || got.Text != "" {
+				t.Fatalf("Execute: got = %+v, %v, want = no accepted result and effort mismatch", got, err)
+			}
+			if !tracer.trace.Turns[0].Failed || tracer.trace.Turns[0].OutputTokens != 30 {
+				t.Errorf("mismatched turn: got = %+v, want = failed with usage preserved", tracer.trace.Turns[0])
+			}
+		})
 	}
 }
 

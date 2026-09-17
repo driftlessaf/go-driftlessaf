@@ -45,10 +45,12 @@ type Config[Response any] struct {
 	MaxTurns            int
 	ToolCallConcurrency int
 	MaxTokens           int64
-	Effort              effort.Level
-	Submit              submitresult.Options[Response]
-	ResultValidators    []callbacks.ResultValidator[Response]
-	ResourceLabels      map[string]string
+	// Effort is sent verbatim. Routed callers validate model support against
+	// the route's capabilities; direct callers must select a supported level.
+	Effort           effort.Level
+	Submit           submitresult.Options[Response]
+	ResultValidators []callbacks.ResultValidator[Response]
+	ResourceLabels   map[string]string
 
 	// RequestTimeout bounds each streaming HTTP attempt. Zero inherits the
 	// execution deadline. This is a total timeout, not an idle timeout.
@@ -69,6 +71,13 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	config   Config[Response]
 	submit   submitresult.ResponsesMetadata[Response]
 	recorder *telemetry.Recorder
+}
+
+// Empty requested means provider default; empty reported means unavailable.
+type reasoningEffortEvidence struct {
+	Turn      int          `json:"turn"`
+	Requested effort.Level `json:"requested"`
+	Reported  effort.Level `json:"reported"`
 }
 
 // New constructs a native Responses executor using an already configured client.
@@ -136,6 +145,10 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 	}
 	trace, done := agenttrace.StartTrace[Response](ctx, prompt)
 	defer func() { done(response, err) }()
+	// Structural evidence survives payload truncation and does not contain
+	// prompts or reasoning text. Write only after all tool workers have joined.
+	var reasoningEvidence []reasoningEffortEvidence
+	defer func() { trace.Metadata["responses_reasoning_effort"] = reasoningEvidence }()
 	defs, err := e.definitions(tools)
 	if err != nil {
 		return response, err
@@ -157,11 +170,7 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 		params.Instructions = param.NewOpt(instructions)
 	}
 	if e.config.Effort != "" {
-		level := shared.ReasoningEffort(e.config.Effort)
-		if e.config.Effort == effort.XHigh || e.config.Effort == effort.Max {
-			level = shared.ReasoningEffortHigh
-		}
-		params.Reasoning = shared.ReasoningParam{Effort: level}
+		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(e.config.Effort)}
 	}
 	invalid := 0
 	turns := 0
@@ -198,6 +207,15 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 			turn.RecordTokens(out.Usage.InputTokens, out.Usage.OutputTokens)
 			turn.RecordCacheTokens(out.Usage.InputTokensDetails.CachedTokens, 0)
 			turn.RecordReasoningTokens(out.Usage.OutputTokensDetails.ReasoningTokens)
+			reported := effort.Level(out.Reasoning.Effort)
+			switch reported {
+			case "", "none", "minimal", effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max:
+			default:
+				reported = ""
+			}
+			reasoningEvidence = append(reasoningEvidence, reasoningEffortEvidence{
+				Turn: index, Requested: e.config.Effort, Reported: reported,
+			})
 			e.recorder.RecordTokens(ctx, out.Usage.InputTokens, out.Usage.OutputTokens)
 			e.recorder.RecordCacheTokens(ctx, out.Usage.InputTokensDetails.CachedTokens, 0)
 			responsePayload, err := safePayload(out)
@@ -206,6 +224,11 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 				return false, false, err
 			}
 			if err := turn.RecordResponse(responsePayload); err != nil {
+				turn.Fail(err)
+				return false, false, err
+			}
+			if e.config.Effort != "" && reported != "" && reported != e.config.Effort {
+				err := fmt.Errorf("responses reasoning effort mismatch: requested %q, provider reported %q", e.config.Effort, reported)
 				turn.Fail(err)
 				return false, false, err
 			}

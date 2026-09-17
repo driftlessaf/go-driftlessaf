@@ -16,8 +16,10 @@ import "fmt"
 //     (claudeexecutor.WithEffort).
 //   - Gemini: thinkingLevel on Gemini 3.x models, thinkingBudget tiers on
 //     earlier models (googleexecutor.WithEffort).
-//   - OpenAI-compatible: reasoning_effort, where XHigh and Max clamp to
+//   - OpenAI-compatible Chat Completions: reasoning_effort, where XHigh and Max clamp to
 //     "high" (openaiexecutor.WithEffort).
+//   - OpenAI Responses: reasoning.effort, sent verbatim after route capability
+//     validation (responsesexecutor.Config.Effort).
 //
 // The zero value means "not configured": backends keep their model default,
 // and Validate rejects it — express "no effort" by not passing the option.
