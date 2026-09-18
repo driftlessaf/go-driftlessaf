@@ -11,7 +11,14 @@ SPDX-License-Identifier: Apache-2.0
 //  3. Handle states (skip/closed/findings/pending)
 //  4. Acquire clone lease
 //  5. Run agent
-//  6. Push changes
+//  6. Revalidate issue eligibility before committing and pushing changes
+//
+// When an agent produces changes, the reconciler refreshes the issue before
+// publishing. A closed issue, a missing required label, or an issue skip label
+// discards the work without a push, PR update, or give-up explanation. Read
+// failures abort publication with an error so reconciliation can retry.
+// This narrows the race rather than eliminating it: the issue can still change
+// between the refresh and the subsequent push or PR creation.
 //
 // The package is parameterized by request type, response type, and callbacks type,
 // allowing different agents to plug in their specific logic while reusing the

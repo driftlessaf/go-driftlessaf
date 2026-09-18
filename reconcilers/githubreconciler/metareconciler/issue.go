@@ -23,6 +23,10 @@ import (
 	"github.com/google/go-github/v88/github"
 )
 
+// errIssueInactive cancels publication without treating discarded agent work as
+// a no-change result that would post a give-up explanation.
+var errIssueInactive = errors.New("issue is no longer eligible for publication")
+
 // reconcileIssue processes an issue URL and runs the agent to create/update a PR.
 func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
 	log := clog.FromContext(ctx)
@@ -303,10 +307,27 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 				return "", changemanager.ErrNoChanges
 			}
 
+			// The issue may have closed or been taken over while the agent ran.
+			// Refresh only when there is a change to commit, before the lease
+			// pushes it and Upsert creates or updates the PR.
+			freshIssue, _, err := gh.Issues.Get(ctx, res.Owner, res.Repo, res.Number)
+			if err != nil {
+				return "", fmt.Errorf("refresh issue before publication: %w", err)
+			}
+			if freshIssue.GetState() != "open" ||
+				(r.requiredLabel != "" && !hasLabel(freshIssue, r.requiredLabel)) ||
+				changeSession.IssueHasSkipLabel(freshIssue) {
+				clog.InfoContext(ctx, "Issue no longer permits publication, discarding agent changes", "issue_state", freshIssue.GetState())
+				return "", errIssueInactive
+			}
+
 			return result.GetCommitMessage(), nil
 		})
 	})
 	if err != nil {
+		if errors.Is(err, errIssueInactive) {
+			return nil
+		}
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
 			switch {
