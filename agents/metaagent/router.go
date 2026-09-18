@@ -328,7 +328,11 @@ func validateSubmitToolForProtocol[Resp, CB any](protocol modelrouter.Protocol, 
 	case modelrouter.ProtocolGoogleGenAI:
 		_, err = submitresult.GoogleTool(submitOptions(config))
 	case modelrouter.ProtocolAnthropicMessages:
-		_, err = submitresult.ClaudeTool(submitOptions(config))
+		tool, buildErr := submitresult.ClaudeTool(submitOptions(config))
+		err = buildErr
+		if err == nil && config.SuspendToolName != "" && config.SuspendToolName == tool.Definition.Name {
+			return fmt.Errorf("creating routed meta-agent: suspend tool name %q collides with the submit tool name", config.SuspendToolName)
+		}
 	case modelrouter.ProtocolOpenAIChatCompletions:
 		_, err = submitresult.OpenAITool(submitOptions(config))
 	case modelrouter.ProtocolOpenAIResponses:
