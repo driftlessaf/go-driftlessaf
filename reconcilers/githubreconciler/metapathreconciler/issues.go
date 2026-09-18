@@ -162,7 +162,9 @@ func (r *IssueReconciler) reconcilePathIssues(ctx context.Context, res *githubre
 
 	// Fast path: a deleted path has no findings. Skip the analyzer and
 	// reconcile an empty desired set so any outstanding issues are closed.
-	if !lease.PathExists() {
+	// A reconciler whose paths name no file (WithSyntheticPaths) skips this:
+	// its analyzer resolves the path and decides what a missing file means.
+	if !r.syntheticPaths && !lease.PathExists() {
 		if _, err := session.Reconcile(ctx, nil, nil, r.closeMessage); err != nil {
 			return fmt.Errorf("reconcile issues: %w", err)
 		}

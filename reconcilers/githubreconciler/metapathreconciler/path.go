@@ -209,14 +209,18 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		// A path key outlives its file: a module or package removed from the
 		// default branch keeps arriving through retries and resyncs. Nothing
 		// remains to analyze, so complete the key and close any PR opened for it.
-		exists, err := pathExists(wt, res.Path)
-		if err != nil {
-			return fmt.Errorf("stat path: %w", err)
-		}
-		if !exists {
-			log.Info("Path no longer exists on the default branch, closing stale PR if any")
-			r.giveUp.Clear(ctx, session)
-			return session.CloseAnyOutstanding(ctx, "Closing this PR: the path no longer exists on the base branch.")
+		// A reconciler whose paths name no file (WithSyntheticPaths) skips this:
+		// its analyzer resolves the path and decides what a missing file means.
+		if !r.syntheticPaths {
+			exists, err := pathExists(wt, res.Path)
+			if err != nil {
+				return fmt.Errorf("stat path: %w", err)
+			}
+			if !exists {
+				log.Info("Path no longer exists on the default branch, closing stale PR if any")
+				r.giveUp.Clear(ctx, session)
+				return session.CloseAnyOutstanding(ctx, "Closing this PR: the path no longer exists on the base branch.")
+			}
 		}
 
 		// First pass: run the analyzer. The analyzer may modify files in

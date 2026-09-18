@@ -33,9 +33,10 @@ type IssuesOption interface {
 
 // commonOptions holds the configuration shared by every reconciler variant.
 type commonOptions struct {
-	mode    Mode
-	labels  []string
-	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+	mode           Mode
+	labels         []string
+	labelFn        func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+	syntheticPaths bool
 }
 
 // prOptions holds the configuration for a reconciler built with NewPR.
@@ -107,6 +108,22 @@ func WithLabels(labels ...string) Option {
 func WithLabelFunc(fn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string) Option {
 	return option(func(o *commonOptions) {
 		o.labelFn = fn
+	})
+}
+
+// WithSyntheticPaths declares that the reconciler's resource paths are
+// workqueue keys rather than files on the default branch: for example a
+// per-finding branch suffix that the analyzer maps back to the file it
+// covers, chosen so pull request events re-queue the same key (see
+// githubreconciler.BranchSuffixToPath). A path that names no file in the
+// leased worktree is then analyzed like any other instead of being taken for
+// a removed file, which would complete the key and close the pull request or
+// issues opened for it. The analyzer owns the removed-file outcome for such a
+// reconciler: report no diagnostics to close. Off by default, so reconcilers
+// whose paths are real files keep the missing-path short-circuit.
+func WithSyntheticPaths() Option {
+	return option(func(o *commonOptions) {
+		o.syntheticPaths = true
 	})
 }
 

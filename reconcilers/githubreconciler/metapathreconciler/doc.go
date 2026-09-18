@@ -31,6 +31,17 @@ SPDX-License-Identifier: Apache-2.0
 // to the agent as findings. When the analyzer fixes all diagnostics, the
 // agent is skipped entirely and the analyzer's changes are committed directly.
 //
+// # Synthetic paths
+//
+// Both variants take a resource path for a file on the default branch, and a
+// path the branch no longer carries completes the key and closes whatever was
+// opened for it. A reconciler may instead key its work on paths that name no
+// file, such as a per-finding branch suffix its analyzer maps back to the
+// file it covers, so that pull request events re-queue the same key (see
+// githubreconciler.BranchSuffixToPath). Such a reconciler declares this with
+// WithSyntheticPaths; without it, every fresh pass on such a path ends as a
+// removed file and no pull request or issue is ever opened.
+//
 // # Path reconciliation with NewIssues
 //
 // Every pass is the same level-triggered re-derivation against the default

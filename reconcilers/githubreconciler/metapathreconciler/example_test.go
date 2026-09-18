@@ -109,6 +109,40 @@ func Example_newIssues() {
 	_ = rec // register with githubreconciler.Main / CLIMain
 }
 
+// ExampleWithSyntheticPaths demonstrates a reconciler whose resource paths are
+// branch suffixes rather than files. Its analyzer maps each path to the file
+// it covers, so the framework must hand a path that names no file to the
+// analyzer instead of reading it as a removed file.
+func ExampleWithSyntheticPaths() {
+	ctx := context.Background()
+	const identity = "my-bot"
+
+	tmpl := template.Must(template.New("issue").Parse(`{{.Rule}} findings in {{.Path}}`))
+	im, err := issuemanager.New[metapathreconciler.IssueData](identity, tmpl, tmpl)
+	if err != nil {
+		// handle error
+		return
+	}
+
+	var cloneMeta *clonemanager.Meta // your clone manager metadata
+
+	rec, err := metapathreconciler.NewIssues(
+		ctx,
+		identity,
+		reportOnlyAnalyzer{},
+		im,
+		cloneMeta,
+		metapathreconciler.WithMode(metapathreconciler.ModeFix),
+		// Paths such as "pkg-finding-1" name branches, not files.
+		metapathreconciler.WithSyntheticPaths(),
+	)
+	if err != nil {
+		// handle error
+		return
+	}
+	_ = rec // register with githubreconciler.Main / CLIMain
+}
+
 // ExampleGroupByRule demonstrates the default grouping: one issue per rule,
 // keyed by the rule name, with the diagnostics sorted deterministically.
 func ExampleGroupByRule() {

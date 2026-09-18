@@ -32,6 +32,11 @@ type core struct {
 	// labelFn optionally computes additional labels from diagnostics/findings.
 	// See WithLabelFunc.
 	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+
+	// syntheticPaths, when true, means resource paths name no file on the
+	// default branch, so a missing path is analyzed rather than treated as a
+	// removed file. See WithSyntheticPaths.
+	syntheticPaths bool
 }
 
 // newCore builds the shared reconciler state from the common configuration.
@@ -41,12 +46,13 @@ func newCore(ctx context.Context, identity string, analyzer Analyzer, cloneMeta 
 		return core{}, fmt.Errorf("create status manager: %w", err)
 	}
 	return core{
-		identity:      identity,
-		analyzer:      analyzer,
-		statusManager: sm,
-		cloneMeta:     cloneMeta,
-		mode:          o.mode,
-		labels:        o.labels,
-		labelFn:       o.labelFn,
+		identity:       identity,
+		analyzer:       analyzer,
+		statusManager:  sm,
+		cloneMeta:      cloneMeta,
+		mode:           o.mode,
+		labels:         o.labels,
+		labelFn:        o.labelFn,
+		syntheticPaths: o.syntheticPaths,
 	}, nil
 }

@@ -21,7 +21,9 @@ type Result interface {
 }
 
 // Analyzer runs a static analysis tool over a worktree and returns diagnostics.
-// Each path is relative to the repo root (e.g., "path/to/package").
+// Each path is relative to the repo root (e.g., "path/to/package"). A
+// reconciler built with WithSyntheticPaths hands the analyzer paths that name
+// no file; the analyzer maps those to the files they cover.
 type Analyzer interface {
 	// Analyze runs the tool scoped to the given paths within the worktree
 	// and returns diagnostics. An empty slice means the paths are clean.
