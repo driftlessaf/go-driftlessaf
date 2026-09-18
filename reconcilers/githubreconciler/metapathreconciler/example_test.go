@@ -17,6 +17,13 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 )
 
+func ExampleReviewDiffFromContext() {
+	ctx := metapathreconciler.WithReviewDiff(context.Background(), "PR diff")
+	diff, isPR := metapathreconciler.ReviewDiffFromContext(ctx)
+	fmt.Println(isPR, diff)
+	// Output: true PR diff
+}
+
 // Example_prData demonstrates the PRData type used for change detection.
 // The PRData is embedded in PR bodies to track state across reconciliations.
 func Example_prData() {

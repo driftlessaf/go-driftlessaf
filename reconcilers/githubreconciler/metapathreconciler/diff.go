@@ -6,8 +6,60 @@ SPDX-License-Identifier: Apache-2.0
 package metapathreconciler
 
 import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+
 	"github.com/waigani/diffparser"
 )
+
+type reviewDiffKey struct{}
+
+// filterDiffToPaths retains complete Git file patches for selected destination
+// paths. Parse each patch to identify its destination, but preserve its bytes:
+// rebuilding hunks would risk changing line numbers or losing newline markers.
+// Git prefixes hunk content with a space, +, or -, so a file's content cannot
+// be mistaken for the next unprefixed "diff --git" header.
+func filterDiffToPaths(raw string, paths []string) (string, error) {
+	var filtered strings.Builder
+	for raw != "" {
+		patch, rest, more := strings.Cut(raw, "\ndiff --git ")
+		if more {
+			patch += "\n"
+			raw = "diff --git " + rest
+		} else {
+			raw = ""
+		}
+		parsed, err := diffparser.Parse(patch)
+		if err != nil {
+			return "", fmt.Errorf("parse review file diff: %w", err)
+		}
+		if len(parsed.Files) != 1 {
+			return "", fmt.Errorf("expected one file in review diff section, got %d", len(parsed.Files))
+		}
+		file := parsed.Files[0]
+		if file.NewName != "" && file.NewName != "/dev/null" && slices.Contains(paths, file.NewName) {
+			filtered.WriteString(patch)
+		}
+	}
+	return filtered.String(), nil
+}
+
+// WithReviewDiff marks an analyzer invocation as a PR review and carries the
+// unified diff from the PR base to its head. Path audits do not set this value.
+// An empty diff still identifies a PR review; it must not trigger a broad audit.
+func WithReviewDiff(ctx context.Context, diff string) context.Context {
+	return context.WithValue(ctx, reviewDiffKey{}, diff)
+}
+
+// ReviewDiffFromContext returns the PR diff and whether this is a PR review.
+// Analyzers can read surrounding code for context, but should report only
+// violations introduced by the diff, anchored to an added or modified line.
+func ReviewDiffFromContext(ctx context.Context) (string, bool) {
+	diff, ok := ctx.Value(reviewDiffKey{}).(string)
+	return diff, ok
+}
 
 // changedLineRange represents a range of changed lines in a file.
 type changedLineRange struct {
@@ -70,10 +122,9 @@ func filterToChangedLines(diagnostics []Diagnostic, pd *parsedDiff) []Diagnostic
 		if !ok {
 			continue
 		}
-		// Line 0 means the diagnostic applies to the whole file;
-		// include it if the file has any changes.
-		if d.Line == 0 {
-			filtered = append(filtered, d)
+		// File-level findings cannot establish that the PR introduced the
+		// issue. Require an actual changed line, including for new files.
+		if d.Line <= 0 {
 			continue
 		}
 		for _, r := range ranges {

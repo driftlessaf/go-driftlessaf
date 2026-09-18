@@ -843,15 +843,12 @@ index abc..def 100644
 
 	filtered := filterToChangedLines(diagnostics, pd)
 
-	// Should include line 12 (in range) and line 0 (whole file).
-	if len(filtered) != 2 {
-		t.Fatalf("len(filtered): got = %d, want = 2", len(filtered))
+	// File-level findings do not demonstrate that the PR introduced an issue.
+	if len(filtered) != 1 {
+		t.Fatalf("len(filtered): got = %d, want = 1", len(filtered))
 	}
 	if filtered[0].Line != 12 {
 		t.Errorf("filtered[0].Line: got = %d, wanted = 12", filtered[0].Line)
-	}
-	if filtered[1].Line != 0 {
-		t.Errorf("filtered[1].Line: got = %d, wanted = 0", filtered[1].Line)
 	}
 }
 

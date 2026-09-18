@@ -19,6 +19,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
+	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v88/github"
 	"github.com/shurcooL/githubv4"
 )
@@ -207,11 +208,10 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 
 	// Run analyzer on the changed files, then filter diagnostics to only
 	// lines touched in the diff.
-	diagnostics, err := r.analyzer.Analyze(ctx, wt, filesToAnalyze)
+	diagnostics, err := r.analyzeReview(ctx, wt, filesToAnalyze, raw, pd)
 	if err != nil {
 		return fmt.Errorf("run analyzer: %w", err)
 	}
-	diagnostics = filterToChangedLines(diagnostics, pd)
 
 	// Report results via statusmanager.
 	if len(diagnostics) == 0 {
@@ -225,6 +225,39 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 		Conclusion: "failure",
 		Details:    CheckDetails{Diagnostics: diagnostics, Identity: r.identity},
 	})
+}
+
+// analyzeReview supplies explicit PR scope through analyzer compositions and
+// filters every analyzer's output before it reaches check annotations.
+func (r *core) analyzeReview(ctx context.Context, wt *gogit.Worktree, paths []string, raw string, pd *parsedDiff) ([]Diagnostic, error) {
+	reviewDiff, err := filterDiffToPaths(raw, paths)
+	if err != nil {
+		return nil, fmt.Errorf("filter PR review diff: %w", err)
+	}
+	diagnostics, err := r.analyzer.Analyze(WithReviewDiff(ctx, reviewDiff), wt, paths)
+	if err != nil {
+		return nil, err
+	}
+	filtered := slices.DeleteFunc(filterToChangedLines(diagnostics, pd), func(d Diagnostic) bool {
+		return !slices.Contains(paths, d.Path)
+	})
+	if dropped := len(diagnostics) - len(filtered); dropped > 0 {
+		var withoutAnchor, outsidePaths int
+		for _, d := range diagnostics {
+			// Count each suppressed finding once, with missing anchors first.
+			if d.Line <= 0 {
+				withoutAnchor++
+			} else if !slices.Contains(paths, d.Path) {
+				outsidePaths++
+			}
+		}
+		clog.InfoContext(ctx, "Dropped PR review diagnostics outside review scope",
+			"dropped_count", dropped,
+			"without_line_anchor", withoutAnchor,
+			"outside_selected_paths", outsidePaths,
+			"outside_changed_lines", dropped-withoutAnchor-outsidePaths)
+	}
+	return filtered, nil
 }
 
 // ownsPR is the pure ownership decision for a pull request whose head branch

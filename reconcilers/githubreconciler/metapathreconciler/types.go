@@ -25,6 +25,16 @@ type Result interface {
 type Analyzer interface {
 	// Analyze runs the tool scoped to the given paths within the worktree
 	// and returns diagnostics. An empty slice means the paths are clean.
+	// PR reviews carry their diff via [ReviewDiffFromContext]; without it,
+	// the invocation is a path audit, regardless of the number of paths.
+	//
+	// In PR reviews, paths is the selected changed-file set after repository
+	// exclusions. The reconciler publishes only diagnostics whose Path exactly
+	// matches a selected path and whose positive Line is added or modified in
+	// the diff. Findings on related files outside paths, on unchanged lines,
+	// or without a line anchor (including file-level Line 0 findings) are
+	// dropped, with counts logged by reason. This contract applies to every
+	// analyzer used for PR reviews. Path audits do not apply these filters.
 	//
 	// prior carries findings from a previous pass so analyzers with
 	// nondeterministic output (e.g. agent-based audits) can re-confirm
