@@ -18,10 +18,13 @@ SPDX-License-Identifier: Apache-2.0
 // New is the compatibility constructor. Its model parameter determines which
 // executor path is used:
 //   - Models starting with "gemini-" use Google's Generative AI SDK (native)
-//   - Models starting with "claude-" use Anthropic's SDK via Vertex AI (native)
+//   - Models starting with "claude-" use the configured legacy Claude backend
 //   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
 //
-// NewRouted is the explicit path. An application constructs a modelrouter.Registry,
+// NewRouted is the recommended constructor for new agents and migrations.
+// NewVertexRouter configures declared Vertex routes for one project and region.
+// NewRouterWithAdapters registers typed adapters for other providers or custom
+// settings in one call. An application constructs a modelrouter.Registry,
 // registers typed adapters by provider in the matching protocol registry, and
 // selects a provider and logical model. The resolved Plan remains authoritative
 // for the exact provider model ID, effective capabilities, and attribution;
@@ -49,7 +52,15 @@ SPDX-License-Identifier: Apache-2.0
 //	    ),
 //	)
 //
-// Configure and create the agent:
+// Construct the router once at application startup. For Vertex AI, pass exact
+// application-owned route declarations to NewVertexRouter:
+//
+//	router, err := metaagent.NewVertexRouter(projectID, region, declarations...)
+//	if err != nil {
+//	    return err
+//	}
+//
+// Configure the agent and select one declared provider/model pair:
 //
 //	config := metaagent.Config[*Result, MyCallbacks]{
 //	    SystemInstructions: systemPrompt,
@@ -57,7 +68,7 @@ SPDX-License-Identifier: Apache-2.0
 //	    Tools:              tools,
 //	}
 //
-//	agent, err := metaagent.New[*Request, *Result, MyCallbacks](ctx, projectID, region, model, config)
+//	agent, err := metaagent.NewRouted[*Request, *Result, MyCallbacks](ctx, router, selection, config)
 //	result, err := agent.Execute(ctx, request, callbacks)
 //
 // The agent uses the submit_result tool to return structured results. The Resp

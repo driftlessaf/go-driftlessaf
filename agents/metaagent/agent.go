@@ -23,10 +23,11 @@ type Agent[Req promptbuilder.Bindable, Resp, CB any] interface {
 	Execute(ctx context.Context, request Req, callbacks CB) (Resp, error)
 }
 
-// New creates a new meta-agent with the given configuration.
+// New is the compatibility constructor. Prefer NewRouted for new agents and
+// migrations that explicitly preserve provider and model configuration.
 // The modelName parameter determines which provider implementation is used:
 //   - Models starting with "gemini-" use Google's Generative AI SDK (native)
-//   - Models starting with "claude-" use Anthropic's SDK via Vertex AI (native)
+//   - Models starting with "claude-" use the configured legacy Claude backend
 //   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
 func New[Req promptbuilder.Bindable, Resp, CB any](
 	ctx context.Context,

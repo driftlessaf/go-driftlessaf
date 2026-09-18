@@ -40,9 +40,8 @@ type response struct {
 	Answer string `json:"answer"`
 }
 
-// ExampleNew demonstrates creating a new meta-agent with model selection.
-// New selects the provider implementation based on the model name prefix:
-// "gemini-" uses Google's Generative AI SDK, "claude-" uses Anthropic via Vertex AI.
+// ExampleNew demonstrates the retained compatibility constructor. Prefer
+// NewRouted for explicit provider selection in new applications.
 func ExampleNew() {
 	ctx := context.Background()
 
@@ -283,20 +282,26 @@ func ExampleNewBedrockOpenAIChatCompletionsAdapter() {
 // Execute sends the request to the model and returns the structured response.
 func ExampleAgent_Execute() {
 	ctx := context.Background()
-
-	tools := toolcall.NewEmptyToolsProvider[*response]()
-	config := metaagent.Config[*response, toolcall.EmptyTools]{
-		Tools: tools,
-	}
-
-	agent, err := metaagent.New[*request](ctx, "my-project", "us-central1", "gemini-2.0-flash", config)
+	declaration := exampleVertexDeclaration()
+	router, err := metaagent.NewVertexRouter("my-project", "global", declaration)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
-
-	req := &request{Query: "What is the answer?"}
-	_, err = agent.Execute(ctx, req, toolcall.EmptyTools{})
+	prompt, err := promptbuilder.NewPrompt("Answer the question: {query}")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	agent, err := metaagent.NewRouted[*request](ctx, router, declaration.Selection, metaagent.Config[*response, toolcall.EmptyTools]{
+		UserPrompt: prompt,
+		Tools:      toolcall.NewEmptyToolsProvider[*response](),
+	})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	_, err = agent.Execute(ctx, &request{Query: "What is the answer?"}, toolcall.EmptyTools{})
 	if err != nil {
 		fmt.Println("error:", err)
 	}
@@ -327,4 +332,67 @@ func ExampleAsResumer() {
 		fmt.Println("not resumable: run from scratch")
 	}
 	// Output: not resumable: run from scratch
+}
+
+// ExampleNewVertexRouter constructs a shared router without loading credentials.
+// In mono, obtain the declaration from models.LookupRoute instead of duplicating
+// fleet capabilities in application code.
+func ExampleNewVertexRouter() {
+	declaration := exampleVertexDeclaration()
+	router, err := metaagent.NewVertexRouter("my-project", "global", declaration)
+	if err != nil {
+		panic(err)
+	}
+	resolution, err := router.Resolve(declaration.Selection)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(resolution.Plan().ProviderModelID())
+	// Output: claude-sonnet-4-6
+}
+
+// ExampleNewRouterWithAdapters registers explicit Anthropic-direct configuration
+// without separate registry construction or environment-driven routing.
+func ExampleNewRouterWithAdapters() {
+	selection := modelrouter.Selection{Provider: modelrouter.ProviderAnthropic, LogicalModel: "claude-sonnet-4-6"}
+	routes, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection:       selection,
+		Protocol:        modelrouter.ProtocolAnthropicMessages,
+		ProviderModelID: "claude-sonnet-4-6",
+		Attribution:     modelrouter.Attribution{ProviderName: "anthropic", LegacySystem: "anthropic"},
+		Capabilities:    modelrouter.Capabilities{ToolCalling: true, TerminalSubmission: true},
+	})
+	if err != nil {
+		panic(err)
+	}
+	adapter, err := metaagent.NewAnthropicDirectMessagesAdapter(anthropicauth.Config{
+		FederationRuleID: "fdrl_0123456789",
+		OrganizationID:   "12345678-1234-1234-1234-123456789012",
+		Source:           anthropicauth.SourceGoogle,
+	})
+	if err != nil {
+		panic(err)
+	}
+	router, err := metaagent.NewRouterWithAdapters(routes, metaagent.AdapterRegistrations{
+		AnthropicMessages: []metaagent.AnthropicMessagesRegistration{{Provider: selection.Provider, Adapter: adapter}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	resolution, err := router.Resolve(selection)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(resolution.Plan().Provider())
+	// Output: anthropic
+}
+
+func exampleVertexDeclaration() modelrouter.Route {
+	return modelrouter.Route{
+		Selection:       modelrouter.Selection{Provider: modelrouter.ProviderVertexAI, LogicalModel: "claude-sonnet-4-6"},
+		Protocol:        modelrouter.ProtocolAnthropicMessages,
+		ProviderModelID: "claude-sonnet-4-6",
+		Attribution:     modelrouter.Attribution{ProviderName: "gcp.vertex_ai", LegacySystem: "google.vertex"},
+		Capabilities:    modelrouter.Capabilities{ToolCalling: true, TerminalSubmission: true},
+	}
 }
