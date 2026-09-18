@@ -11,7 +11,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/awsauth"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -87,7 +87,7 @@ func ExampleNewRouted() {
 				// A real application prepares the SDK client with its provider-owned
 				// endpoint and credential here, outside the route plan.
 				return metaagent.NewOpenAIChatCompletionsBinding(
-					plan, openai.Client{}, openaiexecutor.TokenLimitMaxTokens, nil,
+					plan, openai.Client{}, chatcompletionexecutor.TokenLimitMaxTokens, nil,
 				)
 			},
 		},

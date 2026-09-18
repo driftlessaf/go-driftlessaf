@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package openaiexecutor_test
+package chatcompletionexecutor_test
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -96,7 +96,7 @@ func emptyCompletionJSON(t *testing.T, finishReason string) string {
 	return string(b)
 }
 
-func newResponseRecoveryExecutor(t *testing.T, url, promptText string, maxTurns int) openaiexecutor.Interface[errCapRequest, errCapResponse] {
+func newResponseRecoveryExecutor(t *testing.T, url, promptText string, maxTurns int) chatcompletionexecutor.Interface[errCapRequest, errCapResponse] {
 	t.Helper()
 	client := openai.NewClient(
 		option.WithBaseURL(url),
@@ -111,12 +111,12 @@ func newResponseRecoveryExecutor(t *testing.T, url, promptText string, maxTurns 
 	if err != nil {
 		t.Fatalf("BindJSON: %v", err)
 	}
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		openaiexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
-		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](maxTurns),
-		openaiexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.OpenAIToolForResponse[errCapResponse]),
+		chatcompletionexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](maxTurns),
+		chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.OpenAIToolForResponse[errCapResponse]),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)

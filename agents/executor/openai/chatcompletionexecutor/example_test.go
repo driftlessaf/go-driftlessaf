@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package openaiexecutor_test
+package chatcompletionexecutor_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 	"github.com/chainguard-dev/clog"
 
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -37,10 +37,10 @@ func ExampleNew() {
 		option.WithAPIKey("placeholder"),
 	)
 
-	exec, err := openaiexecutor.New[myRequest, myResponse](client, prompt,
-		openaiexecutor.WithModel[myRequest, myResponse]("google/gemini-3.5-flash"),
-		openaiexecutor.WithMaxTokens[myRequest, myResponse](8192),
-		openaiexecutor.WithTemperature[myRequest, myResponse](0.1),
+	exec, err := chatcompletionexecutor.New[myRequest, myResponse](client, prompt,
+		chatcompletionexecutor.WithModel[myRequest, myResponse]("google/gemini-3.5-flash"),
+		chatcompletionexecutor.WithMaxTokens[myRequest, myResponse](8192),
+		chatcompletionexecutor.WithTemperature[myRequest, myResponse](0.1),
 	)
 	if err != nil {
 		clog.FatalContextf(ctx, "%v", err)
@@ -58,8 +58,8 @@ func ExampleWithModel() {
 		option.WithAPIKey("placeholder"),
 	)
 
-	exec, err := openaiexecutor.New[myRequest, myResponse](client, prompt,
-		openaiexecutor.WithModel[myRequest, myResponse]("deepseek-ai/deepseek-v3.2-maas"),
+	exec, err := chatcompletionexecutor.New[myRequest, myResponse](client, prompt,
+		chatcompletionexecutor.WithModel[myRequest, myResponse]("deepseek-ai/deepseek-v3.2-maas"),
 	)
 	if err != nil {
 		clog.FatalContextf(ctx, "%v", err)
@@ -77,8 +77,8 @@ func ExampleWithMaxTurns() {
 		option.WithAPIKey("placeholder"),
 	)
 
-	exec, err := openaiexecutor.New[myRequest, myResponse](client, prompt,
-		openaiexecutor.WithMaxTurns[myRequest, myResponse](50),
+	exec, err := chatcompletionexecutor.New[myRequest, myResponse](client, prompt,
+		chatcompletionexecutor.WithMaxTurns[myRequest, myResponse](50),
 	)
 	if err != nil {
 		clog.FatalContextf(ctx, "%v", err)
@@ -96,8 +96,8 @@ func ExampleWithTemperature() {
 		option.WithAPIKey("placeholder"),
 	)
 
-	exec, err := openaiexecutor.New[myRequest, myResponse](client, prompt,
-		openaiexecutor.WithTemperature[myRequest, myResponse](0.5),
+	exec, err := chatcompletionexecutor.New[myRequest, myResponse](client, prompt,
+		chatcompletionexecutor.WithTemperature[myRequest, myResponse](0.5),
 	)
 	if err != nil {
 		clog.FatalContextf(ctx, "%v", err)

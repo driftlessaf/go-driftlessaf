@@ -19,3 +19,8 @@ The following components are available:
   in`agents/toolcall/`.
 - **Result parsing**: Structured output extraction from model responses in
   `agents/result/`.
+
+For providers that support the Responses API, prefer
+[`responsesexecutor`](executor/openai/responsesexecutor/README.md).
+Use `executor/openai/chatcompletionexecutor` for providers that require
+Chat Completions.

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"maps"
 
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go"
@@ -150,7 +150,7 @@ func (b AnthropicMessagesBinding) ResourceLabels() map[string]string {
 type OpenAIChatCompletionsBinding struct {
 	plan                modelrouter.Plan
 	client              openai.Client
-	tokenLimitParameter openaiexecutor.TokenLimitParameter
+	tokenLimitParameter chatcompletionexecutor.TokenLimitParameter
 	resourceLabels      map[string]string
 	initialized         bool
 }
@@ -160,14 +160,14 @@ type OpenAIChatCompletionsBinding struct {
 func NewOpenAIChatCompletionsBinding(
 	plan modelrouter.Plan,
 	client openai.Client,
-	tokenLimitParameter openaiexecutor.TokenLimitParameter,
+	tokenLimitParameter chatcompletionexecutor.TokenLimitParameter,
 	resourceLabels map[string]string,
 ) (OpenAIChatCompletionsBinding, error) {
 	if err := validateBindingPlan(plan, modelrouter.ProtocolOpenAIChatCompletions); err != nil {
 		return OpenAIChatCompletionsBinding{}, err
 	}
 	switch tokenLimitParameter {
-	case openaiexecutor.TokenLimitMaxCompletionTokens, openaiexecutor.TokenLimitMaxTokens:
+	case chatcompletionexecutor.TokenLimitMaxCompletionTokens, chatcompletionexecutor.TokenLimitMaxTokens:
 	default:
 		return OpenAIChatCompletionsBinding{}, fmt.Errorf("%w: unsupported OpenAI token-limit parameter %q", ErrInvalidBinding, tokenLimitParameter)
 	}
@@ -187,7 +187,7 @@ func (b OpenAIChatCompletionsBinding) Plan() modelrouter.Plan { return b.plan }
 func (b OpenAIChatCompletionsBinding) Client() openai.Client { return b.client }
 
 // TokenLimitParameter returns the request field used for output-token limits.
-func (b OpenAIChatCompletionsBinding) TokenLimitParameter() openaiexecutor.TokenLimitParameter {
+func (b OpenAIChatCompletionsBinding) TokenLimitParameter() chatcompletionexecutor.TokenLimitParameter {
 	return b.tokenLimitParameter
 }
 

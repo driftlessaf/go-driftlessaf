@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 // Package openaistool converts unified [toolcall.Tool] definitions into
 // OpenAI-compatible [openai.ChatCompletionToolParam] metadata for use with
-// the [openaiexecutor].
+// the [chatcompletionexecutor].
 //
 // This package mirrors [claudetool] and [googletool], providing tool
 // conversion and error formatting for tool handlers that receive

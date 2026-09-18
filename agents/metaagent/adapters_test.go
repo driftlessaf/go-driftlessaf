@@ -9,7 +9,7 @@ import (
 	"errors"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go"
@@ -29,7 +29,7 @@ func TestBindingKeepsPlanAuthoritativeAndCopiesLabels(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	labels := map[string]string{"model_name": "opaque-deployment"}
-	binding, err := NewOpenAIChatCompletionsBinding(plan, openai.Client{}, openaiexecutor.TokenLimitMaxTokens, labels)
+	binding, err := NewOpenAIChatCompletionsBinding(plan, openai.Client{}, chatcompletionexecutor.TokenLimitMaxTokens, labels)
 	if err != nil {
 		t.Fatalf("NewOpenAIChatCompletionsBinding: %v", err)
 	}
@@ -42,8 +42,8 @@ func TestBindingKeepsPlanAuthoritativeAndCopiesLabels(t *testing.T) {
 	if !binding.Plan().SameResolution(plan) {
 		t.Errorf("binding Plan differs from resolved Plan")
 	}
-	if got := binding.TokenLimitParameter(); got != openaiexecutor.TokenLimitMaxTokens {
-		t.Errorf("TokenLimitParameter = %q, want %q", got, openaiexecutor.TokenLimitMaxTokens)
+	if got := binding.TokenLimitParameter(); got != chatcompletionexecutor.TokenLimitMaxTokens {
+		t.Errorf("TokenLimitParameter = %q, want %q", got, chatcompletionexecutor.TokenLimitMaxTokens)
 	}
 }
 

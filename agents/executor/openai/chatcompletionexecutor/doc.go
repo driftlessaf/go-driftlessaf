@@ -3,9 +3,13 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Package openaiexecutor provides a multi-turn conversation executor for
+// Package chatcompletionexecutor provides a multi-turn conversation executor for
 // OpenAI-compatible chat completion APIs, including Vertex AI's partner model
 // endpoint.
+//
+// Prefer [responsesexecutor] for providers that support the Responses API.
+// Use this package for providers that require Chat Completions. See the
+// [Responses executor documentation] for capabilities and configuration.
 //
 // The executor manages the full conversation lifecycle: sending prompts,
 // processing tool calls, recording metrics, and extracting structured results.
@@ -22,10 +26,10 @@ SPDX-License-Identifier: Apache-2.0
 //
 //	prompt := promptbuilder.MustParse("Analyze {{.Input}}")
 //
-//	exec, err := openaiexecutor.New[MyRequest, MyResponse](client, prompt,
-//		openaiexecutor.WithModel[MyRequest, MyResponse]("deepseek-ai/deepseek-v3.2-maas"),
-//		openaiexecutor.WithMaxTokens[MyRequest, MyResponse](32768),
-//		openaiexecutor.WithTemperature[MyRequest, MyResponse](0.2),
+//	exec, err := chatcompletionexecutor.New[MyRequest, MyResponse](client, prompt,
+//		chatcompletionexecutor.WithModel[MyRequest, MyResponse]("deepseek-ai/deepseek-v3.2-maas"),
+//		chatcompletionexecutor.WithMaxTokens[MyRequest, MyResponse](32768),
+//		chatcompletionexecutor.WithTemperature[MyRequest, MyResponse](0.2),
 //	)
 //
 // # Options
@@ -53,7 +57,10 @@ SPDX-License-Identifier: Apache-2.0
 //
 // When a submit_result tool is configured but the model responds with text instead
 // of calling the tool, the executor sends a redirect message asking the model to
-// call submit_result. Unlike the claudeexecutor, the openaiexecutor does not use
+// call submit_result. Unlike the claudeexecutor, the chatcompletionexecutor does not use
 // a forced tool_choice for the redirect — some models (e.g. reasoning models)
 // return 400 on named tool_choice constraints.
-package openaiexecutor
+//
+// [responsesexecutor]: https://pkg.go.dev/chainguard.dev/driftlessaf/agents/executor/openai/responsesexecutor
+// [Responses executor documentation]: https://github.com/driftlessaf/go-driftlessaf/blob/main/agents/executor/openai/responsesexecutor/README.md
+package chatcompletionexecutor

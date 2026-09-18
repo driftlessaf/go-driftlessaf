@@ -1331,7 +1331,7 @@ func supportsExtendedThinkingBudget(modelName string) bool {
 // the nearest supported level otherwise ("xhigh" clamps down to "high" on
 // models that predate it), and dropped entirely (empty) on models that reject
 // the effort parameter. This mirrors the nearest-supported mappings the
-// googleexecutor and openaiexecutor apply to the same provider-neutral scale,
+// googleexecutor and chatcompletionexecutor apply to the same provider-neutral scale,
 // so swapping models never turns a tuned effort into a request error. Execute
 // logs when the resolution is not exact.
 func effortForModel(modelName string, level anthropic.OutputConfigEffort) anthropic.OutputConfigEffort {

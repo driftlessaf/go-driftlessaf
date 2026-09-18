@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package openaiexecutor_test
+package chatcompletionexecutor_test
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -75,14 +75,14 @@ func TestSubmitEvaluatedAfterToolHandlers(t *testing.T) {
 		t.Fatalf("NewPrompt: %v", err)
 	}
 
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		openai.NewClient(
 			option.WithBaseURL(srv.URL),
 			option.WithAPIKey("test"),
 			option.WithMaxRetries(0),
 		),
 		prompt,
-		openaiexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](func() (openaistool.SubmitMetadata[errCapResponse], error) {
+		chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](func() (openaistool.SubmitMetadata[errCapResponse], error) {
 			return openaistool.SubmitMetadata[errCapResponse]{
 				Definition: openai.ChatCompletionToolParam{
 					Function: shared.FunctionDefinitionParam{Name: "submit_result"},
@@ -100,7 +100,7 @@ func TestSubmitEvaluatedAfterToolHandlers(t *testing.T) {
 				},
 			}, nil
 		}),
-		openaiexecutor.WithResultValidator[errCapRequest, errCapResponse](func(context.Context, errCapResponse, string) ([]callbacks.Finding, error) {
+		chatcompletionexecutor.WithResultValidator[errCapRequest, errCapResponse](func(context.Context, errCapResponse, string) ([]callbacks.Finding, error) {
 			close(validatorStarted)
 			validatorSawDone.Store(handlerDone.Load())
 			return nil, nil

@@ -17,7 +17,7 @@ import "fmt"
 //   - Gemini: thinkingLevel on Gemini 3.x models, thinkingBudget tiers on
 //     earlier models (googleexecutor.WithEffort).
 //   - OpenAI-compatible Chat Completions: reasoning_effort, where XHigh and Max clamp to
-//     "high" (openaiexecutor.WithEffort).
+//     "high" (chatcompletionexecutor.WithEffort).
 //   - OpenAI Responses: reasoning.effort, sent verbatim after route capability
 //     validation (responsesexecutor.Config.Effort).
 //

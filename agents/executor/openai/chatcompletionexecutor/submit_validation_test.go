@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package openaiexecutor_test
+package chatcompletionexecutor_test
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"sync"
 	"testing"
 
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -97,11 +97,11 @@ func TestSubmitRejectedByValidatorKeepsLoopGoing(t *testing.T) {
 		t.Fatalf("NewPrompt: %v", err)
 	}
 
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		openaiexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.OpenAIToolForResponse[errCapResponse]),
-		openaiexecutor.WithResultValidator[errCapRequest, errCapResponse](func(_ context.Context, r errCapResponse, _ string) ([]callbacks.Finding, error) {
+		chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.OpenAIToolForResponse[errCapResponse]),
+		chatcompletionexecutor.WithResultValidator[errCapRequest, errCapResponse](func(_ context.Context, r errCapResponse, _ string) ([]callbacks.Finding, error) {
 			if r.Answer != "correct" {
 				return []callbacks.Finding{{
 					Kind:       callbacks.FindingKindReview,
@@ -111,7 +111,7 @@ func TestSubmitRejectedByValidatorKeepsLoopGoing(t *testing.T) {
 			}
 			return nil, nil
 		}),
-		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
+		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)

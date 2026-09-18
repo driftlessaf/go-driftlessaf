@@ -24,7 +24,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/effort"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -156,7 +156,7 @@ func TestEffortWiredOnGoogleAndOpenAIBackends(t *testing.T) {
 
 // TestUserPromptSuffixAcceptedOnOpenAIBackend pins the config-compat contract
 // of the OpenAI-compatible path: the suffix is folded into the built user
-// prompt (see openaiexecutor.WithUserPromptSuffix), so setting one must not
+// prompt (see chatcompletionexecutor.WithUserPromptSuffix), so setting one must not
 // change whether construction succeeds. The model is operator-configurable
 // (e.g. REVIEWER_MODEL), so a suffix-specific rejection here would break
 // deployments pointing at a publisher/model value that worked before.
@@ -275,8 +275,8 @@ func TestNewOpenAICompatibleBaseten(t *testing.T) {
 	agent, err := NewOpenAICompatible[*testRequest](OpenAICompatibleProvider{
 		BaseURL:             srv.URL + "/v1",
 		APIKey:              apiKey,
-		Provider:            openaiexecutor.ProviderBaseten,
-		TokenLimitParameter: openaiexecutor.TokenLimitMaxTokens,
+		Provider:            chatcompletionexecutor.ProviderBaseten,
+		TokenLimitParameter: chatcompletionexecutor.TokenLimitMaxTokens,
 	}, "openai/gpt-oss-120b", config)
 	if err != nil {
 		t.Fatalf("NewOpenAICompatible: %v", err)
@@ -314,8 +314,8 @@ func TestNewOpenAICompatibleValidatesExplicitConfiguration(t *testing.T) {
 	valid := OpenAICompatibleProvider{
 		BaseURL:             "https://example.invalid/v1",
 		APIKey:              "secret-value-that-must-not-leak",
-		Provider:            openaiexecutor.ProviderBaseten,
-		TokenLimitParameter: openaiexecutor.TokenLimitMaxTokens,
+		Provider:            chatcompletionexecutor.ProviderBaseten,
+		TokenLimitParameter: chatcompletionexecutor.TokenLimitMaxTokens,
 	}
 
 	tests := []struct {
@@ -326,8 +326,8 @@ func TestNewOpenAICompatibleValidatesExplicitConfiguration(t *testing.T) {
 		{name: "empty base URL", provider: OpenAICompatibleProvider{APIKey: valid.APIKey}, model: "model"},
 		{name: "empty API key", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL}, model: "model"},
 		{name: "empty model", provider: valid},
-		{name: "unknown provider", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL, APIKey: valid.APIKey, Provider: openaiexecutor.Provider("unknown"), TokenLimitParameter: valid.TokenLimitParameter}, model: "model"},
-		{name: "unknown token parameter", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL, APIKey: valid.APIKey, Provider: valid.Provider, TokenLimitParameter: openaiexecutor.TokenLimitParameter("unknown")}, model: "model"},
+		{name: "unknown provider", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL, APIKey: valid.APIKey, Provider: chatcompletionexecutor.Provider("unknown"), TokenLimitParameter: valid.TokenLimitParameter}, model: "model"},
+		{name: "unknown token parameter", provider: OpenAICompatibleProvider{BaseURL: valid.BaseURL, APIKey: valid.APIKey, Provider: valid.Provider, TokenLimitParameter: chatcompletionexecutor.TokenLimitParameter("unknown")}, model: "model"},
 	}
 
 	for _, tt := range tests {

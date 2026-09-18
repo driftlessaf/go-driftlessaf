@@ -12,7 +12,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/awsauth"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/openai/openai-go"
@@ -61,6 +61,6 @@ func newBedrockOpenAIChatCompletionsAdapter(cfg awsauth.Config, newTransport bed
 			// The executor owns retries and records them in the trace.
 			option.WithMaxRetries(0),
 			option.WithJSONSet("store", false),
-		)}, openaiexecutor.TokenLimitMaxCompletionTokens, nil)
+		)}, chatcompletionexecutor.TokenLimitMaxCompletionTokens, nil)
 	}, nil
 }

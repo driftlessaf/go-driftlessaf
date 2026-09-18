@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package openaiexecutor_test
+package chatcompletionexecutor_test
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"github.com/openai/openai-go"
@@ -83,11 +83,11 @@ func TestExecutorDefaultTokenLimitField(t *testing.T) {
 	}
 
 	const maxTokens = int64(123)
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		openaiexecutor.WithMaxTokens[errCapRequest, errCapResponse](maxTokens),
-		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
+		chatcompletionexecutor.WithMaxTokens[errCapRequest, errCapResponse](maxTokens),
+		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -130,11 +130,11 @@ func TestExecutorMarksTurnFailedOnAPIError(t *testing.T) {
 		t.Fatalf("NewPrompt: %v", err)
 	}
 
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		openaiexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
-		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
+		chatcompletionexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -187,11 +187,11 @@ func TestExecutorRecordsTransientErrorsViaRetryCallback(t *testing.T) {
 	}
 
 	const maxRetries = 2
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		openaiexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(maxRetries)),
-		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
+		chatcompletionexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(maxRetries)),
+		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)

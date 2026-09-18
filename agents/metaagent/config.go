@@ -104,7 +104,7 @@ type Config[Resp, CB any] struct {
 	//   - Gemini: thinkingLevel on Gemini 3.x models, thinkingBudget tiers on
 	//     earlier models; see googleexecutor.WithEffort.
 	//   - OpenAI-compatible: reasoning_effort, where xhigh and max clamp to
-	//     "high"; reasoning models only, see openaiexecutor.WithEffort.
+	//     "high"; reasoning models only, see chatcompletionexecutor.WithEffort.
 	// effort.XHigh is recommended for hard coding/agentic work on
 	// Sonnet 5 / Opus 4.7+.
 	Effort effort.Level

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
 	sdkoption "github.com/anthropics/anthropic-sdk-go/option"
@@ -210,7 +210,7 @@ func newVertexOpenAIChatCompletionsAdapter(projectID, region string, newTokenSou
 					Transport: &oauth2.Transport{Source: tokenSource},
 				}),
 			),
-			openaiexecutor.TokenLimitMaxCompletionTokens,
+			chatcompletionexecutor.TokenLimitMaxCompletionTokens,
 			config.resourceLabels(plan),
 		)
 	}, nil

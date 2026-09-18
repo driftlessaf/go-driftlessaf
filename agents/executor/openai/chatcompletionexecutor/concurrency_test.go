@@ -3,7 +3,7 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package openaiexecutor_test
+package chatcompletionexecutor_test
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
@@ -148,11 +148,11 @@ func TestExecutorRunsTurnToolCallsConcurrently(t *testing.T) {
 		}, nil
 	}
 
-	exec, err := openaiexecutor.New[errCapRequest, errCapResponse](
+	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		openaiexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submit),
-		openaiexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
+		chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submit),
+		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -438,7 +438,7 @@ const (
 
 // metricName is the OTel gen_ai.provider.name value for the backend, aligned
 // with the semconv well-known values the sibling executors use
-// (googleexecutor: "gcp.vertex_ai", openaiexecutor: "openai-compat").
+// (googleexecutor: "gcp.vertex_ai", chatcompletionexecutor: "openai-compat").
 func (p Provider) metricName() string {
 	switch p {
 	case ProviderAnthropic:

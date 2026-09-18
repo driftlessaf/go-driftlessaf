@@ -19,7 +19,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/awsauth"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -125,7 +125,7 @@ func TestBedrockChatTextIgnoresOpenAIEnvironment(t *testing.T) {
 	if !binding.Plan().SameResolution(plan) {
 		t.Error("binding changed the resolved plan")
 	}
-	if got, want := binding.TokenLimitParameter(), openaiexecutor.TokenLimitMaxCompletionTokens; got != want {
+	if got, want := binding.TokenLimitParameter(), chatcompletionexecutor.TokenLimitMaxCompletionTokens; got != want {
 		t.Errorf("token parameter: got = %q, want = %q", got, want)
 	}
 	client := binding.Client()

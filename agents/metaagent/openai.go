@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
-	"chainguard.dev/driftlessaf/agents/executor/openaiexecutor"
+	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
@@ -25,7 +25,7 @@ import (
 
 // openAICompatAgent implements Agent using the OpenAI-compatible API (e.g. Vertex AI partner models).
 type openAICompatAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
-	executor openaiexecutor.Interface[Req, Resp]
+	executor chatcompletionexecutor.Interface[Req, Resp]
 	config   Config[Resp, CB]
 }
 
@@ -35,8 +35,8 @@ type openAICompatAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 type OpenAICompatibleProvider struct {
 	BaseURL             string
 	APIKey              string
-	Provider            openaiexecutor.Provider
-	TokenLimitParameter openaiexecutor.TokenLimitParameter
+	Provider            chatcompletionexecutor.Provider
+	TokenLimitParameter chatcompletionexecutor.TokenLimitParameter
 }
 
 // NewOpenAICompatible creates an agent for an explicitly configured external
@@ -120,8 +120,8 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 	return newOpenAICompatibleAgentWithClient[Req, Resp, CB](
 		client,
 		model,
-		openaiexecutor.ProviderOpenAICompatible,
-		openaiexecutor.TokenLimitMaxCompletionTokens,
+		chatcompletionexecutor.ProviderOpenAICompatible,
+		chatcompletionexecutor.TokenLimitMaxCompletionTokens,
 		map[string]string{
 			"projectID":  projectID,
 			"region":     region,
@@ -134,8 +134,8 @@ func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 func newOpenAICompatibleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
 	client openai.Client,
 	model string,
-	provider openaiexecutor.Provider,
-	tokenLimitParameter openaiexecutor.TokenLimitParameter,
+	provider chatcompletionexecutor.Provider,
+	tokenLimitParameter chatcompletionexecutor.TokenLimitParameter,
 	resourceLabels map[string]string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
@@ -153,8 +153,8 @@ func newOpenAICompatibleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any
 type openAIAgentConstruction struct {
 	client              openai.Client
 	providerModelID     string
-	legacyProvider      *openaiexecutor.Provider
-	tokenLimitParameter openaiexecutor.TokenLimitParameter
+	legacyProvider      *chatcompletionexecutor.Provider
+	tokenLimitParameter chatcompletionexecutor.TokenLimitParameter
 	applyTemperature    bool
 	maxTokens           int64
 	resourceLabels      map[string]string
@@ -191,52 +191,52 @@ func newOpenAIAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("building submit tool: %w", err)
 	}
 
-	executorOpts := []openaiexecutor.Option[Req, Resp]{
-		openaiexecutor.WithModel[Req, Resp](construction.providerModelID),
-		openaiexecutor.WithMaxTokens[Req, Resp](construction.maxTokens),
-		openaiexecutor.WithTokenLimitParameter[Req, Resp](construction.tokenLimitParameter),
-		openaiexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.SubmitMetadata[Resp], error) { return submitTool, nil }),
-		openaiexecutor.WithResourceLabels[Req, Resp](construction.resourceLabels),
+	executorOpts := []chatcompletionexecutor.Option[Req, Resp]{
+		chatcompletionexecutor.WithModel[Req, Resp](construction.providerModelID),
+		chatcompletionexecutor.WithMaxTokens[Req, Resp](construction.maxTokens),
+		chatcompletionexecutor.WithTokenLimitParameter[Req, Resp](construction.tokenLimitParameter),
+		chatcompletionexecutor.WithSubmitResultProvider[Req, Resp](func() (openaistool.SubmitMetadata[Resp], error) { return submitTool, nil }),
+		chatcompletionexecutor.WithResourceLabels[Req, Resp](construction.resourceLabels),
 	}
 	if construction.legacyProvider != nil {
-		executorOpts = append(executorOpts, openaiexecutor.WithProvider[Req, Resp](*construction.legacyProvider))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithProvider[Req, Resp](*construction.legacyProvider))
 	}
 	if construction.applyTemperature {
-		executorOpts = append(executorOpts, openaiexecutor.WithTemperature[Req, Resp](0.2))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithTemperature[Req, Resp](0.2))
 	} else {
-		executorOpts = append(executorOpts, openaiexecutor.WithoutTemperature[Req, Resp]())
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithoutTemperature[Req, Resp]())
 	}
 	if construction.attribution != nil {
-		executorOpts = append(executorOpts, openaiexecutor.WithAttribution[Req, Resp](*construction.attribution))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithAttribution[Req, Resp](*construction.attribution))
 	}
 	for _, v := range config.ResultValidators {
-		executorOpts = append(executorOpts, openaiexecutor.WithResultValidator[Req, Resp](v))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithResultValidator[Req, Resp](v))
 	}
 
 	if config.MaxTurns > 0 {
-		executorOpts = append(executorOpts, openaiexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithMaxTurns[Req, Resp](config.MaxTurns))
 	}
 
 	if config.ToolCallConcurrency > 0 {
-		executorOpts = append(executorOpts, openaiexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
 	}
 
 	if config.SystemInstructions != nil {
-		executorOpts = append(executorOpts, openaiexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}
 
 	// The OpenAI-compatible API has no per-block prompt-cache semantics, so
 	// the suffix is simply appended to the built user prompt (see
-	// openaiexecutor.WithUserPromptSuffix).
+	// chatcompletionexecutor.WithUserPromptSuffix).
 	if config.UserPromptSuffix != nil {
-		executorOpts = append(executorOpts, openaiexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithUserPromptSuffix[Req, Resp](config.UserPromptSuffix))
 	}
 
 	if config.Effort != "" {
-		executorOpts = append(executorOpts, openaiexecutor.WithEffort[Req, Resp](config.Effort))
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
-	exec, err := openaiexecutor.New[Req, Resp](construction.client, config.UserPrompt, executorOpts...)
+	exec, err := chatcompletionexecutor.New[Req, Resp](construction.client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating OpenAI-compatible executor: %w", err)
 	}
@@ -251,14 +251,14 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	if config.UserPrompt == nil {
 		return fmt.Errorf("creating OpenAI-compatible executor: prompt cannot be nil")
 	}
-	// Suspend/resume is not wired for this backend yet: openaiexecutor has no
+	// Suspend/resume is not wired for this backend yet: chatcompletionexecutor has no
 	// suspend tool option, so a set SuspendToolName would otherwise be silently
 	// dropped and the advertised pause lifecycle could never fire. Fail closed
-	// with a clear error until the openaiexecutor suspend/resume slice lands
+	// with a clear error until the chatcompletionexecutor suspend/resume slice lands
 	// (DEV-2247). openAICompatAgent likewise does not implement Resumer, so
 	// AsResumer reports false for agents built here.
 	if config.SuspendToolName != "" {
-		return fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the OpenAI-compatible backend; it lands with the openaiexecutor suspend/resume slice", config.SuspendToolName)
+		return fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the OpenAI-compatible backend; it lands with the chatcompletionexecutor suspend/resume slice", config.SuspendToolName)
 	}
 	return nil
 }
