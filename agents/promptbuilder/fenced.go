@@ -82,7 +82,7 @@ func fenceUntrustedFrom(entropy io.Reader, content string) (string, error) {
 	token := hex.EncodeToString(nonce[:])
 	return rawFenceBeginPrefix + " [" + token + "] -----\n" +
 		rawFencePreamble + "\n" +
-		neutralizeRawFenceMarkers(content) +
+		NeutralizeUntrustedMarkers(content) +
 		"\n" + rawFenceEndPrefix + " [" + token + "] -----", nil
 }
 
@@ -97,13 +97,18 @@ func UntrustedMarkerShaped(content string) bool {
 	return strings.Contains(content, rawFenceBeginPrefix) || strings.Contains(content, rawFenceEndPrefix)
 }
 
-// neutralizeRawFenceMarkers rewrites every content line that carries the
+// NeutralizeUntrustedMarkers rewrites every line of content that carries the
 // fence marker shape — the static BEGIN/END prefix, with or without a nonce —
-// into a visibly escaped variant that cannot read as a boundary, so even a
-// lucky or leaked nonce cannot close the fence. The rewrite is loud rather
-// than lossy: an attempted fence escape stays legible as evidence. All other
-// content passes through byte-identical.
-func neutralizeRawFenceMarkers(content string) string {
+// into a visibly escaped variant that cannot read as a boundary, and returns
+// every other line byte-identical. [FenceUntrusted] applies it to the content
+// it fences, so even a lucky or leaked nonce cannot close the fence early.
+//
+// It is exported for text that leaves a fence's protection but must still
+// not carry the shape: a model's finding echoed back to another agent, an
+// excerpt put in front of a human. The rewrite is loud rather than lossy — an
+// attempted fence escape stays legible as evidence — and
+// [UntrustedMarkerShaped] is false over the result.
+func NeutralizeUntrustedMarkers(content string) string {
 	if !UntrustedMarkerShaped(content) {
 		return content
 	}
