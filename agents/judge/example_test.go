@@ -20,6 +20,25 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
+func ExampleNewWithTarget() {
+	runtime, err := metaagent.NewRuntime([]modelrouter.Route{{
+		Selection:       modelrouter.Selection{Provider: modelrouter.ProviderVertexAI, LogicalModel: "gemini-2.5-flash"},
+		Protocol:        modelrouter.ProtocolGoogleGenAI,
+		ProviderModelID: "gemini-2.5-flash",
+		Attribution:     modelrouter.Attribution{ProviderName: "gcp.vertex_ai", LegacySystem: "google.vertex"},
+		Capabilities:    modelrouter.Capabilities{MaximumOutputTokens: true},
+	}}, metaagent.Backend{Provider: modelrouter.ProviderVertexAI, Google: metaagent.VertexConfig{ProjectID: "my-project"}})
+	if err != nil {
+		panic(err)
+	}
+	_, err = judge.NewWithTarget(context.Background(), runtime.Target(metaagent.TargetConfig{
+		Provider: modelrouter.ProviderVertexAI, Model: "gemini-2.5-flash", Region: "global",
+	}))
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
 // ExampleRetry demonstrates calling a judge through the shared retry helper, which
 // spaces transient-error retries with exponential backoff.
 func ExampleRetry() {

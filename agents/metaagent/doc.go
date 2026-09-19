@@ -52,6 +52,12 @@ SPDX-License-Identifier: Apache-2.0
 //	    ),
 //	)
 //
+// For configuration-driven provider/model switching, construct a [Runtime] once
+// at startup from an application catalog and named [Backend] configurations.
+// Pass a [Target] to agent factories and use [NewWithTarget]. The runtime shares
+// routers by backend and region and reads no provider-selection environment
+// variables. Existing applications can continue using explicit Router values.
+//
 // Construct the router once at application startup. For Vertex AI, pass exact
 // application-owned route declarations to NewVertexRouter:
 //

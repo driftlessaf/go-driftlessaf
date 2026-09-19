@@ -14,6 +14,16 @@ import (
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 )
 
+// NewWithTarget constructs a judge from a startup-owned target. It delegates to
+// NewRouted, preserving judge-specific validation and selected-adapter errors.
+func NewWithTarget(ctx context.Context, target metaagent.Target) (Interface, error) {
+	router, selection, err := target.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	return NewRouted(ctx, router, selection)
+}
+
 // NewRouted constructs a judge from an explicit route selection. It resolves
 // one immutable plan, invokes exactly one protocol-typed adapter, and never
 // falls back to another provider or the legacy environment-selected path.
