@@ -480,6 +480,20 @@ func TestResolveBedrockFailsWhenCredentialsAreUnavailable(t *testing.T) {
 	}
 }
 
+func TestResolveBedrockRejectsGoogleCredentials(t *testing.T) {
+	clearBackendEnvironment(t)
+	t.Setenv("CLAUDE_BACKEND", "bedrock")
+	t.Setenv(awsauth.EnvRegion, "us-east-1")
+	t.Setenv(awsauth.EnvProfile, "")
+	t.Setenv(awsauth.EnvWebIdentityTokenFile, "")
+	t.Setenv(awsauth.EnvRoleARN, "arn:aws:iam::123456789012:role/BedrockInvoker")
+	t.Setenv(awsauth.EnvGoogleAudience, "https://aws.example/skillup")
+	_, err := Resolve(t.Context(), "", "", "claude-sonnet-4-6")
+	if err == nil || !strings.Contains(err.Error(), "explicit routed Bedrock constructor") {
+		t.Fatalf("Resolve() error = %v, want rejection before Mantle reloads credentials", err)
+	}
+}
+
 func TestResolveBedrockFailsStartupForUnavailableProfile(t *testing.T) {
 	clearBackendEnvironment(t)
 	dir := t.TempDir()
@@ -545,6 +559,7 @@ func clearBackendEnvironment(t *testing.T) {
 		awsauth.EnvProfile,
 		awsauth.EnvRoleARN,
 		awsauth.EnvWebIdentityTokenFile,
+		awsauth.EnvGoogleAudience,
 		"AWS_ACCESS_KEY_ID",
 		"AWS_SECRET_ACCESS_KEY",
 		"AWS_SESSION_TOKEN",

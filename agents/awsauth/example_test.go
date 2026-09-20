@@ -35,3 +35,14 @@ func ExampleConfig_LoadAWSConfig() {
 	}
 	fmt.Printf("AWS region: %s\n", awsConfig.Region)
 }
+
+// ExampleGoogleConfig demonstrates explicit Google metadata identity for a
+// Cloud Run workload. The role trust must authorize its service account.
+func ExampleGoogleConfig() {
+	cfg := awsauth.Config{Region: "us-east-1", Google: awsauth.GoogleConfig{
+		RoleARN:  "arn:aws:iam::123456789012:role/BedrockInvoker",
+		Audience: "https://aws.example/skillup",
+	}}
+	fmt.Println(cfg.Google.Audience)
+	// Output: https://aws.example/skillup
+}

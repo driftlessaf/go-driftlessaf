@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 // for DriftlessAF agents.
 //
 // Local agents authenticate with an AWS IAM Identity Center (SSO) profile.
-// Workloads authenticate with a web-identity token and role ARN. Static AWS
+// Google Cloud workloads can explicitly exchange metadata identity tokens for
+// AWS credentials, refreshed in process. Other workloads authenticate with a
+// web-identity token file and role ARN. Static AWS
 // credentials and Bedrock API keys are rejected. ConfigFromEnv validates the
 // selected mode, and Config.ValidateCredentials verifies the source chosen by
 // the AWS SDK credential chain. Config.LoadAWSConfig additionally resolves the

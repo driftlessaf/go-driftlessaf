@@ -320,6 +320,7 @@ func TestLoadAWSConfig(t *testing.T) {
 func clearEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
+		EnvGoogleAudience,
 		EnvRegion,
 		EnvProfile,
 		EnvRoleARN,

@@ -7,6 +7,7 @@ package claudebackend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -183,6 +184,11 @@ func mantleModelID(model string) (string, error) {
 }
 
 func newMantleMessages(ctx context.Context, cfg awsauth.Config) (anthropic.MessageService, error) {
+	// This compatibility path lets the Mantle SDK reload its credential chain.
+	// It cannot preserve an explicitly configured Google credential provider.
+	if cfg.Google != (awsauth.GoogleConfig{}) {
+		return anthropic.MessageService{}, errors.New("google workload identity requires an explicit routed Bedrock constructor")
+	}
 	if err := cfg.ValidateCredentials(ctx); err != nil {
 		return anthropic.MessageService{}, err
 	}

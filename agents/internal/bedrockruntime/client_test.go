@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/awsauth"
@@ -459,6 +460,78 @@ func TestNewSanitizesCredentialDiscoveryFailure(t *testing.T) {
 	if client != nil || err == nil || strings.Contains(err.Error(), profile) || errors.Unwrap(err) != nil {
 		t.Error("New: got client or unsanitized discovery error, want isolated error without profile or raw cause")
 	}
+}
+
+func TestCredentialExpiryRefreshesRequestSigning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Exercise the real cache and signer. The provider supplies expiring
+		// credentials as STS would; only issuance and the wire exchange are doubles.
+		issued := []aws.Credentials{testCredentials(), testCredentials(), testCredentials()}
+		var retrievals, issuedCount int
+		var rejectRefresh bool
+		cache := aws.NewCredentialsCache(aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			retrievals++
+			if rejectRefresh {
+				return aws.Credentials{}, errors.New("identity exchange unavailable")
+			}
+			if issuedCount >= len(issued) {
+				return aws.Credentials{}, errors.New("unexpected extra credential exchange")
+			}
+			credentials := issued[issuedCount]
+			issuedCount++
+			credentials.CanExpire = true
+			credentials.Expires = time.Now().Add(time.Hour)
+			return credentials, nil
+		}), func(o *aws.CredentialsCacheOptions) { o.ExpiryWindow = time.Minute })
+		var wireCalls int
+		var expected aws.Credentials
+		client, err := newClient(aws.Config{Region: "us-east-1", Credentials: cache}, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			wireCalls++
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential="+expected.AccessKeyID+"/") || r.Header.Get("X-Amz-Security-Token") != expected.SessionToken {
+				t.Error("signed request: got stale signing identity, want current credentials")
+			}
+			return okResponse(r), nil
+		}), time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, step := range []struct {
+			name           string
+			advance        time.Duration
+			credential     int
+			reject         bool
+			wantRetrievals int
+			wantWireCalls  int
+		}{
+			{name: "initial request", credential: 0, wantRetrievals: 1, wantWireCalls: 1},
+			{name: "cached request", credential: 0, wantRetrievals: 1, wantWireCalls: 2},
+			{name: "before refresh window", advance: 58 * time.Minute, credential: 0, wantRetrievals: 1, wantWireCalls: 3},
+			{name: "inside refresh window", advance: 61 * time.Second, credential: 1, wantRetrievals: 2, wantWireCalls: 4},
+			{name: "reuse refreshed credentials", credential: 1, wantRetrievals: 2, wantWireCalls: 5},
+			{name: "refresh failure after idle hour", advance: 65 * time.Minute, reject: true, wantRetrievals: 3, wantWireCalls: 5},
+			{name: "recover on next request", credential: 2, wantRetrievals: 4, wantWireCalls: 6},
+		} {
+			// Inside synctest this advances virtual time, including the SDK's
+			// expiration clock. No cache invalidation or client reconstruction.
+			time.Sleep(step.advance)
+			rejectRefresh = step.reject
+			expected = issued[step.credential]
+			response, err := client.Do(testRequest(t, t.Context(), client.Endpoint()+"/anthropic/v1/messages", "{}"))
+			if response != nil {
+				response.Body.Close()
+			}
+			if step.reject {
+				if err == nil || !strings.Contains(err.Error(), "credential refresh") || response != nil {
+					t.Fatalf("%s: got response = %v, error = %v, want refresh failure without response", step.name, response, err)
+				}
+			} else if err != nil {
+				t.Fatalf("%s: Do() error = %v, want nil", step.name, err)
+			}
+			if retrievals != step.wantRetrievals || wireCalls != step.wantWireCalls {
+				t.Fatalf("%s: retrievals, wire calls = (%d, %d), want (%d, %d)", step.name, retrievals, wireCalls, step.wantRetrievals, step.wantWireCalls)
+			}
+		}
+	})
 }
 
 func TestWebIdentityRefresh(t *testing.T) {

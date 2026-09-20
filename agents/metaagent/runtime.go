@@ -35,8 +35,8 @@ type Backend struct {
 	// Anthropic holds typed WIF configuration for Anthropic-direct.
 	Anthropic anthropicauth.Config
 	// AWS configures Bedrock Runtime. A target region overrides AWS.Region.
-	// AWS.Profile selects SSO; otherwise the existing web-identity credential
-	// chain is resolved when the agent binds its adapter.
+	// AWS.Profile selects SSO, AWS.Google selects Google workload identity;
+	// otherwise the token-file credential chain is resolved when an adapter binds.
 	AWS awsauth.Config
 }
 

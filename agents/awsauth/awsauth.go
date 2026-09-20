@@ -22,6 +22,8 @@ const (
 	EnvProfile = "AWS_PROFILE"
 	// EnvRoleARN names the role assumed when using web identity.
 	EnvRoleARN = "AWS_ROLE_ARN"
+	// EnvGoogleAudience selects Google workload identity with this audience.
+	EnvGoogleAudience = "AWS_GOOGLE_AUDIENCE"
 	// EnvWebIdentityTokenFile names the file containing the web-identity token.
 	EnvWebIdentityTokenFile = "AWS_WEB_IDENTITY_TOKEN_FILE" //nolint:gosec // G101: environment variable name, not a credential
 
@@ -36,14 +38,26 @@ const (
 // Config identifies an allowed AWS credential configuration.
 //
 // Profile is set for local AWS IAM Identity Center (SSO) authentication. It is
-// empty for web-identity authentication, where the AWS SDK reads EnvRoleARN and
+// empty for Google workload identity and file-based web identity. For the latter,
+// the AWS SDK reads EnvRoleARN and
 // EnvWebIdentityTokenFile from the environment.
 type Config struct {
 	Region  string
 	Profile string
+	// Google explicitly selects Google workload identity. Its zero value leaves
+	// the existing SSO or token-file credential chain in use.
+	Google GoogleConfig
+}
+
+// GoogleConfig identifies a Google workload allowed to assume an AWS role.
+// The role trust policy must restrict the Google service account and audience.
+type GoogleConfig struct {
+	RoleARN  string
+	Audience string
 }
 
 type environment struct {
+	GoogleAudience       string `env:"AWS_GOOGLE_AUDIENCE"`
 	Region               string `env:"AWS_REGION"`
 	Profile              string `env:"AWS_PROFILE"`
 	RoleARN              string `env:"AWS_ROLE_ARN"`
@@ -56,29 +70,23 @@ type environment struct {
 	AnthropicAPIKey      string `env:"ANTHROPIC_AWS_API_KEY"`
 }
 
-// ConfigFromEnv reads and validates an AWS SSO or web-identity configuration.
+// ConfigFromEnv reads and validates SSO, Google workload identity, or token-file
+// web-identity configuration.
 // Static AWS credentials and Bedrock API keys are rejected.
 func ConfigFromEnv(_ context.Context) (Config, error) {
-	env := environment{
-		Region:               os.Getenv(EnvRegion),
-		Profile:              os.Getenv(EnvProfile),
-		RoleARN:              os.Getenv(EnvRoleARN),
-		WebIdentityTokenFile: os.Getenv(EnvWebIdentityTokenFile),
-		AccessKeyID:          os.Getenv(envAccessKeyID),
-		SecretAccessKey:      os.Getenv(envSecretAccessKey),
-		SessionToken:         os.Getenv(envSessionToken),
-		SecurityToken:        os.Getenv(envSecurityToken),
-		BearerToken:          os.Getenv(envBearerToken),
-		AnthropicAPIKey:      os.Getenv(envAnthropicAPIKey),
-	}
+	env := readEnvironment()
 	if env.Region == "" {
 		return Config{}, fmt.Errorf("AWS authentication requires %s", EnvRegion)
 	}
-	if name := staticCredentialEnv(env); name != "" {
-		return Config{}, fmt.Errorf("AWS authentication does not permit static credentials from %s", name)
+	if err := env.validateSecrets(); err != nil {
+		return Config{}, err
 	}
-	if name := apiKeyEnv(env); name != "" {
-		return Config{}, fmt.Errorf("AWS authentication does not permit Bedrock API-key authentication from %s", name)
+	if env.GoogleAudience != "" {
+		cfg := Config{Region: env.Region, Google: GoogleConfig{RoleARN: env.RoleARN, Audience: env.GoogleAudience}}
+		if err := cfg.validateGoogle(env); err != nil {
+			return Config{}, err
+		}
+		return cfg, nil
 	}
 
 	hasProfile := env.Profile != ""
@@ -96,6 +104,32 @@ func ConfigFromEnv(_ context.Context) (Config, error) {
 	return Config{Region: env.Region, Profile: env.Profile}, nil
 }
 
+func readEnvironment() environment {
+	return environment{
+		GoogleAudience:       os.Getenv(EnvGoogleAudience),
+		Region:               os.Getenv(EnvRegion),
+		Profile:              os.Getenv(EnvProfile),
+		RoleARN:              os.Getenv(EnvRoleARN),
+		WebIdentityTokenFile: os.Getenv(EnvWebIdentityTokenFile),
+		AccessKeyID:          os.Getenv(envAccessKeyID),
+		SecretAccessKey:      os.Getenv(envSecretAccessKey),
+		SessionToken:         os.Getenv(envSessionToken),
+		SecurityToken:        os.Getenv(envSecurityToken),
+		BearerToken:          os.Getenv(envBearerToken),
+		AnthropicAPIKey:      os.Getenv(envAnthropicAPIKey),
+	}
+}
+
+func (env environment) validateSecrets() error {
+	if name := staticCredentialEnv(env); name != "" {
+		return fmt.Errorf("AWS authentication does not permit static credentials from %s", name)
+	}
+	if name := apiKeyEnv(env); name != "" {
+		return fmt.Errorf("AWS authentication does not permit Bedrock API-key authentication from %s", name)
+	}
+	return nil
+}
+
 // ValidateCredentials verifies that the AWS SDK credential chain selected by
 // cfg is backed by AWS IAM Identity Center (SSO) or web identity.
 func (cfg Config) ValidateCredentials(ctx context.Context) error {
@@ -109,6 +143,11 @@ func (cfg Config) ValidateCredentials(ctx context.Context) error {
 // available. Callers can bind the returned provider directly to a transport so
 // validation and request signing use the same credential chain.
 func (cfg Config) LoadAWSConfig(ctx context.Context) (aws.Config, error) {
+	// The SDK cache detaches refresh work from caller cancellation. Avoid
+	// starting that work when construction has already been cancelled.
+	if err := ctx.Err(); err != nil {
+		return aws.Config{}, err
+	}
 	awsCfg, err := cfg.loadAWSConfig(ctx)
 	if err != nil {
 		return aws.Config{}, err
@@ -120,6 +159,12 @@ func (cfg Config) LoadAWSConfig(ctx context.Context) (aws.Config, error) {
 }
 
 func (cfg Config) loadAWSConfig(ctx context.Context) (aws.Config, error) {
+	if cfg.Google != (GoogleConfig{}) {
+		return cfg.loadGoogleConfig(ctx)
+	}
+	if os.Getenv(EnvGoogleAudience) != "" {
+		return aws.Config{}, fmt.Errorf("%s requires explicit Google configuration; call ConfigFromEnv", EnvGoogleAudience)
+	}
 	loadOptions := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
 	}
