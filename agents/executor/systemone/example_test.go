@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 
 	"chainguard.dev/driftlessaf/agents/executor/systemone"
+	"chainguard.dev/driftlessaf/agents/modelrouter"
 )
 
 // fakeAPI stands in for api.typesafe.ai and answers every request with a
@@ -108,6 +109,52 @@ func ExampleRequest_Validate() {
 	// invalid system one request: question "q": choice needs at least two options
 	// <nil>
 	// {"type":"choice","instructions":"Pick one.","criteria":{"a":null,"b":"the other"}}
+}
+
+// A client bound to a resolved route sends the route's provider model ID
+// when a request leaves Model empty, so model selection stays in the
+// application's validated route catalog.
+func ExampleWithRoute() {
+	registry, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection:       modelrouter.Selection{Provider: modelrouter.ProviderTypeSafe, LogicalModel: systemone.ModelJevLatest},
+		Protocol:        modelrouter.ProtocolTypeSafeSystemOne,
+		ProviderModelID: "jev-1.13.0",
+		Attribution:     modelrouter.Attribution{ProviderName: "typesafe", LegacySystem: "typesafe"},
+	})
+	if err != nil {
+		panic(err)
+	}
+	plan, err := registry.Resolve(modelrouter.Selection{Provider: modelrouter.ProviderTypeSafe, LogicalModel: systemone.ModelJevLatest})
+	if err != nil {
+		panic(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var wire struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&wire)
+		fmt.Println("model on the wire:", wire.Model)
+		_, _ = w.Write([]byte(`{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.5}},"usage":{"input_tokens":4,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	client, err := systemone.NewClient("sk-example",
+		systemone.WithRoute(plan),
+		systemone.WithEndpoint(srv.URL),
+		systemone.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		panic(err)
+	}
+	_, err = client.Ask(context.Background(), systemone.Request{
+		State:     "state",
+		Questions: map[string]systemone.Question{"q": systemone.Noul{Instructions: "?"}},
+	})
+	fmt.Println("err:", err)
+	// Output:
+	// model on the wire: jev-1.13.0
+	// err: <nil>
 }
 
 // Non-2xx statuses surface as *APIError; IsRetryable separates transient

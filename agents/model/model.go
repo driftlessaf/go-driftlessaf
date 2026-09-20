@@ -26,6 +26,10 @@ const (
 	// BackendOpenAICompat covers "gpt-*" and "publisher/model" ids, served by an
 	// OpenAI-compatible endpoint.
 	BackendOpenAICompat Backend = "openai-compat"
+	// BackendSystemOne covers ids with the "jev-" prefix: TypeSafe AI's System
+	// One models, which answer typed questions with calibrated probabilities
+	// and take none of the conversational request parameters.
+	BackendSystemOne Backend = "system-one"
 	// BackendUnknown is the zero value, for ids that match no known routing
 	// shape.
 	BackendUnknown Backend = ""
@@ -135,6 +139,10 @@ func Resolve(id string) Info {
 		return claudeInfo(strings.TrimPrefix(id, "anthropic."))
 	case strings.HasPrefix(lower, "claude-"):
 		return claudeInfo(id)
+	case strings.HasPrefix(lower, "jev-"):
+		// System One has no effort, sampling, or thinking surface: the request
+		// is state plus typed questions, so Info carries only the backend.
+		return Info{Backend: BackendSystemOne}
 	case strings.HasPrefix(lower, "gpt-"), strings.Contains(id, "/"):
 		// Chat Completions maps xhigh/max to "high". Responses preserves
 		// native effort; its route declarations restrict model support.

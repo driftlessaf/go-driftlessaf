@@ -54,6 +54,7 @@ func TestResolve(t *testing.T) {
 		Efforts:        fullScale,
 		SamplingParams: true,
 	}
+	systemOne := model.Info{Backend: model.BackendSystemOne}
 
 	tests := []struct {
 		id   string
@@ -73,6 +74,13 @@ func TestResolve(t *testing.T) {
 		{"gpt-4o", openAICompat},
 		{"gpt-5.6-terra", openAICompat},
 		{"GPT-5.6-TERRA", openAICompat},
+		// System One ids carry no parameter surface; aliases and versioned ids
+		// resolve alike and the prefix match is case-insensitive.
+		{"jev-latest", systemOne},
+		{"jev-preview", systemOne},
+		{"jev-1.13.0", systemOne},
+		{"JEV-LATEST", systemOne},
+		{"jev", model.Info{}},
 		{"us.openai.gpt-5.6-terra", model.Info{}},
 		{"text-bison", model.Info{}},
 		{"", model.Info{}},

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -491,6 +492,76 @@ func TestNewClientOptions(t *testing.T) {
 				t.Errorf("NewClient error: got = %v, wantErr = %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func systemOneRegistry(t *testing.T) *modelrouter.Registry {
+	t.Helper()
+	registry, err := modelrouter.NewRegistry(
+		modelrouter.Route{
+			Selection:       modelrouter.Selection{Provider: modelrouter.ProviderTypeSafe, LogicalModel: ModelJevLatest},
+			Protocol:        modelrouter.ProtocolTypeSafeSystemOne,
+			ProviderModelID: "jev-1.13.0",
+			Attribution:     modelrouter.Attribution{ProviderName: "typesafe", LegacySystem: "typesafe"},
+		},
+		modelrouter.Route{
+			Selection:       modelrouter.Selection{Provider: modelrouter.ProviderAnthropic, LogicalModel: "claude-sonnet-5"},
+			Protocol:        modelrouter.ProtocolAnthropicMessages,
+			ProviderModelID: "claude-sonnet-5",
+			Attribution:     modelrouter.Attribution{ProviderName: "anthropic", LegacySystem: "anthropic"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return registry
+}
+
+func TestWithRouteSuppliesModel(t *testing.T) {
+	t.Parallel()
+	plan, err := systemOneRegistry(t).Resolve(modelrouter.Selection{Provider: modelrouter.ProviderTypeSafe, LogicalModel: ModelJevLatest})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	var gotModels []string
+	client := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var wire struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gotModels = append(gotModels, wire.Model)
+		_, _ = w.Write([]byte(sampleBody(sampleAnswers)))
+	}, WithRoute(plan))
+
+	unset := sampleRequest()
+	unset.Model = ""
+	if _, err := client.Ask(t.Context(), unset); err != nil {
+		t.Fatalf("Ask without model: %v", err)
+	}
+	explicit := sampleRequest()
+	explicit.Model = ModelJevPreview
+	if _, err := client.Ask(t.Context(), explicit); err != nil {
+		t.Fatalf("Ask with model: %v", err)
+	}
+	if diff := cmp.Diff([]string{"jev-1.13.0", ModelJevPreview}, gotModels); diff != "" {
+		t.Errorf("models sent (-want, +got):\n%s", diff)
+	}
+}
+
+func TestWithRouteRejectsOtherProtocols(t *testing.T) {
+	t.Parallel()
+	plan, err := systemOneRegistry(t).Resolve(modelrouter.Selection{Provider: modelrouter.ProviderAnthropic, LogicalModel: "claude-sonnet-5"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if _, err := NewClient("k", WithRoute(plan)); err == nil || !strings.Contains(err.Error(), `protocol "anthropic-messages" is not "typesafe-system-one"`) {
+		t.Errorf("NewClient error: got = %v, want protocol mismatch", err)
+	}
+	if _, err := NewClient("k", WithRoute(modelrouter.Plan{})); !errors.Is(err, modelrouter.ErrInvalidPlan) {
+		t.Errorf("NewClient error with zero plan: got = %v, want ErrInvalidPlan", err)
 	}
 }
 

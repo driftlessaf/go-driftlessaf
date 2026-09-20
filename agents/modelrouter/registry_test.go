@@ -26,6 +26,7 @@ func TestRegistryResolvesDeclaredRoutes(t *testing.T) {
 		newRoute(modelrouter.ProviderVertexAI, "meta/llama-3.3", modelrouter.ProtocolOpenAIChatCompletions, "meta/llama-3.3-70b-instruct-maas"),
 		newRoute(modelrouter.ProviderAnthropic, "claude-sonnet-5", modelrouter.ProtocolAnthropicMessages, "claude-sonnet-5-20260301"),
 		newRoute(modelrouter.ProviderAWSBedrock, "claude-sonnet-5", modelrouter.ProtocolAnthropicMessages, "anthropic.claude-sonnet-5"),
+		newRoute(modelrouter.ProviderTypeSafe, "jev-latest", modelrouter.ProtocolTypeSafeSystemOne, "jev-1.13.0"),
 	}
 	registry, err := modelrouter.NewRegistry(routes...)
 	if err != nil {
@@ -122,7 +123,7 @@ func TestNewRegistryRejectsInvalidRoutesDeterministically(t *testing.T) {
 			name:    "unsupported protocol",
 			route:   newRoute(modelrouter.ProviderVertexAI, "claude-sonnet-5", "anthropic-responses", "claude-sonnet-5"),
 			wantErr: modelrouter.ErrInvalidRoute,
-			want:    `route 0: invalid route: unsupported protocol "anthropic-responses" (want "google-gen-ai", "anthropic-messages", "openai-chat-completions", or "openai-responses")`,
+			want:    `route 0: invalid route: unsupported protocol "anthropic-responses" (want "google-gen-ai", "anthropic-messages", "openai-chat-completions", "openai-responses", or "typesafe-system-one")`,
 		},
 		{
 			name:    "empty provider model ID",
@@ -183,6 +184,18 @@ func TestNewRegistryRejectsInvalidRoutesDeterministically(t *testing.T) {
 			route:   newRoute(modelrouter.ProviderVertexAI, "claude-sonnet-5", modelrouter.ProtocolGoogleGenAI, "claude-sonnet-5"),
 			wantErr: modelrouter.ErrInvalidRoute,
 			want:    `route 0: invalid route: logical model "claude-sonnet-5" resolves to backend "claude", which requires protocol "anthropic-messages", not "google-gen-ai"`,
+		},
+		{
+			name:    "System One model on a conversational protocol",
+			route:   newRoute(modelrouter.ProviderTypeSafe, "jev-latest", modelrouter.ProtocolAnthropicMessages, "jev-latest"),
+			wantErr: modelrouter.ErrInvalidRoute,
+			want:    `route 0: invalid route: logical model "jev-latest" resolves to backend "system-one", which requires protocol "typesafe-system-one", not "anthropic-messages"`,
+		},
+		{
+			name:    "conversational model on the System One protocol",
+			route:   newRoute(modelrouter.ProviderTypeSafe, "claude-sonnet-5", modelrouter.ProtocolTypeSafeSystemOne, "claude-sonnet-5"),
+			wantErr: modelrouter.ErrInvalidRoute,
+			want:    `route 0: invalid route: logical model "claude-sonnet-5" resolves to backend "claude", which requires protocol "anthropic-messages", not "typesafe-system-one"`,
 		},
 	}
 	for _, tt := range tests {
@@ -415,6 +428,8 @@ func routeAttribution(provider modelrouter.Provider) modelrouter.Attribution {
 		return modelrouter.Attribution{ProviderName: "anthropic", LegacySystem: "anthropic"}
 	case modelrouter.ProviderAWSBedrock:
 		return modelrouter.Attribution{ProviderName: "aws.bedrock", LegacySystem: "aws.bedrock"}
+	case modelrouter.ProviderTypeSafe:
+		return modelrouter.Attribution{ProviderName: "typesafe", LegacySystem: "typesafe"}
 	default:
 		return modelrouter.Attribution{ProviderName: string(provider), LegacySystem: string(provider)}
 	}

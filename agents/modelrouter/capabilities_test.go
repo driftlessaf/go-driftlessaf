@@ -86,6 +86,14 @@ func TestEffectiveCapabilities(t *testing.T) {
 			},
 		},
 		{
+			// The route declares every capability, and none survive: the
+			// protocol allows nothing optional, so a consumer asking for tools
+			// or effort on a System One route fails closed.
+			name:  "TypeSafe System One has no optional capabilities",
+			route: newRoute(modelrouter.ProviderTypeSafe, "jev-latest", modelrouter.ProtocolTypeSafeSystemOne, "jev-latest"),
+			want:  modelrouter.Capabilities{Efforts: []effort.Level{}},
+		},
+		{
 			name: "exact route allow set",
 			route: func() modelrouter.Route {
 				route := newRoute(modelrouter.ProviderAWSBedrock, "claude-sonnet-4-6", modelrouter.ProtocolAnthropicMessages, "anthropic.claude-sonnet-4-6")

@@ -7,6 +7,7 @@ package systemone
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,13 +21,14 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
+	"chainguard.dev/driftlessaf/agents/modelrouter"
 )
 
 // DefaultEndpoint is TypeSafe AI's hosted System One endpoint.
 const DefaultEndpoint = "https://api.typesafe.ai/v1/systemone"
 
 // ProviderName is the gen_ai.provider.name value stamped on this client's
-// metrics.
+// metrics when no route supplies one.
 const ProviderName = "typesafe"
 
 // Model aliases published by TypeSafe AI. Exact versioned ids such as
@@ -44,7 +46,9 @@ const defaultMaxResponseBytes = 16 << 20
 
 // Request is one System One call.
 type Request struct {
-	// Model is the model id or alias, for example [ModelJevLatest].
+	// Model is the model id or alias, for example [ModelJevLatest]. It may
+	// be empty on a client constructed with [WithRoute], which then sends
+	// the route's provider model ID.
 	Model string `json:"model"`
 	// State is the content every question is evaluated against.
 	State Content `json:"state"`
@@ -114,6 +118,9 @@ type Client struct {
 	genai            *metrics.GenAI
 	resourceLabels   map[string]string
 	maxResponseBytes int64
+	// defaultModel and providerName come from a route when one is supplied.
+	defaultModel string
+	providerName string
 }
 
 // Option configures a Client.
@@ -131,6 +138,25 @@ func WithEndpoint(endpoint string) Option {
 			return fmt.Errorf("endpoint %q must be an absolute http(s) URL", endpoint)
 		}
 		c.endpoint = endpoint
+		return nil
+	}
+}
+
+// WithRoute binds the client to a resolved route on the
+// [modelrouter.ProtocolTypeSafeSystemOne] protocol. Requests that leave Model
+// empty send the route's provider model ID, and metrics carry the route's
+// provider attribution. Any other protocol is rejected, so a conversational
+// route cannot be handed to this client by mistake.
+func WithRoute(plan modelrouter.Plan) Option {
+	return func(c *Client) error {
+		if err := plan.Validate(); err != nil {
+			return fmt.Errorf("route: %w", err)
+		}
+		if got := plan.Protocol(); got != modelrouter.ProtocolTypeSafeSystemOne {
+			return fmt.Errorf("route: protocol %q is not %q", got, modelrouter.ProtocolTypeSafeSystemOne)
+		}
+		c.defaultModel = plan.ProviderModelID()
+		c.providerName = plan.Attribution().ProviderName
 		return nil
 	}
 }
@@ -213,6 +239,7 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 		httpClient:       &http.Client{Timeout: 30 * time.Second},
 		retry:            DefaultRetryConfig(),
 		maxResponseBytes: defaultMaxResponseBytes,
+		providerName:     ProviderName,
 	}
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
@@ -228,6 +255,7 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 // Every non-2xx status surfaces as an *APIError, and a 2xx body that does not
 // match the questions as sent surfaces as ErrResponseValidation.
 func (c *Client) Ask(ctx context.Context, req Request) (*Response, error) {
+	req.Model = cmp.Or(req.Model, c.defaultModel)
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
@@ -239,7 +267,7 @@ func (c *Client) Ask(ctx context.Context, req Request) (*Response, error) {
 	var recorder *telemetry.Recorder
 	cfg := c.retry
 	if c.genai != nil {
-		recorder = telemetry.NewRecorder(c.genai, req.Model, ProviderName, c.resourceLabels, responseCode)
+		recorder = telemetry.NewRecorder(c.genai, req.Model, c.providerName, c.resourceLabels, responseCode)
 		cfg = recorder.WithAPIRequestCounter(ctx, cfg)
 	}
 

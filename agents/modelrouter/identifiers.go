@@ -19,6 +19,9 @@ const (
 	ProviderAnthropic Provider = "anthropic"
 	// ProviderAWSBedrock serves models through Amazon Bedrock.
 	ProviderAWSBedrock Provider = "bedrock"
+	// ProviderTypeSafe serves System One models through TypeSafe AI's
+	// first-party API.
+	ProviderTypeSafe Provider = "typesafe"
 )
 
 // Validate returns an error unless p is a lowercase identifier. Provider
@@ -57,16 +60,21 @@ const (
 	ProtocolOpenAIChatCompletions Protocol = "openai-chat-completions"
 	// ProtocolOpenAIResponses uses the native streaming Responses contract.
 	ProtocolOpenAIResponses Protocol = "openai-responses"
+	// ProtocolTypeSafeSystemOne uses TypeSafe AI's System One request and
+	// response contract: one state and typed questions in, calibrated typed
+	// answers out, with no turns, tools, or generated text. Implemented by
+	// agents/executor/systemone.
+	ProtocolTypeSafeSystemOne Protocol = "typesafe-system-one"
 )
 
 // Validate returns an error unless p identifies a protocol implemented by a
 // DriftlessAF executor.
 func (p Protocol) Validate() error {
 	switch p {
-	case ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses:
+	case ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolTypeSafeSystemOne:
 		return nil
 	default:
-		return fmt.Errorf("unsupported protocol %q (want %q, %q, %q, or %q)", p, ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses)
+		return fmt.Errorf("unsupported protocol %q (want %q, %q, %q, %q, or %q)", p, ProtocolGoogleGenAI, ProtocolAnthropicMessages, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolTypeSafeSystemOne)
 	}
 }
 

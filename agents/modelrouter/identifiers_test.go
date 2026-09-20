@@ -22,6 +22,7 @@ func TestProviderValidate(t *testing.T) {
 		{"shipped Vertex AI", modelrouter.ProviderVertexAI, false},
 		{"shipped Anthropic", modelrouter.ProviderAnthropic, false},
 		{"shipped Bedrock", modelrouter.ProviderAWSBedrock, false},
+		{"shipped TypeSafe", modelrouter.ProviderTypeSafe, false},
 		{"extension with hyphen", "test-provider", false},
 		{"extension with namespace", "example.provider_v2", false},
 		{"empty", "", true},
@@ -53,6 +54,8 @@ func TestProtocolValidate(t *testing.T) {
 		{modelrouter.ProtocolGoogleGenAI, false},
 		{modelrouter.ProtocolAnthropicMessages, false},
 		{modelrouter.ProtocolOpenAIChatCompletions, false},
+		{modelrouter.ProtocolOpenAIResponses, false},
+		{modelrouter.ProtocolTypeSafeSystemOne, false},
 		{"", true},
 		{"anthropic-responses", true},
 	}
