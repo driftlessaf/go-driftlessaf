@@ -8,6 +8,7 @@ package githubreconciler
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/chainguard-dev/clog"
@@ -32,6 +33,16 @@ type ClientCache struct {
 	// rather than constructing a second App. It is nil for non-App entrypoints
 	// (e.g. Octo STS via RepoMain/OrgMain), where LookupInstallID returns an error.
 	installIDFunc func(ctx context.Context, org string) (int64, error)
+
+	// wrapTransport, when set, wraps each client's authenticated transport
+	// before the client is built. Set by WithConditionalRequests; nil leaves
+	// the transport as it was.
+	//
+	// It is applied PER CLIENT, which for a response cache is the whole
+	// safety argument: this cache is keyed by (org, repo), so a wrapper that
+	// remembers response bodies can only ever serve them back to the
+	// credentials that fetched them.
+	wrapTransport func(http.RoundTripper) http.RoundTripper
 }
 
 // NewClientCache creates a new client cache with the provided token source function.
@@ -90,7 +101,16 @@ func (cc *ClientCache) Get(ctx context.Context, org, repo string) (*github.Clien
 	// Build the client through the SDK primitive so transport instrumentation
 	// (httpmetrics) stays consistent with bots constructed via
 	// sdk.NewGitHubClient / sdk.NewInstallationClient.
-	client = sdk.NewClient(oauth2.NewClient(ctx, tokenSource).Transport)
+	//
+	// Any wrapper sits BELOW httpmetrics, which sdk.NewClient puts outermost.
+	// A conditional-request cache therefore still shows up as a request in
+	// the metrics and the access log, which is correct: the call is made, it
+	// just answers 304 and costs no quota.
+	transport := oauth2.NewClient(ctx, tokenSource).Transport
+	if cc.wrapTransport != nil {
+		transport = cc.wrapTransport(transport)
+	}
+	client = sdk.NewClient(transport)
 
 	// Cache the client
 	cc.clients[key] = client

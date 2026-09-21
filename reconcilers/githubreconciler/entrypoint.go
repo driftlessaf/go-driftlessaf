@@ -9,10 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
 
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/condcache"
 	"chainguard.dev/driftlessaf/workqueue"
 	"chainguard.dev/go-grpc-kit/pkg/duplex"
 	kmetrics "chainguard.dev/go-grpc-kit/pkg/metrics"
@@ -60,6 +62,9 @@ type mainOptions struct {
 	// resolve an org to its GitHub App installation ID (reusing the App's cached
 	// lookup) without constructing a second App. Set by AppMain.
 	installIDFunc func(ctx context.Context, org string) (int64, error)
+	// wrapTransport, when set, wraps each GitHub client's authenticated
+	// transport. Set by WithConditionalRequests.
+	wrapTransport func(http.RoundTripper) http.RoundTripper
 }
 
 // WithInterceptors adds gRPC unary server interceptors that run before
@@ -89,6 +94,33 @@ func WithTokenSourceFuncFactory(f func(identity string) TokenSourceFunc) MainOpt
 func WithIdentity(identity string) MainOption {
 	return func(o *mainOptions) {
 		o.identity = identity
+	}
+}
+
+// WithConditionalRequests makes every GitHub GET this reconciler issues a
+// conditional request: responses are remembered with their ETag, re-reads
+// revalidate with If-None-Match, and an unchanged resource is served from
+// memory. A 304 does not count against the App installation's hourly REST
+// budget, so a reconciler that re-reads the same pull request on every event
+// for it pays for the first read and nothing after it.
+//
+// It buys nothing for a URL read once — a resource addressed by commit SHA is
+// a new URL every time — so the saving tracks how often the same resource is
+// re-read, not how many calls are made.
+//
+// The cache is created per client, which the ClientCache already scopes per
+// (org, repo). That is deliberate and is the safety property: a remembered
+// body is only ever served back through the credentials that fetched it. See
+// the condcache package doc.
+//
+// Off by default. Nothing is served without asking GitHub, so enabling it
+// cannot serve stale data; the cost is memory, bounded by the options passed
+// here.
+func WithConditionalRequests(opts ...condcache.Option) MainOption {
+	return func(o *mainOptions) {
+		o.wrapTransport = func(base http.RoundTripper) http.RoundTripper {
+			return condcache.New(base, opts...)
+		}
 	}
 }
 
@@ -219,6 +251,7 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 
 	clientCache := NewClientCache(mo.tsff(identity))
 	clientCache.installIDFunc = mo.installIDFunc
+	clientCache.wrapTransport = mo.wrapTransport
 
 	rec, err := f(ctx, identity, clientCache, env.Config)
 	if err != nil {
