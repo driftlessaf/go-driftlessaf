@@ -39,7 +39,7 @@ func ResponsesTool[Response any](opts Options[Response]) (ResponsesMetadata[Resp
 	return ResponsesMetadata[Response]{
 		Definition: responses.FunctionToolParam{
 			Name: opts.ToolName, Description: param.NewOpt(opts.Description),
-			Parameters: openaiInputSchema(opts.PayloadFieldName, payload),
+			Parameters: openaiInputSchema(opts.PayloadFieldName, payload, opts.OmitReasoning),
 			// Existing schemas include optional properties. The executor enforces
 			// schema and semantic validation before accepting a submission.
 			Strict: param.NewOpt(false),

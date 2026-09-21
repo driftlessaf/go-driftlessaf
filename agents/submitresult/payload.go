@@ -27,10 +27,14 @@ const reasoningDescription = "Explain why you are confident this result is compl
 // It is shared by the per-provider submit tool handlers, which differ only in
 // how they acquire the argument map.
 func buildOutcome[Response any](ctx context.Context, opts Options[Response], trace *agenttrace.Trace[Response], id, name string, args map[string]any) toolcall.SubmitOutcome[Response] {
-	reasoning, err := params.Extract[string](args, "reasoning")
-	if err != nil {
-		trace.RejectedToolCall(id, name, args, errors.New("parameter error"))
-		return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
+	var reasoning string
+	if !opts.OmitReasoning {
+		var err error
+		reasoning, err = params.Extract[string](args, "reasoning")
+		if err != nil {
+			trace.RejectedToolCall(id, name, args, errors.New("parameter error"))
+			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
+		}
 	}
 
 	payloadRaw, err := params.Extract[map[string]any](args, opts.PayloadFieldName)

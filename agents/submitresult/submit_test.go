@@ -40,6 +40,40 @@ func TestSubmissionDoesNotLogReasoning(t *testing.T) {
 	}
 }
 
+func TestSubmissionCanOmitSeparateReasoning(t *testing.T) {
+	t.Parallel()
+	opts := OptionsForResponse[*sampleResult]()
+	opts.OmitReasoning = true
+	submit, err := ClaudeTool(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := json.Marshal(submit.Definition.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"reasoning"`) {
+		t.Fatalf("schema still advertises a separate reasoning argument: %s", raw)
+	}
+
+	ctx := t.Context()
+	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	outcome := submit.Handler(ctx, anthropic.ToolUseBlock{
+		ID:   "s1",
+		Name: submit.Definition.Name,
+		Input: mustMarshal(t, map[string]any{
+			"analysis": map[string]any{"summary": "all good"},
+		}),
+	}, trace)
+	if !outcome.Accepted || outcome.Response == nil || outcome.Response.Summary != "all good" {
+		t.Fatalf("result-only submission: got = %#v, want accepted payload", outcome)
+	}
+	if outcome.Reasoning != "" {
+		t.Errorf("reasoning = %q, want empty when omitted", outcome.Reasoning)
+	}
+}
+
 // validInput is a well-formed {reasoning, analysis} payload for sampleResult.
 func validInput() map[string]any {
 	return map[string]any{
@@ -94,14 +128,14 @@ func trailingGarbageInput() map[string]any {
 
 // requireRecoverableRejection asserts the trace holds exactly one tool-call
 // record and that it is a recoverable rejection carrying wantErr.
-func requireRecoverableRejection(t *testing.T, trace *agenttrace.Trace[*sampleResult], wantErr string) {
+func requireRecoverableRejection(t *testing.T, trace *agenttrace.Trace[*sampleResult]) {
 	t.Helper()
 	if len(trace.ToolCalls) != 1 {
 		t.Fatalf("tool calls length: got = %d, want = 1", len(trace.ToolCalls))
 	}
 	tc := trace.ToolCalls[0]
-	if tc.Error == nil || tc.Error.Error() != wantErr {
-		t.Errorf("tool call error: got = %v, want = %q", tc.Error, wantErr)
+	if tc.Error == nil || tc.Error.Error() != "parameter error" {
+		t.Errorf("tool call error: got = %v, want = %q", tc.Error, "parameter error")
 	}
 	if !tc.Recoverable {
 		t.Errorf("tool call recoverable: got = false, want = true (rejection returned a corrective hint)")
@@ -180,7 +214,7 @@ func TestClaudeSubmitRejectsTrailingGarbagePayloadAsRecoverable(t *testing.T) {
 	if _, ok := outcome.ToolResult["error"]; !ok {
 		t.Errorf("trailing-garbage payload: got = %#v, want = error tool result", outcome.ToolResult)
 	}
-	requireRecoverableRejection(t, trace, "parameter error")
+	requireRecoverableRejection(t, trace)
 }
 
 func TestClaudeSubmitRejectsMissingReasoningAsRecoverable(t *testing.T) {
@@ -200,7 +234,7 @@ func TestClaudeSubmitRejectsMissingReasoningAsRecoverable(t *testing.T) {
 	if outcome.Accepted {
 		t.Errorf("missing reasoning: got = accepted, want = rejected")
 	}
-	requireRecoverableRejection(t, trace, "parameter error")
+	requireRecoverableRejection(t, trace)
 }
 
 func TestClaudeSubmitRejectsUnparseablePayloadAsRecoverable(t *testing.T) {
@@ -273,7 +307,7 @@ func TestClaudeSubmitRejectsMalformedPayload(t *testing.T) {
 	if outcome.Response != nil {
 		t.Errorf("rejected submit must not carry a response: got = %#v", outcome.Response)
 	}
-	requireRecoverableRejection(t, trace, "parameter error")
+	requireRecoverableRejection(t, trace)
 }
 
 func TestGoogleSubmitCoercesStringifiedPayload(t *testing.T) {
@@ -411,7 +445,7 @@ func TestSubmitRejectsUnparseableArgumentsAsRecoverable(t *testing.T) {
 		if outcome.Accepted {
 			t.Errorf("unparseable input: got = accepted, want = rejected")
 		}
-		requireRecoverableRejection(t, trace, "parameter error")
+		requireRecoverableRejection(t, trace)
 	})
 
 	t.Run("openai", func(t *testing.T) {
@@ -431,7 +465,7 @@ func TestSubmitRejectsUnparseableArgumentsAsRecoverable(t *testing.T) {
 		if outcome.Accepted {
 			t.Errorf("unparseable arguments: got = accepted, want = rejected")
 		}
-		requireRecoverableRejection(t, trace, "parameter error")
+		requireRecoverableRejection(t, trace)
 	})
 }
 

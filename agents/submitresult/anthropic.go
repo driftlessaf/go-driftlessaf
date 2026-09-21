@@ -52,7 +52,7 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata
 		Definition: anthropic.ToolParam{
 			Name:        opts.ToolName,
 			Description: anthropic.String(opts.Description),
-			InputSchema: claudeInputSchema(opts.PayloadFieldName, payloadSchema),
+			InputSchema: claudeInputSchema(opts.PayloadFieldName, payloadSchema, opts.OmitReasoning),
 		},
 		Handler: handler,
 	}, nil
@@ -60,18 +60,23 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata
 
 // claudeInputSchema builds the {reasoning, <payload>} input schema for the
 // terminal submit_result tool.
-func claudeInputSchema(payloadFieldName string, payloadSchema map[string]any) anthropic.ToolInputSchemaParam {
-	return anthropic.ToolInputSchemaParam{
-		Type: constant.Object("object"),
-		Properties: map[string]any{
-			"reasoning": map[string]any{
-				"type":        "string",
-				"description": reasoningDescription,
-			},
-			payloadFieldName: payloadSchema,
-		},
-		Required: []string{"reasoning", payloadFieldName},
+func claudeInputSchema(payloadFieldName string, payloadSchema map[string]any, omitReasoning bool) anthropic.ToolInputSchemaParam {
+	properties := map[string]any{
+		payloadFieldName: payloadSchema,
 	}
+	input := anthropic.ToolInputSchemaParam{
+		Type:       constant.Object("object"),
+		Properties: properties,
+		Required:   []string{payloadFieldName},
+	}
+	if !omitReasoning {
+		properties["reasoning"] = map[string]any{
+			"type":        "string",
+			"description": reasoningDescription,
+		}
+		input.Required = append([]string{"reasoning"}, input.Required...)
+	}
+	return input
 }
 
 // ClaudeToolForResponse constructs the submit_result tool using metadata inferred from the

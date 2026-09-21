@@ -25,6 +25,11 @@ type Options[Response any] struct {
 	PayloadDescription string
 	Generator          *schema.Generator
 
+	// OmitReasoning removes the separate reasoning string from the terminal
+	// tool schema. Use it when the structured payload already carries the full
+	// reasoning and splitting a large result across two arguments adds no value.
+	OmitReasoning bool
+
 	// OmitPayloadFields lists JSON property names to withhold from the payload
 	// schema advertised to the model, and from that schema's required list.
 	// Response itself is untouched: decoding, the result the agent returns, and

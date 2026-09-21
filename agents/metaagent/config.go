@@ -168,6 +168,10 @@ type Config[Resp, CB any] struct {
 	// name must match a property of Resp's reflected schema; an unmatched
 	// name fails construction.
 	OmitResultSchemaFields []string
+
+	// OmitSubmitReasoning removes the terminal tool's separate reasoning
+	// argument. The response type must carry any reasoning the caller needs.
+	OmitSubmitReasoning bool
 }
 
 // submitOptions builds the terminal submit tool's options: the metadata
@@ -177,6 +181,7 @@ type Config[Resp, CB any] struct {
 func submitOptions[Resp, CB any](config Config[Resp, CB]) submitresult.Options[Resp] {
 	opts := submitresult.OptionsForResponse[Resp]()
 	opts.OmitPayloadFields = config.OmitResultSchemaFields
+	opts.OmitReasoning = config.OmitSubmitReasoning
 	return opts
 }
 

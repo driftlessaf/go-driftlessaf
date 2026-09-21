@@ -39,7 +39,7 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.SubmitMetadata
 		Definition: &genai.FunctionDeclaration{
 			Name:        opts.ToolName,
 			Description: opts.Description,
-			Parameters:  googleInputSchema(opts.PayloadFieldName, genaiPayload),
+			Parameters:  googleInputSchema(opts.PayloadFieldName, genaiPayload, opts.OmitReasoning),
 		},
 		Handler: handler,
 	}, nil
@@ -47,18 +47,22 @@ func GoogleTool[Response any](opts Options[Response]) (googletool.SubmitMetadata
 
 // googleInputSchema builds the {reasoning, <payload>} schema for the terminal
 // submit_result tool.
-func googleInputSchema(payloadFieldName string, payloadSchema *genai.Schema) *genai.Schema {
-	return &genai.Schema{
+func googleInputSchema(payloadFieldName string, payloadSchema *genai.Schema, omitReasoning bool) *genai.Schema {
+	input := &genai.Schema{
 		Type: genai.TypeObject,
 		Properties: map[string]*genai.Schema{
-			"reasoning": {
-				Type:        genai.TypeString,
-				Description: reasoningDescription,
-			},
 			payloadFieldName: payloadSchema,
 		},
-		Required: []string{"reasoning", payloadFieldName},
+		Required: []string{payloadFieldName},
 	}
+	if !omitReasoning {
+		input.Properties["reasoning"] = &genai.Schema{
+			Type:        genai.TypeString,
+			Description: reasoningDescription,
+		}
+		input.Required = append([]string{"reasoning"}, input.Required...)
+	}
+	return input
 }
 
 // GoogleToolForResponse constructs the submit_result tool using metadata inferred from the

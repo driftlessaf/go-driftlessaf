@@ -52,7 +52,7 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 			Function: shared.FunctionDefinitionParam{
 				Name:        opts.ToolName,
 				Description: oaiparam.NewOpt(opts.Description),
-				Parameters:  openaiInputSchema(opts.PayloadFieldName, payloadSchema),
+				Parameters:  openaiInputSchema(opts.PayloadFieldName, payloadSchema, opts.OmitReasoning),
 			},
 		},
 		Handler: handler,
@@ -61,18 +61,22 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 
 // openaiInputSchema builds the {reasoning, <payload>} parameters for the
 // terminal submit_result tool.
-func openaiInputSchema(payloadFieldName string, payloadSchema map[string]any) shared.FunctionParameters {
-	return shared.FunctionParameters{
+func openaiInputSchema(payloadFieldName string, payloadSchema map[string]any, omitReasoning bool) shared.FunctionParameters {
+	input := shared.FunctionParameters{
 		"type": "object",
 		"properties": map[string]any{
-			"reasoning": map[string]any{
-				"type":        "string",
-				"description": reasoningDescription,
-			},
 			payloadFieldName: payloadSchema,
 		},
-		"required": []string{"reasoning", payloadFieldName},
+		"required": []string{payloadFieldName},
 	}
+	if !omitReasoning {
+		input["properties"].(map[string]any)["reasoning"] = map[string]any{
+			"type":        "string",
+			"description": reasoningDescription,
+		}
+		input["required"] = []string{"reasoning", payloadFieldName}
+	}
+	return input
 }
 
 // OpenAIToolForResponse constructs the submit_result tool using metadata inferred from
