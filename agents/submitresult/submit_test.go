@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -127,15 +128,25 @@ func trailingGarbageInput() map[string]any {
 }
 
 // requireRecoverableRejection asserts the trace holds exactly one tool-call
-// record and that it is a recoverable rejection carrying wantErr.
-func requireRecoverableRejection(t *testing.T, trace *agenttrace.Trace[*sampleResult]) {
+// record, that it is a recoverable rejection of the ErrParameter class, and
+// that the recorded error names the cause — wantCause is a fragment of the
+// same corrective hint the model received. Asserting the class alone would
+// pass on a bare sentinel, which is the defect this pins: a trace that says
+// only "parameter error" cannot tell an absent reasoning from a stringified
+// payload from arguments that never parsed.
+func requireRecoverableRejection(t *testing.T, trace *agenttrace.Trace[*sampleResult], wantCause string) {
 	t.Helper()
 	if len(trace.ToolCalls) != 1 {
 		t.Fatalf("tool calls length: got = %d, want = 1", len(trace.ToolCalls))
 	}
 	tc := trace.ToolCalls[0]
-	if tc.Error == nil || tc.Error.Error() != "parameter error" {
-		t.Errorf("tool call error: got = %v, want = %q", tc.Error, "parameter error")
+	switch {
+	case tc.Error == nil:
+		t.Errorf("tool call error: got = nil, want = %v", ErrParameter)
+	case !errors.Is(tc.Error, ErrParameter):
+		t.Errorf("tool call error: got = %v, want = one wrapping %v", tc.Error, ErrParameter)
+	case !strings.Contains(tc.Error.Error(), wantCause):
+		t.Errorf("tool call error: got = %q, want = one naming the cause %q", tc.Error, wantCause)
 	}
 	if !tc.Recoverable {
 		t.Errorf("tool call recoverable: got = false, want = true (rejection returned a corrective hint)")
@@ -214,7 +225,7 @@ func TestClaudeSubmitRejectsTrailingGarbagePayloadAsRecoverable(t *testing.T) {
 	if _, ok := outcome.ToolResult["error"]; !ok {
 		t.Errorf("trailing-garbage payload: got = %#v, want = error tool result", outcome.ToolResult)
 	}
-	requireRecoverableRejection(t, trace)
+	requireRecoverableRejection(t, trace, "analysis parameter must be a JSON object, got string")
 }
 
 func TestClaudeSubmitRejectsMissingReasoningAsRecoverable(t *testing.T) {
@@ -234,7 +245,7 @@ func TestClaudeSubmitRejectsMissingReasoningAsRecoverable(t *testing.T) {
 	if outcome.Accepted {
 		t.Errorf("missing reasoning: got = accepted, want = rejected")
 	}
-	requireRecoverableRejection(t, trace)
+	requireRecoverableRejection(t, trace, "reasoning parameter is required")
 }
 
 func TestClaudeSubmitRejectsUnparseablePayloadAsRecoverable(t *testing.T) {
@@ -307,7 +318,7 @@ func TestClaudeSubmitRejectsMalformedPayload(t *testing.T) {
 	if outcome.Response != nil {
 		t.Errorf("rejected submit must not carry a response: got = %#v", outcome.Response)
 	}
-	requireRecoverableRejection(t, trace)
+	requireRecoverableRejection(t, trace, "analysis parameter must be a JSON object, got string")
 }
 
 func TestGoogleSubmitCoercesStringifiedPayload(t *testing.T) {
@@ -445,7 +456,7 @@ func TestSubmitRejectsUnparseableArgumentsAsRecoverable(t *testing.T) {
 		if outcome.Accepted {
 			t.Errorf("unparseable input: got = accepted, want = rejected")
 		}
-		requireRecoverableRejection(t, trace)
+		requireRecoverableRejection(t, trace, "failed to parse tool input")
 	})
 
 	t.Run("openai", func(t *testing.T) {
@@ -465,8 +476,83 @@ func TestSubmitRejectsUnparseableArgumentsAsRecoverable(t *testing.T) {
 		if outcome.Accepted {
 			t.Errorf("unparseable arguments: got = accepted, want = rejected")
 		}
-		requireRecoverableRejection(t, trace)
+		requireRecoverableRejection(t, trace, "failed to parse tool arguments")
 	})
+}
+
+// TestRejectedSubmitRendersDiagnosticInTrace pins the symptom rather than the
+// mechanism: the rendered trace an engineer opens after a red gate must name
+// what was wrong with the submit. A stringified payload is the likeliest first
+// failure on a large submit schema, and the trace used to carry only
+// "Error: parameter error" for it — four distinct causes collapsed into one
+// string, so the reader had to re-derive the cause from the raw params by eye.
+func TestRejectedSubmitRendersDiagnosticInTrace(t *testing.T) {
+	submit, err := ClaudeToolForResponse[*sampleResult]()
+	if err != nil {
+		t.Fatalf("ClaudeToolForResponse: %v", err)
+	}
+
+	ctx := t.Context()
+	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+
+	block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, malformedInput())}
+	if outcome := submit.Handler(ctx, block, trace); outcome.Accepted {
+		t.Fatalf("malformed payload: got = accepted, want = rejected")
+	}
+
+	rendered := trace.String()
+	for _, want := range []string{
+		"parameter error",
+		"analysis parameter must be a JSON object, got string",
+		"pass it directly as a nested JSON object",
+		// The echo of what arrived: length plus the quoted content.
+		`analysis arrived as a 17-byte string: "not a json object"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered trace does not name %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestRejectedSubmitEchoIsBounded pins that the echo of an oversized
+// stringified payload is capped. The submission that motivated the echo was
+// 5,056 bytes, and the record it lands in is durable JSON plus a span
+// attribute, so echoing the whole payload would trade one bad diagnostic for
+// an unbounded one.
+func TestRejectedSubmitEchoIsBounded(t *testing.T) {
+	submit, err := ClaudeToolForResponse[*sampleResult]()
+	if err != nil {
+		t.Fatalf("ClaudeToolForResponse: %v", err)
+	}
+
+	// A complete object followed by prose, which coercion declines (see
+	// trailingGarbageInput), padded past the echo bound. The needle sits in
+	// the tail so its absence proves the cap held.
+	const needle = "NEEDLE_PAST_THE_BOUND"
+	payload := `{"summary":"` + strings.Repeat("a", 4*payloadEchoLimit) + `"} and then ` + needle
+
+	ctx := t.Context()
+	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+	block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, map[string]any{
+		"reasoning": "done",
+		"analysis":  payload,
+	})}
+	if outcome := submit.Handler(ctx, block, trace); outcome.Accepted {
+		t.Fatalf("oversized trailing-garbage payload: got = accepted, want = rejected")
+	}
+
+	recorded := trace.ToolCalls[0].Error.Error()
+	if want := fmt.Sprintf("analysis arrived as a %d-byte string beginning ", len(payload)); !strings.Contains(recorded, want) {
+		t.Errorf("recorded error does not report the length: got = %q, want = one containing %q", recorded, want)
+	}
+	if strings.Contains(recorded, needle) {
+		t.Errorf("recorded error echoed past the %d-byte bound: %q", payloadEchoLimit, recorded)
+	}
+	// The whole record stays proportionate: the cause, the hint and a bounded
+	// prefix, not a payload-sized string.
+	if len(recorded) > len(payload) {
+		t.Errorf("recorded error is %d bytes for a %d-byte payload; want a bounded record", len(recorded), len(payload))
+	}
 }
 
 func mustMarshal(t *testing.T, v any) []byte {

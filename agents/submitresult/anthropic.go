@@ -8,7 +8,6 @@ package submitresult
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -42,7 +41,7 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata
 			// never lands a parseable submit cannot commit a result at all.
 			trace.RejectedToolCall(toolUse.ID, toolUse.Name, map[string]any{
 				"input": toolUse.Input,
-			}, errors.New("parameter error"))
+			}, fmt.Errorf("%w: failed to parse tool input: %w", ErrParameter, err))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool input: %v", err)}
 		}
 		return buildOutcome(ctx, opts, trace, toolUse.ID, toolUse.Name, args)

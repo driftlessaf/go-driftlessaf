@@ -8,7 +8,6 @@ package submitresult
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -41,7 +40,7 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 			// Recoverable, like every other submit rejection: the parse error
 			// goes back to the model as a corrective hint, and a run that
 			// never lands a parseable submit cannot commit a result at all.
-			trace.RejectedToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, errors.New("parameter error"))
+			trace.RejectedToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, fmt.Errorf("%w: failed to parse tool arguments: %w", ErrParameter, err))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool arguments: %v", err)}
 		}
 		return buildOutcome(ctx, opts, trace, tc.ID, tc.Function.Name, args)

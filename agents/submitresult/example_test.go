@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package submitresult_test
 
 import (
+	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -39,4 +40,19 @@ func ExampleResponsesTool() {
 	}
 	fmt.Println(tool.Definition.Name)
 	// Output: submit_result
+}
+
+// ExampleErrParameter demonstrates how a consumer recognizes a submit
+// rejected before its payload parsed. Match the class through the sentinel;
+// the wrapped cause is for humans reading the trace, and quotes
+// model-controlled text.
+func ExampleErrParameter() {
+	recorded := fmt.Errorf("%w: %w", submitresult.ErrParameter,
+		errors.New("result parameter must be a JSON object, got string"))
+
+	fmt.Println(errors.Is(recorded, submitresult.ErrParameter))
+	fmt.Println(recorded)
+	// Output:
+	// true
+	// parameter error: result parameter must be a JSON object, got string
 }

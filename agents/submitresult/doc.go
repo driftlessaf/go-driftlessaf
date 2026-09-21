@@ -26,4 +26,14 @@ SPDX-License-Identifier: Apache-2.0
 // the handlers transparently decode the string and accept the submit instead
 // of rejecting it with a parameter error. Strings that do not contain a JSON
 // object are still rejected back to the model.
+//
+// A rejection records ErrParameter wrapping the cause — the same corrective
+// hint the model receives, naming the parameter at fault — so the trace an
+// engineer reads says which of the three causes fired (arguments that did not
+// decode, an absent or mistyped parameter, or a stringified payload coercion
+// declined) rather than collapsing them into one string. A declined
+// stringified payload also records its length and a bounded, quoted opening
+// prefix, which is what distinguishes a wrapped object from a YAML document
+// from a truncated write. Consumers that gate on the class match ErrParameter
+// with errors.Is, never the message.
 package submitresult

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -23,6 +24,48 @@ import (
 // submit tool schema.
 const reasoningDescription = "Explain why you are confident this result is complete and accurate."
 
+// ErrParameter marks a submit rejected before its payload could be parsed,
+// for one of three causes: the arguments did not decode as JSON, a required
+// parameter was absent or of the wrong JSON type, or coercion declined a
+// stringified payload. Every recording wraps the cause, so a trace names
+// which one fired instead of collapsing all three into one string. Consumers
+// gating on the class match this sentinel with errors.Is rather than the
+// message: an unparsed-arguments cause quotes model-controlled text.
+var ErrParameter = errors.New("parameter error")
+
+// payloadEchoLimit bounds the prefix of a stringified payload echoed into a
+// rejection record. Such a payload runs to kilobytes — the submission that
+// motivated the echo was 5,056 bytes — and the record lands in a trace, a
+// span attribute and a log line. The opening bytes are what identify the
+// shape, so a short prefix is enough to tell a wrapped object from a YAML
+// document from a truncated write.
+const payloadEchoLimit = 128
+
+// arrivedAsString describes what the payload field actually carried, for the
+// rejection record: its length and a bounded opening prefix. It reports the
+// empty string when the field holds anything but a string, because the
+// stringified payload is the shape worth echoing and the caller then appends
+// nothing.
+//
+// The prefix is %q-quoted, so any ANSI or control bytes the model sent are
+// escaped rather than replayed into a terminal, and it is trimmed back to a
+// rune boundary so a multi-byte character split by the bound does not print
+// as a replacement character.
+func arrivedAsString(args map[string]any, field string) string {
+	s, err := params.Extract[string](args, field)
+	if err != nil {
+		return ""
+	}
+	if len(s) <= payloadEchoLimit {
+		return fmt.Sprintf("%s arrived as a %d-byte string: %q", field, len(s), s)
+	}
+	prefix := s[:payloadEchoLimit]
+	for len(prefix) > 0 && !utf8.ValidString(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return fmt.Sprintf("%s arrived as a %d-byte string beginning %q", field, len(s), prefix)
+}
+
 // buildOutcome turns decoded submit tool-call arguments into a SubmitOutcome.
 // It is shared by the per-provider submit tool handlers, which differ only in
 // how they acquire the argument map.
@@ -32,7 +75,7 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 		var err error
 		reasoning, err = params.Extract[string](args, "reasoning")
 		if err != nil {
-			trace.RejectedToolCall(id, name, args, errors.New("parameter error"))
+			trace.RejectedToolCall(id, name, args, fmt.Errorf("%w: %w", ErrParameter, err))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
 		}
 	}
@@ -41,7 +84,11 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 	if err != nil {
 		coerced, ok := coerceStringPayload(args, opts.PayloadFieldName)
 		if !ok {
-			trace.RejectedToolCall(id, name, args, errors.New("parameter error"))
+			cause := err
+			if arrived := arrivedAsString(args, opts.PayloadFieldName); arrived != "" {
+				cause = fmt.Errorf("%w (%s)", err, arrived)
+			}
+			trace.RejectedToolCall(id, name, args, fmt.Errorf("%w: %w", ErrParameter, cause))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", err)}
 		}
 		clog.WarnContext(ctx, "Coerced stringified submit payload into an object",
