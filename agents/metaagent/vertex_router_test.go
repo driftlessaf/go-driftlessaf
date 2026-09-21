@@ -28,6 +28,7 @@ func TestNewVertexRouterConstructsEachDeclaredProtocol(t *testing.T) {
 		vertexRouterTestRoute(modelrouter.ProtocolGoogleGenAI, "gemini-2.5-pro"),
 		vertexRouterTestRoute(modelrouter.ProtocolAnthropicMessages, "claude-sonnet-4-6"),
 		vertexRouterTestRoute(modelrouter.ProtocolOpenAIChatCompletions, "google/gemini-2.5-flash"),
+		vertexRouterTestRoute(modelrouter.ProtocolOpenAIResponses, "example/responses-model"),
 	}
 	router, err := NewVertexRouter("test-project", "global", routes...)
 	if err != nil {
@@ -73,7 +74,7 @@ func TestNewVertexRouterValidatesWithoutCredentials(t *testing.T) {
 		{name: "other provider", project: "test-project", region: "global", routes: []modelrouter.Route{foreign}, wantErr: ErrInvalidBinding},
 		{name: "wrong attribution", project: "test-project", region: "global", routes: []modelrouter.Route{wrongAttribution}, wantErr: ErrInvalidBinding},
 		{name: "duplicate selection", project: "test-project", region: "global", routes: []modelrouter.Route{valid, valid}, wantErr: modelrouter.ErrDuplicateRoute},
-		{name: "unsupported protocol", project: "test-project", region: "global", routes: []modelrouter.Route{vertexRouterTestRoute(modelrouter.ProtocolOpenAIResponses, "example/model")}, wantErr: ErrInvalidRouter},
+		{name: "unsupported protocol", project: "test-project", region: "global", routes: []modelrouter.Route{vertexRouterTestRoute(modelrouter.ProtocolTypeSafeSystemOne, "jev-test")}, wantErr: ErrInvalidRouter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			router, err := NewVertexRouter(tc.project, tc.region, tc.routes...)
