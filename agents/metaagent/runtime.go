@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"sync"
 
-	"chainguard.dev/driftlessaf/agents/anthropicauth"
-	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 )
@@ -24,27 +22,11 @@ type VertexConfig struct {
 	ProjectID string
 }
 
-// Backend is one explicitly configured provider account. Name defaults to the
-// provider name. Use distinct names for separate projects or auth configurations.
-// Credentials configure the selected backend; they never select a provider.
-type Backend struct {
-	Name     string
-	Provider modelrouter.Provider
-	// Google configures Vertex AI.
-	Google VertexConfig
-	// Anthropic holds typed WIF configuration for Anthropic-direct.
-	Anthropic anthropicauth.Config
-	// AWS configures Bedrock Runtime. A target region overrides AWS.Region.
-	// AWS.Profile selects SSO, AWS.Google selects Google workload identity;
-	// otherwise the token-file credential chain is resolved when an adapter binds.
-	AWS awsauth.Config
-}
-
 // TargetConfig selects an exact provider/model pair on a configured backend.
 // It contains no credentials and can be populated from application configuration.
 // Backend defaults to the provider name. Region is required for Vertex AI and
-// ignored for Anthropic-direct. For Bedrock it overrides Backend.AWS.Region;
-// one of those regions must be set. Catalog probe regions are never defaults.
+// ignored for Anthropic-direct. For Bedrock it overrides the configured default
+// region; one of those regions must be set. Catalog probe regions are never defaults.
 type TargetConfig struct {
 	Provider modelrouter.Provider `env:"PROVIDER"`
 	Model    string               `env:"MODEL"`
@@ -76,11 +58,9 @@ type Target struct {
 	config  TargetConfig
 }
 
-// NewRuntime snapshots the catalog and backend configurations without loading
-// credentials or reading environment variables. Vertex AI, Anthropic-direct,
-// and Bedrock Runtime backends are supported; custom adapters can continue using
-// NewRouterWithAdapters. Duplicate backend names and invalid catalogs fail here;
-// selected backend settings are validated when a target is resolved.
+// NewRuntime snapshots exact routes and backend registrations without
+// loading credentials. Duplicate names, invalid registrations, and invalid routes
+// fail here. Provider configuration is validated when its target is resolved.
 func NewRuntime(routes []modelrouter.Route, backends ...Backend) (*Runtime, error) {
 	registry, err := modelrouter.NewRegistry(routes...)
 	if err != nil {
@@ -102,15 +82,16 @@ func NewRuntime(routes []modelrouter.Route, backends ...Backend) (*Runtime, erro
 		r.declarations[route.Selection.Provider] = append(r.declarations[route.Selection.Provider], route)
 	}
 	for _, backend := range backends {
-		if backend.Provider != modelrouter.ProviderVertexAI && backend.Provider != modelrouter.ProviderAnthropic && backend.Provider != modelrouter.ProviderAWSBedrock {
-			return nil, fmt.Errorf("%w: unsupported runtime provider %q", ErrInvalidRouter, backend.Provider)
+		if backend.provider == "" || backend.build == nil || backend.region == nil {
+			return nil, fmt.Errorf("%w: invalid backend registration", ErrInvalidRouter)
 		}
-		backend.Name = cmp.Or(backend.Name, string(backend.Provider))
-		if _, ok := r.backends[backend.Name]; ok {
-			return nil, fmt.Errorf("%w: duplicate backend %q", ErrInvalidRouter, backend.Name)
+		backend.name = cmp.Or(backend.name, string(backend.provider))
+		if _, ok := r.backends[backend.name]; ok {
+			return nil, fmt.Errorf("%w: duplicate backend %q", ErrInvalidRouter, backend.name)
 		}
-		r.backends[backend.Name] = backend
+		r.backends[backend.name] = backend
 	}
+
 	return r, nil
 }
 
@@ -142,38 +123,17 @@ func (r *Runtime) resolve(config TargetConfig, selection modelrouter.Selection) 
 	}
 	key := runtimeKey{backend: cmp.Or(config.Backend, string(config.Provider)), region: config.Region}
 	backend, ok := r.backends[key.backend]
-	if !ok || backend.Provider != config.Provider {
+	if !ok || backend.provider != config.Provider {
 		return nil, fmt.Errorf("%w: backend %q is not configured for provider %q", ErrInvalidRouter, key.backend, config.Provider)
 	}
-	if config.Provider == modelrouter.ProviderAWSBedrock {
-		key.region = cmp.Or(config.Region, backend.AWS.Region)
-	}
-	if config.Provider == modelrouter.ProviderAnthropic {
-		key.region = ""
-	}
+	key.region = backend.region(config.Region)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if router, ok := r.routers[key]; ok {
 		return router, nil
 	}
-	var router *Router
-	var err error
-	switch backend.Provider {
-	case modelrouter.ProviderVertexAI:
-		router, err = NewVertexRouter(backend.Google.ProjectID, key.region, r.declarations[backend.Provider]...)
-	case modelrouter.ProviderAWSBedrock:
-		cfg := backend.AWS
-		cfg.Region = key.region
-		router, err = NewBedrockRuntimeRouter(cfg, r.declarations[backend.Provider]...)
-	case modelrouter.ProviderAnthropic:
-		var adapter AnthropicMessagesAdapter
-		adapter, err = NewAnthropicDirectMessagesAdapter(backend.Anthropic)
-		if err == nil {
-			router, err = NewRouterWithAdapters(r.routes, AdapterRegistrations{
-				AnthropicMessages: []AnthropicMessagesRegistration{{Provider: backend.Provider, Adapter: adapter}},
-			})
-		}
-	}
+	router, err := backend.build(key.region, r.declarations[backend.provider])
+
 	if err != nil {
 		return nil, err
 	}

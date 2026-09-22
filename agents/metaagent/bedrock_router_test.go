@@ -32,8 +32,8 @@ func TestBedrockRuntimeTargets(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "must-not-load")
 	routes := runtimeBedrockRoutes()
 	runtime, err := NewRuntime(routes,
-		Backend{Provider: modelrouter.ProviderAWSBedrock, AWS: awsauth.Config{Region: "us-east-1", Profile: "first"}},
-		Backend{Name: "other", Provider: modelrouter.ProviderAWSBedrock, AWS: awsauth.Config{Region: "us-east-1", Profile: "second"}},
+		BedrockBackend("", awsauth.Config{Region: "us-east-1", Profile: "first"}),
+		BedrockBackend("other", awsauth.Config{Region: "us-east-1", Profile: "second"}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestBedrockTargetChecksCapabilitiesBeforeCredentials(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "must-not-load")
 	route := runtimeBedrockRoutes()[0]
 	route.Capabilities.ToolCalling = false
-	runtime, err := NewRuntime([]modelrouter.Route{route}, Backend{Provider: modelrouter.ProviderAWSBedrock, AWS: awsauth.Config{Region: "us-east-1"}})
+	runtime, err := NewRuntime([]modelrouter.Route{route}, BedrockBackend("", awsauth.Config{Region: "us-east-1"}))
 	if err != nil {
 		t.Fatal(err)
 	}

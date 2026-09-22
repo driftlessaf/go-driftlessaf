@@ -27,7 +27,7 @@ func ExampleNewWithTarget() {
 		ProviderModelID: "gemini-2.5-flash",
 		Attribution:     modelrouter.Attribution{ProviderName: "gcp.vertex_ai", LegacySystem: "google.vertex"},
 		Capabilities:    modelrouter.Capabilities{MaximumOutputTokens: true},
-	}}, metaagent.Backend{Provider: modelrouter.ProviderVertexAI, Google: metaagent.VertexConfig{ProjectID: "my-project"}})
+	}}, metaagent.VertexBackend("", metaagent.VertexConfig{ProjectID: "my-project"}))
 	if err != nil {
 		panic(err)
 	}

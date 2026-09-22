@@ -29,10 +29,10 @@ func TestRuntimeSharesOnlyMatchingBackends(t *testing.T) {
 	t.Setenv("ANTHROPIC_PROFILE", "must-not-load")
 	t.Setenv("CLAUDE_BACKEND", "must-not-select")
 	runtime, err := NewRuntime(runtimeRoutes(),
-		Backend{Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "project-one"}},
-		Backend{Name: "other-project", Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "project-two"}},
-		Backend{Provider: modelrouter.ProviderAnthropic, Anthropic: anthropicauth.Config{FederationRuleID: "rule", OrganizationID: "org"}},
-		Backend{Name: "other-account", Provider: modelrouter.ProviderAnthropic, Anthropic: anthropicauth.Config{FederationRuleID: "rule-two", OrganizationID: "org"}},
+		VertexBackend("", VertexConfig{ProjectID: "project-one"}),
+		VertexBackend("other-project", VertexConfig{ProjectID: "project-two"}),
+		AnthropicBackend("", anthropicauth.Config{FederationRuleID: "rule", OrganizationID: "org"}),
+		AnthropicBackend("other-account", anthropicauth.Config{FederationRuleID: "rule-two", OrganizationID: "org"}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -80,14 +80,14 @@ func TestRuntimeConcurrentResolutionAndSnapshot(t *testing.T) {
 	t.Parallel()
 	routes := runtimeRoutes()
 	routes[0].Capabilities.Efforts = []effort.Level{effort.Low, effort.Medium}
-	backends := []Backend{{Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "original-project"}}}
+	backends := []Backend{VertexBackend("", VertexConfig{ProjectID: "original-project"})}
 	runtime, err := NewRuntime(routes, backends...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	routes[0].ProviderModelID = "mutated"
 	routes[0].Capabilities.Efforts[0] = effort.Max
-	backends[0].Google.ProjectID = "invalid/project"
+	backends[0] = VertexBackend("", VertexConfig{ProjectID: "invalid/project"})
 	target := runtime.Target(TargetConfig{Provider: modelrouter.ProviderVertexAI, Model: "claude-sonnet-4-6", Region: "global"})
 	var wg sync.WaitGroup
 	results := make([]*Router, 20)
@@ -119,7 +119,7 @@ func TestRuntimeConcurrentResolutionAndSnapshot(t *testing.T) {
 
 func TestRuntimeInvalidTargets(t *testing.T) {
 	t.Parallel()
-	runtime, err := NewRuntime(runtimeRoutes(), Backend{Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "project"}})
+	runtime, err := NewRuntime(runtimeRoutes(), VertexBackend("", VertexConfig{ProjectID: "project"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestRuntimeInvalidTargets(t *testing.T) {
 func TestRuntimeRejectsDuplicateConfiguration(t *testing.T) {
 	t.Parallel()
 	routes := runtimeRoutes()
-	vertex := Backend{Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "project"}}
+	vertex := VertexBackend("", VertexConfig{ProjectID: "project"})
 	for _, tc := range []struct {
 		name     string
 		routes   []modelrouter.Route
@@ -158,7 +158,7 @@ func TestRuntimeRejectsDuplicateConfiguration(t *testing.T) {
 	}{
 		{"duplicate route", append(routes, routes[0]), []Backend{vertex}, modelrouter.ErrDuplicateRoute},
 		{"duplicate backend", routes, []Backend{vertex, vertex}, ErrInvalidRouter},
-		{"unsupported provider", routes, []Backend{{Provider: "unsupported"}}, ErrInvalidRouter},
+		{"zero backend", routes, []Backend{{}}, ErrInvalidRouter},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -186,7 +186,7 @@ func TestNewWithTargetValidatesBeforeAdapterAndDoesNotFallback(t *testing.T) {
 			t.Parallel()
 			routes := runtimeRoutes()
 			tc.mutate(&routes[0])
-			runtime, err := NewRuntime(routes, Backend{Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "project"}})
+			runtime, err := NewRuntime(routes, VertexBackend("", VertexConfig{ProjectID: "project"}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -223,7 +223,7 @@ func TestNewWithTargetConstructsSupportedVertexProtocols(t *testing.T) {
 		vertexRouterTestRoute(modelrouter.ProtocolAnthropicMessages, "claude-sonnet-4-6"),
 		vertexRouterTestRoute(modelrouter.ProtocolOpenAIChatCompletions, "google/gemini-2.5-flash"),
 	}
-	runtime, err := NewRuntime(routes, Backend{Provider: modelrouter.ProviderVertexAI, Google: VertexConfig{ProjectID: "project"}})
+	runtime, err := NewRuntime(routes, VertexBackend("", VertexConfig{ProjectID: "project"}))
 	if err != nil {
 		t.Fatal(err)
 	}

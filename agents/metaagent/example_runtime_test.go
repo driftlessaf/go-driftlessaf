@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
@@ -23,7 +24,7 @@ func exampleRuntime() *metaagent.Runtime {
 		ProviderModelID: "gemini-2.5-flash",
 		Attribution:     modelrouter.Attribution{ProviderName: "gcp.vertex_ai", LegacySystem: "google.vertex"},
 		Capabilities:    modelrouter.Capabilities{ToolCalling: true, TerminalSubmission: true},
-	}}, metaagent.Backend{Provider: modelrouter.ProviderVertexAI, Google: metaagent.VertexConfig{ProjectID: "my-project"}})
+	}}, metaagent.VertexBackend("", metaagent.VertexConfig{ProjectID: "my-project"}))
 	if err != nil {
 		panic(err)
 	}
@@ -96,4 +97,34 @@ func ExampleNewBedrockRuntimeRouter() {
 	_, err := metaagent.NewBedrockRuntimeRouter(awsauth.Config{Region: "us-east-1", Profile: "development"}, route)
 	fmt.Println(err)
 	// Output: <nil>
+}
+
+func ExampleVertexBackend() {
+	_, err := metaagent.NewRuntime(nil, metaagent.VertexBackend("primary", metaagent.VertexConfig{ProjectID: "my-project"}))
+	fmt.Println(err)
+	// Output: <nil>
+}
+
+func ExampleBedrockBackend() {
+	_, err := metaagent.NewRuntime(nil, metaagent.BedrockBackend("", awsauth.Config{Region: "us-east-1"}))
+	fmt.Println(err)
+	// Output: <nil>
+}
+
+func ExampleAnthropicBackend() {
+	_, err := metaagent.NewRuntime(nil, metaagent.AnthropicBackend("", anthropicauth.Config{FederationRuleID: "rule", OrganizationID: "org"}))
+	fmt.Println(err)
+	// Output: <nil>
+}
+
+func ExampleNewAdapterBackend() {
+	calls := 0
+	backend := metaagent.NewAdapterBackend("account", "example-provider", func(region string) (metaagent.AdapterRegistrations, error) {
+		calls++
+		// Return adapters capturing this account's configuration and region.
+		return metaagent.AdapterRegistrations{}, nil
+	})
+	_, err := metaagent.NewRuntime(nil, backend)
+	fmt.Println(calls, err)
+	// Output: 0 <nil>
 }
