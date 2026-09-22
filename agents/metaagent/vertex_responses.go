@@ -56,7 +56,11 @@ func newVertexOpenAIResponsesAdapter(projectID, region string, newTokenSource ve
 		}
 		return NewOpenAIResponsesBinding(plan, responses.NewResponseService(
 			option.WithBaseURL(fmt.Sprintf("https://%s/v1/projects/%s/locations/%s/endpoints/openapi/", host, config.projectID, config.region)),
-			option.WithHTTPClient(&http.Client{Transport: &oauth2.Transport{Source: tokenSource}}),
+			option.WithHTTPClient(&http.Client{
+				Transport: &oauth2.Transport{Source: tokenSource},
+				// OAuth transports attach credentials to every request, including redirects.
+				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			}),
 			option.WithMaxRetries(0),
 			option.WithJSONSet("store", false),
 		), config.resourceLabels(plan))

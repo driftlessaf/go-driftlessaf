@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
@@ -97,6 +99,59 @@ func TestVertexResponsesTransport(t *testing.T) {
 			}
 			if got := binding.ResourceLabels(); got["projectID"] != "test-project" || got["region"] != tc.region || got["model_name"] != route.ProviderModelID {
 				t.Errorf("labels: got = %v", got)
+			}
+		})
+	}
+}
+
+func TestVertexResponsesRejectsRedirects(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			var redirected atomic.Int32
+			destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				redirected.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer destination.Close()
+			token := rand.Text()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Header.Get("Authorization") != "Bearer "+token {
+					t.Error("OAuth authorization missing")
+				}
+				// A different hostname exercises cross-host credential handling.
+				w.Header().Set("Location", strings.Replace(destination.URL, "127.0.0.1", "localhost", 1))
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			adapter, err := newVertexOpenAIResponsesAdapter("test-project", "global", func(context.Context, ...string) (oauth2.TokenSource, error) {
+				return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}), nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			route := vertexRouterTestRoute(modelrouter.ProtocolOpenAIResponses, "example/responses-model")
+			plan, err := mustRouteRegistry(t, route).Resolve(route.Selection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, err := adapter(t.Context(), plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := binding.Responses()
+			_, err = service.New(t.Context(), responses.ResponseNewParams{Model: route.ProviderModelID}, option.WithBaseURL(server.URL))
+			if err == nil {
+				t.Error("redirect response: got success, want error")
+			}
+			if got := requests.Load(); got != 1 {
+				t.Errorf("endpoint requests: got = %d, want = 1", got)
+			}
+			if got := redirected.Load(); got != 0 {
+				t.Errorf("redirected requests: got = %d, want = 0", got)
 			}
 		})
 	}

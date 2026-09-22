@@ -80,14 +80,19 @@ func TestRuntimeConcurrentResolutionAndSnapshot(t *testing.T) {
 	t.Parallel()
 	routes := runtimeRoutes()
 	routes[0].Capabilities.Efforts = []effort.Level{effort.Low, effort.Medium}
-	backends := []Backend{VertexBackend("", VertexConfig{ProjectID: "original-project"})}
+	cfg := VertexConfig{ProjectID: "original-project"}
+	backends := []Backend{VertexBackend("", cfg)}
+	// The constructor must capture the caller's configuration by value.
+	cfg.ProjectID = "invalid/project"
 	runtime, err := NewRuntime(routes, backends...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	routes[0].ProviderModelID = "mutated"
 	routes[0].Capabilities.Efforts[0] = effort.Max
-	backends[0] = VertexBackend("", VertexConfig{ProjectID: "invalid/project"})
+	// Mutate the existing registration so retaining a pointer into the caller's
+	// slice would make resolution use the invalid project.
+	backends[0].build = VertexBackend("", cfg).build
 	target := runtime.Target(TargetConfig{Provider: modelrouter.ProviderVertexAI, Model: "claude-sonnet-4-6", Region: "global"})
 	var wg sync.WaitGroup
 	results := make([]*Router, 20)
