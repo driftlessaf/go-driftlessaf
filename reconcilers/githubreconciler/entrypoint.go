@@ -67,6 +67,22 @@ type mainOptions struct {
 	wrapTransport func(http.RoundTripper) http.RoundTripper
 }
 
+// newClientCacheFor builds the ClientCache Main hands to the reconciler
+// functor, applying every MainOption that configures the cache rather than
+// the server around it.
+//
+// Extracted from Main so the wiring is reachable from a test. Main itself
+// binds a port and serves, so nothing inside it can be exercised directly —
+// which meant a dropped assignment here would leave the options that set
+// these fields (WithConditionalRequests above) silently inert, with every
+// test of the thing they configure still passing.
+func newClientCacheFor(mo mainOptions, identity string) *ClientCache {
+	cc := NewClientCache(mo.tsff(identity))
+	cc.installIDFunc = mo.installIDFunc
+	cc.wrapTransport = mo.wrapTransport
+	return cc
+}
+
 // WithInterceptors adds gRPC unary server interceptors that run before
 // the default metrics and recovery interceptors.
 func WithInterceptors(inter ...grpc.UnaryServerInterceptor) MainOption {
@@ -249,9 +265,7 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 	defer httpmetrics.SetupMetrics(ctx)()
 	defer httpmetrics.SetupTracer(ctx)()
 
-	clientCache := NewClientCache(mo.tsff(identity))
-	clientCache.installIDFunc = mo.installIDFunc
-	clientCache.wrapTransport = mo.wrapTransport
+	clientCache := newClientCacheFor(mo, identity)
 
 	rec, err := f(ctx, identity, clientCache, env.Config)
 	if err != nil {
