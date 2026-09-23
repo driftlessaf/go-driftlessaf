@@ -90,6 +90,13 @@ var preXHighEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, eff
 // budget_tokens=N) in favor of adaptive thinking. Opus 4.7 introduced this
 // surface; Opus 4.8, Opus 5, Sonnet 5, and Fable 5 share it.
 // See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
+// automaticToolChoiceOnlyModels are the Claude base ids (the part before any
+// "@" suffix) that reject a forced tool_choice.
+var automaticToolChoiceOnlyModels = []string{
+	"claude-fable-5-1",
+	"claude-opus-5-5",
+}
+
 var samplingParamsRemovedPrefixes = []string{
 	"claude-opus-4-7",
 	"claude-opus-4-8",
@@ -162,7 +169,8 @@ func Resolve(id string) Info {
 func claudeInfo(id string) Info {
 	info := Info{Backend: BackendClaude}
 	base, _, _ := strings.Cut(id, "@")
-	info.AutomaticToolChoiceOnly = base == "claude-fable-5-1"
+	// Forced tool_choice (any or a named tool) is rejected with a 400.
+	info.AutomaticToolChoiceOnly = slices.Contains(automaticToolChoiceOnlyModels, base)
 	if !hasAnyPrefix(id, samplingParamsRemovedPrefixes) {
 		info.SamplingParams = true
 		info.ExtendedThinkingBudget = true
