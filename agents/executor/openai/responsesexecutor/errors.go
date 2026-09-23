@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 
+	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/responses"
 )
@@ -142,6 +143,73 @@ func safeStreamFailure(event responses.ResponseStreamEventUnion, response *http.
 		case "max_output_tokens", "max_tokens", "content_filter":
 			failure.reason = reason
 		}
+	}
+	return failure
+}
+
+// The pinned SDK's ssestream.Stream.Next intercepts SSE data containing a
+// top-level "error" field and returns a generic error before our executor
+// receives the event. The error message has the fixed prefix below, followed
+// by the raw JSON value of the "error" field. Parse only the allowlisted code
+// from that JSON; never retain the message, param, or any other field.
+const sdkInterceptedPrefix = "received error while streaming: "
+
+// safeInterceptedStreamError detects the SDK's intercepted top-level error
+// envelope and returns a streamFailure with only the allowlisted code and
+// validated correlation IDs. It returns nil when the error is not from the
+// intercepted path, so the caller can fall through to the generic message.
+func safeInterceptedStreamError(err error, response *http.Response, responseID string) *streamFailure {
+	suffix, ok := strings.CutPrefix(err.Error(), sdkInterceptedPrefix)
+	if !ok {
+		return nil
+	}
+	failure := &streamFailure{
+		eventType:  "error",
+		responseID: responseID,
+	}
+	if response != nil {
+		failure.requestID = safeHeaderRequestID(response.Header)
+	}
+	// The suffix is the gjson string representation of the "error" field.
+	// Parse only the "code" and "type" sub-fields; ignore message and param.
+	var envelope struct {
+		Code string `json:"code"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(suffix), &envelope); err == nil {
+		for _, code := range []string{envelope.Code, envelope.Type} {
+			switch code {
+			case "server_error", "rate_limit_exceeded", "invalid_prompt", "vector_store_timeout",
+				"invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url",
+				"image_too_large", "image_too_small", "image_parse_error", "image_content_policy_violation",
+				"invalid_image_mode", "image_file_too_large", "unsupported_image_media_type", "empty_image_file",
+				"failed_to_download_image", "image_file_not_found", "invalid_request_error":
+				failure.code = code
+				return failure
+			}
+		}
+	}
+	return failure
+}
+
+// safeBedrockStreamFailure converts a SafeBedrockError into a streamFailure
+// carrying only the allowlisted category and validated correlation IDs. It
+// never retains the original error or any raw SDK content.
+func safeBedrockStreamFailure(be bedrockruntime.SafeBedrockError, response *http.Response, responseID string) *streamFailure {
+	failure := &streamFailure{
+		eventType:  "bedrock",
+		responseID: responseID,
+	}
+	if response != nil {
+		failure.requestID = safeHeaderRequestID(response.Header)
+	}
+	// Prefer the validated service request ID from the Bedrock error over the
+	// HTTP response header when both are present.
+	if id := be.BedrockRequestID(); id != "" {
+		failure.requestID = id
+	}
+	if code := be.BedrockCategory(); code != "" {
+		failure.code = code
 	}
 	return failure
 }

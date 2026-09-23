@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 
+	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/responses"
@@ -128,6 +129,12 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 	if err := stream.Err(); err != nil {
 		if api, ok := errors.AsType[*openai.Error](err); ok && events == 0 {
 			return nil, safeHTTPFailure(api)
+		}
+		if f := safeInterceptedStreamError(err, httpResponse, responseID); f != nil {
+			return nil, f
+		}
+		if be, ok := errors.AsType[bedrockruntime.SafeBedrockError](err); ok {
+			return nil, safeBedrockStreamFailure(be, httpResponse, responseID)
 		}
 		return nil, errors.New("responses stream transport or decoding failure; usage may be unavailable")
 	}

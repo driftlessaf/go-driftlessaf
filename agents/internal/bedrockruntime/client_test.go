@@ -27,6 +27,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	smithy "github.com/aws/smithy-go"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -339,6 +340,183 @@ func TestSafeErrors(t *testing.T) {
 		}
 	}
 }
+
+// fakeAPIError implements smithy.APIError for testing without importing STS types.
+type fakeAPIError struct {
+	code    string
+	message string
+}
+
+func (e *fakeAPIError) Error() string                 { return e.code + ": " + e.message }
+func (e *fakeAPIError) ErrorCode() string             { return e.code }
+func (e *fakeAPIError) ErrorMessage() string          { return e.message }
+func (e *fakeAPIError) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
+
+var _ smithy.APIError = (*fakeAPIError)(nil)
+
+func TestSafeErrorsAWSCategories(t *testing.T) {
+	t.Parallel()
+	secret := rand.Text()
+	for _, tt := range []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{name: "expired token", err: &fakeAPIError{code: "ExpiredTokenException", message: secret}, wantCode: "ExpiredTokenException"},
+		{name: "invalid identity token", err: &fakeAPIError{code: "InvalidIdentityToken", message: secret}, wantCode: "InvalidIdentityToken"},
+		{name: "IDP rejected claim", err: &fakeAPIError{code: "IDPRejectedClaim", message: secret}, wantCode: "IDPRejectedClaim"},
+		{name: "IDP communication error", err: &fakeAPIError{code: "IDPCommunicationError", message: secret}, wantCode: "IDPCommunicationError"},
+		{name: "access denied", err: &fakeAPIError{code: "AccessDenied", message: secret}, wantCode: "AccessDenied"},
+		{name: "access denied exception", err: &fakeAPIError{code: "AccessDeniedException", message: secret}, wantCode: "AccessDeniedException"},
+		{name: "unrecognized client", err: &fakeAPIError{code: "UnrecognizedClientException", message: secret}, wantCode: "UnrecognizedClientException"},
+		{name: "invalid client token", err: &fakeAPIError{code: "InvalidClientTokenId", message: secret}, wantCode: "InvalidClientTokenId"},
+		{name: "region disabled", err: &fakeAPIError{code: "RegionDisabledException", message: secret}, wantCode: "RegionDisabledException"},
+		{name: "wrapped expired token", err: fmt.Errorf("operation error STS: AssumeRoleWithWebIdentity: %w", &fakeAPIError{code: "ExpiredTokenException", message: secret}), wantCode: "ExpiredTokenException"},
+		{name: "unknown AWS code", err: &fakeAPIError{code: "UnknownException", message: secret}},
+		{name: "plain error", err: errors.New(secret)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := safeError("credential refresh", tt.err)
+			if strings.Contains(got.Error(), secret) {
+				t.Errorf("safe error: got = %v, want no secret", got)
+			}
+			if errors.Is(got, tt.err) || errors.Unwrap(got) != nil {
+				t.Error("error chain: got raw error, want no raw cause")
+			}
+			if tt.wantCode != "" {
+				if !strings.Contains(got.Error(), "code="+tt.wantCode) {
+					t.Errorf("safe error: got = %v, want code=%s", got, tt.wantCode)
+				}
+			} else {
+				if strings.Contains(got.Error(), "code=") {
+					t.Errorf("safe error: got = %v, want no code for unknown error", got)
+				}
+			}
+		})
+	}
+}
+
+// fakeResponseError implements serviceRequestIDer for testing without importing
+// the concrete aws/transport/http.ResponseError type.
+type fakeResponseError struct {
+	requestID string
+	message   string
+}
+
+func (e *fakeResponseError) Error() string            { return e.message }
+func (e *fakeResponseError) ServiceRequestID() string { return e.requestID }
+
+func TestSafeErrorsServiceRequestID(t *testing.T) {
+	t.Parallel()
+	const validID = "12345678-1234-1234-1234-123456789abc"
+	secret := rand.Text()
+	for _, tt := range []struct {
+		name     string
+		err      error
+		wantID   string
+		wantCode string
+	}{
+		{
+			name:   "valid UUID without code",
+			err:    &fakeResponseError{requestID: validID, message: secret},
+			wantID: validID,
+		},
+		{
+			name:   "malformed ID is rejected",
+			err:    &fakeResponseError{requestID: "not-a-uuid", message: secret},
+			wantID: "",
+		},
+		{
+			name:   "malicious ID with newline is rejected",
+			err:    &fakeResponseError{requestID: validID[:35] + "\n", message: secret},
+			wantID: "",
+		},
+		{
+			name:   "malicious ID with secret is rejected",
+			err:    &fakeResponseError{requestID: secret, message: secret},
+			wantID: "",
+		},
+		{
+			name:   "empty ID is rejected",
+			err:    &fakeResponseError{requestID: "", message: secret},
+			wantID: "",
+		},
+		{
+			name:   "wrapped response error with valid UUID",
+			err:    fmt.Errorf("operation error STS: %w", &fakeResponseError{requestID: validID, message: secret}),
+			wantID: validID,
+		},
+		{
+			name:     "known code and valid UUID",
+			err:      wrappedResponseAPIError{requestID: validID, api: &fakeAPIError{code: "ExpiredTokenException", message: secret}},
+			wantCode: "ExpiredTokenException",
+			wantID:   validID,
+		},
+		{
+			name:     "known code and malformed UUID",
+			err:      wrappedResponseAPIError{requestID: "bad-id", api: &fakeAPIError{code: "AccessDenied", message: secret}},
+			wantCode: "AccessDenied",
+			wantID:   "",
+		},
+		{
+			name:     "unknown code and valid UUID",
+			err:      wrappedResponseAPIError{requestID: validID, api: &fakeAPIError{code: "UnknownException", message: secret}},
+			wantCode: "",
+			wantID:   validID,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := safeError("credential refresh", tt.err)
+			if strings.Contains(got.Error(), secret) {
+				t.Errorf("safe error: got = %v, want no secret", got)
+			}
+			if errors.Is(got, tt.err) || errors.Unwrap(got) != nil {
+				t.Error("error chain: got raw error, want no raw cause")
+			}
+			if tt.wantID != "" {
+				if !strings.Contains(got.Error(), "request_id="+tt.wantID) {
+					t.Errorf("safe error: got = %v, want request_id=%s", got, tt.wantID)
+				}
+			} else {
+				if strings.Contains(got.Error(), "request_id=") {
+					t.Errorf("safe error: got = %v, want no request_id for invalid/missing ID", got)
+				}
+			}
+			if tt.wantCode != "" {
+				if !strings.Contains(got.Error(), "code="+tt.wantCode) {
+					t.Errorf("safe error: got = %v, want code=%s", got, tt.wantCode)
+				}
+			}
+			// Verify SafeBedrockError interface is implemented when applicable.
+			if be, ok := errors.AsType[SafeBedrockError](got); ok {
+				if be.BedrockRequestID() != tt.wantID {
+					t.Errorf("BedrockRequestID: got = %q, want = %q", be.BedrockRequestID(), tt.wantID)
+				}
+				if tt.wantCode != "" && be.BedrockCategory() != tt.wantCode {
+					t.Errorf("BedrockCategory: got = %q, want = %q", be.BedrockCategory(), tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
+// wrappedResponseAPIError implements both serviceRequestIDer and smithy.APIError
+// to simulate an AWS SDK response error that carries both a request ID and an
+// API error code.
+type wrappedResponseAPIError struct {
+	requestID string
+	api       *fakeAPIError
+}
+
+func (e wrappedResponseAPIError) Error() string                 { return e.api.Error() }
+func (e wrappedResponseAPIError) ServiceRequestID() string      { return e.requestID }
+func (e wrappedResponseAPIError) ErrorCode() string             { return e.api.ErrorCode() }
+func (e wrappedResponseAPIError) ErrorMessage() string          { return e.api.ErrorMessage() }
+func (e wrappedResponseAPIError) ErrorFault() smithy.ErrorFault { return e.api.ErrorFault() }
+
+var _ smithy.APIError = (*wrappedResponseAPIError)(nil)
 
 func TestCancellationAndConcurrentCalls(t *testing.T) {
 	t.Parallel()

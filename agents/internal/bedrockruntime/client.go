@@ -24,6 +24,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	smithy "github.com/aws/smithy-go"
 )
 
 const maxRequestBytes = 25_000_000
@@ -233,6 +234,94 @@ func (*timeoutError) Temporary() bool { return true }
 
 var _ net.Error = (*timeoutError)(nil)
 
+// SafeBedrockError is implemented by errors that carry only an allowlisted
+// AWS/STS error category and an optionally validated service request ID.
+// Callers outside this package can detect Bedrock-specific failures without
+// importing the raw SDK error chain.
+type SafeBedrockError interface {
+	error
+	// BedrockCategory returns the allowlisted AWS error code, or the empty
+	// string when the category is unknown.
+	BedrockCategory() string
+	// BedrockRequestID returns the strictly validated AWS service request ID,
+	// or the empty string when none is available or the ID fails validation.
+	BedrockRequestID() string
+}
+
+// bedrockError retains only an allowlisted AWS/STS error category and an
+// optionally validated service request ID. It never wraps the original error:
+// callers cannot recover SDK response bodies, JWTs, or signed requests from it.
+type bedrockError struct {
+	message   string
+	category  string
+	requestID string
+}
+
+func (e *bedrockError) Error() string            { return e.message }
+func (e *bedrockError) BedrockCategory() string  { return e.category }
+func (e *bedrockError) BedrockRequestID() string { return e.requestID }
+
+var _ SafeBedrockError = (*bedrockError)(nil)
+
+// serviceRequestIDer is a local interface matching the ServiceRequestID()
+// method on aws/transport/http.ResponseError. Using a local interface avoids
+// importing the concrete type while still extracting the validated ID.
+type serviceRequestIDer interface {
+	ServiceRequestID() string
+}
+
+// safeServiceRequestID extracts the AWS service request ID from the error
+// chain and returns it only after strict UUID format validation. It returns
+// the empty string when no ID is present or the ID fails validation.
+func safeServiceRequestID(err error) string {
+	var r serviceRequestIDer
+	if !errors.As(err, &r) {
+		return ""
+	}
+	return safeAWSRequestID(r.ServiceRequestID())
+}
+
+// safeAWSRequestID validates an AWS service request ID. AWS service request
+// IDs are canonical UUIDs (8-4-4-4-12 lowercase hex with hyphens). Return
+// the empty string for any other format to avoid echoing untrusted content.
+func safeAWSRequestID(id string) string {
+	if len(id) != 36 {
+		return ""
+	}
+	for i, c := range id {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return ""
+			}
+			continue
+		}
+		switch {
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+		default:
+			return ""
+		}
+	}
+	return id
+}
+
+// allowlistedAWSCode returns the error code if it is in the allowlist for
+// safe retention, or the empty string otherwise. It accepts smithy.APIError
+// values from the AWS SDK, which carry a structured ErrorCode() method.
+func allowlistedAWSCode(err error) string {
+	api, ok := errors.AsType[smithy.APIError](err)
+	if !ok {
+		return ""
+	}
+	switch api.ErrorCode() {
+	case "ExpiredTokenException", "InvalidIdentityToken", "IDPRejectedClaim",
+		"IDPCommunicationError", "AccessDenied", "AccessDeniedException",
+		"UnrecognizedClientException", "InvalidClientTokenId",
+		"RegionDisabledException":
+		return api.ErrorCode()
+	}
+	return ""
+}
+
 func safeError(stage string, err error) error {
 	message := "bedrock runtime: " + stage + " failed"
 	for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
@@ -242,6 +331,20 @@ func safeError(stage string, err error) error {
 	}
 	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 		return &timeoutError{message: message}
+	}
+	// Extract the validated service request ID before discarding the raw chain.
+	// The ID is retained only after strict UUID format validation; the raw error
+	// is never wrapped or forwarded.
+	requestID := safeServiceRequestID(err)
+	if code := allowlistedAWSCode(err); code != "" {
+		msg := message + "; code=" + code
+		if requestID != "" {
+			msg += "; request_id=" + requestID
+		}
+		return &bedrockError{message: msg, category: code, requestID: requestID}
+	}
+	if requestID != "" {
+		return &bedrockError{message: message + "; request_id=" + requestID, requestID: requestID}
 	}
 	// Do not retain the original error even as an unwrap target: callers could
 	// otherwise recover SDK response bodies, JWTs, or signed requests from it.
