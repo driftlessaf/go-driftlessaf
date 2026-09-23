@@ -586,6 +586,128 @@ func TestSetIssueStateByType_PreferredNameFallsBack(t *testing.T) {
 	}
 }
 
+// TestSetIssueProject_HappyPath proves the issueUpdate mutation carries the
+// projectId through to Linear and reports success.
+func TestSetIssueProject_HappyPath(t *testing.T) {
+	var sawIssueID, sawProjectID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if v, ok := req.Variables["id"].(string); ok {
+			sawIssueID = v
+		}
+		if v, ok := req.Variables["projectId"].(string); ok {
+			sawProjectID = v
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"issueUpdate": map[string]any{"success": true}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueProject(t.Context(), "issue-id-1", "project-id-1"); err != nil {
+		t.Fatalf("SetIssueProject: %v", err)
+	}
+	if sawIssueID != "issue-id-1" {
+		t.Errorf("mutation id = %q, want issue-id-1", sawIssueID)
+	}
+	if sawProjectID != "project-id-1" {
+		t.Errorf("mutation projectId = %q, want project-id-1", sawProjectID)
+	}
+}
+
+// TestSetIssueProject_EmptyProjectIDRejected proves an empty projectID is
+// refused before any network call — this method only moves an issue between
+// projects, so the guard rejects the empty value locally rather than
+// forwarding it to the API.
+func TestSetIssueProject_EmptyProjectIDRejected(t *testing.T) {
+	var called atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"issueUpdate": map[string]any{"success": true}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueProject(t.Context(), "issue-id-1", ""); err == nil {
+		t.Fatal("SetIssueProject with empty projectID: want error, got nil")
+	}
+	if called.Load() {
+		t.Error("SetIssueProject must not issue any request when projectID is empty")
+	}
+}
+
+// TestSetIssueProject_EmptyIssueIDRejected proves an empty issueID is refused
+// before any network call — without a target issue there is nothing to move,
+// so the guard rejects it locally rather than forwarding it to the API.
+func TestSetIssueProject_EmptyIssueIDRejected(t *testing.T) {
+	var called atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"issueUpdate": map[string]any{"success": true}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	if err := c.SetIssueProject(t.Context(), "", "project-id-1"); err == nil {
+		t.Fatal("SetIssueProject with empty issueID: want error, got nil")
+	}
+	if called.Load() {
+		t.Error("SetIssueProject must not issue any request when issueID is empty")
+	}
+}
+
+// TestSetIssueProject_APISuccessFalse proves a success=false response surfaces
+// as an error rather than a silent no-op.
+func TestSetIssueProject_APISuccessFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"issueUpdate": map[string]any{"success": false}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	err := c.SetIssueProject(t.Context(), "issue-id-1", "project-id-1")
+	if err == nil {
+		t.Fatal("SetIssueProject: want error on success=false, got nil")
+	}
+	if !contains(err.Error(), "success=false") {
+		t.Errorf("error = %q, want it to mention success=false", err)
+	}
+}
+
+// TestSetIssueProject_GraphQLError proves a GraphQL-level error is propagated.
+func TestSetIssueProject_GraphQLError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"errors": []map[string]any{{"message": "Entity not found: Issue"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL)
+	err := c.SetIssueProject(t.Context(), "missing-issue", "project-id-1")
+	if err == nil {
+		t.Fatal("SetIssueProject: want error on GraphQL error, got nil")
+	}
+	if !contains(err.Error(), "set project project-id-1 on issue missing-issue") {
+		t.Errorf("error = %q, want it to carry the issue/project context", err)
+	}
+}
+
 // contains is a tiny substring helper so tests don't pull in strings just
 // to do a single Contains check.
 func contains(s, sub string) bool {

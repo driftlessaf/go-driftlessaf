@@ -630,6 +630,42 @@ func (c *Client) UpdateIssueDescription(ctx context.Context, issueID, descriptio
 	}, &result)
 }
 
+// SetIssueProject moves a Linear issue into the project identified by projectID
+// (a project UUID, e.g. from FindActiveProjectIDByName).
+//
+// Both IDs are required. This method only moves an issue between projects; it
+// does not support un-filing one, so an empty projectID is refused locally
+// rather than forwarded.
+func (c *Client) SetIssueProject(ctx context.Context, issueID, projectID string) error {
+	if issueID == "" {
+		return fmt.Errorf("issueID is required")
+	}
+	if projectID == "" {
+		return fmt.Errorf("projectID is required")
+	}
+	const mutation = `mutation($id: String!, $projectId: String!) {
+		issueUpdate(id: $id, input: { projectId: $projectId }) {
+			success
+		}
+	}`
+
+	var result struct {
+		IssueUpdate struct {
+			Success bool `json:"success"`
+		} `json:"issueUpdate"`
+	}
+	if err := c.graphql(ctx, mutation, map[string]any{
+		"id":        issueID,
+		"projectId": projectID,
+	}, &result); err != nil {
+		return fmt.Errorf("set project %s on issue %s: %w", projectID, issueID, err)
+	}
+	if !result.IssueUpdate.Success {
+		return fmt.Errorf("set project %s on issue %s: API returned success=false", projectID, issueID)
+	}
+	return nil
+}
+
 // SetIssueStateByType moves a Linear issue to its team's workflow state
 // matching stateType. State NAMES are workspace-renameable ("Done" →
 // "Resolved"); the schema-stable types are: backlog, unstarted, started,
