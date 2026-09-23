@@ -170,6 +170,12 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// disables retrying: a refusal fails the run right away, as a RefusalError.
 	// Set via WithRefusalNudge. See refusal.go.
 	refusalNudgeMaxRetries int
+
+	// truncatedToolCallRetries bounds how many turns per run cut off at
+	// max_tokens mid tool call are answered with an error tool_result and
+	// retried before the run fails with a *TruncatedToolCallError. Set via
+	// WithTruncatedToolCallRetries. See maxtokens.go.
+	truncatedToolCallRetries int
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -229,6 +235,8 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
 		cacheControl:        true,                       // Prompt caching on by default — see cacheControl field comment
 		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
+
+		truncatedToolCallRetries: 1, // see WithTruncatedToolCallRetries
 
 		// The base schema-conformance validator is always first: submissions
 		// must honor the constraints declared in the Response type's
@@ -387,7 +395,7 @@ func (e *executor[Request, Response]) Execute(
 	// A fresh Execute runs the full turn budget starting at turn 0. Resume
 	// (resume.go) shares the same loop with a restored params, a startTurn past
 	// the suspension point, and the envelope's remaining budget.
-	return e.runConversation(ctx, trace, params, tools, tail, 0, e.maxTurns, seedToolCalls)
+	return e.runConversation(ctx, trace, params, tools, tail, 0, e.maxTurns, seedToolCalls, loopState{})
 }
 
 // runConversation drives the bounded turn loop shared by Execute (a fresh run,
@@ -409,6 +417,7 @@ func (e *executor[Request, Response]) runConversation(
 	startTurn int,
 	turnBudget int,
 	seedToolCalls []anthropic.ToolUseBlock,
+	state loopState,
 ) (response Response, err error) {
 	// finalResult stores the result if a tool sets it
 	var finalResult Response
@@ -431,6 +440,11 @@ func (e *executor[Request, Response]) runConversation(
 	// option is unset, since the bound itself is zero and no retry is ever
 	// attempted.
 	refusalRetries := 0
+	// truncatedToolCalls counts the run's turns the output cap cut off mid
+	// tool call, bounded by truncatedToolCallRetries (see
+	// WithTruncatedToolCallRetries). It never resets: a suspension carries it
+	// in the envelope's loop state, so a resumed run continues the count.
+	truncatedToolCalls := state.TruncatedToolCalls
 	// deferredGateResolved records whether the deferral gate tool (when one is
 	// configured via WithForceSubmitToolChoice) has been called at least once.
 	// While a gate tool is registered but unresolved, the first turn was left
@@ -765,6 +779,45 @@ func (e *executor[Request, Response]) runConversation(
 			clog.WarnContext(ctx, "Stripped empty text block(s) from Claude response before replay")
 		}
 
+		// A cut-off tool call is held out of dispatch and answered with an
+		// error tool_result naming the limit: dispatched, its empty input
+		// reads to the model as its own parameter mistake, and it rewrites
+		// the call at the same length. The turn's other calls still run and
+		// the assistant turn stays in the transcript. The run fails once the
+		// retries are spent or no turn is left to carry one.
+		cutID, cutName, cut := truncatedToolCall(message)
+		// cutTerminal marks the cut-off call that ends the run: the retries
+		// are spent or no turn is left to carry one. The turn's complete
+		// calls still dispatch first, so a sibling submit or suspend keeps
+		// its precedence; the error returns once neither has won the turn.
+		cutTerminal := false
+		var cutErr *TruncatedToolCallError
+		if cut {
+			cutErr = &TruncatedToolCallError{Tool: cutName, Budget: &MaxTokensError{MaxTokens: e.maxTokens, OutputTokens: message.Usage.OutputTokens}}
+			clog.WarnContext(ctx, "Claude stopped at max_tokens mid tool call; the cut-off call is not dispatched",
+				"tool", cutName, "tool_use_id", cutID,
+				"max_tokens", e.maxTokens, "output_tokens", message.Usage.OutputTokens,
+				"turn", turn, "retry", truncatedToolCalls, "max_retries", e.truncatedToolCallRetries)
+			cutParams := map[string]any{"stop_reason": string(message.StopReason), "output_tokens": message.Usage.OutputTokens}
+			cutTerminal = truncatedToolCalls >= e.truncatedToolCallRetries || turn+1 >= startTurn+turnBudget
+			switch {
+			case cutTerminal:
+				trace.BadToolCall(cutID, cutName, cutParams, cutErr)
+			case isSubmit(cutName):
+				// Recoverable is reserved for the terminal submit tool, where
+				// a run that never recovers cannot complete cleanly; a work
+				// tool's cut-off call is a plain bad call (see
+				// ToolCall.Recoverable).
+				trace.RejectedToolCall(cutID, cutName, cutParams, cutErr)
+			default:
+				trace.BadToolCall(cutID, cutName, cutParams, cutErr)
+			}
+			if !cutTerminal {
+				truncatedToolCalls++
+				e.telemetry.RecordToolCall(ctx, "truncated_tool_call_nudge")
+			}
+		}
+
 		// Process response
 		var toolUseBlocks []anthropic.ToolUseBlock
 		var textContent string
@@ -774,6 +827,12 @@ func (e *executor[Request, Response]) runConversation(
 			case "text":
 				textContent = content.Text
 			case "tool_use":
+				if cut && content.ID == cutID {
+					// Answered by the error tool_result below, never
+					// dispatched. Its replayed input is the "{}" the SDK
+					// wrote into the block's wire JSON when it closed.
+					continue
+				}
 				toolUseBlocks = append(toolUseBlocks, anthropic.ToolUseBlock{
 					ID:    content.ID,
 					Name:  content.Name,
@@ -789,8 +848,10 @@ func (e *executor[Request, Response]) runConversation(
 			}
 		}
 
-		// Handle tool calls
-		if len(toolUseBlocks) > 0 {
+		// Handle tool calls. A turn whose only call was cut off still takes
+		// this path: its assistant message and the error tool_result that
+		// answers the cut-off call are what the retry needs to see.
+		if len(toolUseBlocks) > 0 || cut {
 			// Clear any forced ToolChoice from a prior text-fallback redirect; otherwise a failing forced call would lock every subsequent turn into the same tool.
 			params.ToolChoice = anthropic.ToolChoiceUnionParam{}
 
@@ -870,6 +931,12 @@ func (e *executor[Request, Response]) runConversation(
 				}
 			}
 
+			// The cut-off call closes the turn's content, so its result
+			// follows the siblings' results.
+			if cut {
+				toolResults = append(toolResults, truncatedToolCallResult(cutID, cutName, e.maxTokens, message.Usage.OutputTokens))
+			}
+
 			// Add tool results to conversation. When a suspension is pending,
 			// this carries the siblings' real results only; the suspend call's
 			// tool_use stays unanswered so resume can pair the human answer to
@@ -884,7 +951,7 @@ func (e *executor[Request, Response]) runConversation(
 			// real tool_result is in the transcript above, so the envelope's
 			// PendingToolCalls shrinks to just the suspend call.
 			if suspendIdx >= 0 {
-				susp, berr := e.buildSuspension(params, tools, turn, toolUseBlocks[suspendIdx], trace.ID)
+				susp, berr := e.buildSuspension(params, tools, turn, toolUseBlocks[suspendIdx], trace.ID, loopState{TruncatedToolCalls: truncatedToolCalls})
 				if berr != nil {
 					return response, true, berr
 				}
@@ -896,6 +963,10 @@ func (e *executor[Request, Response]) runConversation(
 				trace.Suspend(susp.Reason)
 				e.telemetry.RecordTurns(ctx, turn+1, false)
 				return response, true, susp
+			}
+
+			if cutTerminal {
+				return response, true, cutErr
 			}
 
 			// Optional early-finalize nudge. When the investigative tool-call

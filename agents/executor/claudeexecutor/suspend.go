@@ -6,14 +6,18 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/chainguard-dev/clog"
 )
 
 // suspendProviderName is the checkpoint.Envelope.Provider value stamped by this
@@ -81,10 +85,15 @@ func (e *executor[Request, Response]) buildSuspension(
 	turn int,
 	suspendCall anthropic.ToolUseBlock,
 	traceID string,
+	state loopState,
 ) (*checkpoint.Suspension, error) {
 	providerState, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal provider state: %w", err)
+	}
+	loopStateJSON, err := state.marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshal loop state: %w", err)
 	}
 
 	// ConfigDigest is taken over the turn-invariant request prefix (tools,
@@ -102,12 +111,64 @@ func (e *executor[Request, Response]) buildSuspension(
 
 	// NewAskAFriendSuspension stamps the schema version, the shared reason, and
 	// the clamped remaining-turn budget; this executor supplies only the
-	// provider-typed pieces. LoopState is nil: the parked turn index lives in
-	// Envelope.Turn and Resume re-enters the loop at Turn+1.
+	// provider-typed pieces. The parked turn index lives in Envelope.Turn and
+	// Resume re-enters the loop at Turn+1; LoopState carries the per-run
+	// counters that must survive the pause.
 	return checkpoint.NewAskAFriendSuspension(suspendProviderName, e.modelName, digest, turn, e.maxTurns,
 		checkpoint.PendingToolCall{
 			ID:        suspendCall.ID,
 			Name:      suspendCall.Name,
 			InputJSON: normalizeToolUseInput(suspendCall.Input),
-		}, providerState, nil, traceID), nil
+		}, providerState, loopStateJSON, traceID), nil
+}
+
+// loopState is the executor-loop bookkeeping a suspension carries so a resumed
+// conversation continues the run's per-run bounds instead of restarting them.
+// The turn index is not here: the envelope carries it as Envelope.Turn.
+type loopState struct {
+	// TruncatedToolCalls is the run's count of turns the output cap cut off
+	// mid tool call, bounded by truncatedToolCallRetries.
+	TruncatedToolCalls int `json:"truncated_tool_calls,omitempty"`
+}
+
+// loopStateKey is the envelope key the executor's state sits under: the
+// provider name the envelope already carries, so the executor has one name.
+// Namespacing lets decodeLoopState tell the executor's own record from a
+// foreign object a caller wrote into LoopState, which would otherwise decode
+// to zero counts without a word.
+const loopStateKey = suspendProviderName
+
+// marshal encodes the state for the envelope, or nil when nothing is set, so
+// a run that never tripped a bound seals the same envelope it always did.
+func (s loopState) marshal() (json.RawMessage, error) {
+	if s == (loopState{}) {
+		return nil, nil
+	}
+	return json.Marshal(map[string]loopState{loopStateKey: s})
+}
+
+// decodeLoopState reads a resumed envelope's loop state. An envelope sealed
+// before any state was carried has none, and resumes with zero counts. A
+// non-empty object without the executor's key was written by someone else;
+// it resumes with zero counts too, but says so, since the per-run bounds
+// the state carries restart from that point.
+func decodeLoopState(ctx context.Context, raw json.RawMessage) (loopState, error) {
+	if len(raw) == 0 {
+		return loopState{}, nil
+	}
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return loopState{}, fmt.Errorf("resume: unmarshal loop state: %w", err)
+	}
+	own, ok := wrapped[loopStateKey]
+	if !ok {
+		clog.WarnContext(ctx, "the envelope's loop state carries no record under the executor's key; a caller replaced it, and the run's per-run bounds restart from here",
+			"keys", slices.Sorted(maps.Keys(wrapped)))
+		return loopState{}, nil
+	}
+	var s loopState
+	if err := json.Unmarshal(own, &s); err != nil {
+		return s, fmt.Errorf("resume: unmarshal loop state: %w", err)
+	}
+	return s, nil
 }

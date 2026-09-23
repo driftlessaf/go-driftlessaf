@@ -75,6 +75,8 @@ SPDX-License-Identifier: Apache-2.0
 //     initial user message, outside the shared cacheable prefix (off by default)
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
+//   - WithTruncatedToolCallRetries: Bound the retries when the output-token cap
+//     cuts off a tool call (defaults to 1)
 //
 // # Prompt Caching
 //

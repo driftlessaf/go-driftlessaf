@@ -137,6 +137,9 @@ func TestSuspendReturnsSuspension(t *testing.T) {
 	if len(susp.ProviderState) == 0 {
 		t.Error("ProviderState: got empty, want the serialized request params")
 	}
+	if len(susp.LoopState) != 0 {
+		t.Errorf("LoopState: got %s, want none (a run that tripped no per-run bound seals no loop state)", susp.LoopState)
+	}
 	// The captured provider state must round-trip as a MessageNewParams whose
 	// transcript includes the assistant tool_use for the pending call.
 	if !strings.Contains(string(susp.ProviderState), "toolu_ask") {

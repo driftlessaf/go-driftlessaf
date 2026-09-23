@@ -419,6 +419,30 @@ func WithRefusalNudge[Request promptbuilder.Bindable, Response any](maxRetries i
 	}
 }
 
+// WithTruncatedToolCallRetries bounds how many turns per run cut off at the
+// output-token cap while the model was writing a tool call are retried before
+// the run fails. The cut-off call is never dispatched to its handler; the
+// turn's other calls run as usual, and the cut-off one is answered with an
+// error tool_result naming the tool and the limit, so the model can shrink
+// the input rather than rewrite the same call at the same length. Once the
+// bound is reached the run fails with a *TruncatedToolCallError, which also
+// matches *MaxTokensError through its Unwrap.
+//
+// Defaults to 1. Zero disables the retry: the first cut-off call fails the
+// run. The count spans the whole run and never resets, and a suspension
+// carries it into the envelope so a resumed run continues it: with the
+// default, the second cut-off call anywhere in the run's turn budget fails
+// it, whatever happened in between.
+func WithTruncatedToolCallRetries[Request promptbuilder.Bindable, Response any](maxRetries int) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if maxRetries < 0 {
+			return fmt.Errorf("truncated tool call max retries must not be negative, got %d", maxRetries)
+		}
+		e.truncatedToolCallRetries = maxRetries
+		return nil
+	}
+}
+
 // Provider identifies the serving backend a Claude request goes to. The same
 // Claude model can be served by Google Vertex AI, the Anthropic first-party
 // API, or AWS Bedrock Mantle. The provider is stamped on every metric

@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor_test
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -158,25 +157,13 @@ func TestRefusalNudgeRetriesThenSucceeds(t *testing.T) {
 		t.Fatalf("HTTP requests: got = %d, want = 2 (one refusal, one retry)", got)
 	}
 
-	var second struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(reqs[1], &second); err != nil {
-		t.Fatalf("unmarshal second request: %v", err)
-	}
-
-	if len(second.Messages) < 3 {
-		t.Fatalf("second request messages: got = %d, want >= 3 (initial user, placeholder assistant, nudge user)", len(second.Messages))
+	msgs := requestMessages(t, reqs[1])
+	if len(msgs) < 3 {
+		t.Fatalf("second request messages: got = %d, want >= 3 (initial user, placeholder assistant, nudge user)", len(msgs))
 	}
 	// Roles must strictly alternate; verify the two turns the retry appended.
-	placeholder := second.Messages[len(second.Messages)-2]
-	nudge := second.Messages[len(second.Messages)-1]
+	placeholder := msgs[len(msgs)-2]
+	nudge := msgs[len(msgs)-1]
 	if placeholder.Role != "assistant" {
 		t.Errorf("second-to-last message role: got = %q, want = %q", placeholder.Role, "assistant")
 	}

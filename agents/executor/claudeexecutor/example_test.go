@@ -71,3 +71,31 @@ func ExampleMaxTokensError() {
 	// spent 64000 of 64000 output tokens
 	// model turn: no content in Claude's response: stopped at max_tokens (max_tokens=64000, output_tokens=64000)
 }
+
+// ExampleTruncatedToolCallError shows the error Execute returns when the cap
+// cut the model off mid tool call and the retries were spent.
+func ExampleTruncatedToolCallError() {
+	err := fmt.Errorf("model turn: %w", &claudeexecutor.TruncatedToolCallError{
+		Tool:   "submit_result",
+		Budget: &claudeexecutor.MaxTokensError{MaxTokens: 64000, OutputTokens: 64000},
+	})
+	if terr, ok := errors.AsType[*claudeexecutor.TruncatedToolCallError](err); ok {
+		fmt.Printf("the %s call did not fit\n", terr.Tool)
+	}
+	if merr, ok := errors.AsType[*claudeexecutor.MaxTokensError](err); ok {
+		fmt.Printf("spent %d of %d output tokens\n", merr.OutputTokens, merr.MaxTokens)
+	}
+	fmt.Println(err)
+	// Output:
+	// the submit_result call did not fit
+	// spent 64000 of 64000 output tokens
+	// model turn: Claude stopped at max_tokens while writing a submit_result tool call; the cut-off call was discarded (max_tokens=64000, output_tokens=64000)
+}
+
+// ExampleWithTruncatedToolCallRetries disables the retry so the first tool
+// call the output cap cuts off fails the run at once.
+func ExampleWithTruncatedToolCallRetries() {
+	opt := claudeexecutor.WithTruncatedToolCallRetries[promptbuilder.Noop, *struct{}](0)
+	fmt.Printf("option is nil: %v\n", opt == nil)
+	// Output: option is nil: false
+}

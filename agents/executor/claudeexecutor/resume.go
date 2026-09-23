@@ -108,6 +108,10 @@ func (e *executor[Request, Response]) Resume(
 	if aerr := appendPendingAnswers(&params, env.PendingToolCalls, answers); aerr != nil {
 		return response, aerr
 	}
+	state, lerr := decodeLoopState(ctx, env.LoopState)
+	if lerr != nil {
+		return response, lerr
+	}
 
 	// Start a NEW trace for the resumed run, linked back to the originating trace
 	// so the two halves of a paused conversation join downstream.
@@ -136,7 +140,7 @@ func (e *executor[Request, Response]) Resume(
 	// parked under a larger budget (an operator lowering maxTurns between park
 	// and wake, or a tampered checkpoint) would resume with more turns than the
 	// live configuration allows.
-	response, err = e.runConversation(ctx, trace, params, tools, tail, env.Turn+1, min(env.RemainingTurns, e.maxTurns), nil)
+	response, err = e.runConversation(ctx, trace, params, tools, tail, env.Turn+1, min(env.RemainingTurns, e.maxTurns), nil, state)
 	return response, err
 }
 
