@@ -40,6 +40,16 @@ type gitBackend interface {
 	reset(ctx context.Context, cl *clone) error
 }
 
+// WithGoGit makes the Manager use go-git for clones, fetches, checkouts, and
+// worktree resets regardless of whether a git binary is available. New picks
+// the git CLI backend by default whenever git >= 2.32 is on PATH; this option
+// is the explicit opt-out, and the way tests exercise the go-git transport.
+func WithGoGit() Option {
+	return func(m *Manager) {
+		m.backend = gogitBackend{tokenSource: m.tokenSource}
+	}
+}
+
 // gogitBackend performs clone, fetch, checkout, and reset through go-git.
 type gogitBackend struct {
 	tokenSource oauth2.TokenSource

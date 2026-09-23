@@ -70,8 +70,8 @@ var repoURL = defaultRemoteURL
 type Option func(*Manager)
 
 // WithMaxFetches sets how many pack-transferring fetches a clone serves before
-// it is discarded and replaced by a fresh clone. Under the default go-git
-// backend every such fetch permanently grows a clone's object store — go-git
+// it is discarded and replaced by a fresh clone. Under the go-git backend
+// every such fetch permanently grows a clone's object store — go-git
 // appends a packfile per fetch and never prunes — so on a fast-moving
 // repository a pooled clone grows without bound. The bound caps that growth
 // at the amortized cost of one re-clone every n fetches. The git CLI backend
@@ -191,11 +191,13 @@ func New(ctx context.Context, tokenSource oauth2.TokenSource, identity string, s
 		identity:    identity,
 		signer:      signer,
 	}
-	m.backend = gogitBackend{tokenSource: tokenSource}
 	for _, opt := range opts {
 		opt(m)
 	}
-	if _, ok := m.backend.(cliBackend); ok {
+	switch m.backend.(type) {
+	case nil:
+		m.backend = defaultBackend(ctx, tokenSource)
+	case cliBackend:
 		// A git that ignores the environment the CLI backend hardens with
 		// would fail open, not closed, so refuse it at construction.
 		if err := gitenv.CheckVersion(ctx); err != nil {

@@ -11,11 +11,13 @@ import (
 )
 
 // SetRepoURLForTesting overrides the git URL resolver used for clones and
-// pushes. Returns a restore function; callers should defer or t.Cleanup it.
+// pushes. Resolvers typically return local fixture paths, so the git CLI
+// backend's protocol allowlist is widened to file and http for the duration.
+// Returns a restore function; callers should defer or t.Cleanup it.
 func SetRepoURLForTesting(fn func(*githubreconciler.Resource) string) func() {
-	prev := repoURL
-	repoURL = fn
-	return func() { repoURL = prev }
+	prevURL, prevProtocols := repoURL, allowedProtocols
+	repoURL, allowedProtocols = fn, "https:http:file"
+	return func() { repoURL, allowedProtocols = prevURL, prevProtocols }
 }
 
 // StaticTokenSource returns an oauth2.TokenSource that always yields the given

@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gitenv"
 	"github.com/go-git/go-git/v5"
@@ -34,12 +35,25 @@ var allowedProtocols = "https"
 // checkout and reset walk the entire working tree where native git leans on
 // the index stat cache (measured ~10x on a 46k-file tree). All other
 // operations (branching, committing, signing, pushing) still go through
-// go-git. Requires git >= gitenv.MinMajor.MinMinor on PATH; New fails
-// otherwise.
+// go-git. New already selects this backend when git >= gitenv.MinMajor.MinMinor is on PATH; the
+// option makes that a requirement, so New fails instead of falling back to
+// go-git when git is missing or too old.
 func WithGitCLI() Option {
 	return func(m *Manager) {
 		m.backend = cliBackend{tokenSource: m.tokenSource}
 	}
+}
+
+// defaultBackend picks the backend New uses when no option chose one: the git
+// CLI when a usable git is on PATH, otherwise go-git. The fallback keeps images
+// without git working, at the cost of full-snapshot shallow fetches, so it is
+// logged at warning level rather than silently taken.
+func defaultBackend(ctx context.Context, tokenSource oauth2.TokenSource) gitBackend {
+	if err := gitenv.CheckVersion(ctx); err != nil {
+		clog.WarnContextf(ctx, "Falling back to the go-git clone backend, which re-downloads a full pack on every fetch of a moved ref and walks the whole tree on reset; add git >= %d.%d to the image to use the git CLI backend: %v", gitenv.MinMajor, gitenv.MinMinor, err)
+		return gogitBackend{tokenSource: tokenSource}
+	}
+	return cliBackend{tokenSource: tokenSource}
 }
 
 // cliBackend performs clone, fetch, checkout, and reset by shelling out to

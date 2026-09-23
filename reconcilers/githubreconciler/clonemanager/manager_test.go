@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ import (
 // the git CLI backend cannot silently drift from the go-git behavior it
 // mirrors.
 func forEachBackend(t *testing.T, fn func(t *testing.T, opts ...Option)) {
-	t.Run("gogit", func(t *testing.T) { fn(t) })
+	t.Run("gogit", func(t *testing.T) { fn(t, WithGoGit()) })
 	t.Run("gitcli", func(t *testing.T) { fn(t, WithGitCLI()) })
 }
 
@@ -929,7 +930,7 @@ func BenchmarkLease(b *testing.B) {
 		b.Skip("GITHUB_TOKEN not set")
 	}
 
-	b.Run("gogit", func(b *testing.B) { benchmarkLease(b, token) })
+	b.Run("gogit", func(b *testing.B) { benchmarkLease(b, token, WithGoGit()) })
 	b.Run("gitcli", func(b *testing.B) { benchmarkLease(b, token, WithGitCLI()) })
 }
 
@@ -974,4 +975,49 @@ type staticTokenSource string
 
 func (s staticTokenSource) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: string(s)}, nil
+}
+
+func TestDefaultBackend(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	ctx := t.Context()
+
+	t.Run("git on PATH selects the CLI backend", func(t *testing.T) {
+		m, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, ok := m.backend.(cliBackend); !ok {
+			t.Errorf("backend: got = %T, want = cliBackend", m.backend)
+		}
+	})
+
+	t.Run("no git falls back to go-git", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		m, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, ok := m.backend.(gogitBackend); !ok {
+			t.Errorf("backend: got = %T, want = gogitBackend", m.backend)
+		}
+	})
+
+	t.Run("WithGitCLI without git fails", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if _, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, WithGitCLI()); err == nil {
+			t.Error("New: got = nil error, want = missing git error")
+		}
+	})
+
+	t.Run("WithGoGit ignores git on PATH", func(t *testing.T) {
+		m, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, WithGoGit())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, ok := m.backend.(gogitBackend); !ok {
+			t.Errorf("backend: got = %T, want = gogitBackend", m.backend)
+		}
+	})
 }

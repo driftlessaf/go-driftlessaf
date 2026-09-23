@@ -322,3 +322,42 @@ func initExampleRepo() string {
 	}
 	return dir
 }
+
+// ExampleWithGoGit pins the Manager to the go-git transport even when a git
+// binary is on PATH, which is otherwise selected automatically.
+func ExampleWithGoGit() {
+	ctx := context.Background()
+
+	repoDir := initExampleRepo()
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	defer func() { repoURL = defaultRemoteURL }()
+
+	mgr, err := New(ctx, staticTokenSource(""), "automation", nil, WithGoGit())
+	if err != nil {
+		fmt.Println("error creating manager:", err)
+		return
+	}
+
+	lease, err := mgr.Lease(ctx, &githubreconciler.Resource{
+		Owner: "example",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  "packages/example.yaml",
+		Type:  githubreconciler.ResourceTypePath,
+	})
+	if err != nil {
+		fmt.Println("lease error:", err)
+		return
+	}
+
+	fmt.Println("path exists:", lease.PathExists())
+
+	if err := lease.Return(ctx); err != nil {
+		fmt.Println("return error:", err)
+		return
+	}
+
+	// Output:
+	// path exists: true
+}
