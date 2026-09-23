@@ -8,6 +8,8 @@ package execshared
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -309,4 +311,122 @@ func TestGateSubmissionRejectionKinds(t *testing.T) {
 			t.Errorf("tool call record: got = {error: %v, recoverable: %t}, want = terminal error with recoverable = false", tc.Error, tc.Recoverable)
 		}
 	})
+}
+
+// TestRejectedBy asserts each distinct check is named with its finding count,
+// in the order the validators raised them. The fixture is deliberately not
+// alphabetical, so a sort would fail it.
+func TestRejectedBy(t *testing.T) {
+	t.Parallel()
+
+	got := rejectedBy([]callbacks.Finding{
+		{Identifier: "line-accounting", Details: `release line "17.0" is declared affected but no submitted range covers it`},
+		{Identifier: "below-floor-line", Details: `release 17.0.5 orders BELOW this target's floor`},
+		{Identifier: "line-accounting", Details: `release line "18.0" is declared affected but no submitted range covers it`},
+	})
+	want := []string{`"line-accounting" x2`, `"below-floor-line" x1`}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("rejectedBy mismatch (-want, +got):\n%s", diff)
+	}
+}
+
+// TestRejectedByCarriesNoDetails pins the property that keeps this line safe:
+// Details can quote the source under review, so it must never reach the log.
+func TestRejectedByCarriesNoDetails(t *testing.T) {
+	t.Parallel()
+
+	const secret = "apiKey := \"private-source-fragment\""
+	entries := rejectedBy([]callbacks.Finding{
+		{Identifier: "gostandards:internal/auth/token.go:88", Details: secret},
+	})
+	if len(entries) != 1 {
+		t.Fatalf("entries: got = %d, want = 1 (the assertion below is vacuous otherwise)", len(entries))
+	}
+	if strings.Contains(entries[0], secret) {
+		t.Errorf("rejectedBy leaked Details into the log line: %q", entries[0])
+	}
+}
+
+// TestRejectedByCapsTheList asserts the list is bounded and the elision reports
+// both counts. The fixture is non-uniform because the elided check is often the
+// one carrying the most findings.
+func TestRejectedByCapsTheList(t *testing.T) {
+	t.Parallel()
+
+	findings := make([]callbacks.Finding, 0, maxRejectedBy+500)
+	for i := range maxRejectedBy {
+		findings = append(findings, callbacks.Finding{Identifier: fmt.Sprintf("lint:file%d.go:1", i)})
+	}
+	for range 500 {
+		findings = append(findings, callbacks.Finding{Identifier: "go-vet:internal/run.go:12"})
+	}
+
+	got := rejectedBy(findings)
+	if len(got) != maxRejectedBy+1 {
+		t.Fatalf("entries: got = %d, want = %d", len(got), maxRejectedBy+1)
+	}
+	if want := "and 1 more check(s), 500 finding(s)"; got[len(got)-1] != want {
+		t.Errorf("elision: got = %q, want = %q", got[len(got)-1], want)
+	}
+}
+
+// TestRejectedByQuotesTheIdentifier asserts a degenerate identifier stays
+// legible. A reviewer gate builds rule:path:line without checking the path is
+// non-empty, so ":" is reachable from a third-party analyzer.
+func TestRejectedByQuotesTheIdentifier(t *testing.T) {
+	t.Parallel()
+
+	got := rejectedBy([]callbacks.Finding{{Identifier: ""}, {Identifier: ":"}, {Identifier: ":"}})
+	want := []string{`"" x1`, `":" x2`}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("rejectedBy mismatch (-want, +got):\n%s", diff)
+	}
+}
+
+// TestRejectedByTruncatesALongIdentifier bounds one entry while keeping the end
+// of a rule:path:line identifier, where the line number is. Head-only
+// truncation renders two findings in the same long-path file identically.
+func TestRejectedByTruncatesALongIdentifier(t *testing.T) {
+	t.Parallel()
+
+	id := "rule:" + strings.Repeat("a", 200) + ":412"
+	head := "rule:" + strings.Repeat("a", 75)
+	tail := strings.Repeat("a", 36) + ":412"
+
+	got := rejectedBy([]callbacks.Finding{{Identifier: id}})
+	want := []string{fmt.Sprintf("%q x1", head+"…"+tail)}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("rejectedBy mismatch (-want, +got):\n%s", diff)
+	}
+}
+
+// TestTruncatedKeepsRuneBoundaries asserts a multi-byte identifier truncates
+// without splitting a character, so %q renders no escape.
+func TestTruncatedKeepsRuneBoundaries(t *testing.T) {
+	t.Parallel()
+
+	want := strings.Repeat("é", maxIdentifierRunes-identifierTailRunes) + "…" + strings.Repeat("é", identifierTailRunes)
+	if got := truncated(strings.Repeat("é", 300)); got != want {
+		t.Errorf("truncated(): got = %q, want = %q", got, want)
+	}
+}
+
+// TestTruncatedLeavesAShortIdentifier asserts the common case is untouched.
+func TestTruncatedLeavesAShortIdentifier(t *testing.T) {
+	t.Parallel()
+
+	const id = "below-floor-line"
+	if got := truncated(id); got != id {
+		t.Errorf("truncated(%q): got = %q, want unchanged", id, got)
+	}
+}
+
+// TestRejectedByWithoutFindings asserts no findings render as no entries rather
+// than one empty string, so the field is absent-shaped with nothing to report.
+func TestRejectedByWithoutFindings(t *testing.T) {
+	t.Parallel()
+
+	if got := rejectedBy(nil); len(got) != 0 {
+		t.Errorf("rejectedBy(nil): got = %v, want = no entries", got)
+	}
 }
