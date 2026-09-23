@@ -26,8 +26,8 @@ type bqColumn struct {
 
 // TestAgentTraceSpanSchemaMatchesStruct guards against drift between the
 // agent_trace_span BigQuery schema and the RecordedSpan Go struct. Any
-// added/removed/renamed JSON tag must be mirrored in the schema or the BQ
-// recorder will silently drop the column.
+// added/removed/renamed JSON tag must be mirrored in the schema, or strict
+// BigQuery imports will reject records containing the unknown column.
 func TestAgentTraceSpanSchemaMatchesStruct(t *testing.T) {
 	raw, err := os.ReadFile("iac/schemas/agent_trace_span.schema.json")
 	if err != nil {
@@ -55,7 +55,7 @@ func TestAgentTraceSpanSchemaMatchesStruct(t *testing.T) {
 // agent_trace BigQuery schema and the JSON shape Trace marshals to. Since
 // Trace.MarshalJSON reuses the struct tags via the alias pattern, a new
 // struct field auto-serializes — this test ensures it cannot land without a
-// matching schema column, or the BQ recorder would silently drop it. The
+// matching schema column, or strict BigQuery imports would reject the row. The
 // check is one-directional (struct ⊆ schema) because BigQuery cannot drop
 // columns: the schema legitimately retains legacy columns with no struct
 // counterpart (the trace-level token counts removed in DEV-1140 and the
@@ -84,10 +84,6 @@ func TestAgentTraceSchemaMatchesStruct(t *testing.T) {
 		name string
 		tags []string
 		cols []bqColumn
-		// knownDrift lists struct fields the schema is known to lack: the
-		// recorder drops them today. Entries here document pre-existing gaps,
-		// not a license to add more — new fields need schema columns.
-		knownDrift []string
 	}{{
 		name: "trace",
 		// "error" comes from the MarshalJSON override of the json:"-" field.
@@ -106,10 +102,9 @@ func TestAgentTraceSchemaMatchesStruct(t *testing.T) {
 		tags: jsonTags(reflect.TypeFor[ReasoningContent]()),
 		cols: fieldsOf("reasoning"),
 	}, {
-		name:       "exec_context",
-		tags:       jsonTags(reflect.TypeFor[ExecutionContext]()),
-		cols:       fieldsOf("exec_context"),
-		knownDrift: []string{"request_id", "labels"},
+		name: "exec_context",
+		tags: jsonTags(reflect.TypeFor[ExecutionContext]()),
+		cols: fieldsOf("exec_context"),
 	}}
 
 	for _, tt := range tests {
@@ -118,18 +113,9 @@ func TestAgentTraceSchemaMatchesStruct(t *testing.T) {
 			for _, c := range tt.cols {
 				have[c.Name] = struct{}{}
 			}
-			drift := make(map[string]struct{}, len(tt.knownDrift))
-			for _, d := range tt.knownDrift {
-				drift[d] = struct{}{}
-				if _, ok := have[d]; ok {
-					t.Errorf("field %q now has a schema column — remove it from knownDrift", d)
-				}
-			}
 			for _, tag := range tt.tags {
-				_, inSchema := have[tag]
-				_, inDrift := drift[tag]
-				if !inSchema && !inDrift {
-					t.Errorf("marshaled field %q has no schema column — the BQ recorder will drop it", tag)
+				if _, ok := have[tag]; !ok {
+					t.Errorf("marshaled field %q has no schema column — strict BigQuery imports will reject the row", tag)
 				}
 			}
 		})

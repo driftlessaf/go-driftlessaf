@@ -10,7 +10,9 @@
       {"name": "reconciler_key", "type": "STRING", "mode": "NULLABLE"},
       {"name": "reconciler_type", "type": "STRING", "mode": "NULLABLE"},
       {"name": "commit_sha", "type": "STRING", "mode": "NULLABLE"},
-      {"name": "turn_number", "type": "INTEGER", "mode": "NULLABLE"}
+      {"name": "turn_number", "type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "request_id", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "labels", "type": "JSON", "mode": "NULLABLE"}
     ]
   },
   {
