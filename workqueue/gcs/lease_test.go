@@ -686,32 +686,145 @@ func TestDeadletterPinsGenerations(t *testing.T) {
 		}
 		oip := newTestKey(t, newTestClient(t, f), key, rand.Int64N(1<<40)+1, 1)
 
-		if err := oip.Deadletter(t.Context()); err != nil {
-			t.Fatalf("Deadletter() = %v, want nil", err)
+		if err := oip.Deadletter(t.Context()); !errors.Is(err, workqueue.ErrDeadletterSkipped) {
+			t.Fatalf("Deadletter() = %v, want ErrDeadletterSkipped", err)
 		}
 		if _, ok := findCall(f.recorded(), http.MethodDelete, "/o/"); ok {
 			t.Error("delete call: got = one, want = none (must not touch the new owner's object)")
 		}
 	})
 
-	t.Run("skips delete when replaced after copy", func(t *testing.T) {
-		key := fmt.Sprintf("test-%d", rand.Int64())
-		f := &fakeGCS{}
-		f.handler = func(call gcsCall) (int, string) {
-			switch {
-			case call.method == http.MethodPost && strings.Contains(call.path, "/rewriteTo/"):
-				return http.StatusOK, rewriteJSON(deadLetterPrefix+key, rand.Int64N(1<<40)+1)
-			case call.method == http.MethodDelete:
+	// Once the copy has landed the move is reported as a success even when the
+	// conditioned delete finds the object replaced (412) or already gone (404,
+	// as when the client's idempotent retry re-issues a delete that succeeded).
+	for _, test := range []struct {
+		name         string
+		deleteStatus int
+	}{{
+		name:         "reports success when replaced after copy",
+		deleteStatus: http.StatusPreconditionFailed,
+	}, {
+		name:         "reports success when delete finds the object gone",
+		deleteStatus: http.StatusNotFound,
+	}} {
+		t.Run(test.name, func(t *testing.T) {
+			key := fmt.Sprintf("test-%d", rand.Int64())
+			f := &fakeGCS{}
+			f.handler = func(call gcsCall) (int, string) {
+				switch {
+				case call.method == http.MethodPost && strings.Contains(call.path, "/rewriteTo/"):
+					return http.StatusOK, rewriteJSON(deadLetterPrefix+key, rand.Int64N(1<<40)+1)
+				case call.method == http.MethodDelete:
+					return test.deleteStatus, errorJSON(test.deleteStatus)
+				}
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}
+			oip := newTestKey(t, newTestClient(t, f), key, rand.Int64N(1<<40)+1, 1)
+
+			if err := oip.Deadletter(t.Context()); err != nil {
+				t.Fatalf("Deadletter() = %v, want nil (the dead-letter entry already landed)", err)
+			}
+		})
+	}
+}
+
+// TestObservedDeadletterCountsExpiredLease verifies that an orphan retired by
+// Deadletter increments mExpiredLeases once, exactly as one retired by Requeue
+// does, so the sweep's dead-letter path does not hide the lease expiries that
+// finally settle a key.
+func TestObservedDeadletterCountsExpiredLease(t *testing.T) {
+	key := fmt.Sprintf("test-%d", rand.Int64())
+	gen, metagen := rand.Int64N(1<<40)+1, rand.Int64N(100)+1
+
+	f := &fakeGCS{}
+	f.handler = func(call gcsCall) (int, string) {
+		switch {
+		case call.method == http.MethodGet && strings.Contains(call.path, "/o/"+inProgressPrefix+key):
+			return http.StatusOK, objectJSON(inProgressPrefix+key, gen, metagen)
+		case call.method == http.MethodPost && strings.Contains(call.path, "/rewriteTo/"):
+			return http.StatusOK, rewriteJSON(deadLetterPrefix+key, rand.Int64N(1<<40)+1)
+		case call.method == http.MethodDelete:
+			return http.StatusNoContent, ""
+		}
+		return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+	}
+	// newObservedKey carries no lease expiration, which IsOrphaned reports as
+	// orphaned.
+	oip := newObservedKey(newTestClient(t, f), key, gen, metagen)
+	if !oip.IsOrphaned() {
+		t.Fatal("IsOrphaned() = false, want true for a key without a lease expiration")
+	}
+
+	before := testutil.ToFloat64(mExpiredLeases.With(oip.baseLabels()))
+	if err := oip.Deadletter(t.Context()); err != nil {
+		t.Fatalf("Deadletter() = %v, want nil", err)
+	}
+	if got := testutil.ToFloat64(mExpiredLeases.With(oip.baseLabels())); got != before+1 {
+		t.Errorf("expired leases: got = %v, want = %v", got, before+1)
+	}
+}
+
+// TestObservedDeadletterPinsCopySourceMetageneration verifies that an observed
+// key's Deadletter pins the copy source to the metageneration the freshness
+// re-read returned, so a lease refresh landing between the re-read and the copy
+// fails the copy. Without the pin the copy succeeds (the generation is
+// unchanged), the metageneration-pinned delete fails, and a dead-letter twin is
+// left behind while the live lease keeps running.
+func TestObservedDeadletterPinsCopySourceMetageneration(t *testing.T) {
+	key := fmt.Sprintf("test-%d", rand.Int64())
+	gen, metagen := rand.Int64N(1<<40)+1, rand.Int64N(100)+2
+
+	// deadLettered records whether the fake accepted a copy into dead-letter/,
+	// which is a twin written next to the live lease.
+	var mu sync.Mutex
+	deadLettered := false
+	f := &fakeGCS{}
+	f.handler = func(call gcsCall) (int, string) {
+		switch {
+		case call.method == http.MethodGet && strings.Contains(call.path, "/o/"+inProgressPrefix+key):
+			// Freshness re-read: the lease is still the one observed.
+			return http.StatusOK, objectJSON(inProgressPrefix+key, gen, metagen)
+		case call.method == http.MethodPost && strings.Contains(call.path, "/rewriteTo/"):
+			// The owner refreshed its lease after the re-read. A source pinned
+			// to the observed metageneration fails the precondition; an
+			// unpinned source copies the refreshed object.
+			if call.query.Get("ifSourceMetagenerationMatch") == strconv.FormatInt(metagen, 10) {
 				return http.StatusPreconditionFailed, errorJSON(http.StatusPreconditionFailed)
 			}
-			return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			mu.Lock()
+			deadLettered = true
+			mu.Unlock()
+			return http.StatusOK, rewriteJSON(deadLetterPrefix+key, rand.Int64N(1<<40)+1)
+		case call.method == http.MethodDelete:
+			return http.StatusPreconditionFailed, errorJSON(http.StatusPreconditionFailed)
 		}
-		oip := newTestKey(t, newTestClient(t, f), key, rand.Int64N(1<<40)+1, 1)
+		return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+	}
+	oip := newObservedKey(newTestClient(t, f), key, gen, metagen)
 
-		if err := oip.Deadletter(t.Context()); err != nil {
-			t.Fatalf("Deadletter() = %v, want nil", err)
-		}
-	})
+	if err := oip.Deadletter(t.Context()); !errors.Is(err, workqueue.ErrDeadletterSkipped) {
+		t.Fatalf("Deadletter() = %v, want ErrDeadletterSkipped (lost ownership is a skip)", err)
+	}
+
+	calls := f.recorded()
+	if _, ok := findCall(calls, http.MethodGet, "/o/"+inProgressPrefix+key); !ok {
+		t.Fatal("Attrs() call: got = none, want = one (freshness check must run for observed keys)")
+	}
+	rewrite, ok := findCall(calls, http.MethodPost, "/rewriteTo/")
+	if !ok {
+		t.Fatal("rewrite call: got = none, want = one")
+	}
+	if got := rewrite.query.Get("ifSourceMetagenerationMatch"); got != strconv.FormatInt(metagen, 10) {
+		t.Errorf("rewrite ifSourceMetagenerationMatch: got = %q, want = %q", got, strconv.FormatInt(metagen, 10))
+	}
+	if _, ok := findCall(calls, http.MethodDelete, "/o/"+inProgressPrefix+key); ok {
+		t.Error("delete call: got = one, want = none (copy failed, the live lease must stay intact)")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if deadLettered {
+		t.Error("dead-letter object: got = written, want = none (a twin of a live lease)")
+	}
 }
 
 func TestObservedRequeueFreshnessGuard(t *testing.T) {

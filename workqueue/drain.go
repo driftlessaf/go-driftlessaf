@@ -44,9 +44,13 @@ var errDraining = errors.New("workqueue: server draining")
 // behalf of work interrupted by shutdown: a plain requeue-after, which the
 // dispatcher applies with Options.Delay semantics — resetting the key's
 // attempt count. An orderly instance retirement is infrastructure's doing,
-// so it must not consume the key's dead-letter budget; hard kills (OOM,
-// SIGKILL without grace) never reach this path and still burn an attempt,
-// which keeps genuinely poisonous keys terminating.
+// so it must not consume the key's dead-letter budget. Hard kills (OOM,
+// SIGKILL without grace) never reach this path: the key's lease lapses with
+// its attempt count intact, and the dispatcher's orphan sweep requeues it
+// while attempts stay under maxRetry, or dead-letters it with
+// dispatcher.ErrOrphanRetryBudgetExhausted once they meet it. That gate,
+// not the burnt attempt alone, is what keeps genuinely poisonous keys
+// terminating.
 func drainRequeueResponse() *ProcessResponse {
 	delay := DrainRequeueDelay
 	if DrainRequeueJitter > 0 {

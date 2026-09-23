@@ -7,6 +7,7 @@ package dispatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"time"
@@ -62,6 +63,24 @@ func ServiceCallback(client workqueue.WorkqueueServiceClient) Callback {
 // dispatching work.
 type Future func() error
 
+// ErrOrphanRetryBudgetExhausted is the Err an ErrorContext carries when the
+// orphan sweep dead-letters a key instead of returning it to the queue: the
+// key's lease lapsed while its attempt count already met the dispatcher's
+// maxRetry, so another attempt would only repeat the failure that killed the
+// last owner. It is reported as an infrastructure failure: the callback never
+// answered, so no application error exists to classify.
+var ErrOrphanRetryBudgetExhausted = errors.New("orphaned key exhausted its retry budget")
+
+// budgetedOrphan is the surface the orphan sweep needs to dead-letter an
+// observed key over budget: its attempt count and the dead-letter move. Every
+// in-tree queue's in-progress key carries both; a queue whose observed keys
+// do not is swept as before, by requeueing.
+type budgetedOrphan interface {
+	workqueue.ObservedInProgressKey
+	GetAttempts() int
+	Deadletter(context.Context) error
+}
+
 // Handle is a synchronous form of HandleAsync.
 func Handle(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, opts ...Option) error {
 	return HandleAsync(ctx, wq, concurrency, batchSize, f, 0, opts...)()
@@ -102,8 +121,15 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 
 	eg := errgroup.Group{}
 
-	// Remove any orphaned work by returning it to the queue.
-	// Use context.WithoutCancel to ensure requeue completes even if parent context is canceled.
+	// Remove any orphaned work by returning it to the queue, or by
+	// dead-lettering it when its attempt count already meets maxRetry: the
+	// owner that claimed the last attempt died without reporting (a callback
+	// crash takes the dispatcher down with it before Deadletter can run), so
+	// the lease lapsed with the budget spent and a requeue would only claim
+	// the same key again, attempts+1, and die the same way. Without this the
+	// budget is unreachable for exactly the failures that kill the process.
+	// Use context.WithoutCancel to ensure the move completes even if the
+	// parent context is canceled.
 	activeKeys := make(map[string]struct{}, len(wip))
 	ownerWIP := 0
 	for _, x := range wip {
@@ -115,7 +141,31 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			continue
 		}
 		eg.Go(func() error {
-			return x.Requeue(context.WithoutCancel(ctx))
+			sweepCtx := context.WithoutCancel(ctx)
+			if b, ok := x.(budgetedOrphan); ok && maxRetry > 0 {
+				if attempts := b.GetAttempts(); attempts >= maxRetry {
+					clog.InfoContextf(ctx, "Orphaned key %q has exhausted its retry budget (%d/%d), dead-lettering instead of requeueing", x.Name(), attempts, maxRetry)
+					if err := b.Deadletter(sweepCtx); err != nil {
+						if errors.Is(err, workqueue.ErrDeadletterSkipped) {
+							// The lease changed since the listing or the object is
+							// gone: the key is not ours to retire, so nothing to
+							// report as dead-lettered.
+							clog.InfoContextf(ctx, "Orphaned key %q left alone, its lease changed since observation: %v", x.Name(), err)
+							return nil
+						}
+						return fmt.Errorf("deadletter(orphan over max retries) = %w", err)
+					}
+					cfg.errors.emit(sweepCtx, ErrorContext{
+						Key:            x.Name(),
+						Err:            ErrOrphanRetryBudgetExhausted,
+						Attempts:       attempts,
+						Action:         ErrorDeadLettered,
+						Infrastructure: true,
+					})
+					return nil
+				}
+			}
+			return x.Requeue(sweepCtx)
 		})
 	}
 
@@ -254,6 +304,12 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 						oip.Name(), attempts, maxRetry)
 
 					if err := oip.Deadletter(cleanupCtx); err != nil {
+						if errors.Is(err, workqueue.ErrDeadletterSkipped) {
+							// Another attempt already moved the key; there is no
+							// dead-letter of ours to report.
+							clog.InfoContextf(ctx, "Key %q left alone, another attempt moved it: %v", oip.Name(), err)
+							return nil
+						}
 						return fmt.Errorf("fail(after reaching max retries) = %w", err)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{
@@ -271,6 +327,10 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 					// callback asked to surface durably.
 					clog.InfoContextf(ctx, "Key %q is marked for immediate dead-letter - reason: %s, err: %v", oip.Name(), d.GetMessage(), err)
 					if err := oip.Deadletter(cleanupCtx); err != nil {
+						if errors.Is(err, workqueue.ErrDeadletterSkipped) {
+							clog.InfoContextf(ctx, "Key %q left alone, another attempt moved it: %v", oip.Name(), err)
+							return nil
+						}
 						return fmt.Errorf("deadletter(after dead-letter error) = %w", err)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{

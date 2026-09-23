@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package gcs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -723,7 +724,10 @@ func (o *inProgressKey) attemptsLocked() int {
 
 	attempts, err := strconv.Atoi(o.attrs.Metadata[attemptsMetadataKey])
 	if err != nil {
-		clog.WarnContextf(o.ownerCtx, "Malformed attempts on %s: %v",
+		// Keys observed via Enumerate carry no owner context, and the orphan
+		// sweep reads attempts on every one of them.
+		ctx := cmp.Or(o.ownerCtx, context.Background())
+		clog.WarnContextf(ctx, "Malformed attempts on %s: %v",
 			strings.TrimPrefix(o.attrs.Name, inProgressPrefix), err)
 		return 0
 	}
@@ -757,32 +761,9 @@ func (o *inProgressKey) Requeue(ctx context.Context) error {
 func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.Options) error {
 	o.stopHeartbeat()
 
-	// The delete of the in-progress object is pinned to the generation we
-	// leased so we can never remove an object another attempt owns.
-	conds := storage.Conditions{GenerationMatch: o.attrs.Generation}
-
-	// A key observed via Enumerate has no heartbeat keeping its view of the
-	// lease current: the owner may have refreshed it (which bumps only the
-	// metageneration, not the generation) since we listed it. Re-read the
-	// object and skip the requeue unless it still carries exactly the lease we
-	// observed; pin the delete to that metageneration so a refresh landing
-	// after this check is still caught. Owner-held keys deliberately do NOT
-	// pin the metageneration: a refresh aborted client-side by cancellation
-	// can still land server-side, leaving our recorded metageneration stale
-	// for an object we do own.
-	if o.ownerCancel == nil {
-		attrs, err := o.client.Object(o.attrs.Name).Attrs(ctx)
-		switch {
-		case isNotFound(err):
-			clog.WarnContextf(ctx, "RequeueWithOptions: lost ownership of key %q, skipping requeue: %v", o.Name(), err)
-			return nil
-		case err != nil:
-			return fmt.Errorf("Attrs() = %w", err)
-		case attrs.Generation != o.attrs.Generation || attrs.Metageneration != o.attrs.Metageneration:
-			clog.WarnContextf(ctx, "RequeueWithOptions: lease on key %q changed since observation, skipping requeue", o.Name())
-			return nil
-		}
-		conds.MetagenerationMatch = attrs.Metageneration
+	conds, skip, err := o.deleteConditions(ctx, "RequeueWithOptions", "requeue")
+	if err != nil || skip {
+		return err
 	}
 
 	for {
@@ -791,6 +772,38 @@ func (o *inProgressKey) RequeueWithOptions(ctx context.Context, opts workqueue.O
 			return err
 		}
 	}
+}
+
+// deleteConditions returns the preconditions that pin the in-progress object's
+// delete to the lease this key holds or observed, so it can never remove an
+// object another attempt owns. The delete is always pinned to the generation
+// we leased. A key observed via Enumerate has no heartbeat keeping its view of
+// the lease current: the owner may have refreshed it (which bumps only the
+// metageneration, not the generation) since we listed it. The object is
+// re-read and skip is reported unless it still carries exactly the lease we
+// observed, and the delete is then also pinned to that metageneration so a
+// refresh landing after this check is still caught. Owner-held keys
+// deliberately do NOT pin the metageneration: a refresh aborted client-side by
+// cancellation can still land server-side, leaving our recorded metageneration
+// stale for an object we do own. op and verb only shape the log lines.
+func (o *inProgressKey) deleteConditions(ctx context.Context, op, verb string) (conds storage.Conditions, skip bool, err error) {
+	conds = storage.Conditions{GenerationMatch: o.attrs.Generation}
+	if o.ownerCancel != nil {
+		return conds, false, nil
+	}
+	attrs, err := o.client.Object(o.attrs.Name).Attrs(ctx)
+	switch {
+	case isNotFound(err):
+		clog.WarnContextf(ctx, "%s: lost ownership of key %q, skipping %s: %v", op, o.Name(), verb, err)
+		return conds, true, nil
+	case err != nil:
+		return conds, false, fmt.Errorf("Attrs() = %w", err)
+	case attrs.Generation != o.attrs.Generation || attrs.Metageneration != o.attrs.Metageneration:
+		clog.WarnContextf(ctx, "%s: lease on key %q changed since observation, skipping %s", op, o.Name(), verb)
+		return conds, true, nil
+	}
+	conds.MetagenerationMatch = attrs.Metageneration
+	return conds, false, nil
 }
 
 // requeueOnce performs a single requeue attempt: copy the in-progress object
@@ -1010,6 +1023,25 @@ func (o *inProgressKey) Complete(ctx context.Context) error {
 // Deadletter implements workqueue.OwnedInProgressKey.
 func (o *inProgressKey) Deadletter(ctx context.Context) error {
 	o.stopHeartbeat()
+
+	// An orphan retired here counts as an expired lease exactly like one
+	// Requeue retires.
+	if o.IsOrphaned() {
+		mExpiredLeases.With(o.baseLabels()).Add(1)
+	}
+
+	// The orphan sweep dead-letters keys it only observed. Like a requeue, the
+	// move must not touch a lease a live owner refreshed after the listing.
+	// This runs before taking o.rw, as RequeueWithOptions does: its warning
+	// paths call o.Name(), which takes the read lock itself.
+	conds, skip, err := o.deleteConditions(ctx, "Deadletter", "dead-letter")
+	if err != nil {
+		return err
+	}
+	if skip {
+		return fmt.Errorf("Deadletter(%q): %w", o.Name(), workqueue.ErrDeadletterSkipped)
+	}
+
 	o.rw.RLock()
 	defer o.rw.RUnlock()
 
@@ -1021,8 +1053,15 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 	// Copy the in-progress task to the dead letter queue. The copy source is
 	// pinned to the generation we leased so that a replacement by another
 	// attempt is observed as loss of ownership rather than dead-lettering the
-	// new owner's object.
-	copier := o.client.Object(deadLetterKey).CopierFrom(o.client.Object(o.attrs.Name).Generation(o.attrs.Generation))
+	// new owner's object. For an observed key deleteConditions also pinned the
+	// metageneration; the source carries the same pin so a lease refresh
+	// landing between the re-read and this copy fails the copy instead of
+	// leaving a dead-letter twin of an object whose delete then fails.
+	source := o.client.Object(o.attrs.Name).Generation(o.attrs.Generation)
+	if conds.MetagenerationMatch != 0 {
+		source = source.If(storage.Conditions{MetagenerationMatch: conds.MetagenerationMatch})
+	}
+	copier := o.client.Object(deadLetterKey).CopierFrom(source)
 
 	// Preserve metadata
 	copier.Metadata = o.attrs.Metadata
@@ -1044,14 +1083,20 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 	ttcLabels["status"] = "dead-lettered"
 	mTimeToCompletion.With(ttcLabels).Observe(time.Now().UTC().Sub(o.attrs.Created).Seconds())
 
-	// Create the dead letter entry
-	_, err := copier.Run(ctx)
-	if isNotFound(err) {
+	// Create the dead letter entry. An entry left by an earlier move that was
+	// cut off before its delete is overwritten, so a repeated sweep converges.
+	_, err = copier.Run(ctx)
+	if lostOwnership(err) {
 		// The source is pinned to the generation we leased, so not-found means
-		// that generation is gone: another attempt owns the key now. Leave its
-		// state alone rather than dead-lettering it.
+		// that generation is gone: another attempt owns the key now. A
+		// precondition failure means the observed metageneration moved: the
+		// live owner refreshed its lease. Leave the key's state alone either
+		// way rather than dead-lettering it. For an owner-held key no source
+		// metageneration precondition is set, so a 412 cannot arise from our
+		// own pin; if the API ever returned one the in-progress object stays
+		// put and the next sweep heals it.
 		clog.WarnContextf(ctx, "Deadletter: lost ownership of key %q, skipping dead-letter: %v", key, err)
-		return nil
+		return fmt.Errorf("Deadletter(%q): %w", key, workqueue.ErrDeadletterSkipped)
 	}
 	if err != nil {
 		clog.WarnContextf(ctx, "Deadletter: copy to dead-letter failed for key %q: %v", key, err)
@@ -1059,12 +1104,14 @@ func (o *inProgressKey) Deadletter(ctx context.Context) error {
 	}
 
 	// Delete the in-progress task
-	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name).If(storage.Conditions{
-		GenerationMatch: o.attrs.Generation,
-	})); err != nil {
+	if err := deleteWithRetry(ctx, o.client.Object(o.attrs.Name).If(conds)); err != nil {
 		if lostOwnership(err) {
-			// Another attempt replaced the object between our copy and delete;
-			// the new owner's lease object must be left intact.
+			// The dead-letter entry already exists, so this is not a skip:
+			// either the conditioned delete succeeded and the client's
+			// idempotent retry saw the object gone, or another attempt
+			// replaced the object between our copy and delete, in which case
+			// the new owner's lease object must be left intact and a repeated
+			// sweep overwrites the entry.
 			clog.WarnContextf(ctx, "Deadletter: lost ownership of key %q, skipping delete: %v", key, err)
 			return nil
 		}

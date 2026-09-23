@@ -161,7 +161,10 @@ type OwnedInProgressKey interface {
 	Complete(context.Context) error
 
 	// Deadletter permanently removes this key from the queue, indicating it has
-	// failed after exceeding the maximum retry attempts.
+	// failed after exceeding the maximum retry attempts. It returns an error
+	// wrapping ErrDeadletterSkipped when the key is no longer under the lease
+	// this handle holds or observed (replaced or removed before the copy), so
+	// nothing was moved; this covers owned and observed keys alike.
 	Deadletter(context.Context) error
 
 	// GetAttempts returns the current attempt count for the key.

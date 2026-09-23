@@ -153,7 +153,7 @@ var (
 	mExpiredLeases = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "workqueue_expired_leases_total",
-			Help: "The total number of times leases have expired and keys were returned to the queue.",
+			Help: "The total number of leases that expired on an in-progress key the sweep then requeued or dead-lettered.",
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)

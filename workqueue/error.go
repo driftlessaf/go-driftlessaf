@@ -16,6 +16,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// ErrDeadletterSkipped is returned (wrapped) by Deadletter when the key is no
+// longer under the lease this handle holds or observed: it was replaced or
+// removed before the copy, so nothing was moved. It covers owned keys as well
+// as keys observed via Enumerate. Callers treat it as a no-op and must not
+// report the key as dead-lettered.
+var ErrDeadletterSkipped = errors.New("workqueue: dead-letter skipped, lease changed since observation")
+
 // NoRetryDetails marks the error as non-retriable with the given reason.
 // If this error is returned to the dispatcher, it will not requeue the key.
 func NonRetriableError(err error, reason string) error {

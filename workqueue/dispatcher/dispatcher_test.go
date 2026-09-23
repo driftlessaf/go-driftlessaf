@@ -8,6 +8,7 @@ package dispatcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,8 @@ type mockKey struct {
 	attempts int
 	requeue  int
 	dead     int
+	// deadErr is what Deadletter returns after counting the call.
+	deadErr  error
 	complete int
 	// bareRequeue counts calls to Requeue (no options). requeueOpts counts
 	// calls to RequeueWithOptions and captures the last options passed, so a
@@ -95,7 +98,7 @@ func (m *mockInProgressKey) Deadletter(context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dead++
-	return nil
+	return m.deadErr
 }
 
 type queuedItem struct {
@@ -189,6 +192,74 @@ func TestHandleAsync_OrphanedWorkIsRequeued(t *testing.T) {
 	}
 	if called {
 		t.Errorf("callback should not be called for orphaned key")
+	}
+}
+
+// TestHandleAsync_OrphanOverMaxRetryIsDeadLettered pins the orphan sweep's
+// budget check: an orphan whose attempt count already meets maxRetry is
+// dead-lettered, not requeued, so a callback that kills its dispatcher before
+// Deadletter can run does not re-claim the key forever. Below the budget, or
+// with retries unlimited, the sweep requeues as before.
+func TestHandleAsync_OrphanOverMaxRetryIsDeadLettered(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		attempts    int
+		maxRetry    int
+		wantDead    int
+		wantRequeue int
+	}{
+		{name: "at the budget dead-letters", attempts: 5, maxRetry: 5, wantDead: 1},
+		{name: "over the budget dead-letters", attempts: 268, maxRetry: 5, wantDead: 1},
+		{name: "under the budget requeues", attempts: 4, maxRetry: 5, wantRequeue: 1},
+		{name: "unlimited retries requeue", attempts: 268, maxRetry: 0, wantRequeue: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orphan := &mockKey{name: "orphan", orphaned: true, attempts: tc.attempts}
+			q := &mockQueue{wip: []workqueue.ObservedInProgressKey{&mockInProgressKey{mockKey: orphan}}}
+			called := false
+			future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+				called = true
+				return nil
+			}, tc.maxRetry)
+			if err := future(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if orphan.dead != tc.wantDead || orphan.requeue != tc.wantRequeue {
+				t.Errorf("dead = %d, requeue = %d; want dead = %d, requeue = %d", orphan.dead, orphan.requeue, tc.wantDead, tc.wantRequeue)
+			}
+			if called {
+				t.Errorf("callback should not be called for orphaned key")
+			}
+		})
+	}
+}
+
+// TestHandleAsync_OrphanDeadletterSkippedIsNotReported pins the sweep's
+// handling of a dead-letter the backend declined: the lease changed between
+// the listing and the move, so the key is still running under a live owner.
+// The sweep neither fails, nor requeues, nor reports a dead-letter that did
+// not happen.
+func TestHandleAsync_OrphanDeadletterSkippedIsNotReported(t *testing.T) {
+	orphan := &mockKey{
+		name:     "orphan",
+		orphaned: true,
+		attempts: 5,
+		deadErr:  fmt.Errorf("Deadletter(%q): %w", "orphan", workqueue.ErrDeadletterSkipped),
+	}
+	q := &mockQueue{wip: []workqueue.ObservedInProgressKey{&mockInProgressKey{mockKey: orphan}}}
+	cap := &captureEmitter{}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		t.Error("callback should not be called for orphaned key")
+		return nil
+	}, 5, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if orphan.dead != 1 || orphan.requeue != 0 {
+		t.Errorf("dead = %d, requeue = %d; want dead = 1, requeue = 0", orphan.dead, orphan.requeue)
+	}
+	if got := cap.result(); got != nil {
+		t.Errorf("error emitter called with action %v, want no call for a skipped dead-letter", got.Action)
 	}
 }
 
@@ -377,6 +448,56 @@ func TestHandleAsync_CallbackFails_ImmediateDeadLetter(t *testing.T) {
 	}
 	if next.requeue != 0 {
 		t.Errorf("expected Requeue NOT to be called for a dead-letter error")
+	}
+}
+
+// TestHandleAsync_OwnedDeadletterSkippedOnMaxRetryIsNotReported pins the
+// owned-key max-retry branch when the backend declines the move: the key's
+// pinned copy source is already gone, so the dispatcher neither fails, nor
+// requeues, nor reports a dead-letter that did not happen.
+func TestHandleAsync_OwnedDeadletterSkippedOnMaxRetryIsNotReported(t *testing.T) {
+	next := &mockKey{
+		name:     "fail",
+		attempts: 3,
+		deadErr:  fmt.Errorf("Deadletter(%q): %w", "fail", workqueue.ErrDeadletterSkipped),
+	}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	cap := &captureEmitter{}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return errors.New("fail")
+	}, 3, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 1 || next.requeue != 0 {
+		t.Errorf("dead = %d, requeue = %d; want dead = 1, requeue = 0", next.dead, next.requeue)
+	}
+	if got := cap.result(); got != nil {
+		t.Errorf("error emitter called with action %v, want no call for a skipped dead-letter", got.Action)
+	}
+}
+
+// TestHandleAsync_OwnedDeadletterSkippedOnDeadLetterErrorIsNotReported pins
+// the same no-op handling on the callback's DeadLetterError branch.
+func TestHandleAsync_OwnedDeadletterSkippedOnDeadLetterErrorIsNotReported(t *testing.T) {
+	next := &mockKey{
+		name:    "fail",
+		deadErr: fmt.Errorf("Deadletter(%q): %w", "fail", workqueue.ErrDeadletterSkipped),
+	}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	cap := &captureEmitter{}
+	dl := workqueue.DeadLetterError(errors.New("permanent refusal"), "permanent")
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		return dl
+	}, 0, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 1 || next.requeue != 0 {
+		t.Errorf("dead = %d, requeue = %d; want dead = 1, requeue = 0", next.dead, next.requeue)
+	}
+	if got := cap.result(); got != nil {
+		t.Errorf("error emitter called with action %v, want no call for a skipped dead-letter", got.Action)
 	}
 }
 
