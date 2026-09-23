@@ -11,17 +11,12 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 )
 
-// goldenPrompt is the prompt for golden mode judgment
-var goldenPrompt = promptbuilder.MustNewPrompt(`<task>
+// goldenSystemInstructions contains the reusable golden-mode rubric and
+// output contract. It stays independent of each request for prompt caching.
+var goldenSystemInstructions = promptbuilder.MustNewPrompt(`<task>
 You are evaluating a response against a reference answer.
 Score the response based on the specific criterion provided.
 </task>
-
-{{golden_answer}}
-
-{{actual_response}}
-
-{{criterion}}
 
 <instructions>
 1. Compare the actual response to the golden answer
@@ -83,17 +78,19 @@ Note on suggestions:
 
 Respond with only the JSON object, no additional text.`)
 
-// benchmarkPrompt is the prompt for benchmark mode judgment
-var benchmarkPrompt = promptbuilder.MustNewPrompt(`<task>
+// goldenPrompt contains only request-specific judgment inputs.
+var goldenPrompt = promptbuilder.MustNewPrompt(`{{golden_answer}}
+
+{{actual_response}}
+
+{{criterion}}`)
+
+// benchmarkSystemInstructions contains the reusable benchmark-mode rubric and
+// output contract. It stays independent of each request for prompt caching.
+var benchmarkSystemInstructions = promptbuilder.MustNewPrompt(`<task>
 You are evaluating two responses to determine which one better meets the evaluation criterion.
 Compare the responses directly and provide a comparative assessment.
 </task>
-
-{{foo}}
-
-{{bar}}
-
-{{criterion}}
 
 <instructions>
 1. Evaluate responses SOLELY based on the given criterion - ignore all other response qualities
@@ -187,15 +184,19 @@ Focus suggestions on the weaker-performing response, or provide balanced suggest
 
 Respond with only the JSON object, no additional text.`)
 
-// standalonePrompt is the prompt for standalone mode judgment
-var standalonePrompt = promptbuilder.MustNewPrompt(`<task>
+// benchmarkPrompt contains only request-specific judgment inputs.
+var benchmarkPrompt = promptbuilder.MustNewPrompt(`{{foo}}
+
+{{bar}}
+
+{{criterion}}`)
+
+// standaloneSystemInstructions contains the reusable standalone-mode rubric
+// and output contract. It stays independent of each request for prompt caching.
+var standaloneSystemInstructions = promptbuilder.MustNewPrompt(`<task>
 You are evaluating a response to determine how well it meets the evaluation criterion.
 Assess the response's quality based on the specific criterion provided.
 </task>
-
-{{response}}
-
-{{criterion}}
 
 <instructions>
 1. Evaluate the response SOLELY based on the given criterion - ignore all other response qualities
@@ -260,6 +261,11 @@ Focus suggestions on how to better meet the criterion requirements.
 
 Respond with only the JSON object, no additional text.`)
 
+// standalonePrompt contains only request-specific judgment inputs.
+var standalonePrompt = promptbuilder.MustNewPrompt(`{{response}}
+
+{{criterion}}`)
+
 // modePrompts orders the per-mode prompts for the provider constructors:
 // golden, benchmark, standalone. The provider constructors assign the
 // resulting executors positionally, so this order must match the
@@ -267,11 +273,12 @@ Respond with only the JSON object, no additional text.`)
 // claude.go and google.go.
 var modePrompts = []struct {
 	name   string
+	system *promptbuilder.Prompt
 	prompt *promptbuilder.Prompt
 }{
-	{name: "golden", prompt: goldenPrompt},
-	{name: "benchmark", prompt: benchmarkPrompt},
-	{name: "standalone", prompt: standalonePrompt},
+	{name: "golden", system: goldenSystemInstructions, prompt: goldenPrompt},
+	{name: "benchmark", system: benchmarkSystemInstructions, prompt: benchmarkPrompt},
+	{name: "standalone", system: standaloneSystemInstructions, prompt: standalonePrompt},
 }
 
 // Bind implements promptbuilder.Bindable for Request

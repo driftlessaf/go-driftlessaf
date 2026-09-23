@@ -145,6 +145,11 @@ func TestRoutedClaudePreservesModesAndRouteIdentity(t *testing.T) {
 		"evaluating two responses to determine which one better",
 		"evaluating a response to determine how well it meets",
 	}
+	wantUserMarkers := []string{
+		"<golden_answer>reference answer</golden_answer>",
+		"<foo>first response</foo>",
+		"<response>standalone response</response>",
+	}
 	requestNumber := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)
@@ -166,6 +171,15 @@ func TestRoutedClaudePreservesModesAndRouteIdentity(t *testing.T) {
 			Model       string   `json:"model"`
 			MaxTokens   int64    `json:"max_tokens"`
 			Temperature *float64 `json:"temperature"`
+			System      []struct {
+				Text         string           `json:"text"`
+				CacheControl *json.RawMessage `json:"cache_control"`
+			} `json:"system"`
+			Messages []struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"messages"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Errorf("decoding request body: %v", err)
@@ -179,8 +193,25 @@ func TestRoutedClaudePreservesModesAndRouteIdentity(t *testing.T) {
 		if payload.Temperature == nil || *payload.Temperature != 0.1 {
 			t.Errorf("temperature = %v, want 0.1", payload.Temperature)
 		}
-		if !strings.Contains(string(body), wantMarker) || !strings.Contains(string(body), string(wantMode)) {
-			t.Errorf("request for mode %q does not contain its judge prompt: %s", wantMode, body)
+		if len(payload.System) != 1 || !strings.Contains(payload.System[0].Text, wantMarker) {
+			t.Errorf("system prompt for mode %q does not contain its rubric: %s", wantMode, body)
+		}
+		if len(payload.System) == 1 && payload.System[0].CacheControl == nil {
+			t.Errorf("system prompt for mode %q is missing its cache breakpoint: %s", wantMode, body)
+		}
+		var userText string
+		for _, message := range payload.Messages {
+			for _, content := range message.Content {
+				userText += content.Text
+			}
+		}
+		if !strings.Contains(userText, wantUserMarkers[requestNumber-1]) {
+			t.Errorf("user prompt for mode %q does not contain request data: %s", wantMode, body)
+		}
+		for _, stableMarker := range []string{"<task>", "<instructions>", "<output_format>"} {
+			if strings.Contains(userText, stableMarker) {
+				t.Errorf("user prompt for mode %q contains stable instruction %q: %s", wantMode, stableMarker, body)
+			}
 		}
 		writeAnthropicJudgement(w, providerModelID, wantMode)
 	}))
@@ -286,12 +317,26 @@ func TestRoutedGooglePreservesStructuredOutputAndRouteIdentity(t *testing.T) {
 		"evaluating two responses to determine which one better",
 		"evaluating a response to determine how well it meets",
 	}
+	requests := judgeModeRequests()
+	requests[0].ReferenceAnswer = "google-dynamic-reference"
+	requests[0].ActualAnswer = "google-dynamic-actual"
+	requests[0].Criterion = "google-dynamic-golden-criterion"
+	requests[1].ReferenceAnswer = "google-dynamic-foo"
+	requests[1].ActualAnswer = "google-dynamic-bar"
+	requests[1].Criterion = "google-dynamic-benchmark-criterion"
+	requests[2].ActualAnswer = "google-dynamic-standalone"
+	requests[2].Criterion = "google-dynamic-standalone-criterion"
 	requestNumber := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Errorf("reading request body: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(request.URL.Path, "cachedContents") {
+			t.Errorf("judge created explicit context cache: %s", body)
+			http.Error(w, "judge must keep its short rubric inline", http.StatusBadRequest)
 			return
 		}
 		if requestNumber >= len(wantModes) {
@@ -306,6 +351,16 @@ func TestRoutedGooglePreservesStructuredOutputAndRouteIdentity(t *testing.T) {
 			t.Errorf("request path = %q, want exact provider model ID", request.URL.Path)
 		}
 		var payload struct {
+			SystemInstruction struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"systemInstruction"`
+			Contents []struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"contents"`
 			GenerationConfig struct {
 				MaxOutputTokens int64          `json:"maxOutputTokens"`
 				Temperature     *float64       `json:"temperature"`
@@ -331,8 +386,34 @@ func TestRoutedGooglePreservesStructuredOutputAndRouteIdentity(t *testing.T) {
 		if got := payload.Labels["workload"]; got != "judge" {
 			t.Errorf("workload label = %q, want judge", got)
 		}
-		if !strings.Contains(string(body), wantMarker) || !strings.Contains(string(body), string(wantMode)) {
-			t.Errorf("request for mode %q does not contain its judge prompt: %s", wantMode, body)
+		if len(payload.SystemInstruction.Parts) != 1 || !strings.Contains(payload.SystemInstruction.Parts[0].Text, wantMarker) {
+			t.Errorf("inline system prompt for mode %q does not contain its rubric: %s", wantMode, body)
+		}
+		var systemText string
+		for _, part := range payload.SystemInstruction.Parts {
+			systemText += part.Text
+		}
+		var userText string
+		for _, content := range payload.Contents {
+			for _, part := range content.Parts {
+				userText += part.Text
+			}
+		}
+		wantUserMarkers := [][]string{
+			{"<golden_answer>google-dynamic-reference</golden_answer>", "<actual_response>google-dynamic-actual</actual_response>", "<criterion>google-dynamic-golden-criterion</criterion>"},
+			{"<foo>google-dynamic-foo</foo>", "<bar>google-dynamic-bar</bar>", "<criterion>google-dynamic-benchmark-criterion</criterion>"},
+			{"<response>google-dynamic-standalone</response>", "<criterion>google-dynamic-standalone-criterion</criterion>"},
+		}[requestNumber-1]
+		for _, marker := range wantUserMarkers {
+			if !strings.Contains(userText, marker) {
+				t.Errorf("request for mode %q does not contain dynamic user marker %q: %s", wantMode, marker, body)
+			}
+			if strings.Contains(systemText, marker) {
+				t.Errorf("system prompt for mode %q contains dynamic user marker %q: %s", wantMode, marker, body)
+			}
+		}
+		if strings.Contains(systemText, "google-dynamic-") {
+			t.Errorf("system prompt for mode %q contains dynamic request data: %s", wantMode, body)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":%q}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}`, judgementJSON(wantMode))
@@ -368,7 +449,7 @@ func TestRoutedGooglePreservesStructuredOutputAndRouteIdentity(t *testing.T) {
 	ctx := agenttrace.WithTracer(t.Context(), agenttrace.ByCode(func(trace *agenttrace.Trace[*Judgement]) {
 		traces = append(traces, trace)
 	}))
-	for _, request := range judgeModeRequests() {
+	for _, request := range requests {
 		judgement, err := judgeInstance.Judge(ctx, request)
 		if err != nil {
 			t.Fatalf("Judge(%q): %v", request.Mode, err)
@@ -488,6 +569,11 @@ func TestLegacyGoogleConstructionPreservesCallerOptionPrecedence(t *testing.T) {
 		body, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Errorf("reading request body: %v", err)
+		}
+		if strings.Contains(request.URL.Path, "cachedContents") {
+			t.Errorf("legacy judge created explicit context cache: %s", body)
+			http.Error(w, "judge must keep its short rubric inline", http.StatusBadRequest)
+			return
 		}
 		if !strings.Contains(request.URL.Path, overrideModel+":generateContent") {
 			t.Errorf("request path = %q, want caller-overridden model", request.URL.Path)

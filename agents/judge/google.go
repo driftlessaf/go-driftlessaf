@@ -96,6 +96,12 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 	// Create one executor per mode using the pre-parsed templates from
 	// prompts.go; executors apply options read-only, so one slice is shared.
 	execOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
+		// Judge rubrics are intentionally sent inline. These short, mode-specific
+		// prefixes may be below Vertex's explicit CachedContent minimum, which
+		// would turn every invocation into a failed cache-create RPC. Keeping the
+		// stable rubric in the system instruction preserves the prompt boundary
+		// while allowing Gemini's implicit prefix caching where eligible.
+		googleexecutor.WithoutCacheControl[*Request, *Judgement](),
 		googleexecutor.WithTemperature[*Request, *Judgement](0.1),
 		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
 		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
@@ -118,10 +124,13 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 	}
 	executors := make([]googleexecutor.Interface[*Request, *Judgement], len(modePrompts))
 	for i, mp := range modePrompts {
+		options := append([]googleexecutor.Option[*Request, *Judgement]{
+			googleexecutor.WithSystemInstructions[*Request, *Judgement](mp.system),
+		}, execOpts...)
 		executor, err := googleexecutor.New[*Request, *Judgement](
 			construction.client,
 			mp.prompt,
-			execOpts...,
+			options...,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create %s executor: %w", mp.name, err)

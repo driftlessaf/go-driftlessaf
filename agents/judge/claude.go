@@ -94,10 +94,13 @@ func newClaudeWithMessages(construction claudeJudgeConstruction, opts ...claudee
 	}
 	executors := make([]claudeexecutor.Interface[*Request, *Judgement], len(modePrompts))
 	for i, mp := range modePrompts {
+		options := append([]claudeexecutor.Option[*Request, *Judgement]{
+			claudeexecutor.WithSystemInstructions[*Request, *Judgement](mp.system),
+		}, execOpts...)
 		executor, err := claudeexecutor.NewWithMessages[*Request, *Judgement](
 			construction.messages,
 			mp.prompt,
-			execOpts...,
+			options...,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create %s executor: %w", mp.name, err)
