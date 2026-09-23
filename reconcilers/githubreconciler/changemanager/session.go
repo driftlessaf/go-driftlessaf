@@ -95,6 +95,7 @@ type Session[T any] struct {
 	prAssignees []string // Login names of PR assignees
 
 	commitCount   int                 // Total number of commits on the PR
+	budgetCommits int                 // Commits counted toward the turn limit
 	findings      []callbacks.Finding // CI failures detected on the existing PR
 	pendingChecks []string            // Names of checks that are not yet complete
 	meta          metadata            // Changemanager state embedded in the PR body
@@ -200,14 +201,22 @@ func (s *Session[T]) CommitCount() int {
 	return s.commitCount
 }
 
+func (s *Session[T]) budgetCommitCount() int {
+	if s.manager.excludeMergeCommitsFromBudget {
+		return s.budgetCommits
+	}
+	return s.commitCount
+}
+
 // commitBudgetUsed returns the commit count the turn limit is measured against:
 // commits since the last ResetCommitBudget under WithDynamicCommitBudget
-// (NewSession clamps the baseline, so never negative), else the total count.
+// (NewSession clamps the baseline, so never negative), else the configured
+// static commit count.
 func (s *Session[T]) commitBudgetUsed() int {
-	if !s.manager.dynamicCommitBudget {
-		return s.commitCount
+	if s.manager.dynamicCommitBudget {
+		return s.commitCount - s.meta.CommitBudgetBaseline
 	}
-	return s.commitCount - s.meta.CommitBudgetBaseline
+	return s.budgetCommitCount()
 }
 
 // PendingChecks returns the names of checks that are not yet complete.
@@ -311,7 +320,7 @@ func (s *Session[T]) ApplyTurnLimit(ctx context.Context) (string, error) {
 		clog.InfoContext(ctx, "PR already has turn-limit label", "pr", s.prNumber)
 		return s.prURL, nil
 	}
-	clog.InfoContext(ctx, "PR hit turn limit, adding turn-limit label", "pr", s.prNumber, "commits", s.commitCount, "max", s.manager.maxCommits)
+	clog.InfoContext(ctx, "PR hit turn limit, adding turn-limit label", "pr", s.prNumber, "commits", s.commitCount, "budget_commits", s.commitBudgetUsed(), "max", s.manager.maxCommits)
 
 	if _, _, err := s.client.Issues.AddLabelsToIssue(ctx, s.owner, s.repo, s.prNumber, []string{turnLimitLabel}); err != nil {
 		return "", fmt.Errorf("adding turn-limit label: %w", err)

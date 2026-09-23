@@ -74,6 +74,20 @@ func Example() {
 	}
 }
 
+// ExampleWithMergeCommitsExcludedFromBudget configures a commit limit that
+// measures bot-authored linear commits while allowing maintenance merges.
+func ExampleWithMergeCommitsExcludedFromBudget() {
+	_, err := changemanager.New[UpdateData]("update-bot",
+		template.Must(template.New("title").Parse(`{{.PackageName}} update`)),
+		template.Must(template.New("body").Parse(`Update {{.PackageName}}`)),
+		changemanager.WithMaxCommits[UpdateData](10),
+		changemanager.WithMergeCommitsExcludedFromBudget[UpdateData](),
+	)
+	fmt.Println(err)
+
+	// Output: <nil>
+}
+
 // ExampleSession_ReplaceLabels demonstrates replace-managed labels on the
 // open PR. The desired labels are added first (like AddLabels), then, for
 // each declared prefix, labels under that prefix that are not in the desired

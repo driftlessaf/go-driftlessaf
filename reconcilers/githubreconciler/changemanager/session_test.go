@@ -148,11 +148,13 @@ func TestHasUnresolvedReviews(t *testing.T) {
 
 func TestHitMaxCommitsDynamicBudget(t *testing.T) {
 	tests := []struct {
-		name        string
-		dynamic     bool
-		commitCount int
-		baseline    int
-		want        bool
+		name          string
+		dynamic       bool
+		commitCount   int
+		budgetCount   int
+		excludeMerges bool
+		baseline      int
+		want          bool
 	}{{
 		name:        "static under limit",
 		commitCount: 4,
@@ -174,16 +176,29 @@ func TestHitMaxCommitsDynamicBudget(t *testing.T) {
 		commitCount: 8,
 		baseline:    3,
 		want:        true,
+	}, {
+		name:          "merge commits excluded",
+		commitCount:   12,
+		budgetCount:   4,
+		excludeMerges: true,
+		want:          false,
+	}, {
+		name:          "non-merge commits at limit",
+		commitCount:   12,
+		budgetCount:   5,
+		excludeMerges: true,
+		want:          true,
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := Session[testData]{
-				manager:     &CM[testData]{maxCommits: 5, dynamicCommitBudget: tt.dynamic},
-				prNumber:    1,
-				prMergeable: new(true),
-				commitCount: tt.commitCount,
-				meta:        metadata{CommitBudgetBaseline: tt.baseline},
+				manager:       &CM[testData]{maxCommits: 5, dynamicCommitBudget: tt.dynamic, excludeMergeCommitsFromBudget: tt.excludeMerges},
+				prNumber:      1,
+				prMergeable:   new(true),
+				commitCount:   tt.commitCount,
+				budgetCommits: tt.budgetCount,
+				meta:          metadata{CommitBudgetBaseline: tt.baseline},
 			}
 			if got := s.State().HitMaxCommits(); got != tt.want {
 				t.Errorf("HitMaxCommits(): got = %v, want = %v", got, tt.want)

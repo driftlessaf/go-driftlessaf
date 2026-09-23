@@ -67,13 +67,24 @@ func WithFindingReplies[T any]() Option[T] {
 	}
 }
 
-// WithMaxCommits sets the maximum number of commits allowed on a PR before
-// the session reports StateMaxCommits. Each commit triggers a CI run, so this
-// limits how many times the bot can iterate on a PR. A value of 0 (default)
-// means no limit.
+// WithMaxCommits sets the commit budget allowed on a PR before the session
+// reports StateMaxCommits. Each commit triggers a CI run, so this limits how
+// many times the bot can iterate on a PR. A value of 0 (default) means no
+// limit. WithMergeCommitsExcludedFromBudget can narrow which commits count.
 func WithMaxCommits[T any](n int) Option[T] {
 	return func(cm *CM[T]) {
 		cm.maxCommits = n
+	}
+}
+
+// WithMergeCommitsExcludedFromBudget makes merge commits count as zero toward
+// WithMaxCommits. NewSession lists the pull request's commits when this option
+// is enabled; reconcilers that do not opt in keep the existing query load and
+// count every commit. It cannot be combined with WithDynamicCommitBudget
+// because existing persisted baselines count all commits.
+func WithMergeCommitsExcludedFromBudget[T any]() Option[T] {
+	return func(cm *CM[T]) {
+		cm.excludeMergeCommitsFromBudget = true
 	}
 }
 
@@ -239,20 +250,21 @@ func WithManagedLabels[T any](labels ...string) Option[T] {
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
-	identity            string
-	titleTemplate       *template.Template
-	bodyTemplate        *template.Template
-	templateExecutor    *internaltemplate.Template[embeddedData[T]]
-	owner               string
-	repo                string
-	handlesFindings     bool
-	findingReplies      bool
-	maxCommits          int
-	dynamicCommitBudget bool
-	maxBudgetResets     int
-	closeOnEmptyDiff    bool
-	managedLabels       []string
-	traceDashboardURL   string
+	identity                      string
+	titleTemplate                 *template.Template
+	bodyTemplate                  *template.Template
+	templateExecutor              *internaltemplate.Template[embeddedData[T]]
+	owner                         string
+	repo                          string
+	handlesFindings               bool
+	findingReplies                bool
+	maxCommits                    int
+	excludeMergeCommitsFromBudget bool
+	dynamicCommitBudget           bool
+	maxBudgetResets               int
+	closeOnEmptyDiff              bool
+	managedLabels                 []string
+	traceDashboardURL             string
 	// trustedReviewAuthors are GitHub login names trusted regardless of
 	// author association; see WithTrustedReviewAuthors.
 	trustedReviewAuthors map[string]struct{}
@@ -473,6 +485,9 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 	for _, opt := range opts {
 		opt(cm)
 	}
+	if cm.excludeMergeCommitsFromBudget && cm.dynamicCommitBudget {
+		return nil, errors.New("WithMergeCommitsExcludedFromBudget cannot be combined with WithDynamicCommitBudget")
+	}
 
 	return cm, nil
 }
@@ -585,6 +600,7 @@ func (cm *CM[T]) NewSession(
 		prLabels      []string
 		prAssignees   []string
 		commitCount   int
+		budgetCommits int
 		findings      []callbacks.Finding
 		pendingChecks []string
 		meta          metadata
@@ -669,6 +685,13 @@ func (cm *CM[T]) NewSession(
 		}
 
 		commitCount = pr.Commits.TotalCount
+		budgetCommits = commitCount
+		if cm.excludeMergeCommitsFromBudget && cm.maxCommits > 0 {
+			budgetCommits, err = countNonMergeCommits(ctx, gqlClient, owner, repo, prNumber)
+			if err != nil {
+				return nil, fmt.Errorf("counting non-merge commits: %w", err)
+			}
+		}
 
 		// Collect all check runs, handling pagination
 		if len(pr.Commits.Nodes) > 0 {
@@ -718,6 +741,7 @@ func (cm *CM[T]) NewSession(
 		prLabels:      prLabels,
 		prAssignees:   prAssignees,
 		commitCount:   commitCount,
+		budgetCommits: budgetCommits,
 		findings:      findings,
 		pendingChecks: pendingChecks,
 		meta:          meta,
