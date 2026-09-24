@@ -29,6 +29,10 @@ type Metadata[Response any] struct {
 		trace *agenttrace.Trace[Response],
 		result *Response,
 	) map[string]any
+
+	// LogPolicy is copied from toolcall.Definition by FromTool. A caller
+	// assembling Metadata by hand must copy it too, or arguments are logged.
+	LogPolicy *toolcall.ArgLogPolicy
 }
 
 // SubmitMetadata describes the terminal submit tool for the Claude executor.
@@ -62,6 +66,7 @@ func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
 	return Metadata[Resp]{
 		Definition: toolParam(t.Def),
 		Handler:    handler(t),
+		LogPolicy:  t.Def.LogPolicy,
 	}
 }
 

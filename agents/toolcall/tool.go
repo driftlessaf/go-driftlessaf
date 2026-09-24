@@ -57,6 +57,11 @@ type Definition struct {
 	// these are forwarded to MCP clients that support tool annotations.
 	Annotations *ToolAnnotations
 
+	// LogPolicy allowlists the call arguments an executor may log. Nil leaves
+	// the tool unpoliced. `json:"-"` keeps it out of the tool contract: it is
+	// never sent to a provider, an MCP client, or a consumer's schema digest.
+	LogPolicy *ArgLogPolicy `json:"-"`
+
 	// OutputSchema is an optional JSON Schema describing the tool's response.
 	// Used by MCP's Tool.OutputSchema field.
 	OutputSchema *Schema

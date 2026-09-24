@@ -23,6 +23,10 @@ type Metadata[Response any] struct {
 	// It receives the context, tool call, trace, and a result pointer.
 	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response.
 	Handler func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response], result *Response) *genai.FunctionResponse
+
+	// LogPolicy is copied from toolcall.Definition by FromTool. A caller
+	// assembling Metadata by hand must copy it too, or arguments are logged.
+	LogPolicy *toolcall.ArgLogPolicy
 }
 
 // SubmitMetadata describes the terminal submit tool for the Google executor.
@@ -69,6 +73,7 @@ func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
 	return Metadata[Resp]{
 		Definition: toolParam(t.Def),
 		Handler:    handler(t),
+		LogPolicy:  t.Def.LogPolicy,
 	}
 }
 

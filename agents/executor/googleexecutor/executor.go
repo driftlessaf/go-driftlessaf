@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/schema"
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
 	"github.com/chainguard-dev/clog"
@@ -388,6 +390,14 @@ func (e *executor[Request, Response]) Execute(
 		return ok
 	}
 
+	// Held-out submit and suspend tools are absent from the map, so in a
+	// policed run they carry no policy and their arguments are withheld.
+	policies := make(map[string]*toolcall.ArgLogPolicy, len(tools))
+	for name, t := range tools {
+		policies[name] = t.LogPolicy
+	}
+	argLog := execshared.NewArgLogRedactor(policies, slices.Collect(maps.Keys(heldOutTools))...)
+
 	// executeToolCall runs a single function call and returns its response
 	// part. The handler writes any terminal result into resultPtr; each call
 	// gets its own slot on the concurrent path so handlers never race on the
@@ -397,10 +407,8 @@ func (e *executor[Request, Response]) Execute(
 	// zero value.
 	executeToolCall := func(call *genai.FunctionCall, resultPtr *Response) (*genai.Part, bool, error) {
 		kvs := make([]any, 0, 4+2*len(call.Args))
-		kvs = append(kvs, "tool", call.Name, "id", call.ID)
-		for k, v := range call.Args {
-			kvs = append(kvs, "args."+k, v)
-		}
+		kvs = append(kvs, "tool", argLog.ToolName(call.Name), "id", call.ID)
+		kvs = argLog.AppendArgs(kvs, call.Name, call.Args)
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
 		// Record tool call metric
@@ -432,7 +440,9 @@ func (e *executor[Request, Response]) Execute(
 			committed = com
 			toolResponse = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result}
 		default:
-			clog.ErrorContext(ctx, "Unknown function call requested by model", "function", call.Name)
+			// The name is unregistered by definition on this branch, so it is
+			// model text: ToolName withholds it and the trace below keeps it.
+			clog.ErrorContext(ctx, "Unknown function call requested by model", "function", argLog.ToolName(call.Name))
 			toolResponse = googletool.Error(call, "Unknown function: %s", call.Name)
 
 			// Record bad tool call for unknown function. The wrapped sentinel
@@ -633,8 +643,10 @@ func (e *executor[Request, Response]) Execute(
 
 		// Check for malformed function call
 		if candidate.FinishReason == genai.FinishReasonMalformedFunctionCall {
+			// On this finish reason the message quotes the call the model
+			// failed to emit, arguments included, so only its size is logged.
 			clog.WarnContext(ctx, "Model attempted a malformed function call, asking it to retry",
-				"finish_message", candidate.FinishMessage)
+				"finish_message_bytes", len(candidate.FinishMessage))
 
 			// Build available function names for retry message
 			var funcNames []string
@@ -754,7 +766,7 @@ func (e *executor[Request, Response]) Execute(
 				toolCalls = append(toolCalls, part.FunctionCall)
 				clog.InfoContext(ctx, "Found function call part",
 					"part_index", i,
-					"function_name", part.FunctionCall.Name,
+					"function_name", argLog.ToolName(part.FunctionCall.Name),
 					"function_id", part.FunctionCall.ID)
 			default:
 				clog.WarnContext(ctx, "Found part with unexpected content", "part_index", i)

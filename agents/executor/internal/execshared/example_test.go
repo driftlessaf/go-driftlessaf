@@ -128,3 +128,59 @@ func ExampleFailTurnUnlessSuspended() {
 	// Output:
 	// turn not failed
 }
+
+func ExampleNewArgLogRedactor() {
+	// No tool declares a policy, so the run logs every argument value.
+	unpoliced := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": nil})
+	fmt.Println(unpoliced.AppendArgs(nil, "git_grep",
+		map[string]any{"pattern": "restricted-input-7742"})...)
+
+	// One tool declaring a policy policies the whole run, so a sibling that
+	// declared none has its arguments withheld and counted.
+	policed := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{
+		"git_grep":       toolcall.NewArgLogPolicy("ref"),
+		"git_log_search": nil,
+	})
+	fmt.Println(policed.AppendArgs(nil, "git_log_search",
+		map[string]any{"pattern": "restricted-input-7742"})...)
+
+	// Output:
+	// args.pattern restricted-input-7742
+	// args_withheld 1
+}
+
+func ExampleArgLogRedactor_AppendArgs() {
+	redactor := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{
+		"git_grep": toolcall.NewArgLogPolicy("ref"),
+	})
+
+	// An allowed argument keeps its name and value; anything else is counted,
+	// because the model chooses the names too. One call per argument here:
+	// AppendArgs walks a map, so several at once have no stable order.
+	fmt.Println(redactor.AppendArgs(nil, "git_grep", map[string]any{"ref": "4.1.0"})...)
+	fmt.Println(redactor.AppendArgs(nil, "git_grep",
+		map[string]any{"reasoning": "confirm the caller input still appears at 4.1.0"})...)
+
+	// Output:
+	// args.ref 4.1.0
+	// args_withheld 1
+}
+
+func ExampleArgLogRedactor_ToolName() {
+	// The held-out submit tool is named separately. It dispatches from outside
+	// the policy map, so leaving it out would make a real call read as unknown.
+	redactor := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{
+		"git_grep": toolcall.NewArgLogPolicy("ref"),
+	}, "submit_result")
+
+	// The provider reports the name the model emitted, so a name the run never
+	// registered is model text and is replaced rather than logged.
+	fmt.Println(redactor.ToolName("git_grep"))
+	fmt.Println(redactor.ToolName("submit_result"))
+	fmt.Println(redactor.ToolName("the caller input names lib/index.ts"))
+
+	// Output:
+	// git_grep
+	// submit_result
+	// [unknown]
+}

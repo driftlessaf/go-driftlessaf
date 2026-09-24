@@ -22,6 +22,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/schema"
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"github.com/chainguard-dev/clog"
@@ -270,6 +271,14 @@ func (e *executor[Request, Response]) Execute(
 		return nil
 	}
 
+	// Held-out submit and suspend tools are absent from the map, so in a
+	// policed run they carry no policy and their arguments are withheld.
+	policies := make(map[string]*toolcall.ArgLogPolicy, len(tools))
+	for name, t := range tools {
+		policies[name] = t.LogPolicy
+	}
+	argLog := execshared.NewArgLogRedactor(policies, heldOutNames...)
+
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a
 	// turn gets its own slot so concurrent handlers never race on the same
@@ -278,10 +287,8 @@ func (e *executor[Request, Response]) Execute(
 	// resultPtr holds the run's final result — even when that result is the
 	// zero value.
 	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, args map[string]any, resultPtr *Response) (string, bool, error) {
-		kvs := []any{"tool", tc.Function.Name, "id", tc.ID}
-		for k, v := range args {
-			kvs = append(kvs, "args."+k, v)
-		}
+		kvs := []any{"tool", argLog.ToolName(tc.Function.Name), "id", tc.ID}
+		kvs = argLog.AppendArgs(kvs, tc.Function.Name, args)
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
 		var res map[string]any
@@ -308,7 +315,9 @@ func (e *executor[Request, Response]) Execute(
 				return "", false, err
 			}
 		default:
-			clog.ErrorContext(ctx, "Unknown tool requested", "tool", tc.Function.Name)
+			// The name is unregistered by definition on this branch, so it is
+			// model text: ToolName withholds it and the trace below keeps it.
+			clog.ErrorContext(ctx, "Unknown tool requested", "tool", argLog.ToolName(tc.Function.Name))
 			trace.BadToolCall(tc.ID, tc.Function.Name,
 				map[string]any{"arguments": tc.Function.Arguments},
 				fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, tc.Function.Name))

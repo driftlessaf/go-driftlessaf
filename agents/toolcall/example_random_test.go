@@ -144,3 +144,35 @@ var _ = func() {
 	// Provider returns unified tools that work with any provider.
 	_, _ = exampleProvider.Tools(context.Background(), tools)
 }
+
+// ExampleArgLogPolicy: an allowed argument is logged by name and value; every
+// other one is withheld WHOLE and counted, because the model chooses the names
+// too and an invented argument would otherwise put its text in the log key.
+func ExampleArgLogPolicy() {
+	policy := NewArgLogPolicy("ref")
+
+	allowed := make(map[string]struct{}, len(policy.Loggable))
+	for _, name := range policy.Loggable {
+		allowed[name] = struct{}{}
+	}
+
+	// The third argument is one the model invented, with the caller's text as
+	// its NAME. Walked as an ordered slice so the output below is stable.
+	withheld := 0
+	for _, arg := range []struct{ name, value string }{
+		{"ref", "4.1.0"},
+		{"pattern", "restricted-input-7742"},
+		{"restricted-input-7742", "1"},
+	} {
+		if _, ok := allowed[arg.name]; ok {
+			fmt.Printf("args.%s %s\n", arg.name, arg.value)
+			continue
+		}
+		withheld++
+	}
+	fmt.Printf("args_withheld %d\n", withheld)
+
+	// Output:
+	// args.ref 4.1.0
+	// args_withheld 2
+}

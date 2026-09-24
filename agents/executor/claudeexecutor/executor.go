@@ -26,6 +26,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/schema"
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -486,6 +487,14 @@ func (e *executor[Request, Response]) runConversation(
 	}
 	availableTools := availableToolNames(tools, heldOutNames...)
 
+	// Held-out submit and suspend tools are absent from the map, so in a
+	// policed run they carry no policy and their arguments are withheld.
+	policies := make(map[string]*toolcall.ArgLogPolicy, len(tools))
+	for name, t := range tools {
+		policies[name] = t.LogPolicy
+	}
+	argLog := execshared.NewArgLogRedactor(policies, heldOutNames...)
+
 	// executeToolCall handles executing a single tool call and returning the
 	// result. The handler writes any terminal result into resultPtr; the
 	// sequential path passes the shared finalResultPtr, while the concurrent
@@ -494,12 +503,10 @@ func (e *executor[Request, Response]) runConversation(
 	// call and the registered result validators passed, so resultPtr holds the
 	// run's final result — even when that result is the zero value.
 	executeToolCall := func(toolUse anthropic.ToolUseBlock, resultPtr *Response) (anthropic.ContentBlockParamUnion, bool, error) {
-		kvs := []any{"tool", toolUse.Name, "id", toolUse.ID}
+		kvs := []any{"tool", argLog.ToolName(toolUse.Name), "id", toolUse.ID}
 		var args map[string]any
 		if err := json.Unmarshal(normalizeToolUseInput(toolUse.Input), &args); err == nil {
-			for k, v := range args {
-				kvs = append(kvs, "args."+k, v)
-			}
+			kvs = argLog.AppendArgs(kvs, toolUse.Name, args)
 		}
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
 
@@ -540,7 +547,9 @@ func (e *executor[Request, Response]) runConversation(
 			result = map[string]any{"status": checkpoint.StatusAwaitingAnswer}
 		default:
 			// Unknown tool
-			clog.ErrorContext(ctx, "Unknown tool requested", "tool", toolUse.Name)
+			// The name is unregistered by definition on this branch, so it is
+			// model text: ToolName withholds it and the trace below keeps it.
+			clog.ErrorContext(ctx, "Unknown tool requested", "tool", argLog.ToolName(toolUse.Name))
 			trace.BadToolCall(toolUse.ID, toolUse.Name,
 				map[string]any{"input": toolUse.Input},
 				fmt.Errorf("%w: %q", agenttrace.ErrUnknownTool, toolUse.Name))
@@ -795,7 +804,7 @@ func (e *executor[Request, Response]) runConversation(
 		if cut {
 			cutErr = &TruncatedToolCallError{Tool: cutName, Budget: &MaxTokensError{MaxTokens: e.maxTokens, OutputTokens: message.Usage.OutputTokens}}
 			clog.WarnContext(ctx, "Claude stopped at max_tokens mid tool call; the cut-off call is not dispatched",
-				"tool", cutName, "tool_use_id", cutID,
+				"tool", argLog.ToolName(cutName), "tool_use_id", cutID,
 				"max_tokens", e.maxTokens, "output_tokens", message.Usage.OutputTokens,
 				"turn", turn, "retry", truncatedToolCalls, "max_retries", e.truncatedToolCallRetries)
 			cutParams := map[string]any{"stop_reason": string(message.StopReason), "output_tokens": message.Usage.OutputTokens}

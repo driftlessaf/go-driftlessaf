@@ -98,7 +98,13 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 		payloadRaw = coerced
 	}
 
-	clog.InfoContextf(ctx, "Submitting result")
+	// `reasoning` is free-form model prose, so on confidential input it
+	// paraphrases that input. The byte count keeps the line diagnosable and
+	// queryable; the reasoning itself travels on the SubmitOutcome to the trace.
+	clog.InfoContext(ctx, "Submitting result",
+		"tool", name,
+		"reasoning_bytes", len(reasoning),
+	)
 
 	parsed, err := parsePayload[Response](payloadRaw)
 	if err != nil {
