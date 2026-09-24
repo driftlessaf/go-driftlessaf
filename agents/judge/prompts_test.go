@@ -100,6 +100,9 @@ func TestRequestKeepsDynamicContentInUserPrompt(t *testing.T) {
 					t.Errorf("user prompt missing %q: %s", want, rendered)
 				}
 			}
+			if !strings.HasSuffix(rendered, "</criterion>\n\n"+outputReminder) {
+				t.Errorf("user prompt does not close with the output reminder right after the criterion: %s", rendered)
+			}
 			for _, absent := range []string{"<task>", "<instructions>", "<output_format>", "Score 1.0 (Perfect)"} {
 				if strings.Contains(rendered, absent) {
 					t.Errorf("user prompt unexpectedly contains stable instruction %q", absent)

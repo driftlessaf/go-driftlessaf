@@ -161,6 +161,35 @@ func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt
 	}
 }
 
+// WithAppendedSystemInstructions adds prompt after any system instructions an
+// earlier option set, separated by a blank line, so both reach the model as
+// one system instruction; with none set it behaves like WithSystemInstructions.
+// Options apply in order, so the prompt lands after every system instruction
+// set before it. A wrapper that owns the closing contract of the system
+// instruction (such as the judge's JSON output format) applies it with this
+// option last, where a caller's WithSystemInstructions can add to it but not
+// replace it. Neither prompt is modified.
+func WithAppendedSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if prompt == nil {
+			return errors.New("appended system instructions prompt cannot be nil")
+		}
+		if e.systemInstructions == nil {
+			e.systemInstructions = prompt
+			return nil
+		}
+		composed, err := promptbuilder.MustNewPrompt("{{base}}\n\n{{appended}}").BindPrompt("base", e.systemInstructions)
+		if err != nil {
+			return fmt.Errorf("composing system instructions: %w", err)
+		}
+		if composed, err = composed.BindPrompt("appended", prompt); err != nil {
+			return fmt.Errorf("composing system instructions: %w", err)
+		}
+		e.systemInstructions = composed
+		return nil
+	}
+}
+
 // WithUserPromptSuffix appends a static, operator-authored prompt to the end
 // of the built user prompt, separated by a blank line. It is the Gemini
 // counterpart of the Claude executor's user-prompt-suffix option: agents that

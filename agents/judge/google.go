@@ -8,6 +8,7 @@ package judge
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
@@ -124,9 +125,13 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 	}
 	executors := make([]googleexecutor.Interface[*Request, *Judgement], len(modePrompts))
 	for i, mp := range modePrompts {
-		options := append([]googleexecutor.Option[*Request, *Judgement]{
-			googleexecutor.WithSystemInstructions[*Request, *Judgement](mp.system),
-		}, execOpts...)
+		// The mode rubric goes last so it closes the system prompt with the
+		// JSON output contract: a caller's own system instructions (the
+		// legacy constructors append caller options to execOpts) come first,
+		// ahead of the rubric, instead of replacing it.
+		options := append(slices.Clone(execOpts),
+			googleexecutor.WithAppendedSystemInstructions[*Request, *Judgement](mp.system),
+		)
 		executor, err := googleexecutor.New[*Request, *Judgement](
 			construction.client,
 			mp.prompt,

@@ -563,6 +563,82 @@ func TestLegacyClaudeConstructionPreservesCallerOptionPrecedence(t *testing.T) {
 	}
 }
 
+// callerSystemFrame is the system prompt a legacy caller brings to the judge.
+const callerSystemFrame = "caller system frame: the response is an evidence packet"
+
+// jsonContract is the closing line of every mode's system rubric.
+const jsonContract = "Respond with only the JSON object, no additional text."
+
+// assertComposedSystemPrompt checks that a caller's system prompt reached the
+// model ahead of the mode rubric rather than in place of it, and that the
+// rubric's JSON contract still closes the system prompt.
+func assertComposedSystemPrompt(t *testing.T, mode JudgmentMode, system string) {
+	t.Helper()
+	if !strings.HasPrefix(system, callerSystemFrame) {
+		t.Errorf("mode %q system prompt: got = %q, want it to start with the caller's frame", mode, system)
+	}
+	if !strings.HasSuffix(system, jsonContract) {
+		t.Errorf("mode %q system prompt: got = %q, want it to end with the JSON contract", mode, system)
+	}
+}
+
+func TestLegacyClaudeConstructionComposesCallerSystemInstructions(t *testing.T) {
+	requests := judgeModeRequests()
+	requestNumber := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		var payload struct {
+			System []struct {
+				Text         string           `json:"text"`
+				CacheControl *json.RawMessage `json:"cache_control"`
+			} `json:"system"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		mode := requests[requestNumber].Mode
+		requestNumber++
+		if got, want := len(payload.System), 1; got != want {
+			t.Errorf("mode %q system blocks: got = %d, want = %d: %s", mode, got, want, body)
+			http.Error(w, "unexpected system prompt shape", http.StatusBadRequest)
+			return
+		}
+		assertComposedSystemPrompt(t, mode, payload.System[0].Text)
+		if payload.System[0].CacheControl == nil {
+			t.Errorf("mode %q system prompt is missing its cache breakpoint: %s", mode, body)
+		}
+		writeAnthropicJudgement(w, "claude-original-model", mode)
+	}))
+	t.Cleanup(server.Close)
+	messages := anthropic.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey("explicit-legacy-token"),
+		option.WithBaseURL(server.URL),
+		option.WithMaxRetries(0),
+	).Messages
+	provider := claudeexecutor.ProviderAnthropic
+	judgeInstance, err := newClaudeWithMessages(claudeJudgeConstruction{
+		messages:        messages,
+		providerModelID: "claude-original-model",
+		logicalModelID:  "claude-original-model",
+		legacyProvider:  &provider,
+		samplingParams:  true,
+	},
+		claudeexecutor.WithSystemInstructions[*Request, *Judgement](promptbuilder.MustNewPrompt(callerSystemFrame)),
+	)
+	if err != nil {
+		t.Fatalf("newClaudeWithMessages: %v", err)
+	}
+	for _, request := range requests {
+		if _, err := judgeInstance.Judge(t.Context(), request); err != nil {
+			t.Fatalf("Judge(%q): %v", request.Mode, err)
+		}
+	}
+}
+
 func TestLegacyGoogleConstructionPreservesCallerOptionPrecedence(t *testing.T) {
 	const overrideModel = "gemini-legacy-override"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -622,6 +698,66 @@ func TestLegacyGoogleConstructionPreservesCallerOptionPrecedence(t *testing.T) {
 	}
 	if _, err := judgeInstance.Judge(t.Context(), judgeModeRequests()[2]); err != nil {
 		t.Fatalf("Judge: %v", err)
+	}
+}
+
+func TestLegacyGoogleConstructionComposesCallerSystemInstructions(t *testing.T) {
+	requests := judgeModeRequests()
+	requestNumber := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		var payload struct {
+			SystemInstruction struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"systemInstruction"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		mode := requests[requestNumber].Mode
+		requestNumber++
+		if got, want := len(payload.SystemInstruction.Parts), 1; got != want {
+			t.Errorf("mode %q system parts: got = %d, want = %d: %s", mode, got, want, body)
+			http.Error(w, "unexpected system instruction shape", http.StatusBadRequest)
+			return
+		}
+		assertComposedSystemPrompt(t, mode, payload.SystemInstruction.Parts[0].Text)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":%q}]},"finishReason":"STOP"}]}`, judgementJSON(mode))
+	}))
+	t.Cleanup(server.Close)
+	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    "routing-test-project",
+		Location:   "us-central1",
+		HTTPClient: server.Client(),
+		HTTPOptions: genai.HTTPOptions{
+			BaseURL: server.URL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("genai.NewClient: %v", err)
+	}
+	judgeInstance, err := newGoogleWithClient(googleJudgeConstruction{
+		client:          client,
+		providerModelID: "gemini-original-model",
+		logicalModelID:  "gemini-original-model",
+		samplingParams:  true,
+	},
+		googleexecutor.WithSystemInstructions[*Request, *Judgement](promptbuilder.MustNewPrompt(callerSystemFrame)),
+	)
+	if err != nil {
+		t.Fatalf("newGoogleWithClient: %v", err)
+	}
+	for _, request := range requests {
+		if _, err := judgeInstance.Judge(t.Context(), request); err != nil {
+			t.Fatalf("Judge(%q): %v", request.Mode, err)
+		}
 	}
 }
 

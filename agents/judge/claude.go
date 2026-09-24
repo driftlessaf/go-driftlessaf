@@ -8,6 +8,7 @@ package judge
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
@@ -94,9 +95,13 @@ func newClaudeWithMessages(construction claudeJudgeConstruction, opts ...claudee
 	}
 	executors := make([]claudeexecutor.Interface[*Request, *Judgement], len(modePrompts))
 	for i, mp := range modePrompts {
-		options := append([]claudeexecutor.Option[*Request, *Judgement]{
-			claudeexecutor.WithSystemInstructions[*Request, *Judgement](mp.system),
-		}, execOpts...)
+		// The mode rubric goes last so it closes the system prompt with the
+		// JSON output contract: a caller's own system instructions (the
+		// legacy constructors append caller options to execOpts) come first,
+		// ahead of the rubric, instead of replacing it.
+		options := append(slices.Clone(execOpts),
+			claudeexecutor.WithAppendedSystemInstructions[*Request, *Judgement](mp.system),
+		)
 		executor, err := claudeexecutor.NewWithMessages[*Request, *Judgement](
 			construction.messages,
 			mp.prompt,

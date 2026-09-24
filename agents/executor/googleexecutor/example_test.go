@@ -210,3 +210,15 @@ Provide clear, concise explanations.`)
 
 	fmt.Printf("Answer: %s\n", response.Answer)
 }
+
+// Example_withAppendedSystemInstructions demonstrates adding a closing section
+// to the system instruction after a caller's own, so the two reach the model
+// together instead of one replacing the other.
+func Example_withAppendedSystemInstructions() {
+	opts := []googleexecutor.Option[*MathRequest, *MathResponse]{
+		googleexecutor.WithSystemInstructions[*MathRequest, *MathResponse](promptbuilder.MustNewPrompt("You are a math tutor.")),
+		googleexecutor.WithAppendedSystemInstructions[*MathRequest, *MathResponse](promptbuilder.MustNewPrompt("Respond with only the JSON object.")),
+	}
+	fmt.Printf("options: %d\n", len(opts))
+	// Output: options: 2
+}

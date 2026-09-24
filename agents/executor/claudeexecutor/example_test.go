@@ -99,3 +99,23 @@ func ExampleWithTruncatedToolCallRetries() {
 	fmt.Printf("option is nil: %v\n", opt == nil)
 	// Output: option is nil: false
 }
+
+// ExampleWithAppendedSystemInstructions demonstrates adding a closing section
+// to the system prompt after a caller's own system instructions, so the two
+// reach the model together instead of one replacing the other.
+func ExampleWithAppendedSystemInstructions() {
+	prompt, err := promptbuilder.NewPrompt("Respond to the request.")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	executor, err := claudeexecutor.NewWithMessages[promptbuilder.Noop, *struct{}](
+		anthropic.NewClient(option.WithAPIKey("example")).Messages,
+		prompt,
+		claudeexecutor.WithSystemInstructions[promptbuilder.Noop, *struct{}](promptbuilder.MustNewPrompt("You review build changes.")),
+		claudeexecutor.WithAppendedSystemInstructions[promptbuilder.Noop, *struct{}](promptbuilder.MustNewPrompt("Respond with only the JSON object.")),
+	)
+	fmt.Println(executor != nil && err == nil)
+	// Output: true
+}

@@ -278,3 +278,63 @@ func (t *testBindable) Bind(p *promptbuilder.Prompt) (*promptbuilder.Prompt, err
 type testResponse struct {
 	Result string `json:"result"`
 }
+
+func TestWithAppendedSystemInstructions(t *testing.T) {
+	t.Parallel()
+
+	frame := promptbuilder.MustNewPrompt("caller frame")
+	contract := promptbuilder.MustNewPrompt("closing contract")
+	tests := []struct {
+		name string
+		opts []Option[*testBindable, *testResponse]
+		want string
+	}{{
+		name: "alone sets the system instructions",
+		opts: []Option[*testBindable, *testResponse]{
+			WithAppendedSystemInstructions[*testBindable, *testResponse](contract),
+		},
+		want: "closing contract",
+	}, {
+		name: "after WithSystemInstructions composes after them",
+		opts: []Option[*testBindable, *testResponse]{
+			WithSystemInstructions[*testBindable, *testResponse](frame),
+			WithAppendedSystemInstructions[*testBindable, *testResponse](contract),
+		},
+		want: "caller frame\n\nclosing contract",
+	}, {
+		name: "a later WithSystemInstructions still replaces",
+		opts: []Option[*testBindable, *testResponse]{
+			WithAppendedSystemInstructions[*testBindable, *testResponse](contract),
+			WithSystemInstructions[*testBindable, *testResponse](frame),
+		},
+		want: "caller frame",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := &executor[*testBindable, *testResponse]{}
+			for _, opt := range tt.opts {
+				if err := opt(e); err != nil {
+					t.Fatalf("applying option: %v", err)
+				}
+			}
+			got, err := e.systemInstructions.Build()
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("system instructions: got = %q, want = %q", got, tt.want)
+			}
+			for want, p := range map[string]*promptbuilder.Prompt{"caller frame": frame, "closing contract": contract} {
+				if got, err := p.Build(); err != nil || got != want {
+					t.Errorf("input prompt after composing: got = %q (err %v), want = %q", got, err, want)
+				}
+			}
+		})
+	}
+
+	if err := WithAppendedSystemInstructions[*testBindable, *testResponse](nil)(&executor[*testBindable, *testResponse]{}); err == nil {
+		t.Error("WithAppendedSystemInstructions(nil): got = nil, want error")
+	}
+}

@@ -78,12 +78,22 @@ Note on suggestions:
 
 Respond with only the JSON object, no additional text.`)
 
-// goldenPrompt contains only request-specific judgment inputs.
+// outputReminder closes every mode's user prompt. The output contract lives
+// in the system instructions, so without it the criterion would be the last
+// text the model reads; a criterion that ends with its own mandatory format
+// (a caller's audit block meant for the "reasoning" field) then wins on long
+// prompts and the reply arrives as that block instead of the JSON object.
+const outputReminder = "Respond with only the JSON object described in the system instructions, no additional text."
+
+// goldenPrompt contains the request-specific judgment inputs, then the
+// output reminder.
 var goldenPrompt = promptbuilder.MustNewPrompt(`{{golden_answer}}
 
 {{actual_response}}
 
-{{criterion}}`)
+{{criterion}}
+
+` + outputReminder)
 
 // benchmarkSystemInstructions contains the reusable benchmark-mode rubric and
 // output contract. It stays independent of each request for prompt caching.
@@ -184,12 +194,15 @@ Focus suggestions on the weaker-performing response, or provide balanced suggest
 
 Respond with only the JSON object, no additional text.`)
 
-// benchmarkPrompt contains only request-specific judgment inputs.
+// benchmarkPrompt contains the request-specific judgment inputs, then the
+// output reminder.
 var benchmarkPrompt = promptbuilder.MustNewPrompt(`{{foo}}
 
 {{bar}}
 
-{{criterion}}`)
+{{criterion}}
+
+` + outputReminder)
 
 // standaloneSystemInstructions contains the reusable standalone-mode rubric
 // and output contract. It stays independent of each request for prompt caching.
@@ -261,10 +274,13 @@ Focus suggestions on how to better meet the criterion requirements.
 
 Respond with only the JSON object, no additional text.`)
 
-// standalonePrompt contains only request-specific judgment inputs.
+// standalonePrompt contains the request-specific judgment inputs, then the
+// output reminder.
 var standalonePrompt = promptbuilder.MustNewPrompt(`{{response}}
 
-{{criterion}}`)
+{{criterion}}
+
+` + outputReminder)
 
 // modePrompts orders the per-mode prompts for the provider constructors:
 // golden, benchmark, standalone. The provider constructors assign the

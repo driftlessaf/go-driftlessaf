@@ -19,6 +19,9 @@ import (
 // implementation based on the model name. Claude models use Anthropic SDK,
 // Gemini models use Google's Generative AI SDK.
 // Accepts optional executor options that will be passed through to the underlying executor.
+// System instructions passed that way are prepended to each mode's rubric,
+// which keeps the JSON output contract as the closing system text; they
+// cannot replace it.
 func NewVertex(ctx context.Context, projectID, region, modelName string, opts ...any) (Interface, error) {
 	return NewVertexWithLabels(ctx, projectID, region, modelName, nil, opts...)
 }
