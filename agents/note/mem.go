@@ -76,6 +76,20 @@ func (m *Mem) Get(_ context.Context, key string, run int, name, author string) (
 	return e.note, io.NopCloser(bytes.NewReader(slices.Clone(e.body))), nil
 }
 
+// Delete removes the note stored under the coordinates, or returns ErrNotExist
+// when there is none.
+func (m *Mem) Delete(_ context.Context, key string, run int, name, author string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ref := Ref(key, run, name, author)
+	if _, ok := m.notes[ref]; !ok {
+		return ErrNotExist
+	}
+	delete(m.notes, ref)
+	return nil
+}
+
 // List returns a bounded, Ref-ordered Page of the coordinates matching f. It caps
 // at Filter.Limit (or defaultListLimit) and sets Page.Cursor when more matches
 // remain; pass that cursor back in Filter.Cursor for the next page.
@@ -87,7 +101,7 @@ func (m *Mem) List(_ context.Context, f Filter) (Page, error) {
 
 	refs := make([]string, 0, len(m.notes))
 	for ref, e := range m.notes {
-		if matches(f, e.note) {
+		if f.Matches(e.note) {
 			refs = append(refs, ref)
 		}
 	}
@@ -112,20 +126,4 @@ func (m *Mem) List(_ context.Context, f Filter) (Page, error) {
 		page.Cursor = refs[end-1]
 	}
 	return page, nil
-}
-
-// matches reports whether n satisfies every non-wildcard field of f.
-func matches(f Filter, n Note) bool {
-	switch {
-	case f.Key != "" && n.Key != f.Key:
-		return false
-	case f.Run != nil && n.Run != *f.Run:
-		return false
-	case f.Name != "" && n.Name != f.Name:
-		return false
-	case f.Author != nil && n.Author != *f.Author:
-		return false
-	default:
-		return true
-	}
 }

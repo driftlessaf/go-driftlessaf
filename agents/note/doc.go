@@ -21,10 +21,21 @@ SPDX-License-Identifier: Apache-2.0
 // interfaces, return structs", a backend returns a concrete type and a consumer
 // accepts [Store] — or a narrower interface of just the methods it uses.
 //
+// The durable backend is agents/note/gcsstore, which lays notes out on object
+// names over the store/blob primitive. Every backend is held to one contract by
+// agents/note/notetest, the shared conformance suite [Mem] also runs, so the
+// in-memory store cannot drift from the durable one it stands in for.
+//
 // # Listing
 //
 // [Store.List] filters by any subset of coordinates and returns a bounded [Page]
 // of coordinates; a caller pages by passing Page.Cursor back in Filter.Cursor
-// until it is empty. Bodies are streamed on [Store.Get], so a fan-in lists
-// coordinates and reads only the bodies it needs.
+// until it is empty. Bodies are fetched separately on [Store.Get], so a fan-in
+// lists coordinates and reads only the bodies it needs.
+//
+// A backend narrows a [Filter] as far as its storage can — a blob prefix covers
+// a leading subset of the coordinates — and applies the rest with
+// [Filter.Matches], so the selection rule is defined once rather than per
+// backend. That is why a page can be short while Page.Cursor is live: page until
+// the cursor is empty, never until a page looks small.
 package note

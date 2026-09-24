@@ -29,6 +29,18 @@ func ExampleRef() {
 	// per-author: true
 }
 
+// ExampleFilter_Matches selects shared fix plans for one key across all runs.
+func ExampleFilter_Matches() {
+	filter := note.Filter{Key: "harden:widget", Name: "fix_plan", Author: new("")}
+	fmt.Println("shared:", filter.Matches(note.Note{Key: "harden:widget", Run: 1, Name: "fix_plan"}))
+	fmt.Println("named author:", filter.Matches(note.Note{Key: "harden:widget", Run: 1, Name: "fix_plan", Author: "claude"}))
+	fmt.Println("another run:", filter.Matches(note.Note{Key: "harden:widget", Run: 2, Name: "fix_plan"}))
+	// Output:
+	// shared: true
+	// named author: false
+	// another run: true
+}
+
 // ExampleMem passes notes through the in-memory store: two authors each Put their
 // fix_plan for one key+run, a consumer Gets one back by its coordinates, and List
 // gathers every author's fix_plan for that run.
@@ -61,4 +73,52 @@ func ExampleMem() {
 	// Output:
 	// claude fix_plan: plan A
 	// fix_plans in run: 2
+}
+
+// ExampleStore_Delete shows the retention sweep the store is shaped for. It owns
+// no retention policy, so an application that keeps only the newest runs — or
+// that must honor a deletion request — walks the notes it wants gone with List
+// and removes each with Delete. There is no delete-by-filter on purpose: each
+// removal is its own durable decision, so a sweep interrupted half way through
+// has still recorded exactly what it did.
+func ExampleStore_Delete() {
+	ctx := context.Background()
+	store := note.NewMem()
+
+	for _, run := range []int{1, 2, 3} {
+		n := note.Note{Key: "harden:widget", Run: run, Name: "harden/fix_plan", Author: "claude"}
+		if err := store.Put(ctx, n, strings.NewReader("plan")); err != nil {
+			panic(err)
+		}
+	}
+
+	// Retain only the newest run: page the older ones and delete each.
+	const retain = 3
+	filter := note.Filter{Key: "harden:widget"}
+	for {
+		page, err := store.List(ctx, filter)
+		if err != nil {
+			panic(err)
+		}
+		for _, n := range page.Notes {
+			if n.Run >= retain {
+				continue
+			}
+			if err := store.Delete(ctx, n.Key, n.Run, n.Name, n.Author); err != nil {
+				panic(err)
+			}
+		}
+		if page.Cursor == "" {
+			break
+		}
+		filter.Cursor = page.Cursor
+	}
+
+	remaining, err := store.List(ctx, note.Filter{Key: "harden:widget"})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("runs retained:", len(remaining.Notes))
+	// Output:
+	// runs retained: 1
 }
