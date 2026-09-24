@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -198,6 +199,37 @@ func TestWithMode(t *testing.T) {
 			WithMode(tt.mode).applyPR(&o)
 			if o.mode != tt.want {
 				t.Errorf("mode: got = %d, wanted = %d", o.mode, tt.want)
+			}
+		})
+	}
+}
+
+func TestWithRequeueOnUnknownMergeability(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []PROption
+		want time.Duration
+	}{{
+		name: "enabled by default",
+		want: 30 * time.Second,
+	}, {
+		name: "custom delay",
+		opts: []PROption{WithRequeueOnUnknownMergeability(5 * time.Minute)},
+		want: 5 * time.Minute,
+	}, {
+		name: "disabled",
+		opts: []PROption{WithRequeueOnUnknownMergeability(0)},
+		want: 0,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := defaultPROptions()
+			for _, opt := range tt.opts {
+				opt.applyPR(&o)
+			}
+			if o.unknownMergeabilityRequeueAfter != tt.want {
+				t.Errorf("unknownMergeabilityRequeueAfter: got = %v, want = %v", o.unknownMergeabilityRequeueAfter, tt.want)
 			}
 		})
 	}

@@ -62,7 +62,7 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// unknownMergeabilityRequeueAfter, when positive, requeues a reconcile after
 	// that delay when GitHub has not yet computed the PR's mergeability and
 	// nothing else needs acting on, instead of resetting the PR from the
-	// default branch. Zero (the default) keeps the optimistic reset. See
+	// default branch. Non-positive disables the requeue. See
 	// WithRequeueOnUnknownMergeability.
 	unknownMergeabilityRequeueAfter time.Duration
 
@@ -234,11 +234,16 @@ func WithStartComment[Req promptbuilder.Bindable, Resp Result, CB any](marker st
 	}
 }
 
-// WithRequeueOnUnknownMergeability requeues after the given delay when GitHub
-// has not yet computed a PR's mergeability and there is nothing else to act on
-// (no findings, no pending checks), instead of resetting the PR from the
-// default branch and re-running the agent for nothing. A non-positive delay
-// disables it (the default).
+// defaultUnknownMergeabilityRequeueAfter is how long a PR whose mergeability
+// GitHub has not yet computed waits before being re-checked, unless overridden
+// with WithRequeueOnUnknownMergeability.
+const defaultUnknownMergeabilityRequeueAfter = 30 * time.Second
+
+// WithRequeueOnUnknownMergeability sets how long to wait before re-checking a PR
+// whose mergeability GitHub has not yet computed when there is nothing else to
+// act on (no findings, no pending checks). The default is 30 seconds. A
+// non-positive delay disables the requeue, so the PR is reset from the default
+// branch and the agent re-runs.
 func WithRequeueOnUnknownMergeability[Req promptbuilder.Bindable, Resp Result, CB any](after time.Duration) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.unknownMergeabilityRequeueAfter = after
@@ -264,6 +269,8 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any](
 		agent:          agent,
 		buildRequest:   buildRequest,
 		buildCallbacks: buildCallbacks,
+
+		unknownMergeabilityRequeueAfter: defaultUnknownMergeabilityRequeueAfter,
 	}
 	for _, opt := range opts {
 		opt(r)

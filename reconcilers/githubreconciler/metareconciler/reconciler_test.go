@@ -659,8 +659,9 @@ func TestWithRequeueOnUnknownMergeability(t *testing.T) {
 		opts []Option[*testRequest, *testResult, testCallbacks]
 		want time.Duration
 	}{
-		{name: "disabled by default", want: 0},
-		{name: "opted in", opts: []Option[*testRequest, *testResult, testCallbacks]{WithRequeueOnUnknownMergeability[*testRequest, *testResult, testCallbacks](30 * time.Second)}, want: 30 * time.Second},
+		{name: "enabled by default", want: 30 * time.Second},
+		{name: "custom delay", opts: []Option[*testRequest, *testResult, testCallbacks]{WithRequeueOnUnknownMergeability[*testRequest, *testResult, testCallbacks](5 * time.Minute)}, want: 5 * time.Minute},
+		{name: "disabled", opts: []Option[*testRequest, *testResult, testCallbacks]{WithRequeueOnUnknownMergeability[*testRequest, *testResult, testCallbacks](0)}, want: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

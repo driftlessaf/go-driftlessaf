@@ -80,9 +80,9 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		return nil
 
 	// Mergeability not yet computed, with nothing else to act on (findings and
-	// pending checks handled above). Only opted-in reconcilers requeue to
-	// re-check rather than resetting the PR from the default branch; the case is
-	// gated on the option so others fall through to the historical behavior.
+	// pending checks handled above). Requeue to re-check rather than resetting
+	// the PR from the default branch, which would discard the agent's commits.
+	// A reconciler that disables the requeue falls through to that reset.
 	case state.IsUnknown() && r.unknownMergeabilityRequeueAfter > 0:
 		log.With("after", r.unknownMergeabilityRequeueAfter).Info("PR mergeability still being computed by GitHub, requeuing")
 		return workqueue.RequeueAfter(r.unknownMergeabilityRequeueAfter)

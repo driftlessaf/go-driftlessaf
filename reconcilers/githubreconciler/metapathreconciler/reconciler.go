@@ -103,8 +103,7 @@ type PRReconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 
 	// unknownMergeabilityRequeueAfter, when > 0, requeues a PR whose mergeability
 	// GitHub has not yet computed instead of resetting it from the default
-	// branch. Zero keeps the historical behavior. See
-	// WithRequeueOnUnknownMergeability.
+	// branch. See WithRequeueOnUnknownMergeability.
 	unknownMergeabilityRequeueAfter time.Duration
 
 	// Agent and its adapters
@@ -135,7 +134,7 @@ func NewPR[Req promptbuilder.Bindable, Resp Result, CB any](
 		return nil, errors.New("analyzer must be provided")
 	}
 
-	o := prOptions{mode: ModeConfig}
+	o := defaultPROptions()
 	for _, opt := range opts {
 		opt.applyPR(&o)
 	}

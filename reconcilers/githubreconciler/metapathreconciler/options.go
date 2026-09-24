@@ -47,6 +47,15 @@ type prOptions struct {
 	giveUp                          *changemanager.GiveUpComment
 }
 
+// defaultPROptions returns the configuration NewPR starts from before applying
+// options.
+func defaultPROptions() prOptions {
+	return prOptions{
+		mode:                            ModeConfig,
+		unknownMergeabilityRequeueAfter: defaultUnknownMergeabilityRequeueAfter,
+	}
+}
+
 // issuesOptions holds the configuration for a reconciler built with NewIssues.
 type issuesOptions struct {
 	commonOptions
@@ -138,10 +147,16 @@ func WithBaseRevalidation() PROption {
 	})
 }
 
-// WithRequeueOnUnknownMergeability requeues after the given delay when GitHub
-// has not yet computed a PR's mergeability and there is nothing else to act on
-// (no findings, no pending checks), instead of resetting the PR from the
-// default branch. A non-positive delay disables it (the default).
+// defaultUnknownMergeabilityRequeueAfter is how long a PR whose mergeability
+// GitHub has not yet computed waits before being re-checked, unless overridden
+// with WithRequeueOnUnknownMergeability.
+const defaultUnknownMergeabilityRequeueAfter = 30 * time.Second
+
+// WithRequeueOnUnknownMergeability sets how long to wait before re-checking a PR
+// whose mergeability GitHub has not yet computed when there is nothing else to
+// act on (no findings, no pending checks). The default is 30 seconds. A
+// non-positive delay disables the requeue, so the PR is reset from the default
+// branch instead.
 func WithRequeueOnUnknownMergeability(after time.Duration) PROption {
 	return prOption(func(o *prOptions) {
 		o.unknownMergeabilityRequeueAfter = after

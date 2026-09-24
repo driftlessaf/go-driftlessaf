@@ -151,11 +151,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		return nil
 
 	// Mergeability not yet computed, with nothing else to act on (findings and
-	// pending checks handled above). By default the reconcile proceeds as if no
-	// rebase were needed, because in a high-volume repository GitHub can take
-	// long to compute mergeability. A reconciler that opts in requeues to
-	// re-check instead: falling through resets the PR from the default branch
-	// and re-runs the agent for nothing.
+	// pending checks handled above). Requeue to re-check rather than falling
+	// through, which resets the PR from the default branch and re-runs the agent
+	// for nothing. A reconciler that disables the requeue gets that reset.
 	case state.IsUnknown() && r.unknownMergeabilityRequeueAfter > 0:
 		log.With("after", r.unknownMergeabilityRequeueAfter).Info("PR mergeability still being computed by GitHub, requeuing")
 		return workqueue.RequeueAfter(r.unknownMergeabilityRequeueAfter)
