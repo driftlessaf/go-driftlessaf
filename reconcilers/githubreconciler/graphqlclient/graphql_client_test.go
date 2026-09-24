@@ -128,6 +128,21 @@ func TestMutate_RecordsHTTPStatusCode(t *testing.T) {
 	}
 }
 
+func TestMutateWithStatus_ReturnsHTTPStatusOnError(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	var mutation struct {
+		AddStar struct {
+			Starrable struct{ ID githubv4.ID }
+		} `graphql:"addStar(input: $input)"`
+	}
+	status, err := client.MutateWithStatus(t.Context(), "AuthFailure", &mutation, githubv4.AddStarInput{StarrableID: githubv4.ID("test")}, nil)
+	if status != http.StatusForbidden || err == nil {
+		t.Errorf("MutateWithStatus = (%d, %v), want 403 and an error", status, err)
+	}
+}
+
 // Each request through the transport must write its status code to its
 // own context-provided pointer, not to shared state. This is tested
 // sequentially — if the transport used a single shared field, request B

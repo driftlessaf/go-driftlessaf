@@ -123,6 +123,14 @@ func (c *GraphQLClient) Query(ctx context.Context, operationName string, q any, 
 // It must be a static string representing the actual name of the GraphQL operation.
 // Do not include dynamic content, as this will cause a cardinality explosion that will break our metrics.
 func (c *GraphQLClient) Mutate(ctx context.Context, operationName string, m any, input githubv4.Input, variables map[string]any) error {
+	_, err := c.MutateWithStatus(ctx, operationName, m, input, variables)
+	return err
+}
+
+// MutateWithStatus executes a GraphQL mutation and returns its HTTP status.
+// GraphQL errors can also arrive with HTTP 200, so callers must inspect both
+// the status and the error when classifying a failed mutation.
+func (c *GraphQLClient) MutateWithStatus(ctx context.Context, operationName string, m any, input githubv4.Input, variables map[string]any) (int, error) {
 	start := time.Now()
 
 	code, err := c.mutate(ctx, m, input, variables)
@@ -134,5 +142,5 @@ func (c *GraphQLClient) Mutate(ctx context.Context, operationName string, m any,
 	mGraphQLOperations.WithLabelValues(operationName, "mutation", status, strconv.Itoa(code)).Inc()
 	mGraphQLDuration.WithLabelValues(operationName, "mutation").Observe(time.Since(start).Seconds())
 
-	return err
+	return code, err
 }
