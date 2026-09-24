@@ -101,3 +101,30 @@ func ExampleWithBackoff() {
 	// Output:
 	// dispatched with failure-retry backoff
 }
+
+// ExampleWithCandidateWindowFactor demonstrates widening the per-pass
+// candidate shuffle so dispatchers sharing a queue under one identity stop
+// racing for the same head keys. The window is the factor multiplied by the
+// number of keys the pass can launch; the default is
+// DefaultCandidateWindowFactor, and zero disables the shuffle.
+func ExampleWithCandidateWindowFactor() {
+	wq := inmem.NewWorkQueue(5)
+	ctx := context.Background()
+
+	for _, key := range []string{"key-a", "key-b", "key-c"} {
+		if err := wq.Queue(ctx, key, workqueue.Options{}); err != nil {
+			panic(err)
+		}
+	}
+
+	// Pick from a window of 96 keys per launch slot instead of the default 48.
+	err := dispatcher.Handle(ctx, wq, 1, 0, func(_ context.Context, _ string, _ workqueue.Options) error {
+		return nil
+	}, dispatcher.WithCandidateWindowFactor(2*dispatcher.DefaultCandidateWindowFactor))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("dispatched with a widened candidate window")
+	// Output:
+	// dispatched with a widened candidate window
+}

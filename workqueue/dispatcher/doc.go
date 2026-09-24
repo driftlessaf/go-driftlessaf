@@ -11,6 +11,22 @@ SPDX-License-Identifier: Apache-2.0
 // batch sizing. Use Handle for synchronous dispatch or HandleAsync for
 // non-blocking dispatch with a Future to await results.
 //
+// # Candidate Selection
+//
+// A queue with several dispatchers (one per region, say) hands each of them
+// the same ordering, so taking the head means they race for the same keys and
+// every claim but one is lost. When the queue reports an identity, each pass
+// shuffles the head of each priority run before launching, which makes
+// concurrent dispatchers tend to pick different keys and spreads work evenly
+// across them.
+//
+// Priority still decides: a lower-priority key is never launched while a
+// higher-priority one is available. Within a priority the shuffle covers the
+// oldest [DefaultCandidateWindowFactor] candidates per launchable key, or the
+// whole run when it is shorter, so a key can be passed over by at most that
+// many others in one pass, and a fresh shuffle each pass gives every candidate
+// in the window the same chance every time.
+//
 // # Error Handling
 //
 // When a callback returns an error, the dispatcher requeues, dead-letters,

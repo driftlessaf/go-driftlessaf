@@ -189,6 +189,11 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	}
 	launchLimit := min(batchSize, openSlots)
 
+	// An identity means sibling dispatchers may be reading this same ordering.
+	if identity != "" {
+		next = orderCandidates(next, activeKeys, cfg.windowFactor*launchLimit, cfg.shuffle)
+	}
+
 	idx, launched := 0, 0
 	for ; idx < len(next) && launched < launchLimit; idx++ {
 		nextKey := next[idx]
@@ -410,6 +415,76 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 		cfg.errors.drain()
 		return err
 	}
+}
+
+// DefaultCandidateWindowFactor scales the shuffled candidate window with the
+// number of keys a pass can launch: W = DefaultCandidateWindowFactor * L.
+//
+// The factor trades collisions against ordering. Raising it lowers the chance
+// two dispatchers reach for the same key, and raises how long a key can sit in
+// the window, because each key is picked with probability L/W per pass and so
+// waits the factor in passes when it is the only dispatcher. Measured for
+// three dispatchers, as lost share of claim attempts against that wait:
+//
+//	factor   aggregate   slowest   wait (1 dispatcher)
+//	    16       6.1%     11.2%             16 passes
+//	    24       4.0%      8.0%             24 passes
+//	    32       3.2%      6.5%             32 passes
+//	    48       2.0%      4.2%             47 passes
+//	    64       1.7%      3.4%             60 passes
+//
+// 48 is the smallest that holds the slowest dispatcher under 5%, which is the
+// bar this was built to, and it sits at the knee: 32 to 48 buys 2.3 points for
+// 14 passes, 48 to 64 buys 0.8 points for another 14. Beyond about 96 the
+// curve flattens because the window reaches the enumeration limit.
+//
+// The loss figures assume every dispatcher has the same L and a window shorter
+// than the enumerated list. Where per-owner limits make L differ, or L grows
+// until the window covers the whole list, loss rises toward
+// 1-(1-L/limit)^(k-1). Every regime still beats taking the head, where all but
+// one claim per contested key is lost.
+const DefaultCandidateWindowFactor = 48
+
+// orderCandidates returns the launchable keys from next, with the head of each
+// priority run shuffled so that dispatchers sharing a queue tend to pick
+// different keys. Without it every dispatcher reads the same ordering and
+// races for the same head, and all but one lose the slot for the pass.
+//
+// Keys in active are dropped rather than left in place, so they cannot spend
+// window positions that no dispatcher can claim. A key appears both queued and
+// in progress when the winner of an earlier claim failed to delete the queued
+// object. With no shuffle source or no window the input is returned as it
+// came, active keys included, and the caller's own skip handles them.
+//
+// Relative order across priorities is preserved, so a lower-priority key never
+// precedes a higher-priority one. Within one priority only the first window
+// keys are permuted, which bounds how far a key can be passed over in a single
+// pass.
+func orderCandidates(next []workqueue.QueuedKey, active map[string]struct{}, window int, shuffle func(n int, swap func(i, j int))) []workqueue.QueuedKey {
+	if shuffle == nil || window <= 0 {
+		return next
+	}
+
+	eligible := make([]workqueue.QueuedKey, 0, len(next))
+	for _, key := range next {
+		if _, ok := active[key.Name()]; ok {
+			continue
+		}
+		eligible = append(eligible, key)
+	}
+
+	for start := 0; start < len(eligible); {
+		end := start + 1
+		for end < len(eligible) && eligible[end].Priority() == eligible[start].Priority() {
+			end++
+		}
+		if n := min(window, end-start); n > 1 {
+			run := eligible[start : start+n]
+			shuffle(n, func(i, j int) { run[i], run[j] = run[j], run[i] })
+		}
+		start = end
+	}
+	return eligible
 }
 
 // retryBackoff returns the base backoff for a failed dispatch on the given

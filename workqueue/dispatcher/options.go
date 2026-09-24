@@ -7,6 +7,7 @@ package dispatcher
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 )
 
@@ -88,6 +89,8 @@ type config struct {
 	backoff          func(attempts int) time.Duration
 	dispatchPeriod   time.Duration
 	ownerConcurrency int
+	shuffle          func(n int, swap func(i, j int))
+	windowFactor     int
 }
 
 // WithOwnerConcurrency limits the number of active keys owned by the queue's
@@ -97,6 +100,20 @@ type config struct {
 func WithOwnerConcurrency(concurrency int) Option {
 	return func(c *config) {
 		c.ownerConcurrency = concurrency
+	}
+}
+
+// WithCandidateWindowFactor sets how far the per-pass candidate shuffle
+// reaches, as a multiple of the number of keys the pass can launch. Zero
+// disables the shuffle, so the dispatcher takes the head of the queue as it
+// was enumerated. The default is DefaultCandidateWindowFactor.
+//
+// Dispatchers sharing a queue that all take the head race for the same keys,
+// so this should only be zero where that contention does not exist or is
+// being deliberately left in place.
+func WithCandidateWindowFactor(factor int) Option {
+	return func(c *config) {
+		c.windowFactor = factor
 	}
 }
 
@@ -126,7 +143,11 @@ func WithBackoff(fn func(attempts int) time.Duration) Option {
 }
 
 func applyOptions(opts []Option) config {
-	cfg := config{errors: nopErrorEmitter{}}
+	cfg := config{
+		errors:       nopErrorEmitter{},
+		shuffle:      rand.Shuffle,
+		windowFactor: DefaultCandidateWindowFactor,
+	}
 	for _, o := range opts {
 		o(&cfg)
 	}
