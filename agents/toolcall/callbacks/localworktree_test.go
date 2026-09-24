@@ -6,14 +6,18 @@ SPDX-License-Identifier: Apache-2.0
 package callbacks_test
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
+	"github.com/google/go-cmp/cmp"
 )
 
 // openTestRoot creates a temporary directory, writes the supplied files into
@@ -809,6 +813,105 @@ func TestLocalWorktree_SearchCodebase(t *testing.T) {
 		}
 		if all.HasMore {
 			t.Error("has_more: got = true, want = false")
+		}
+	})
+}
+
+func TestLocalWorktree_SearchCodebaseRoot(t *testing.T) {
+	r := openTestRoot(t, map[string]string{
+		"top.go":      "func Foo() {}\n",
+		"sub/baz.go":  "func Foo() {}\n",
+		"sub/in/q.go": "func Foo() {}\n",
+	})
+	cb := callbacks.LocalWorktree(r)
+	ctx := t.Context()
+
+	search := func(t *testing.T, dir string) ([]callbacks.Match, error) {
+		t.Helper()
+		res, err := cb.SearchCodebase(ctx, dir, `func Foo`, "", 0, -1)
+		return res.Matches, err
+	}
+
+	t.Run("unusable root returns an error", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, dir string
+			wantErr   error
+		}{
+			{name: "nonexistent", dir: "no-such-dir", wantErr: fs.ErrNotExist},
+			{name: "escapes the root", dir: "../x", wantErr: fs.ErrInvalid},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := search(t, tc.dir)
+				if !errors.Is(err, tc.wantErr) {
+					t.Errorf("SearchCodebase(%q): got = %v, want error matching %v", tc.dir, err, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("equivalent spellings match the clean path", func(t *testing.T) {
+		for _, tc := range []struct{ dir, clean string }{
+			{dir: "./sub", clean: "sub"},
+			{dir: "sub/", clean: "sub"},
+			{dir: "sub/.", clean: "sub"},
+			{dir: "a/../sub", clean: "sub"},
+			{dir: "", clean: "."},
+		} {
+			t.Run(fmt.Sprintf("%q", tc.dir), func(t *testing.T) {
+				want, err := search(t, tc.clean)
+				if err != nil {
+					t.Fatalf("SearchCodebase(%q): %v", tc.clean, err)
+				}
+				if len(want) == 0 {
+					t.Fatalf("SearchCodebase(%q): got = 0 matches, want > 0", tc.clean)
+				}
+				got, err := search(t, tc.dir)
+				if err != nil {
+					t.Fatalf("SearchCodebase(%q): %v", tc.dir, err)
+				}
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Errorf("SearchCodebase(%q) matches (-want, +got):\n%s", tc.dir, diff)
+				}
+			})
+		}
+	})
+}
+
+func TestLocalWorktree_SearchCodebaseUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("permission bits do not deny reads as root or on Windows")
+	}
+	r := openTestRoot(t, map[string]string{
+		"ok.go":          "func Foo() {}\n",
+		"locked.go":      "func Foo() {}\n",
+		"lockeddir/x.go": "func Foo() {}\n",
+	})
+	for _, name := range []string{"locked.go", "lockeddir"} {
+		if err := r.Chmod(name, 0o000); err != nil {
+			t.Fatalf("Chmod(%q): %v", name, err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = r.Chmod("locked.go", 0o644)
+		_ = r.Chmod("lockeddir", 0o755)
+	})
+	cb := callbacks.LocalWorktree(r)
+	ctx := t.Context()
+
+	t.Run("unreadable entries below the root are skipped", func(t *testing.T) {
+		res, err := cb.SearchCodebase(ctx, ".", `func Foo`, "", 0, -1)
+		if err != nil {
+			t.Fatalf("SearchCodebase: %v", err)
+		}
+		want := []callbacks.Match{{Path: "ok.go", Offset: 0, Length: len("func Foo")}}
+		if diff := cmp.Diff(want, res.Matches); diff != "" {
+			t.Errorf("matches (-want, +got):\n%s", diff)
+		}
+	})
+
+	t.Run("unreadable root returns an error", func(t *testing.T) {
+		if _, err := cb.SearchCodebase(ctx, "lockeddir", `func Foo`, "", 0, -1); !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("SearchCodebase(lockeddir): got = %v, want error matching %v", err, fs.ErrPermission)
 		}
 	})
 }

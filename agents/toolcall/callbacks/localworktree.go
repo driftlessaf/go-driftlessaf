@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -252,13 +253,22 @@ func checkOffset(offset int64) error {
 // localWalkDir recursively walks the directory tree under r starting at dir
 // via fs.WalkDir, calling fn for each regular file that matches the optional
 // filter glob. Hidden directories (names starting with ".") are skipped.
+//
+// dir is cleaned first, because fs.ValidPath rejects equivalent forms such as
+// "./os", "os/" and "a/../os". An error on the walk root is returned wrapped.
+// Errors on entries below the root are skipped, so one unreadable file or
+// directory does not fail the search.
 func localWalkDir(r *os.Root, dir, filter string, fn func(relPath string, data []byte)) error {
-	return fs.WalkDir(r.FS(), dir, func(path string, d fs.DirEntry, err error) error {
+	dir = path.Clean(dir)
+	return fs.WalkDir(r.FS(), dir, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if name == dir { // d may be nil here
+				return fmt.Errorf("search root %q: %w", dir, err)
+			}
 			return nil
 		}
 		if d.IsDir() {
-			if path != dir && strings.HasPrefix(d.Name(), ".") {
+			if name != dir && strings.HasPrefix(d.Name(), ".") {
 				return fs.SkipDir
 			}
 			return nil
@@ -269,11 +279,11 @@ func localWalkDir(r *os.Root, dir, filter string, fn func(relPath string, data [
 				return nil
 			}
 		}
-		data, readErr := r.ReadFile(path)
+		data, readErr := r.ReadFile(name)
 		if readErr != nil {
 			return nil
 		}
-		fn(path, data)
+		fn(name, data)
 		return nil
 	})
 }
