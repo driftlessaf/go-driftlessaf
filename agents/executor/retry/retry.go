@@ -128,7 +128,7 @@ func RetryWithBackoff[T any](ctx context.Context, cfg RetryConfig, operation str
 			}
 		}
 
-		clog.WarnContext(ctx, "Rate limit hit, retrying",
+		clog.WarnContext(ctx, "Retryable error, retrying",
 			"operation", operation,
 			"attempt", attempt+1,
 			"max_retries", cfg.MaxRetries,
