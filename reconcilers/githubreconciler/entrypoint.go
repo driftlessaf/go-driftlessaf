@@ -185,6 +185,14 @@ func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error
 		// reconcilers can resolve org -> installation ID without building a
 		// second App (the token minting already primes this cache).
 		func(o *mainOptions) { o.installIDFunc = app.LookupInstallID },
+		// Prepend rather than append: attribution goes outermost so every
+		// layer below it — caller middleware included — reconciles on a
+		// context whose GitHub calls carry the app_id/installation_id labels.
+		// This option runs after the caller's (AppMain appends its own opts),
+		// so the caller's layers are already present to be wrapped.
+		func(o *mainOptions) {
+			o.middleware = append([]Middleware{appAttribution(appEnv.AppID, app.LookupInstallID)}, o.middleware...)
+		},
 	)...)
 }
 
