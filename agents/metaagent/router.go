@@ -281,6 +281,9 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 	if config.RefusalNudgeMaxRetries < 0 {
 		return fmt.Errorf("creating routed meta-agent: refusal nudge max retries must not be negative, got %d", config.RefusalNudgeMaxRetries)
 	}
+	if config.MaxToolCallsBeforeFinalize < 0 {
+		return fmt.Errorf("creating routed meta-agent: max tool calls before finalize must not be negative, got %d", config.MaxToolCallsBeforeFinalize)
+	}
 	for i, validator := range config.ResultValidators {
 		if validator == nil {
 			return fmt.Errorf("creating routed meta-agent: result validator at index %d is nil", i)
@@ -290,6 +293,9 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 }
 
 func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol, config Config[Resp, CB]) error {
+	if config.MaxToolCallsBeforeFinalize != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: MaxToolCallsBeforeFinalize is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
 	switch protocol {
 	case modelrouter.ProtocolGoogleGenAI:
 		if config.MaxTokens > 65536 {

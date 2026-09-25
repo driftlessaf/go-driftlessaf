@@ -40,6 +40,10 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the Gemini backend; it lands with the googleexecutor suspend/resume slice", config.SuspendToolName)
 	}
 
+	if config.MaxToolCallsBeforeFinalize != 0 {
+		return nil, fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the Gemini backend", config.MaxToolCallsBeforeFinalize)
+	}
+
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  projectID,
 		Location: region,

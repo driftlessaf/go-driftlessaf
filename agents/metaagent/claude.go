@@ -8,6 +8,7 @@ package metaagent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -173,6 +174,13 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 
 	if config.RefusalNudgeMaxRetries > 0 {
 		executorOpts = append(executorOpts, claudeexecutor.WithRefusalNudge[Req, Resp](config.RefusalNudgeMaxRetries))
+	}
+
+	if config.MaxToolCallsBeforeFinalize != 0 {
+		if config.ThinkingBudget > 0 {
+			return nil, errors.New("MaxToolCallsBeforeFinalize is incompatible with ThinkingBudget: explicit thinking forbids the forced submit tool_choice")
+		}
+		executorOpts = append(executorOpts, claudeexecutor.WithMaxToolCallsBeforeFinalize[Req, Resp](config.MaxToolCallsBeforeFinalize))
 	}
 
 	if config.SuspendToolName != "" {
