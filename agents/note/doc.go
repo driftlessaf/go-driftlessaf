@@ -38,4 +38,23 @@ SPDX-License-Identifier: Apache-2.0
 // [Filter.Matches], so the selection rule is defined once rather than per
 // backend. That is why a page can be short while Page.Cursor is live: page until
 // the cursor is empty, never until a page looks small.
+//
+// # Scoping
+//
+// Isolation is a capability, not a coordinate. A note's coordinates are
+// content-addressed precisely so any agent can compute a peer's [Ref] without a
+// lookup — which is what makes note-passing work, and what makes a coordinate
+// useless as an authorization check, since an agent could compute another
+// scope's just as easily. So the boundary is the handle a caller holds:
+// [NewScoped] confines a Store to one [Scope], and the scope is fixed when the
+// handle is minted.
+//
+// The grant ladder runs from narrowest outward. A Scope with a Run is what one
+// attempt's agents share; a Scope with only a Key is the broader grant an
+// orchestrator needs to compare attempts (retry, a rag layer embedding past
+// runs, a synthesizer); the unscoped store is wider still. Above all of them
+// sits the store's own namespace, holding the axes a handle cannot cross at all
+// — the per-tenant floor, and the separation between pipelines kept in
+// different stores — which is why that namespace is pinned when a backend is
+// constructed rather than passed per call.
 package note

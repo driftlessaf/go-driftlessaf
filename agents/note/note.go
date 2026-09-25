@@ -26,10 +26,25 @@ import (
 // end-to-end is a backend property, not a promise of this type: both the
 // in-memory store and the blob-backed one hold a body in memory for the length
 // of a call.
+//
+// A pipeline is usually several workqueues chained together, and the coordinates
+// are sized for that: Key and Run identify one attempt at one item across every
+// queue it passes through, and the producing step distinguishes itself in Name.
+// So the queue a note came from is part of its name, not a fifth coordinate —
+// which is what lets a step in one queue read back what a step in an earlier
+// queue wrote, under coordinates it can compute.
 type Note struct {
-	Key    string // workqueue key — the item the run is about (e.g. "harden:<skill>")
-	Run    int    // run number — the pipeline attempt for this key, 1-based
-	Name   string // step/note name: "fix_plan", "critique", …
+	Key string // workqueue key — the item the run is about (e.g. "harden:<skill>")
+
+	// Run is the pipeline attempt for this key, 1-based. It numbers the attempt,
+	// not the queue: when several workqueues are chained, the entry queue
+	// allocates the run and every later queue carries the same number, so one
+	// attempt's notes share a Run across all of them. A per-queue counter would
+	// break that — the same number would mean a different attempt in each queue,
+	// and a downstream step could not address what an upstream one wrote.
+	Run int
+
+	Name   string // step/note name, qualified by its producing stage: "harden/fix_plan", "review/critique", …
 	Author string // who produced it: a model, a synthesizer, or a human ("" for shared notes)
 }
 

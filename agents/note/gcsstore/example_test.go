@@ -7,6 +7,7 @@ package gcsstore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -60,24 +61,33 @@ func ExampleNew() {
 	}
 	fmt.Println("fix_plans in run:", len(page.Notes))
 
+	if err := store.Delete(ctx, "harden:widget", run, "fix_plan", "claude"); err != nil {
+		panic(err)
+	}
+	_, _, err = store.Get(ctx, "harden:widget", run, "fix_plan", "claude")
+	fmt.Println("deleted note absent:", errors.Is(err, note.ErrNotExist))
+
 	// Output:
 	// claude fix_plan: plan A
 	// fix_plans in run: 2
+	// deleted note absent: true
 }
 
-// ExampleWithMaxNoteSize configures a body ceiling. An oversized write fails
-// without replacing the existing body.
+// ExampleWithMaxNoteSize limits note bodies to four bytes. A rejected overwrite
+// leaves the previously stored body intact.
 func ExampleWithMaxNoteSize() {
 	ctx := context.Background()
 	store, err := gcsstore.New("notes/", blob.NewMem(), gcsstore.WithMaxNoteSize(4))
 	if err != nil {
 		panic(err)
 	}
-	n := note.Note{Key: "harden:widget", Run: 1, Name: "fix_plan"}
+
+	n := note.Note{Key: "harden:widget", Run: 1, Name: "fix_plan", Author: "claude"}
 	if err := store.Put(ctx, n, strings.NewReader("plan")); err != nil {
 		panic(err)
 	}
-	fmt.Println("oversized write:", store.Put(ctx, n, strings.NewReader("a longer plan")))
+	err = store.Put(ctx, n, strings.NewReader("a longer plan"))
+	fmt.Println("oversized write:", err)
 
 	_, rc, err := store.Get(ctx, n.Key, n.Run, n.Name, n.Author)
 	if err != nil {
