@@ -102,10 +102,16 @@ func responseCodeFromMessage(s string) int {
 // error type decides via inStreamErrorCode, and every code it recognises
 // (429, 500, 529) is transient per Anthropic's docs. That deliberately
 // includes api_error/500, matching the string fallback below, while
-// transport-level 500s stay non-retryable.
+// transport-level 500s stay non-retryable. A transport DROP — the stream
+// reset or the connection lost mid-response, with no API verdict at all — is
+// retryable (isTransportDrop): the request was sound and the turn is simply
+// re-sent.
 func isRetryableClaudeError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isTransportDrop(err) {
+		return true
 	}
 	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		if inStreamErrorCode(apiErr) > 0 {

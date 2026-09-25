@@ -17,6 +17,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
@@ -164,8 +165,17 @@ func TestExecutorRecordsTransientErrorsViaRetryCallback(t *testing.T) {
 	tracer := &recordingTracer{}
 	ctx := agenttrace.WithTracer[errCapResponse](t.Context(), tracer)
 
-	if _, execErr := exec.Execute(ctx, errCapRequest{}, nil); execErr == nil {
+	_, execErr := exec.Execute(ctx, errCapRequest{}, nil)
+	if execErr == nil {
 		t.Fatal("Execute: got nil error, want non-nil after retry exhaustion")
+	}
+	// The exhausted API error asks the workqueue for the LLM backoff and is
+	// marked infrastructure; both must survive the executor's wrap.
+	if delay, ok := workqueue.GetRequeueDelay(execErr); !ok || delay != retry.LLMBackoffDelay {
+		t.Errorf("GetRequeueDelay(execErr) = (%v, %t), want = (%v, true)", delay, ok, retry.LLMBackoffDelay)
+	}
+	if !workqueue.IsInfrastructureError(execErr) {
+		t.Errorf("IsInfrastructureError(execErr) = false, want = true: %v", execErr)
 	}
 
 	// Sanity: the executor actually exercised the retry loop.

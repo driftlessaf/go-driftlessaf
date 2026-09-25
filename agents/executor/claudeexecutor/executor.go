@@ -29,6 +29,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
+	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
 )
@@ -678,17 +679,41 @@ func (e *executor[Request, Response]) runConversation(
 				}
 			}
 			if err := stream.Err(); err != nil {
+				// A drop after message_start has billed this attempt's input;
+				// the retry discards msg, so its usage is counted here. The
+				// trace row keeps the answering attempt's usage (RecordTokens
+				// sets, it does not add). An error before message_start has
+				// no usage, and records nothing.
+				if msg.Usage.InputTokens > 0 || msg.Usage.OutputTokens > 0 {
+					e.telemetry.RecordTokens(ctx, msg.Usage.InputTokens, msg.Usage.OutputTokens)
+				}
+				if e.cacheControl && (msg.Usage.CacheReadInputTokens > 0 || msg.Usage.CacheCreationInputTokens > 0) {
+					e.telemetry.RecordCacheTokens(ctx, msg.Usage.CacheReadInputTokens, msg.Usage.CacheCreationInputTokens)
+				}
 				return msg, err
 			}
 			return msg, nil
 		})
 		e.telemetry.RecordAPIRequest(ctx, err)
 		if err != nil {
-			// If the error is a retryable Claude API error (429, 503, 504, 529) that
-			// exhausted inner retries, signal the workqueue to back off instead of
-			// immediately retrying — avoids contributing to API overload.
+			// A stream the transport dropped on every attempt fails the item
+			// as infrastructure WITHOUT a requeue marker. A Delay requeue
+			// resets the dispatcher's attempt count, and a drop can repeat for
+			// one request (a turn that always outlives a proxy's stream
+			// limit), so it stays on the counted path that dead-letters at
+			// maxRetry. The marker keeps every consumer's transient gating.
+			if isTransportDrop(err) {
+				clog.WarnContext(ctx, "Claude response stream dropped on every attempt", "error", err)
+				return response, true, workqueue.InfrastructureError(fmt.Errorf("failed to stream Claude response: %w", err))
+			}
+			// If the error is a retryable Claude API error (isRetryableClaudeError:
+			// 429, 503, 504, 529, or an in-stream api_error) that exhausted the
+			// inner retries, signal the workqueue to back off instead of
+			// immediately retrying — avoids contributing to API overload. The
+			// cause joins the message: the requeue error's own text is only the
+			// delay, and the exhausted-retry log is what an operator reads.
 			if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableClaudeError, "Claude API"); requeueErr != nil {
-				return response, true, requeueErr
+				return response, true, fmt.Errorf("%w: %w", requeueErr, err)
 			}
 			return response, true, fmt.Errorf("failed to stream Claude response: %w", err)
 		}
