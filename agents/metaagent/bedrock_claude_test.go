@@ -141,6 +141,9 @@ func TestRuntimeClaudeToolLoop(t *testing.T) {
 		t.Fatal("expected one trace with two turns")
 	}
 	for _, turn := range tracer.traces[0].Turns {
+		if got, want := turn.ServingLocation, "us-west-2"; got != want {
+			t.Errorf("serving location: got = %q, want = %q", got, want)
+		}
 		if turn.Provider != agenttrace.SystemBedrock || turn.System != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) || turn.Model != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel {
 			t.Errorf("incorrect attribution: %+v", turn)
 		}

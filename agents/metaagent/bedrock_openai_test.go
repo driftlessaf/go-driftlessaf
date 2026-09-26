@@ -397,6 +397,9 @@ func TestBedrockChatRoutedToolLoopAndAttribution(t *testing.T) {
 		t.Fatalf("traces: got = %+v, want = one trace with two turns", tracer.traces)
 	}
 	for _, turn := range tracer.traces[0].Turns {
+		if got, want := turn.ServingLocation, "us-east-1"; got != want {
+			t.Errorf("serving location: got = %q, want = %q", got, want)
+		}
 		if turn.Model != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel || turn.Provider != agenttrace.SystemBedrock || turn.System != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) {
 			t.Errorf("incorrect routed attribution: %+v", turn)
 		}

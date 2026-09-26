@@ -56,6 +56,6 @@ func newBedrockOpenAIResponsesAdapter(cfg awsauth.Config, newTransport bedrockRu
 			option.WithHTTPClient(transport),
 			option.WithMaxRetries(0),
 			option.WithJSONSet("store", false),
-		), nil)
+		), map[string]string{"region": cfg.Region})
 	}, nil
 }

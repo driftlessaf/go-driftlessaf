@@ -279,6 +279,9 @@ func TestNewRoutedMigrationConversationParity(t *testing.T) {
 										if turn.LogicalModel != route.Selection.LogicalModel || turn.Protocol != string(protocol) || turn.Provider != route.Attribution.ProviderName {
 											t.Errorf("routed attribution: got = %q/%q/%q", turn.LogicalModel, turn.Protocol, turn.Provider)
 										}
+										if got, want := turn.ServingLocation, "global"; got != want {
+											t.Errorf("serving location: got = %q, want = %q", got, want)
+										}
 									}
 								}
 							} else {

@@ -82,6 +82,7 @@ func newRoutedGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	plan := binding.Plan()
 	maxOutputTokens := int32(cmp.Or(config.MaxTokens, int64(65536)))
 	attribution := routedAttribution(plan)
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
 	return newGoogleAgentWithClient[Req, Resp, CB](googleAgentConstruction{
 		client:               binding.Client(),
 		providerModelID:      plan.ProviderModelID(),

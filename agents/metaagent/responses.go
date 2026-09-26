@@ -117,9 +117,11 @@ type responsesAgent[Req promptbuilder.Bindable, Resp, CB any] struct {
 }
 
 func newRoutedResponsesAgent[Req promptbuilder.Bindable, Resp, CB any](binding OpenAIResponsesBinding, config Config[Resp, CB]) (Agent[Req, Resp, CB], error) {
+	attribution := routedAttribution(binding.Plan())
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
 	executor, err := responsesexecutor.New[Req](binding.Responses(), responsesexecutor.Config[Resp]{
 		Model:               binding.Plan().ProviderModelID(),
-		Attribution:         routedAttribution(binding.Plan()),
+		Attribution:         attribution,
 		UserPrompt:          config.UserPrompt,
 		SystemInstructions:  config.SystemInstructions,
 		UserPromptSuffix:    config.UserPromptSuffix,

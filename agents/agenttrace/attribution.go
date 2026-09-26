@@ -18,13 +18,14 @@ import (
 // LogicalModel and Protocol identify the provider-independent model choice and
 // the wire protocol selected by the router.
 //
-// Attribution contains only validated identifiers. It must never contain
-// credentials, endpoints, or other request-specific data.
+// Serving holds verified conditions from the selected adapter. Attribution
+// contains no prices, credentials, endpoints, or unverified route defaults.
 type Attribution struct {
 	ProviderName string
 	System       string
 	LogicalModel string
 	Protocol     string
+	Serving      ServingContext
 }
 
 // Validate reports whether all route attribution fields are present and safe
@@ -44,6 +45,9 @@ func (a Attribution) Validate() error {
 		if err := validateAttributionValue(field.value); err != nil {
 			return fmt.Errorf("%s: %w", field.name, err)
 		}
+	}
+	if err := a.Serving.Validate(); err != nil {
+		return fmt.Errorf("serving context: %w", err)
 	}
 	return nil
 }

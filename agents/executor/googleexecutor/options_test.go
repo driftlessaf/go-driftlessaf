@@ -213,6 +213,9 @@ func TestWithCacheTTL(t *testing.T) {
 		{name: "valid 1 hour", ttl: time.Hour, wantErr: false},
 		{name: "valid 5 minutes", ttl: 5 * time.Minute, wantErr: false},
 		{name: "valid 1 minute", ttl: time.Minute, wantErr: false},
+		{name: "valid 61 seconds", ttl: 61 * time.Second, wantErr: false},
+		{name: "fractional seconds", ttl: 60*time.Second + 500*time.Millisecond, wantErr: true},
+		{name: "subsecond remainder", ttl: time.Minute + time.Nanosecond, wantErr: true},
 		{name: "too short 30s", ttl: 30 * time.Second, wantErr: true},
 		{name: "zero", ttl: 0, wantErr: true},
 		{name: "negative", ttl: -time.Minute, wantErr: true},
@@ -222,13 +225,35 @@ func TestWithCacheTTL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := New[*testBindable, *testResponse](nil, prompt,
+			got, err := New[*testBindable, *testResponse](nil, prompt,
 				WithCacheTTL[*testBindable, *testResponse](tt.ttl),
 			)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("WithCacheTTL(%v) error = %v, wantErr %v", tt.ttl, err, tt.wantErr)
 			}
+			if err == nil {
+				exec := got.(*executor[*testBindable, *testResponse])
+				if seconds := exec.servingAttribution(false).Serving.CacheTTLSeconds; seconds != nil {
+					t.Errorf("uncached turn TTL: got = %v, want = nil", seconds)
+				}
+				seconds := exec.servingAttribution(true).Serving.CacheTTLSeconds
+				if seconds == nil || *seconds != int64(tt.ttl/time.Second) {
+					t.Errorf("recorded cache TTL seconds: got = %v, want = %d", seconds, int64(tt.ttl/time.Second))
+				}
+				if seconds := exec.attribution.Serving.CacheTTLSeconds; seconds != nil {
+					t.Errorf("executor attribution TTL: got = %v, want = nil", seconds)
+				}
+			}
 		})
+	}
+	withoutCache, err := New[*testBindable, *testResponse](nil, prompt,
+		WithoutCacheControl[*testBindable, *testResponse](),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := withoutCache.(*executor[*testBindable, *testResponse]).servingAttribution(true).Serving.CacheTTLSeconds; got != nil {
+		t.Errorf("disabled cache TTL: got = %v, want = nil", got)
 	}
 }
 

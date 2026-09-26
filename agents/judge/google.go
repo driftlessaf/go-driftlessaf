@@ -55,6 +55,7 @@ type googleJudgeConstruction struct {
 func newRoutedGoogle(binding metaagent.GoogleGenAIBinding) (Interface, error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
 	return newGoogleWithClient(googleJudgeConstruction{
 		client:          binding.Client(),
 		providerModelID: plan.ProviderModelID(),

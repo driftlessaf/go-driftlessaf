@@ -115,7 +115,7 @@ func newBedrockAnthropicMessagesAdapter(
 		if err != nil {
 			return AnthropicMessagesBinding{}, fmt.Errorf("creating Bedrock Mantle Messages client: %w", err)
 		}
-		return NewAnthropicMessagesBinding(plan, messages, nil)
+		return NewAnthropicMessagesBinding(plan, messages, map[string]string{"region": cfg.Region})
 	}, nil
 }
 

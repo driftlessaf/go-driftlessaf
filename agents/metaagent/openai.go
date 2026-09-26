@@ -168,6 +168,7 @@ func newRoutedOpenAIChatCompletionsAgent[Req promptbuilder.Bindable, Resp, CB an
 	plan := binding.Plan()
 	maxTokens := cmp.Or(config.MaxTokens, int64(32768))
 	attribution := routedAttribution(plan)
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
 	return newOpenAIAgentWithClient[Req, Resp, CB](openAIAgentConstruction{
 		client:              binding.Client(),
 		providerModelID:     plan.ProviderModelID(),

@@ -7,6 +7,7 @@ package agenttrace
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -61,6 +62,101 @@ func TestNewTrace(t *testing.T) {
 
 	if trace.Metadata == nil {
 		t.Error("metadata: got = nil, wanted = initialized map")
+	}
+}
+
+func TestRecordServingContext(t *testing.T) {
+	t.Parallel()
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+	turn := trace.BeginTurn(0, "fixture-provider", "fixture-model")
+	ttl := int64(0)
+	context := ServingContext{
+		Location:        "us-east-1",
+		InferenceMode:   "on_demand",
+		ServiceTier:     "standard",
+		CacheTTLSeconds: &ttl,
+	}
+	if err := turn.RecordServingContext(context); err != nil {
+		t.Fatal(err)
+	}
+	*context.CacheTTLSeconds = 300
+	turn.End()
+
+	got := trace.Turns[0]
+	if got.ServingLocation != "us-east-1" || got.InferenceMode != "on_demand" || got.ServiceTier != "standard" {
+		t.Errorf("serving conditions: got = %q, %q, %q", got.ServingLocation, got.InferenceMode, got.ServiceTier)
+	}
+	if got.CacheTTLSeconds == nil || *got.CacheTTLSeconds != 0 {
+		t.Errorf("cache TTL seconds: got = %v, want = 0", got.CacheTTLSeconds)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload["cache_ttl_seconds"]; got != float64(0) {
+		t.Errorf("JSON cache_ttl_seconds: got = %v, want = 0", got)
+	}
+	if got := payload["serving_location"]; got != "us-east-1" {
+		t.Errorf("JSON serving_location: got = %v, want = %q", got, "us-east-1")
+	}
+}
+
+func TestBeginTurnServingContext(t *testing.T) {
+	t.Parallel()
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+	ttl := int64(300)
+	turn := trace.BeginTurnWithAttribution(0, "fixture-model", Attribution{
+		ProviderName: "gcp.vertex_ai",
+		System:       SystemGoogleVertex,
+		LogicalModel: "fixture-model",
+		Protocol:     "google-genai",
+		Serving: ServingContext{
+			Location:        "us-east5",
+			CacheTTLSeconds: &ttl,
+		},
+	})
+	ttl = 3600
+	turn.End()
+	got := trace.Turns[0]
+	if got.ServingLocation != "us-east5" {
+		t.Errorf("serving location: got = %q, want = %q", got.ServingLocation, "us-east5")
+	}
+	if got.CacheTTLSeconds == nil || *got.CacheTTLSeconds != 300 {
+		t.Errorf("cache TTL seconds: got = %v, want = 300", got.CacheTTLSeconds)
+	}
+}
+
+func TestServingContextValidate(t *testing.T) {
+	t.Parallel()
+	negativeTTL := int64(-1)
+	for _, tc := range []struct {
+		name      string
+		context   ServingContext
+		wantError string
+	}{
+		{name: "unknown", context: ServingContext{}},
+		{name: "known zero TTL", context: ServingContext{CacheTTLSeconds: new(int64)}},
+		{name: "invalid location", context: ServingContext{Location: " us-east-1"}, wantError: "serving location"},
+		{name: "invalid mode", context: ServingContext{InferenceMode: "on\ndemand"}, wantError: "inference mode"},
+		{name: "invalid tier", context: ServingContext{ServiceTier: " standard"}, wantError: "service tier"},
+		{name: "negative TTL", context: ServingContext{CacheTTLSeconds: &negativeTTL}, wantError: "cache TTL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.context.Validate()
+			if tc.wantError == "" && err != nil {
+				t.Errorf("Validate(): got = %v, want = nil", err)
+			}
+			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Errorf("Validate(): got = %v, want containing %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

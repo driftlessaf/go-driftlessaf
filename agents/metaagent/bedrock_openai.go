@@ -61,6 +61,6 @@ func newBedrockOpenAIChatCompletionsAdapter(cfg awsauth.Config, newTransport bed
 			// The executor owns retries and records them in the trace.
 			option.WithMaxRetries(0),
 			option.WithJSONSet("store", false),
-		)}, chatcompletionexecutor.TokenLimitMaxCompletionTokens, nil)
+		)}, chatcompletionexecutor.TokenLimitMaxCompletionTokens, map[string]string{"region": cfg.Region})
 	}, nil
 }

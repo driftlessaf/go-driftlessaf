@@ -407,12 +407,15 @@ func WithoutCacheControl[Request promptbuilder.Bindable, Response any]() Option[
 }
 
 // WithCacheTTL sets the TTL for Vertex AI cached content resources.
-// Default is 30 minutes. Minimum is 1 minute.
+// Default is 30 minutes. Minimum is 1 minute; TTLs must use whole seconds.
 // For long-running agents that make many turns, consider a longer TTL.
 func WithCacheTTL[Request promptbuilder.Bindable, Response any](ttl time.Duration) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if ttl < time.Minute {
 			return fmt.Errorf("cache TTL must be at least 1 minute, got %v", ttl)
+		}
+		if ttl%time.Second != 0 {
+			return fmt.Errorf("cache TTL must be a whole number of seconds, got %v", ttl)
 		}
 		e.cacheTTL = ttl
 		return nil

@@ -117,6 +117,9 @@ func TestBedrockResponsesRoutedContinuation(t *testing.T) {
 		t.Fatal("missing traces")
 	}
 	for _, turn := range tracer.traces[0].Turns {
+		if got, want := turn.ServingLocation, "us-west-2"; got != want {
+			t.Errorf("serving location: got = %q, want = %q", got, want)
+		}
 		if turn.Provider != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) || turn.Model != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel || turn.ReasoningTokens != 1 || turn.CacheReadTokens != 2 {
 			t.Errorf("turn=%+v", turn)
 		}

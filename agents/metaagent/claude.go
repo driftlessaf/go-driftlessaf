@@ -100,6 +100,7 @@ func newRoutedClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 ) (Agent[Req, Resp, CB], error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
 	return newClaudeAgentWithMessages[Req, Resp, CB](claudeAgentConstruction{
 		messages:         binding.Messages(),
 		providerModelID:  plan.ProviderModelID(),

@@ -55,6 +55,7 @@ type claudeJudgeConstruction struct {
 func newRoutedClaude(binding metaagent.AnthropicMessagesBinding) (Interface, error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
 	return newClaudeWithMessages(claudeJudgeConstruction{
 		messages:        binding.Messages(),
 		providerModelID: plan.ProviderModelID(),

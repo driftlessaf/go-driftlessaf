@@ -52,6 +52,6 @@ func newBedrockRuntimeAnthropicMessagesAdapter(cfg awsauth.Config, newTransport 
 			option.WithHTTPClient(transport),
 			// The executor owns retries and records them in the trace.
 			option.WithMaxRetries(0),
-		), nil)
+		), map[string]string{"region": cfg.Region})
 	}, nil
 }

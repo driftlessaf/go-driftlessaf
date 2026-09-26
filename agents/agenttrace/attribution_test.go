@@ -32,6 +32,7 @@ func TestAttributionValidate(t *testing.T) {
 		{name: "protocol required", attribution: Attribution{ProviderName: valid.ProviderName, System: valid.System, LogicalModel: valid.LogicalModel}, wantError: "protocol"},
 		{name: "surrounding whitespace rejected", attribution: Attribution{ProviderName: " gcp.vertex_ai", System: valid.System, LogicalModel: valid.LogicalModel, Protocol: valid.Protocol}, wantError: "leading or trailing whitespace"},
 		{name: "control character rejected", attribution: Attribution{ProviderName: valid.ProviderName, System: valid.System, LogicalModel: "fast\nforged", Protocol: valid.Protocol}, wantError: "control characters"},
+		{name: "invalid serving context", attribution: Attribution{ProviderName: valid.ProviderName, System: valid.System, LogicalModel: valid.LogicalModel, Protocol: valid.Protocol, Serving: ServingContext{Location: " global"}}, wantError: "serving context"},
 	}
 
 	for _, tt := range tests {

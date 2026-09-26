@@ -437,7 +437,7 @@ func TestRoutedGooglePreservesStructuredOutputAndRouteIdentity(t *testing.T) {
 		GoogleGenAI: mustGoogleJudgeAdapters(t, metaagent.GoogleGenAIRegistration{
 			Provider: selection.Provider,
 			Adapter: func(_ context.Context, plan modelrouter.Plan) (metaagent.GoogleGenAIBinding, error) {
-				return metaagent.NewGoogleGenAIBinding(plan, client, map[string]string{"workload": "judge"})
+				return metaagent.NewGoogleGenAIBinding(plan, client, map[string]string{"workload": "judge", "region": "us-central1"})
 			},
 		}),
 	})
@@ -462,6 +462,11 @@ func TestRoutedGooglePreservesStructuredOutputAndRouteIdentity(t *testing.T) {
 		t.Fatalf("provider requests = %d, want %d", requestNumber, len(wantModes))
 	}
 	assertJudgeRouteTraces(t, traces, providerModelID, "gcp.vertex_ai", agenttrace.SystemGoogleVertex, logicalModelID, modelrouter.ProtocolGoogleGenAI)
+	for _, trace := range traces {
+		if got, want := trace.Turns[0].ServingLocation, "us-central1"; got != want {
+			t.Errorf("serving location: got = %q, want = %q", got, want)
+		}
+	}
 }
 
 func TestRoutedReviewerAndJudgeSelectIndependentClaudeProviders(t *testing.T) {

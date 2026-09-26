@@ -160,6 +160,10 @@ type RecordedTurn struct {
 	System              string    `json:"system,omitempty"`
 	LogicalModel        string    `json:"logical_model,omitempty"`
 	Protocol            string    `json:"protocol,omitempty"`
+	ServingLocation     string    `json:"serving_location,omitempty"`
+	InferenceMode       string    `json:"inference_mode,omitempty"`
+	ServiceTier         string    `json:"service_tier,omitempty"`
+	CacheTTLSeconds     *int64    `json:"cache_ttl_seconds,omitempty"`
 	InputTokens         int64     `json:"input_tokens,omitempty"`
 	OutputTokens        int64     `json:"output_tokens,omitempty"`
 	ReasoningTokens     int64     `json:"reasoning_tokens,omitempty"` // Subset of output tokens.
@@ -179,6 +183,39 @@ type RecordedTurn struct {
 	// instead of NULL — analytics queries can use `failed = FALSE` directly
 	// without the three-valued-logic gotcha of NULL.
 	Failed bool `json:"failed"`
+}
+
+// ServingContext contains secret-free conditions observed for one model call.
+// An empty field means the condition was not verified. CacheTTLSeconds is a
+// pointer so an observed zero remains distinct from an unknown TTL.
+type ServingContext struct {
+	Location        string
+	InferenceMode   string
+	ServiceTier     string
+	CacheTTLSeconds *int64
+}
+
+// Validate rejects malformed serving conditions before they enter telemetry.
+func (c ServingContext) Validate() error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "serving location", value: c.Location},
+		{name: "inference mode", value: c.InferenceMode},
+		{name: "service tier", value: c.ServiceTier},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := validateAttributionValue(field.value); err != nil {
+			return fmt.Errorf("%s: %w", field.name, err)
+		}
+	}
+	if c.CacheTTLSeconds != nil && *c.CacheTTLSeconds < 0 {
+		return errors.New("cache TTL seconds cannot be negative")
+	}
+	return nil
 }
 
 // Trace represents a complete agent interaction from prompt to result.
@@ -468,20 +505,28 @@ func (t *Trace[T]) BeginTurnWithAttribution(turn int, modelName string, attribut
 	}
 	t.mu.Unlock()
 
-	return &LLMTurn[T]{
+	llmTurn := &LLMTurn[T]{
 		span:    span,
 		trace:   t,
 		prevCtx: parentCtx,
 		record: RecordedTurn{
-			Index:        turn,
-			Model:        modelName,
-			Provider:     attribution.ProviderName,
-			System:       attribution.System,
-			LogicalModel: attribution.LogicalModel,
-			Protocol:     attribution.Protocol,
-			StartTime:    time.Now(),
+			Index:           turn,
+			Model:           modelName,
+			Provider:        attribution.ProviderName,
+			System:          attribution.System,
+			LogicalModel:    attribution.LogicalModel,
+			Protocol:        attribution.Protocol,
+			ServingLocation: attribution.Serving.Location,
+			InferenceMode:   attribution.Serving.InferenceMode,
+			ServiceTier:     attribution.Serving.ServiceTier,
+			StartTime:       time.Now(),
 		},
 	}
+	if attribution.Serving.CacheTTLSeconds != nil {
+		ttl := *attribution.Serving.CacheTTLSeconds
+		llmTurn.record.CacheTTLSeconds = &ttl
+	}
+	return llmTurn
 }
 
 // RecordTokens sets input/output token counts as span attributes on the turn span.
@@ -520,6 +565,24 @@ func (lt *LLMTurn[T]) RecordCacheTokens(cacheReadTokens, cacheCreationTokens int
 	}
 	lt.record.CacheReadTokens = cacheReadTokens
 	lt.record.CacheCreationTokens = cacheCreationTokens
+}
+
+// RecordServingContext records verified conditions for this model call. Call
+// before End. Unknown conditions remain unset so pricing can report the gap.
+func (lt *LLMTurn[T]) RecordServingContext(c ServingContext) error {
+	if err := c.Validate(); err != nil {
+		return fmt.Errorf("record serving context: %w", err)
+	}
+	lt.record.ServingLocation = c.Location
+	lt.record.InferenceMode = c.InferenceMode
+	lt.record.ServiceTier = c.ServiceTier
+	if c.CacheTTLSeconds != nil {
+		ttl := *c.CacheTTLSeconds
+		lt.record.CacheTTLSeconds = &ttl
+	} else {
+		lt.record.CacheTTLSeconds = nil
+	}
+	return nil
 }
 
 // RecordError appends err to the turn's chronological error list and emits

@@ -175,7 +175,6 @@ func New[Request promptbuilder.Bindable, Response any](
 			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
-
 	// Effort resolution needs the final model and max_output_tokens, so it is
 	// validated after all options have been applied.
 	if exec.effortLevel != "" {
@@ -538,7 +537,7 @@ func (e *executor[Request, Response]) Execute(
 
 	executeTurn := func(turn int, response *genai.GenerateContentResponse) (_ Response, _ *genai.GenerateContentResponse, _ bool, err error) {
 		var zero Response
-		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.attribution)
+		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.servingAttribution(usedCache))
 		defer func() {
 			if err != nil {
 				llmTurn.Fail(err)
@@ -893,7 +892,7 @@ func (e *executor[Request, Response]) Execute(
 	// is the source of truth for cost analysis (DEV-1140), so leaving
 	// them off would silently undercount maxTurns-exhausted runs.
 	if response != nil && response.UsageMetadata != nil {
-		llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.attribution)
+		llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.servingAttribution(usedCache))
 		inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
 		llmTurn.RecordTokens(inputTokens, outputTokens)
 		if e.cacheControl && response.UsageMetadata.CachedContentTokenCount > 0 {
@@ -902,6 +901,17 @@ func (e *executor[Request, Response]) Execute(
 		llmTurn.End()
 	}
 	return resp, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.maxTurns)
+}
+
+// servingAttribution records cache TTL only when this execution attached
+// cached content to its model requests.
+func (e *executor[Request, Response]) servingAttribution(usedCache bool) agenttrace.Attribution {
+	attribution := e.attribution
+	if usedCache && e.cacheControl {
+		ttl := int64(e.cacheTTL / time.Second)
+		attribution.Serving.CacheTTLSeconds = &ttl
+	}
+	return attribution
 }
 
 func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentConfig {

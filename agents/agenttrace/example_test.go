@@ -41,6 +41,27 @@ func ExampleLLMTurn_RecordReasoningTokens() {
 	// Output: output=30 reasoning-subset=10
 }
 
+func ExampleLLMTurn_RecordServingContext() {
+	tracer := agenttrace.ByCode[string](func(trace *agenttrace.Trace[string]) {
+		fmt.Println(trace.Turns[0].ServingLocation)
+	})
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
+	trace, done := agenttrace.StartTrace[string](ctx, "synthetic fixture")
+	turn := trace.BeginTurn(0, "fixture-provider", "fixture-model")
+	if err := turn.RecordServingContext(agenttrace.ServingContext{Location: "us-east-1"}); err != nil {
+		panic(err)
+	}
+	turn.End()
+	done("done", nil)
+	// Output: us-east-1
+}
+
+func ExampleServingContext_Validate() {
+	context := agenttrace.ServingContext{Location: "us-east-1"}
+	fmt.Println(context.Validate())
+	// Output: <nil>
+}
+
 // ExampleWithExecutionContext demonstrates attaching execution context to a
 // context for trace enrichment.
 func ExampleWithExecutionContext() {

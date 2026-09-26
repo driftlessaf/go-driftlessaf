@@ -281,23 +281,26 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 	if got, want := len(tracer.traces), 1; got != want {
 		t.Fatalf("recorded traces: got = %d, want = %d", got, want)
 	}
+	ttl := int64(1800)
 	wantTurns := []agenttrace.RecordedTurn{
 		{
 			Index:               0,
 			Model:               "gemini-2.5-flash",
 			Provider:            "gcp.vertex_ai",
 			System:              agenttrace.SystemGoogleVertex,
+			CacheTTLSeconds:     &ttl,
 			InputTokens:         1,
 			OutputTokens:        1,
 			CacheCreationTokens: 5,
 		},
 		{
-			Index:        1,
-			Model:        "gemini-2.5-flash",
-			Provider:     "gcp.vertex_ai",
-			System:       agenttrace.SystemGoogleVertex,
-			InputTokens:  1,
-			OutputTokens: 1,
+			Index:           1,
+			Model:           "gemini-2.5-flash",
+			Provider:        "gcp.vertex_ai",
+			System:          agenttrace.SystemGoogleVertex,
+			CacheTTLSeconds: &ttl,
+			InputTokens:     1,
+			OutputTokens:    1,
 		},
 	}
 	if diff := cmp.Diff(wantTurns, tracer.traces[0].Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime")); diff != "" {
