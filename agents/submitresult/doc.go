@@ -24,8 +24,10 @@ SPDX-License-Identifier: Apache-2.0
 // Payload leniency: when the model JSON-encodes the payload object into a
 // string instead of passing it as a nested object (a common model mistake),
 // the handlers transparently decode the string and accept the submit instead
-// of rejecting it with a parameter error. Strings that do not contain a JSON
-// object are still rejected back to the model.
+// of rejecting it with a parameter error. The object may be followed by
+// spurious closing delimiters or closing markup tags such as `</invoke>`.
+// Strings that do not contain a JSON object, or that carry other content
+// after it, are still rejected back to the model.
 //
 // A rejection records ErrParameter wrapping the cause — the same corrective
 // hint the model receives, naming the parameter at fault — so the trace an

@@ -207,6 +207,82 @@ func TestClaudeSubmitCoercesTrailingDelimiterPayloads(t *testing.T) {
 	}
 }
 
+// TestClaudeSubmitCoercesTrailingClosingTagPayloads pins the tool-call markup
+// Sonnet 5 leaks into a stringified payload: the complete object followed by
+// the closing tags of the parameter and invocation it was writing. On CI job
+// 108061537350 every such submit was declined, and after repeated rejections
+// the model submitted `{"summary":"test","failures":[]}` placeholders, which
+// were accepted and zeroed the golden-eval judges on four cases.
+func TestClaudeSubmitCoercesTrailingClosingTagPayloads(t *testing.T) {
+	submit, err := ClaudeToolForResponse[*sampleResult]()
+	if err != nil {
+		t.Fatalf("ClaudeToolForResponse: %v", err)
+	}
+
+	for _, tail := range []string{
+		"</analysis>\n",
+		"</analysis>\n</invoke>\n",
+		"\n</analysis>\n</invoke>\n",
+		"</analysis>\n</submit_result>\n\n",
+		"}</analysis>",
+		"]</analysis>\n}",
+	} {
+		t.Run(fmt.Sprintf("tail=%q", tail), func(t *testing.T) {
+			input := map[string]any{
+				"reasoning": "done",
+				"analysis":  `{"summary":"all good"}` + tail,
+			}
+			block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, input)}
+
+			ctx := t.Context()
+			trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+			outcome := submit.Handler(ctx, block, trace)
+
+			if !outcome.Accepted {
+				t.Fatalf("trailing %q payload: got = rejected (%#v), want = coerced and accepted", tail, outcome.ToolResult)
+			}
+			if got, want := outcome.Response.Summary, "all good"; got != want {
+				t.Errorf("response summary: got = %q, want = %q", got, want)
+			}
+		})
+	}
+}
+
+// TestClaudeSubmitRejectsTrailingMarkupWithContent pins the edge of the
+// closing-tag leniency: markup that opens a tag or carries text after the
+// object may hold another parameter's value, so coercion still declines it.
+func TestClaudeSubmitRejectsTrailingMarkupWithContent(t *testing.T) {
+	submit, err := ClaudeToolForResponse[*sampleResult]()
+	if err != nil {
+		t.Fatalf("ClaudeToolForResponse: %v", err)
+	}
+
+	for _, tail := range []string{
+		"</analysis>\n<parameter name=\"reasoning\">the log shows",
+		"</analysis> and that is my answer",
+		"</analysis",
+		"</>",
+		"</ analysis>",
+	} {
+		t.Run(fmt.Sprintf("tail=%q", tail), func(t *testing.T) {
+			input := map[string]any{
+				"reasoning": "done",
+				"analysis":  `{"summary":"all good"}` + tail,
+			}
+			block := anthropic.ToolUseBlock{ID: "s1", Name: submit.Definition.Name, Input: mustMarshal(t, input)}
+
+			ctx := t.Context()
+			trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
+			outcome := submit.Handler(ctx, block, trace)
+
+			if outcome.Accepted {
+				t.Errorf("trailing %q payload: got = accepted, want = rejected", tail)
+			}
+			requireRecoverableRejection(t, trace, "analysis parameter must be a JSON object, got string")
+		})
+	}
+}
+
 func TestClaudeSubmitRejectsTrailingGarbagePayloadAsRecoverable(t *testing.T) {
 	submit, err := ClaudeToolForResponse[*sampleResult]()
 	if err != nil {

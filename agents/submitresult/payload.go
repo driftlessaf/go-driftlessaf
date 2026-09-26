@@ -133,9 +133,18 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 // rejecting them assumes the model resubmits correctly, but on CI run
 // 30109908781 opus reproduced the same malformed shape across retries and
 // then submitted a minimal payload without the artifact, which was accepted
-// and zeroed the golden-eval judges. Trailing content other than
-// whitespace and closing delimiters still declines coercion, so truncated
-// or otherwise mangled payloads keep the corrective type-mismatch hint.
+// and zeroed the golden-eval judges.
+//
+// A stringified payload can also carry the closing tags of the tool-call
+// markup the model was writing, such as `</analysis>` or
+// `</analysis></invoke>`. Sonnet 5 left such tags on 639 of 702 stringified
+// payloads across 97 loganalyzer golden-eval runs, and on CI job
+// 108061537350 it fell back to placeholder payloads after the rejections,
+// the same failure as above. Closing tags carry no content, so they are
+// coerced too. Any other trailing content, including an opening
+// tag that may hold another parameter's value, still declines coercion, so
+// truncated or otherwise mangled payloads keep the corrective type-mismatch
+// hint.
 func coerceStringPayload(args map[string]any, field string) (map[string]any, bool) {
 	s, err := params.Extract[string](args, field)
 	if err != nil {
@@ -147,10 +156,47 @@ func coerceStringPayload(args map[string]any, field string) (map[string]any, boo
 	if err := dec.Decode(&obj); err != nil || obj == nil {
 		return nil, false
 	}
-	if rest := strings.TrimLeft(s[dec.InputOffset():], "}] \t\r\n"); rest != "" {
+	if !onlyClosingTokens(s[dec.InputOffset():]) {
 		return nil, false
 	}
 	return obj, true
+}
+
+// onlyClosingTokens reports whether s holds nothing but whitespace, closing
+// JSON delimiters (`}`/`]`) and closing markup tags such as `</invoke>`.
+func onlyClosingTokens(s string) bool {
+	for {
+		s = strings.TrimLeft(s, "}] \t\r\n")
+		if s == "" {
+			return true
+		}
+		rest, ok := strings.CutPrefix(s, "</")
+		if !ok {
+			return false
+		}
+		name, after, ok := strings.Cut(rest, ">")
+		if !ok || !isTagName(name) {
+			return false
+		}
+		s = after
+	}
+}
+
+// isTagName reports whether name is a non-empty run of ASCII letters, digits
+// and `_`, which covers the tool-call markup tags and payload field names
+// models leak, such as `invoke` and `submit_result`.
+func isTagName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parsePayload converts a raw payload object (as received from the model) into
