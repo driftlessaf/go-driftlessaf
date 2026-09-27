@@ -14,6 +14,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
+	"github.com/anthropics/anthropic-sdk-go"
+	"google.golang.org/genai"
 )
 
 func runtimeRoutes() []modelrouter.Route {
@@ -22,6 +24,74 @@ func runtimeRoutes() []modelrouter.Route {
 	direct.Selection.Provider = modelrouter.ProviderAnthropic
 	direct.Attribution = modelrouter.Attribution{ProviderName: "anthropic", LegacySystem: "anthropic"}
 	return []modelrouter.Route{claude, direct, vertexRouterTestRoute(modelrouter.ProtocolGoogleGenAI, "gemini-2.5-flash")}
+}
+
+func TestTargetResourceLabelsPreserveProviderLabelsAndIsolateRoles(t *testing.T) {
+	t.Parallel()
+	runtime, err := NewRuntime(runtimeRoutes(), NewAdapterBackend("", modelrouter.ProviderVertexAI, func(string) (AdapterRegistrations, error) {
+		return AdapterRegistrations{
+			GoogleGenAI: []GoogleGenAIRegistration{{Provider: modelrouter.ProviderVertexAI, Adapter: func(_ context.Context, plan modelrouter.Plan) (GoogleGenAIBinding, error) {
+				return NewGoogleGenAIBinding(plan, &genai.Client{}, map[string]string{"model_name": plan.ProviderModelID(), "projectID": "project"})
+			}}},
+			AnthropicMessages: []AnthropicMessagesRegistration{{Provider: modelrouter.ProviderVertexAI, Adapter: func(_ context.Context, plan modelrouter.Plan) (AnthropicMessagesBinding, error) {
+				return NewAnthropicMessagesBinding(plan, anthropic.NewMessageService(), map[string]string{"model_name": plan.ProviderModelID(), "projectID": "project"})
+			}}},
+		}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	labels := map[string]string{"agent_name": "loganalyzer", "model_name": "incorrect"}
+	analyzer := runtime.Target(TargetConfig{Provider: modelrouter.ProviderVertexAI, Model: "gemini-2.5-flash", Region: "global", ResourceLabels: labels})
+	labels["agent_name"] = "mutated"
+	analyzerRouter, analyzerSelection, err := analyzer.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyzerResolution, err := analyzerRouter.Resolve(analyzerSelection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyzerBinding, err := analyzerResolution.BindGoogleGenAI(t.Context(), modelrouter.Requirements{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := analyzerBinding.ResourceLabels(); got["agent_name"] != "loganalyzer" || got["model_name"] != analyzerBinding.Plan().ProviderModelID() || got["projectID"] != "project" {
+		t.Errorf("analyzer labels = %v, want agent_name=loganalyzer and authoritative provider labels", got)
+	}
+
+	judgeRouter, judgeSelection, err := runtime.Target(TargetConfig{Provider: modelrouter.ProviderVertexAI, Model: "claude-sonnet-4-6", Region: "global", ResourceLabels: map[string]string{"agent_name": "judge"}}).Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	judgeResolution, err := judgeRouter.Resolve(judgeSelection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judgeBinding, err := judgeResolution.BindAnthropicMessages(t.Context(), modelrouter.Requirements{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := judgeBinding.ResourceLabels()["agent_name"]; got != "judge" {
+		t.Errorf("judge agent_name = %q, want judge", got)
+	}
+
+	defaultRouter, defaultSelection, err := runtime.Target(TargetConfig{Provider: modelrouter.ProviderVertexAI, Model: "gemini-2.5-flash", Region: "global"}).Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultResolution, err := defaultRouter.Resolve(defaultSelection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultBinding, err := defaultResolution.BindGoogleGenAI(t.Context(), modelrouter.Requirements{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultBinding.ResourceLabels()["agent_name"]; got != "" {
+		t.Errorf("unlabeled target inherited agent_name = %q", got)
+	}
 }
 
 func TestRuntimeSharesOnlyMatchingBackends(t *testing.T) {

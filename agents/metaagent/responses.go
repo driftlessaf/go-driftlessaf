@@ -108,6 +108,7 @@ func (r RouteResolution) bindOpenAIResponses(ctx context.Context, requirements m
 	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
 		return OpenAIResponsesBinding{}, err
 	}
+	binding.resourceLabels = r.router.bindingResourceLabels(binding.resourceLabels)
 	return binding, nil
 }
 

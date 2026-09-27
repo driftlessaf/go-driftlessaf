@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
@@ -32,6 +33,8 @@ type TargetConfig struct {
 	Model    string               `env:"MODEL"`
 	Region   string               `env:"REGION"`
 	Backend  string               `env:"BACKEND"`
+	// ResourceLabels are added to adapter labels without replacing provider labels.
+	ResourceLabels map[string]string
 }
 
 // Runtime owns a route catalog and reusable routers for one application startup.
@@ -98,6 +101,7 @@ func NewRuntime(routes []modelrouter.Route, backends ...Backend) (*Runtime, erro
 // Target describes a role's provider, model, region, and backend. Validation is
 // deferred to Resolve or NewWithTarget so callers use normal constructor errors.
 func (r *Runtime) Target(config TargetConfig) Target {
+	config.ResourceLabels = maps.Clone(config.ResourceLabels)
 	return Target{runtime: r, config: config}
 }
 
@@ -114,7 +118,7 @@ func (t Target) Resolve() (*Router, modelrouter.Selection, error) {
 	if err != nil {
 		return nil, selection, fmt.Errorf("target provider %q model %q: %w", selection.Provider, selection.LogicalModel, err)
 	}
-	return router, selection, nil
+	return router.withResourceLabels(t.config.ResourceLabels), selection, nil
 }
 
 func (r *Runtime) resolve(config TargetConfig, selection modelrouter.Selection) (*Router, error) {

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -36,8 +37,29 @@ type AdapterRegistries struct {
 // A Router is safe for concurrent use when its registered adapters are safe
 // for concurrent use.
 type Router struct {
-	routes   *modelrouter.Registry
-	adapters AdapterRegistries
+	routes         *modelrouter.Registry
+	adapters       AdapterRegistries
+	resourceLabels map[string]string
+}
+
+// withResourceLabels gives one target its own labels without changing the
+// backend's shared router or another target's bindings.
+func (r *Router) withResourceLabels(labels map[string]string) *Router {
+	if len(labels) == 0 {
+		return r
+	}
+	copy := *r
+	copy.resourceLabels = maps.Clone(labels)
+	return &copy
+}
+
+func (r *Router) bindingResourceLabels(providerLabels map[string]string) map[string]string {
+	if len(r.resourceLabels) == 0 {
+		return providerLabels
+	}
+	labels := maps.Clone(r.resourceLabels)
+	maps.Copy(labels, providerLabels)
+	return labels
 }
 
 // RouteResolution carries one route plan together with the Router that
@@ -98,6 +120,7 @@ func (r RouteResolution) BindGoogleGenAI(ctx context.Context, requirements model
 	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
 		return GoogleGenAIBinding{}, err
 	}
+	binding.resourceLabels = r.router.bindingResourceLabels(binding.resourceLabels)
 	return binding, nil
 }
 
@@ -121,6 +144,7 @@ func (r RouteResolution) BindAnthropicMessages(ctx context.Context, requirements
 	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
 		return AnthropicMessagesBinding{}, err
 	}
+	binding.resourceLabels = r.router.bindingResourceLabels(binding.resourceLabels)
 	return binding, nil
 }
 
@@ -142,6 +166,7 @@ func (r RouteResolution) bindOpenAIChatCompletions(ctx context.Context, requirem
 	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
 		return OpenAIChatCompletionsBinding{}, err
 	}
+	binding.resourceLabels = r.router.bindingResourceLabels(binding.resourceLabels)
 	return binding, nil
 }
 
