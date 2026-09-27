@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 // the provider takes natively, whether the sampling parameters (temperature,
 // top_p, top_k) are accepted, whether the Claude extended-thinking budget
 // parameter is accepted, and which generation of Gemini thinking knob
-// applies. TypeSafe AI's System One ids ("jev-") resolve to a backend with
+// applies. Jev ids ("jev-") and Hopper resolve to a backend with
 // no parameter surface at all, since those models take typed questions rather
 // than a conversation.
 //

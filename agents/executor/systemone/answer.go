@@ -42,7 +42,7 @@ type ChoiceAnswer struct {
 	// Probabilities holds one probability per option label.
 	Probabilities map[string]float64
 	// Confidence is the model's overall confidence in the selection, in
-	// [0, 1].
+	// [0, 1]. For Hopper, this is the selected label's probability.
 	Confidence float64
 }
 
@@ -55,15 +55,17 @@ func (ChoiceAnswer) answer()      {}
 // ScoreAnswer answers a [Score] question.
 type ScoreAnswer struct {
 	// Score is the probability-weighted position on the rubric, in
-	// [0, len(levels)-1].
+	// [0, len(levels)-1]. For Hopper, it is derived from the level probabilities.
 	Score float64
 	// Legend maps each level key used in Probabilities to the level's
-	// description as the API rendered it.
+	// description as the API rendered it. For Hopper, it is derived from the
+	// request's Levels.
 	Legend map[string]string
 	// Probabilities holds one probability per rubric level, keyed as in
 	// Legend.
 	Probabilities map[string]float64
 	// Confidence is the model's overall confidence in the rating, in [0, 1].
+	// For Hopper, this is the highest level probability.
 	Confidence float64
 }
 
@@ -139,7 +141,7 @@ func normalizeQuestion(question Question) (Question, error) {
 // deliberately strict: a distribution must cover exactly the declared options
 // or rubric levels and sum to one, so a consumer never reads a missing entry
 // as zero or a foreign key as a level.
-func decodeAnswer(id string, raw json.RawMessage, question Question) (Answer, error) {
+func decodeAnswer(id string, raw json.RawMessage, question Question, hopper bool) (Answer, error) {
 	question, err := normalizeQuestion(question)
 	if err != nil {
 		return nil, validationError("answer %q: %w", id, err)
@@ -167,19 +169,49 @@ func decodeAnswer(id string, raw json.RawMessage, question Question) (Answer, er
 		}); err != nil {
 			return nil, validationError("answer %q: %w", id, err)
 		}
+		if hopper && w.Confidence == nil {
+			confidence := w.Probabilities[w.Choice]
+			w.Confidence = &confidence
+		}
 		if err := checkUnitInterval("confidence", w.Confidence); err != nil {
 			return nil, validationError("answer %q: %w", id, err)
 		}
 		return ChoiceAnswer{Choice: w.Choice, Probabilities: w.Probabilities, Confidence: *w.Confidence}, nil
 	case Score:
 		top := len(q.Levels) - 1
-		if w.Score == nil || math.IsNaN(*w.Score) || *w.Score < 0 || *w.Score > float64(top) {
-			return nil, validationError("answer %q: score %v is outside [0, %d]", id, deref(w.Score), top)
-		}
 		if err := checkDistribution(w.Probabilities, len(q.Levels), func(key string) bool {
 			return isLevelKey(key, len(q.Levels))
 		}); err != nil {
 			return nil, validationError("answer %q: %w", id, err)
+		}
+		if hopper {
+			if w.Score == nil {
+				var score, total float64
+				for i := range q.Levels {
+					p := w.Probabilities[strconv.Itoa(i)]
+					score += float64(i) * p
+					total += p
+				}
+				score /= total
+				w.Score = &score
+			}
+			if w.Legend == nil {
+				w.Legend = make(map[string]string, len(q.Levels))
+				for i, level := range q.Levels {
+					label, err := levelDescription(level)
+					if err != nil {
+						return nil, validationError("answer %q: level %d: %w", id, i, err)
+					}
+					w.Legend[strconv.Itoa(i)] = label
+				}
+			}
+			if w.Confidence == nil {
+				_, confidence := mostProbable(w.Probabilities)
+				w.Confidence = &confidence
+			}
+		}
+		if w.Score == nil || math.IsNaN(*w.Score) || *w.Score < 0 || *w.Score > float64(top) {
+			return nil, validationError("answer %q: score %v is outside [0, %d]", id, deref(w.Score), top)
 		}
 		if len(w.Legend) != len(q.Levels) {
 			return nil, validationError("answer %q: legend has %d entries, want %d (one per level)", id, len(w.Legend), len(q.Levels))
@@ -196,6 +228,17 @@ func decodeAnswer(id string, raw json.RawMessage, question Question) (Answer, er
 	default:
 		return nil, validationError("answer %q: unsupported question type %T", id, question)
 	}
+}
+
+func levelDescription(level Content) (string, error) {
+	if text, ok := level.(string); ok {
+		return text, nil
+	}
+	raw, err := json.Marshal(level)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // isLevelKey reports whether key is the decimal index of one of n rubric

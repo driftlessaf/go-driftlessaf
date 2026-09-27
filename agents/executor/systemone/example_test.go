@@ -157,6 +157,37 @@ func ExampleWithRoute() {
 	// err: <nil>
 }
 
+func ExampleWithHopper() {
+	// Hopper's server accepts one question per call and needs no API key.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"hopper","answers":{"decision":{"type":"choice","choice":"refund","probabilities":{"refund":0.8,"track":0.2}}},"usage":{"input_tokens":12,"output_tokens":0}}`))
+	}))
+	defer srv.Close()
+
+	client, err := systemone.NewClient("",
+		systemone.WithHopper(),
+		systemone.WithEndpoint(srv.URL+"/v1/systemone"),
+	)
+	if err != nil {
+		panic(err)
+	}
+	resp, err := client.Ask(context.Background(), systemone.Request{
+		State: "The customer wants their money back.",
+		Questions: map[string]systemone.Question{
+			"decision": systemone.Choice{
+				Instructions: "Route the ticket.",
+				Options:      map[string]systemone.Content{"refund": "money back", "track": "where is it"},
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	answer := resp.Answers["decision"].(systemone.ChoiceAnswer)
+	fmt.Printf("%s: %s (%.1f)\n", resp.Model, answer.Choice, answer.Confidence)
+	// Output: hopper: refund (0.8)
+}
+
 // Non-2xx statuses surface as *APIError; IsRetryable separates transient
 // statuses from client errors so callers can decide whether to requeue.
 func ExampleIsRetryable() {

@@ -9,9 +9,11 @@ The following components are available:
 
 - **AI executors**: Production-ready executors for Google Gemini and Anthropic
   Claude models in   `agents/executor/`.
-- **System One client**: Single-shot typed-question client for TypeSafe AI's
-  Jev model (yes/no probabilities, choices, rubric scores) in
-  `agents/executor/systemone/`.
+- **System One client**: Typed-question client for TypeSafe AI's Jev model or
+  self-hosted Hopper (yes/no probabilities, choices, rubric scores) in
+  `agents/executor/systemone/`. Use `WithHopper` or a Hopper route to select
+  Hopper, which requires an explicit endpoint and no API key and sends one
+  question per request.
 - **Evaluation framework**: Testing and monitoring agent quality with
   comprehensive metrics in `agents/evals/`.
 - **OpenTelemetry metrics**: Built-in observability for AI operations in

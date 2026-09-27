@@ -22,6 +22,8 @@ const (
 	// ProviderTypeSafe serves System One models through TypeSafe AI's
 	// first-party API.
 	ProviderTypeSafe Provider = "typesafe"
+	// ProviderHopper serves the Hopper System One compatible model.
+	ProviderHopper Provider = "hopper"
 )
 
 // Validate returns an error unless p is a lowercase identifier. Provider
@@ -60,10 +62,10 @@ const (
 	ProtocolOpenAIChatCompletions Protocol = "openai-chat-completions"
 	// ProtocolOpenAIResponses uses the native streaming Responses contract.
 	ProtocolOpenAIResponses Protocol = "openai-responses"
-	// ProtocolTypeSafeSystemOne uses TypeSafe AI's System One request and
-	// response contract: one state and typed questions in, calibrated typed
-	// answers out, with no turns, tools, or generated text. Implemented by
-	// agents/executor/systemone.
+	// ProtocolTypeSafeSystemOne uses the System One request and response
+	// contract shared by TypeSafe AI and Hopper: one state and typed questions
+	// in, calibrated typed answers out, with no turns, tools, or generated text.
+	// Implemented by agents/executor/systemone.
 	ProtocolTypeSafeSystemOne Protocol = "typesafe-system-one"
 )
 

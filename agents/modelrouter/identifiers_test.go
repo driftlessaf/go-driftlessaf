@@ -23,6 +23,7 @@ func TestProviderValidate(t *testing.T) {
 		{"shipped Anthropic", modelrouter.ProviderAnthropic, false},
 		{"shipped Bedrock", modelrouter.ProviderAWSBedrock, false},
 		{"shipped TypeSafe", modelrouter.ProviderTypeSafe, false},
+		{"shipped Hopper", modelrouter.ProviderHopper, false},
 		{"extension with hyphen", "test-provider", false},
 		{"extension with namespace", "example.provider_v2", false},
 		{"empty", "", true},

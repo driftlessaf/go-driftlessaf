@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -31,13 +32,18 @@ const DefaultEndpoint = "https://api.typesafe.ai/v1/systemone"
 // metrics when no route supplies one.
 const ProviderName = "typesafe"
 
-// Model aliases published by TypeSafe AI. Exact versioned ids such as
-// "jev-1.13.0" are also accepted; the alias set is the stable surface.
+// HopperProviderName is the telemetry provider name for Hopper.
+const HopperProviderName = "hopper"
+
+// Known model IDs. TypeSafe AI also accepts exact Jev versions such as
+// "jev-1.13.0"; Hopper's server accepts "hopper".
 const (
 	// ModelJevLatest is the most recent stable, official Jev release.
 	ModelJevLatest = "jev-latest"
 	// ModelJevPreview is the most recent Jev release, official or not.
 	ModelJevPreview = "jev-preview"
+	// ModelHopper is the model ID accepted by the Hopper server.
+	ModelHopper = "hopper"
 )
 
 // defaultMaxResponseBytes caps a response body; a well-formed answer set is
@@ -48,7 +54,7 @@ const defaultMaxResponseBytes = 16 << 20
 type Request struct {
 	// Model is the model id or alias, for example [ModelJevLatest]. It may
 	// be empty on a client constructed with [WithRoute], which then sends
-	// the route's provider model ID.
+	// the route's provider model ID. [WithHopper] also supplies [ModelHopper].
 	Model string `json:"model"`
 	// State is the content every question is evaluated against.
 	State Content `json:"state"`
@@ -121,6 +127,9 @@ type Client struct {
 	// defaultModel and providerName come from a route when one is supplied.
 	defaultModel string
 	providerName string
+	hopper       bool
+	endpointSet  bool
+	routeSet     bool
 }
 
 // Option configures a Client.
@@ -138,6 +147,23 @@ func WithEndpoint(endpoint string) Option {
 			return fmt.Errorf("endpoint %q must be an absolute http(s) URL", endpoint)
 		}
 		c.endpoint = endpoint
+		c.endpointSet = true
+		return nil
+	}
+}
+
+// WithHopper configures an unrouted client for Hopper's System One compatible
+// server. The caller must also supply its full /v1/systemone URL via
+// [WithEndpoint]. Hopper requires no API key and answers one question per call.
+// Use [WithRoute] instead when selecting providers through a route catalog.
+func WithHopper() Option {
+	return func(c *Client) error {
+		if c.routeSet {
+			return errors.New("WithHopper cannot be combined with WithRoute")
+		}
+		c.hopper = true
+		c.defaultModel = ModelHopper
+		c.providerName = HopperProviderName
 		return nil
 	}
 }
@@ -145,7 +171,8 @@ func WithEndpoint(endpoint string) Option {
 // WithRoute binds the client to a resolved route on the
 // [modelrouter.ProtocolTypeSafeSystemOne] protocol. Requests that leave Model
 // empty send the route's provider model ID, and metrics carry the route's
-// provider attribution. Any other protocol is rejected, so a conversational
+// provider attribution. A Hopper route selects its one-question response
+// dialect automatically. Any other protocol is rejected, so a conversational
 // route cannot be handed to this client by mistake.
 func WithRoute(plan modelrouter.Plan) Option {
 	return func(c *Client) error {
@@ -155,6 +182,11 @@ func WithRoute(plan modelrouter.Plan) Option {
 		if got := plan.Protocol(); got != modelrouter.ProtocolTypeSafeSystemOne {
 			return fmt.Errorf("route: protocol %q is not %q", got, modelrouter.ProtocolTypeSafeSystemOne)
 		}
+		if c.hopper && !c.routeSet {
+			return errors.New("WithRoute cannot be combined with WithHopper")
+		}
+		c.routeSet = true
+		c.hopper = plan.Provider() == modelrouter.ProviderHopper
 		c.defaultModel = plan.ProviderModelID()
 		c.providerName = plan.Attribution().ProviderName
 		return nil
@@ -228,11 +260,9 @@ func DefaultRetryConfig() retry.RetryConfig {
 	}
 }
 
-// NewClient constructs a Client that authenticates with apiKey.
+// NewClient constructs a Client. apiKey is required for TypeSafe AI and must
+// be empty for Hopper, whose server does not require authentication.
 func NewClient(apiKey string, opts ...Option) (*Client, error) {
-	if apiKey == "" {
-		return nil, errors.New("api key must not be empty")
-	}
 	c := &Client{
 		endpoint:         DefaultEndpoint,
 		apiKey:           apiKey,
@@ -245,6 +275,15 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 		if err := opt(c); err != nil {
 			return nil, err
 		}
+	}
+	if !c.hopper && apiKey == "" {
+		return nil, errors.New("api key must not be empty")
+	}
+	if c.hopper && apiKey != "" {
+		return nil, errors.New("hopper does not accept an API key")
+	}
+	if c.hopper && !c.endpointSet {
+		return nil, errors.New("hopper requires an explicit endpoint")
 	}
 	return c, nil
 }
@@ -259,6 +298,37 @@ func (c *Client) Ask(ctx context.Context, req Request) (*Response, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
+	if !c.hopper {
+		return c.askOne(ctx, req)
+	}
+
+	// Hopper serves one question per HTTP call. Sort IDs to make the order of
+	// calls and the first failure deterministic, then combine their results.
+	ids := make([]string, 0, len(req.Questions))
+	for id := range req.Questions {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	combined := &Response{Answers: make(map[string]Answer, len(ids))}
+	for _, id := range ids {
+		one := req
+		one.Questions = map[string]Question{id: req.Questions[id]}
+		resp, err := c.askOne(ctx, one)
+		if err != nil {
+			return nil, fmt.Errorf("question %q: %w", id, err)
+		}
+		if combined.Model != "" && resp.Model != combined.Model {
+			return nil, validationError("question %q: model %q differs from %q", id, resp.Model, combined.Model)
+		}
+		combined.Model = resp.Model
+		combined.Answers[id] = resp.Answers[id]
+		combined.Usage.InputTokens += resp.Usage.InputTokens
+		combined.Usage.OutputTokens += resp.Usage.OutputTokens
+	}
+	return combined, nil
+}
+
+func (c *Client) askOne(ctx context.Context, req Request) (*Response, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: encoding: %w", ErrInvalidRequest, err)
@@ -292,7 +362,9 @@ func (c *Client) do(ctx context.Context, body []byte, questions map[string]Quest
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if !c.hopper && c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
@@ -316,13 +388,13 @@ func (c *Client) do(ctx context.Context, body []byte, questions map[string]Quest
 			RetryAfter: parseRetryAfter(httpResp.Header.Get("Retry-After")),
 		}
 	}
-	return decodeResponse(raw, questions)
+	return decodeResponse(raw, questions, c.hopper)
 }
 
 // decodeResponse decodes a 2xx body and checks it against the questions as
 // sent: every question has exactly one answer of its own kind and no answer
 // arrives for a question that was not asked.
-func decodeResponse(raw []byte, questions map[string]Question) (*Response, error) {
+func decodeResponse(raw []byte, questions map[string]Question, hopper bool) (*Response, error) {
 	var w wireResponse
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return nil, validationError("decoding body: %w", err)
@@ -333,7 +405,7 @@ func decodeResponse(raw []byte, questions map[string]Question) (*Response, error
 		if !ok {
 			return nil, validationError("no answer for question %q", id)
 		}
-		answer, err := decodeAnswer(id, rawAnswer, question)
+		answer, err := decodeAnswer(id, rawAnswer, question, hopper)
 		if err != nil {
 			return nil, err
 		}

@@ -83,6 +83,7 @@ func TestResolve(t *testing.T) {
 		{"jev-preview", systemOne},
 		{"jev-1.13.0", systemOne},
 		{"JEV-LATEST", systemOne},
+		{"hopper", systemOne},
 		{"jev", model.Info{}},
 		{"us.openai.gpt-5.6-terra", model.Info{}},
 		{"text-bison", model.Info{}},

@@ -27,6 +27,7 @@ func TestRegistryResolvesDeclaredRoutes(t *testing.T) {
 		newRoute(modelrouter.ProviderAnthropic, "claude-sonnet-5", modelrouter.ProtocolAnthropicMessages, "claude-sonnet-5-20260301"),
 		newRoute(modelrouter.ProviderAWSBedrock, "claude-sonnet-5", modelrouter.ProtocolAnthropicMessages, "anthropic.claude-sonnet-5"),
 		newRoute(modelrouter.ProviderTypeSafe, "jev-latest", modelrouter.ProtocolTypeSafeSystemOne, "jev-1.13.0"),
+		newRoute(modelrouter.ProviderHopper, "hopper", modelrouter.ProtocolTypeSafeSystemOne, "hopper"),
 	}
 	registry, err := modelrouter.NewRegistry(routes...)
 	if err != nil {
