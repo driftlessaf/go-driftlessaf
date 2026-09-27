@@ -20,6 +20,10 @@ import (
 // The returned router is safe for concurrent use. Mantle requires a separate
 // router built with NewBedrockAnthropicMessagesAdapter and NewRouterWithAdapters.
 func NewBedrockRuntimeRouter(cfg awsauth.Config, routes ...modelrouter.Route) (*Router, error) {
+	return newBedrockRuntimeRouter(cfg, nil, routes...)
+}
+
+func newBedrockRuntimeRouter(cfg awsauth.Config, systemOne SystemOneAdapter, routes ...modelrouter.Route) (*Router, error) {
 	if len(routes) == 0 {
 		return nil, fmt.Errorf("%w: Bedrock Runtime router requires at least one declared route", ErrInvalidRouter)
 	}
@@ -64,6 +68,11 @@ func NewBedrockRuntimeRouter(cfg awsauth.Config, routes ...modelrouter.Route) (*
 				return nil, err
 			}
 			adapters.OpenAIResponses = []OpenAIResponsesRegistration{{Provider: modelrouter.ProviderAWSBedrock, Adapter: adapter}}
+		case modelrouter.ProtocolSystemOne:
+			if systemOne == nil {
+				return nil, fmt.Errorf("%w: Bedrock Runtime has no System One adapter", ErrInvalidRouter)
+			}
+			adapters.SystemOne = []SystemOneRegistration{{Provider: modelrouter.ProviderAWSBedrock, Adapter: systemOne}}
 		default:
 			return nil, fmt.Errorf("%w: Bedrock Runtime has no built-in adapter for protocol %q", ErrInvalidRouter, route.Protocol)
 		}

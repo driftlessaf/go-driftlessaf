@@ -19,6 +19,7 @@ type AdapterRegistrations struct {
 	AnthropicMessages     []AnthropicMessagesRegistration
 	OpenAIChatCompletions []OpenAIChatCompletionsRegistration
 	OpenAIResponses       []OpenAIResponsesRegistration
+	SystemOne             []SystemOneRegistration
 }
 
 // NewRouterWithAdapters validates typed registrations and constructs their
@@ -46,8 +47,12 @@ func NewRouterWithAdapters(routes *modelrouter.Registry, registrations AdapterRe
 	if err != nil {
 		return nil, err
 	}
+	systemOne, err := NewSystemOneAdapterRegistry(registrations.SystemOne...)
+	if err != nil {
+		return nil, err
+	}
 	return NewRouter(routes, AdapterRegistries{
 		GoogleGenAI: google, AnthropicMessages: anthropic,
-		OpenAIChatCompletions: chat, OpenAIResponses: responses,
+		OpenAIChatCompletions: chat, OpenAIResponses: responses, SystemOne: systemOne,
 	})
 }

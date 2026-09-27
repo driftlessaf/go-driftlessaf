@@ -114,7 +114,7 @@ type wireResponse struct {
 	Usage   Usage                      `json:"usage"`
 }
 
-// Client calls the System One API. Construct one with [NewClient]; a Client is
+// Client calls a System One compatible API. Construct one with [NewClient]; a Client is
 // safe for concurrent use once constructed.
 type Client struct {
 	endpoint         string
@@ -128,6 +128,7 @@ type Client struct {
 	defaultModel string
 	providerName string
 	hopper       bool
+	externalAuth bool
 	endpointSet  bool
 	routeSet     bool
 }
@@ -169,26 +170,36 @@ func WithHopper() Option {
 }
 
 // WithRoute binds the client to a resolved route on the
-// [modelrouter.ProtocolTypeSafeSystemOne] protocol. Requests that leave Model
+// [modelrouter.ProtocolSystemOne] protocol. Requests that leave Model
 // empty send the route's provider model ID, and metrics carry the route's
-// provider attribution. A Hopper route selects its one-question response
-// dialect automatically. Any other protocol is rejected, so a conversational
+// provider attribution. A Hopper model selects its one-question response
+// dialect regardless of serving provider. Any other protocol is rejected, so a conversational
 // route cannot be handed to this client by mistake.
 func WithRoute(plan modelrouter.Plan) Option {
 	return func(c *Client) error {
 		if err := plan.Validate(); err != nil {
 			return fmt.Errorf("route: %w", err)
 		}
-		if got := plan.Protocol(); got != modelrouter.ProtocolTypeSafeSystemOne {
-			return fmt.Errorf("route: protocol %q is not %q", got, modelrouter.ProtocolTypeSafeSystemOne)
+		if got := plan.Protocol(); got != modelrouter.ProtocolSystemOne {
+			return fmt.Errorf("route: protocol %q is not %q", got, modelrouter.ProtocolSystemOne)
 		}
 		if c.hopper && !c.routeSet {
 			return errors.New("WithRoute cannot be combined with WithHopper")
 		}
 		c.routeSet = true
-		c.hopper = plan.Provider() == modelrouter.ProviderHopper
+		c.hopper = plan.LogicalModel() == ModelHopper
 		c.defaultModel = plan.ProviderModelID()
 		c.providerName = plan.Attribution().ProviderName
+		return nil
+	}
+}
+
+// WithExternalAuth uses authentication supplied by the HTTP transport, such
+// as a Baseten gateway token or cloud-provider request signing. It allows a
+// routed System One client to omit a first-party API key.
+func WithExternalAuth() Option {
+	return func(c *Client) error {
+		c.externalAuth = true
 		return nil
 	}
 }
@@ -260,8 +271,10 @@ func DefaultRetryConfig() retry.RetryConfig {
 	}
 }
 
-// NewClient constructs a Client. apiKey is required for TypeSafe AI and must
-// be empty for Hopper, whose server does not require authentication.
+// NewClient constructs a Client. apiKey is required for first-party System One
+// requests, unless [WithExternalAuth] delegates authentication to the transport.
+// Hopper's model API key must be empty; a hosting gateway may authenticate
+// separately through that transport.
 func NewClient(apiKey string, opts ...Option) (*Client, error) {
 	c := &Client{
 		endpoint:         DefaultEndpoint,
@@ -276,7 +289,7 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 			return nil, err
 		}
 	}
-	if !c.hopper && apiKey == "" {
+	if !c.hopper && !c.externalAuth && apiKey == "" {
 		return nil, errors.New("api key must not be empty")
 	}
 	if c.hopper && apiKey != "" {

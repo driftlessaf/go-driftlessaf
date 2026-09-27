@@ -30,6 +30,7 @@ type AdapterRegistries struct {
 	AnthropicMessages     *AnthropicMessagesAdapterRegistry
 	OpenAIChatCompletions *OpenAIChatCompletionsAdapterRegistry
 	OpenAIResponses       *OpenAIResponsesAdapterRegistry
+	SystemOne             *SystemOneAdapterRegistry
 }
 
 // Router combines an immutable route registry with explicitly constructed,
@@ -143,6 +144,30 @@ func (r RouteResolution) BindAnthropicMessages(ctx context.Context, requirements
 	}
 	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
 		return AnthropicMessagesBinding{}, err
+	}
+	binding.resourceLabels = r.router.bindingResourceLabels(binding.resourceLabels)
+	return binding, nil
+}
+
+// BindSystemOne validates the route and binds the selected provider's typed
+// question service. It does not construct a conversational meta-agent.
+func (r RouteResolution) BindSystemOne(ctx context.Context, requirements modelrouter.Requirements) (SystemOneBinding, error) {
+	if err := r.validate(modelrouter.ProtocolSystemOne, requirements); err != nil {
+		return SystemOneBinding{}, err
+	}
+	adapter, err := r.router.adapters.SystemOne.lookup(r.plan.Provider())
+	if err != nil {
+		return SystemOneBinding{}, err
+	}
+	binding, err := adapter(ctx, r.plan)
+	if err != nil {
+		return SystemOneBinding{}, r.adapterError(err)
+	}
+	if !binding.initialized {
+		return SystemOneBinding{}, fmt.Errorf("%w: adapter returned a zero System One binding", ErrInvalidBinding)
+	}
+	if err := validateReturnedPlan(r.plan, binding.Plan()); err != nil {
+		return SystemOneBinding{}, err
 	}
 	binding.resourceLabels = r.router.bindingResourceLabels(binding.resourceLabels)
 	return binding, nil

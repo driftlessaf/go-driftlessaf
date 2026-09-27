@@ -7,12 +7,46 @@ package metaagent
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 )
+
+// BackendOption extends a provider backend with an explicitly configured
+// protocol adapter. The serving provider still owns credentials and transport.
+type BackendOption func(*backendOptions)
+
+type backendOptions struct {
+	systemOne SystemOneAdapter
+	err       error
+}
+
+// WithSystemOneAdapter adds typed-question serving to a Vertex or Bedrock
+// backend when that provider offers a System One model.
+func WithSystemOneAdapter(adapter SystemOneAdapter) BackendOption {
+	return func(options *backendOptions) {
+		if adapter == nil {
+			options.err = errors.New("system one adapter is nil")
+			return
+		}
+		options.systemOne = adapter
+	}
+}
+
+func configuredBackendOptions(options []BackendOption) backendOptions {
+	var configured backendOptions
+	for _, option := range options {
+		if option == nil {
+			configured.err = errors.New("backend option is nil")
+			continue
+		}
+		option(&configured)
+	}
+	return configured
+}
 
 // Backend is an immutable registration for one provider account. Create
 // it with VertexBackend, BedrockBackend, AnthropicBackend, or NewAdapterBackend.
@@ -27,26 +61,34 @@ type Backend struct {
 
 // VertexBackend captures one Vertex project. Every target must supply a region.
 // Construction and target resolution do not discover credentials.
-func VertexBackend(name string, cfg VertexConfig) Backend {
+func VertexBackend(name string, cfg VertexConfig, options ...BackendOption) Backend {
+	configured := configuredBackendOptions(options)
 	return Backend{
 		name: name, provider: modelrouter.ProviderVertexAI,
 		region: func(region string) string { return region },
 		build: func(region string, routes []modelrouter.Route) (*Router, error) {
-			return NewVertexRouter(cfg.ProjectID, region, routes...)
+			if configured.err != nil {
+				return nil, configured.err
+			}
+			return newVertexRouter(cfg.ProjectID, region, configured.systemOne, routes...)
 		},
 	}
 }
 
 // BedrockBackend captures one AWS credential configuration and default region.
 // A target's region overrides cfg.Region. Credentials remain lazy.
-func BedrockBackend(name string, cfg awsauth.Config) Backend {
+func BedrockBackend(name string, cfg awsauth.Config, options ...BackendOption) Backend {
+	configured := configuredBackendOptions(options)
 	return Backend{
 		name: name, provider: modelrouter.ProviderAWSBedrock,
 		region: func(region string) string { return cmp.Or(region, cfg.Region) },
 		build: func(region string, routes []modelrouter.Route) (*Router, error) {
+			if configured.err != nil {
+				return nil, configured.err
+			}
 			selected := cfg
 			selected.Region = region
-			return NewBedrockRuntimeRouter(selected, routes...)
+			return newBedrockRuntimeRouter(selected, configured.systemOne, routes...)
 		},
 	}
 }
@@ -103,6 +145,11 @@ func NewAdapterBackend(name string, provider modelrouter.Provider, factory func(
 			}
 		}
 		for _, r := range registrations.OpenAIResponses {
+			if r.Provider != provider {
+				return nil, fmt.Errorf("%w: backend provider mismatch", ErrInvalidRouter)
+			}
+		}
+		for _, r := range registrations.SystemOne {
 			if r.Provider != provider {
 				return nil, fmt.Errorf("%w: backend provider mismatch", ErrInvalidRouter)
 			}

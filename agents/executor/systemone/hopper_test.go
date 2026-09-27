@@ -38,6 +38,49 @@ func hopperPlan(t *testing.T) modelrouter.Plan {
 	return plan
 }
 
+func TestHopperDialectDependsOnModelAcrossProviders(t *testing.T) {
+	t.Parallel()
+	registry, err := modelrouter.NewRegistry(modelrouter.Route{
+		Selection: modelrouter.Selection{Provider: "baseten", LogicalModel: ModelHopper},
+		Protocol:  modelrouter.ProtocolTypeSafeSystemOne, ProviderModelID: ModelHopper,
+		Attribution: modelrouter.Attribution{ProviderName: "baseten", LegacySystem: "baseten"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := registry.Resolve(modelrouter.Selection{Provider: "baseten", LogicalModel: ModelHopper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"model": ModelHopper,
+			"answers": map[string]any{"choice": map[string]any{
+				"type": "choice", "choice": "yes", "probabilities": map[string]float64{"no": 0.2, "yes": 0.8},
+			}},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := NewClient("", WithRoute(plan), WithExternalAuth(), WithEndpoint(srv.URL), WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Ask(t.Context(), Request{
+		State: "a change", Questions: map[string]Question{
+			"choice": Choice{Instructions: "Choose.", Options: map[string]Content{"no": "No", "yes": "Yes"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, ok := response.Answers["choice"].(ChoiceAnswer)
+	if !ok || answer.Confidence != 0.8 {
+		t.Errorf("choice: got = %+v, want confidence 0.8", response.Answers["choice"])
+	}
+}
+
 func TestHopperRouteRoundTrip(t *testing.T) {
 	t.Parallel()
 	var ids []string

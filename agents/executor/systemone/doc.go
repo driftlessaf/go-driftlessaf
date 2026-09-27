@@ -3,8 +3,8 @@ Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Package systemone calls TypeSafe AI's System One API or a self-hosted Hopper
-// server. A request carries one state (text or JSON) and a map of typed
+// Package systemone calls System One compatible models through their serving
+// providers. A request carries one state (text or JSON) and a map of typed
 // questions; the response carries one typed, probability-bearing answer per
 // question. There are no turns, tools, or generated text, so this package is a
 // single-shot client rather than a conversation executor. It shares the
@@ -25,11 +25,11 @@ SPDX-License-Identifier: Apache-2.0
 // undeclared label, or an out-of-range probability is an
 // [ErrResponseValidation] rather than a silently accepted value.
 //
-// To switch providers through modelrouter, declare Jev and Hopper routes with
-// [modelrouter.ProtocolTypeSafeSystemOne], resolve the desired selection, and
-// pass its plan to [WithRoute]. For Hopper, pass the server's full
-// /v1/systemone URL to [WithEndpoint] and an empty key to [NewClient]. Leave
-// [Request.Model] empty so the route supplies the right model ID. Applications
+// To switch serving providers through modelrouter, declare routes with
+// [modelrouter.ProtocolSystemOne], resolve the provider/model selection, and
+// pass its plan to [WithRoute]. The route supplies the model ID; the provider
+// binding supplies its endpoint and authentication. Use [WithExternalAuth]
+// when the provider's HTTP transport authenticates the request. Applications
 // without a route catalog can use [WithHopper] and [ModelHopper].
 //
 // Hopper accepts one question per HTTP request and omits some answer fields.

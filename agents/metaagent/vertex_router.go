@@ -21,6 +21,10 @@ import (
 // Use a separate router for each project/region pair. For mixed-provider routing
 // or custom adapter settings, use NewRouterWithAdapters with typed registrations.
 func NewVertexRouter(projectID, region string, routes ...modelrouter.Route) (*Router, error) {
+	return newVertexRouter(projectID, region, nil, routes...)
+}
+
+func newVertexRouter(projectID, region string, systemOne SystemOneAdapter, routes ...modelrouter.Route) (*Router, error) {
 	if len(routes) == 0 {
 		return nil, fmt.Errorf("%w: Vertex router requires at least one declared route", ErrInvalidRouter)
 	}
@@ -77,6 +81,11 @@ func NewVertexRouter(projectID, region string, routes ...modelrouter.Route) (*Ro
 				return nil, err
 			}
 			adapters.OpenAIResponses = []OpenAIResponsesRegistration{{Provider: modelrouter.ProviderVertexAI, Adapter: adapter}}
+		case modelrouter.ProtocolSystemOne:
+			if systemOne == nil {
+				return nil, fmt.Errorf("%w: Vertex router has no System One adapter", ErrInvalidRouter)
+			}
+			adapters.SystemOne = []SystemOneRegistration{{Provider: modelrouter.ProviderVertexAI, Adapter: systemOne}}
 		default:
 			return nil, fmt.Errorf("%w: Vertex router has no built-in adapter for protocol %q; use NewRouterWithAdapters with an explicit adapter", ErrInvalidRouter, route.Protocol)
 		}

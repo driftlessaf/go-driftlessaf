@@ -62,11 +62,12 @@ const (
 	ProtocolOpenAIChatCompletions Protocol = "openai-chat-completions"
 	// ProtocolOpenAIResponses uses the native streaming Responses contract.
 	ProtocolOpenAIResponses Protocol = "openai-responses"
-	// ProtocolTypeSafeSystemOne uses the System One request and response
-	// contract shared by TypeSafe AI and Hopper: one state and typed questions
-	// in, calibrated typed answers out, with no turns, tools, or generated text.
-	// Implemented by agents/executor/systemone.
-	ProtocolTypeSafeSystemOne Protocol = "typesafe-system-one"
+	// ProtocolSystemOne uses one state and typed questions to produce calibrated
+	// typed answers, with no turns, tools, or generated text. The wire identifier
+	// retains its original spelling for route compatibility across providers.
+	ProtocolSystemOne Protocol = "typesafe-system-one"
+	// ProtocolTypeSafeSystemOne is the original name of ProtocolSystemOne.
+	ProtocolTypeSafeSystemOne = ProtocolSystemOne
 )
 
 // Validate returns an error unless p identifies a protocol implemented by a

@@ -248,7 +248,7 @@ func protocolForBackend(backend model.Backend) Protocol {
 	case model.BackendOpenAICompat:
 		return ProtocolOpenAIChatCompletions
 	case model.BackendSystemOne:
-		return ProtocolTypeSafeSystemOne
+		return ProtocolSystemOne
 	default:
 		return ""
 	}

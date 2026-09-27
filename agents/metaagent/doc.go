@@ -37,6 +37,12 @@ SPDX-License-Identifier: Apache-2.0
 // use Mantle; choosing Runtime requires explicitly registering the new adapter.
 // Routers and route resolutions are safe for concurrent use when their
 // registered adapters are safe for concurrent use.
+// System One routes use the same provider/model selection and backend
+// registration. Their callers use [RouteResolution.BindSystemOne] to obtain a
+// typed question service rather than [NewRouted], which constructs a
+// conversational agent. One provider backend can register chat and System One
+// adapters, and a route is available only when its provider supplies both the
+// selected model and protocol.
 //
 // # Usage
 //
