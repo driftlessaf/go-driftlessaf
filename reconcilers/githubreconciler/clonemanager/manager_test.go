@@ -70,6 +70,12 @@ func testLeaseLifecycle(t *testing.T, opts ...Option) {
 	if workingDir == repoDir {
 		t.Fatalf("expected working dir to differ from remote")
 	}
+	if got := lease.Root().Name(); got != workingDir {
+		t.Fatalf("Root().Name(): got = %q, want = %q", got, workingDir)
+	}
+	if _, err := lease.Root().Stat(res.Path); err != nil {
+		t.Fatalf("Root().Stat(%q): got = %v, want = nil", res.Path, err)
+	}
 
 	scratch := filepath.Join(workingDir, "scratch.txt")
 	if err := os.WriteFile(scratch, []byte("temporary"), 0o644); err != nil {

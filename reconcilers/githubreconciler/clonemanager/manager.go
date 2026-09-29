@@ -750,6 +750,12 @@ func (l *Lease) WorkingTree() string {
 	return l.clone.path
 }
 
+// Root returns the lease's working tree as an [os.Root]. The lease owns it:
+// callers must not close it, and it is invalid once Return is called.
+func (l *Lease) Root() *os.Root {
+	return l.clone.root
+}
+
 // SHA returns the commit hash currently checked out by the lease.
 func (l *Lease) SHA() string {
 	return l.sha
