@@ -95,6 +95,7 @@ var preXHighEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, eff
 var automaticToolChoiceOnlyModels = []string{
 	"claude-fable-5-1",
 	"claude-opus-5-5",
+	"claude-sonnet-5-5",
 }
 
 var samplingParamsRemovedPrefixes = []string{

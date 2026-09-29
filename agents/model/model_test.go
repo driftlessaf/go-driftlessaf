@@ -35,8 +35,10 @@ func TestResolve(t *testing.T) {
 		Backend: model.BackendClaude,
 		Efforts: fullScale,
 	}
-	fable51 := claudeAdaptive
-	fable51.AutomaticToolChoiceOnly = true
+	// claudeAutoToolChoice is the adaptive surface for models that also reject
+	// a forced tool_choice: Fable 5.1, Opus 5.5, and Sonnet 5.5.
+	claudeAutoToolChoice := claudeAdaptive
+	claudeAutoToolChoice.AutomaticToolChoiceOnly = true
 	geminiBudget := model.Info{
 		Backend:         model.BackendGemini,
 		Efforts:         fullScale,
@@ -63,13 +65,16 @@ func TestResolve(t *testing.T) {
 		// Backend routing shapes, including unknown ids.
 		{"gemini-2.5-flash", geminiBudget},
 		{"claude-fable-5", claudeAdaptive},
-		{"claude-fable-5-1", fable51},
-		{"claude-fable-5-1@default", fable51},
-		{"anthropic.claude-fable-5-1", fable51},
+		{"claude-fable-5-1", claudeAutoToolChoice},
+		{"claude-fable-5-1@default", claudeAutoToolChoice},
+		{"anthropic.claude-fable-5-1", claudeAutoToolChoice},
 		{"claude-fable-5-10", claudeAdaptive},
-		{"claude-opus-5-5", fable51},
-		{"claude-opus-5-5@default", fable51},
+		{"claude-opus-5-5", claudeAutoToolChoice},
+		{"claude-opus-5-5@default", claudeAutoToolChoice},
 		{"claude-opus-5", claudeAdaptive},
+		{"claude-sonnet-5-5", claudeAutoToolChoice},
+		{"claude-sonnet-5-5@default", claudeAutoToolChoice},
+		{"anthropic.claude-sonnet-5-5", claudeAutoToolChoice},
 		{"anthropic.claude-sonnet-5", claudeAdaptive},
 		{"anthropic.claude-sonnet-4-6", claudePreXHigh},
 		{"meta/llama-3.3-70b-instruct-maas", openAICompat},

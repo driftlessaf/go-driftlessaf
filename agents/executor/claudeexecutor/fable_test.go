@@ -32,10 +32,15 @@ func TestFableTerminalSubmissionAndHistory(t *testing.T) {
 		name, model string
 		finalize    int
 		noSubmit    bool
+		// autoOnly marks models the registry declares AutomaticToolChoiceOnly:
+		// every request must leave tool_choice at auto.
+		autoOnly bool
 	}{
-		{name: "Fable redirect", model: "claude-fable-5-1"},
-		{name: "Fable early finalize", model: "claude-fable-5-1", finalize: 1},
-		{name: "Fable never submits", model: "claude-fable-5-1", noSubmit: true},
+		{name: "Fable redirect", model: "claude-fable-5-1", autoOnly: true},
+		{name: "Fable early finalize", model: "claude-fable-5-1", finalize: 1, autoOnly: true},
+		{name: "Fable never submits", model: "claude-fable-5-1", noSubmit: true, autoOnly: true},
+		{name: "Sonnet 5.5 redirect", model: "claude-sonnet-5-5", autoOnly: true},
+		{name: "Sonnet 5.5 early finalize", model: "claude-sonnet-5-5", finalize: 1, autoOnly: true},
 		{name: "existing Claude still forces redirect", model: "claude-sonnet-5", finalize: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,9 +57,9 @@ func TestFableTerminalSubmissionAndHistory(t *testing.T) {
 					t.Errorf("wire model = %v, want routed deployment", current["model"])
 				}
 				choice, _ := current["tool_choice"].(map[string]any)
-				if tc.model == "claude-fable-5-1" {
+				if tc.autoOnly {
 					if choice != nil && choice["type"] != "auto" {
-						t.Errorf("Fable request %d forces tool choice: %v", n, choice)
+						t.Errorf("%s request %d forces tool choice: %v", tc.model, n, choice)
 					}
 				} else if n == 2 || n == 3 {
 					if choice["type"] != "tool" || choice["name"] != "submit_result" {
