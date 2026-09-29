@@ -53,18 +53,26 @@
 WITH prices AS (
   SELECT * FROM UNNEST([
     -- USD per token = page price / 1e6
-    -- Claude. Fable 5, Opus 4.5-4.8, Sonnet 4.6, Haiku 4.5: uniform across
-    -- context size. Cache read = 0.1x input; cache creation (5m TTL) = 1.25x input.
+    -- Claude. Uniform across context size. Cache creation (5m TTL) = 1.25x
+    -- input. Cache read = 0.1x input, except Fable 5.1 (0.025x) and Opus 5.5
+    -- (0.05x), whose rows carry the reduced rate directly.
     STRUCT(
       'claude-opus-4-7' AS pricing_model, 'Standard' AS pricing_tier,
       CAST(NULL AS STRING) AS pricing_provider,  -- NULL = rate applies to any provider
       5.0e-6 AS input_price, 2.5e-5 AS output_price,
       5.0e-7 AS cache_read_price, 6.25e-6 AS cache_creation_price),
     STRUCT('claude-fable-5',      'Standard', NULL, 1.0e-5, 5.0e-5,  1.0e-6, 1.25e-5),
+    STRUCT('claude-fable-5-1',    'Standard', NULL, 1.0e-5, 5.0e-5,  2.5e-7, 1.25e-5),
+    STRUCT('claude-opus-5-5',     'Standard', NULL, 4.0e-6, 2.0e-5,  2.0e-7, 5.0e-6),
+    STRUCT('claude-opus-5',       'Standard', NULL, 5.0e-6, 2.5e-5,  5.0e-7, 6.25e-6),
     STRUCT('claude-opus-4-8',     'Standard', NULL, 5.0e-6, 2.5e-5,  5.0e-7, 6.25e-6),
     STRUCT('claude-opus-4-6',     'Standard', NULL, 5.0e-6, 2.5e-5,  5.0e-7, 6.25e-6),
     STRUCT('claude-opus-4-5',     'Standard', NULL, 5.0e-6, 2.5e-5,  5.0e-7, 6.25e-6),
     STRUCT('claude-sonnet-4-6',   'Standard', NULL, 3.0e-6, 1.5e-5,  3.0e-7, 3.75e-6),
+    -- Sonnet 5 / 5.5: $2 in / $10 out. Sonnet 5's introductory rate became the
+    -- standard price (the scheduled 2026-09-01 increase to $3 / $15 was dropped).
+    STRUCT('claude-sonnet-5',     'Standard', NULL, 2.0e-6, 1.0e-5,  2.0e-7, 2.5e-6),
+    STRUCT('claude-sonnet-5-5',   'Standard', NULL, 2.0e-6, 1.0e-5,  2.0e-7, 2.5e-6),
     -- Sonnet 4.5 has a >200K Large Context tier; Sonnet 4.6 does not.
     STRUCT('claude-sonnet-4-5',   'Standard',      NULL, 3.0e-6, 1.5e-5,  3.0e-7, 3.75e-6),
     STRUCT('claude-sonnet-4-5',   'Large Context', NULL, 6.0e-6, 2.25e-5, 6.0e-7, 7.5e-6),
@@ -130,12 +138,17 @@ matched AS (
   SELECT
     a.* EXCEPT (model_for_pricing),
     CASE
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-fable-5-1(@.*)?$')                      THEN 'claude-fable-5-1'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-fable-5(@.*)?$')                        THEN 'claude-fable-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-5-5(@.*)?$')                       THEN 'claude-opus-5-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-5(@.*)?$')                         THEN 'claude-opus-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-8(@.*)?$')                       THEN 'claude-opus-4-8'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-7(@.*)?$')                       THEN 'claude-opus-4-7'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-6(@.*)?$')                       THEN 'claude-opus-4-6'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-opus-4-5(-20251101)?(@.*)?$')           THEN 'claude-opus-4-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-4-6(@.*)?$')                     THEN 'claude-sonnet-4-6'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-5-5(@.*)?$')                     THEN 'claude-sonnet-5-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-5(@.*)?$')                       THEN 'claude-sonnet-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-4-5(-20250929)?(@.*)?$')         THEN 'claude-sonnet-4-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-haiku-4-5(-20251001)?(@.*)?$')          THEN 'claude-haiku-4-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-pro(@.*)?$')                          THEN 'gemini-2.5-pro'
