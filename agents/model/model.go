@@ -104,6 +104,9 @@ var samplingParamsRemovedPrefixes = []string{
 	"claude-opus-5",
 	"claude-fable-5",
 	"claude-sonnet-5",
+	// Verified 2026-09-07 against Vertex (us): claude-mythos-5-1 returns
+	// "`temperature` is deprecated for this model"; output_config.effort works.
+	"claude-mythos-5",
 }
 
 // noEffortModelPrefixes lists Claude id prefixes that predate the effort

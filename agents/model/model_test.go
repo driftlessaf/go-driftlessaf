@@ -65,6 +65,7 @@ func TestResolve(t *testing.T) {
 		// Backend routing shapes, including unknown ids.
 		{"gemini-2.5-flash", geminiBudget},
 		{"claude-fable-5", claudeAdaptive},
+		{"claude-mythos-5-1", claudeAdaptive},
 		{"claude-fable-5-1", claudeAutoToolChoice},
 		{"claude-fable-5-1@default", claudeAutoToolChoice},
 		{"anthropic.claude-fable-5-1", claudeAutoToolChoice},
@@ -131,6 +132,7 @@ func TestResolve(t *testing.T) {
 		{"claude-opus-4-7", claudeAdaptive},
 		{"claude-opus-4-8@default", claudeAdaptive},
 		{"claude-fable-5@default", claudeAdaptive},
+		{"claude-mythos-5-1@default", claudeAdaptive},
 		{"claude-sonnet-5@20260301", claudeAdaptive},
 		// Future Claude ids keep the newest surface by default; they miss
 		// the sampling-removed table too, so those parameters stay accepted
