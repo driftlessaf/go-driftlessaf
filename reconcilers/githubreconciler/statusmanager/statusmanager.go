@@ -41,15 +41,17 @@ type Status[T any] struct {
 
 // StatusManager manages reconciliation status via GitHub Check Runs
 type StatusManager[T any] struct {
-	identity         string
-	projectID        string
-	serviceName      string
-	isJob            bool
-	readOnly         bool
-	detailsURLFunc   DetailsURLFunc
-	publisherAppID   int64
-	skipUnchanged    bool
-	templateExecutor *internaltemplate.Template[Status[T]]
+	identity          string
+	externalID        string
+	externalIDMatcher func(string) bool
+	projectID         string
+	serviceName       string
+	isJob             bool
+	readOnly          bool
+	detailsURLFunc    DetailsURLFunc
+	publisherAppID    int64
+	skipUnchanged     bool
+	templateExecutor  *internaltemplate.Template[Status[T]]
 }
 
 // DetailsURLFunc builds the "Details" link attached to a reconciler's check run
@@ -63,9 +65,22 @@ type DetailsURLFunc func(res *githubreconciler.Resource, sha string) string
 type Option func(*config)
 
 type config struct {
-	detailsURL     DetailsURLFunc
-	publisherAppID int64
-	skipUnchanged  bool
+	externalID        string
+	externalIDMatcher func(string) bool
+	detailsURL        DetailsURLFunc
+	publisherAppID    int64
+	skipUnchanged     bool
+}
+
+// WithExternalID sets app-owned metadata on the initial check creation and subsequent updates.
+func WithExternalID(value string) Option {
+	return func(c *config) { c.externalID = value }
+}
+
+// WithExternalIDMatcher restricts observed checks to those whose external_id matches.
+// The caller interprets its own metadata format; nil leaves lookup unchanged.
+func WithExternalIDMatcher(matches func(string) bool) Option {
+	return func(c *config) { c.externalIDMatcher = matches }
 }
 
 // WithDetailsURL overrides how the check run "Details" link is built. By default
@@ -158,15 +173,17 @@ func newStatusManager[T any](ctx context.Context, identity string, readOnly bool
 	}
 
 	return &StatusManager[T]{
-		identity:         identity,
-		projectID:        projectID,
-		serviceName:      serviceName,
-		isJob:            cloudrun.IsJob(),
-		readOnly:         readOnly,
-		detailsURLFunc:   cfg.detailsURL,
-		publisherAppID:   cfg.publisherAppID,
-		skipUnchanged:    cfg.skipUnchanged,
-		templateExecutor: templateExecutor,
+		identity:          identity,
+		externalID:        cfg.externalID,
+		externalIDMatcher: cfg.externalIDMatcher,
+		projectID:         projectID,
+		serviceName:       serviceName,
+		isJob:             cloudrun.IsJob(),
+		readOnly:          readOnly,
+		detailsURLFunc:    cfg.detailsURL,
+		publisherAppID:    cfg.publisherAppID,
+		skipUnchanged:     cfg.skipUnchanged,
+		templateExecutor:  templateExecutor,
 	}, nil
 }
 
@@ -191,6 +208,7 @@ type Session[T any] struct {
 // cannot silently miss a field the way a hand-written comparison drifts into
 // doing when a new field is added to the request.
 type checkRunFace struct {
+	externalID string
 	name       string
 	status     string
 	conclusion string
@@ -281,7 +299,7 @@ jsonPayload.sha=%q`,
 // findCheckRun re-checks the App ID client-side even though it's also passed
 // server-side to ListCheckRunsForRef: a run this reconciler doesn't own must
 // never be mistaken for its own observed state (see WithPublisherAppID).
-func findCheckRun(ctx context.Context, client *github.Client, owner, repo, sha, name string, publisherAppID int64) (*github.CheckRun, error) {
+func findCheckRun(ctx context.Context, client *github.Client, owner, repo, sha, name string, publisherAppID int64, matchesExternalID func(string) bool) (*github.CheckRun, error) {
 	opts := &github.ListCheckRunsOptions{CheckName: new(name)}
 	if publisherAppID != 0 {
 		opts.AppID = new(publisherAppID)
@@ -298,6 +316,9 @@ func findCheckRun(ctx context.Context, client *github.Client, owner, repo, sha, 
 		if publisherAppID != 0 && run.GetApp().GetID() != publisherAppID {
 			continue
 		}
+		if matchesExternalID != nil && !matchesExternalID(run.GetExternalID()) {
+			continue
+		}
 		return run, nil
 	}
 
@@ -311,7 +332,7 @@ func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 		return nil, err
 	}
 
-	run, err := findCheckRun(ctx, s.client, s.resource.Owner, s.resource.Repo, s.sha, name, s.manager.publisherAppID)
+	run, err := findCheckRun(ctx, s.client, s.resource.Owner, s.resource.Repo, s.sha, name, s.manager.publisherAppID, s.manager.externalIDMatcher)
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +348,7 @@ func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 	// free: the listing above already carried every one of these fields.
 	s.setLive(checkRunFace{
 		name:       run.GetName(),
+		externalID: run.GetExternalID(),
 		status:     run.GetStatus(),
 		conclusion: run.GetConclusion(),
 		detailsURL: run.GetDetailsURL(),
@@ -351,7 +373,7 @@ func (sm *StatusManager[T]) ObservedStateAtSHA(
 		return nil, err
 	}
 
-	run, err := findCheckRun(ctx, client, res.Owner, res.Repo, sha, name, sm.publisherAppID)
+	run, err := findCheckRun(ctx, client, res.Owner, res.Repo, sha, name, sm.publisherAppID, sm.externalIDMatcher)
 	if err != nil {
 		return nil, err
 	}
@@ -390,6 +412,11 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		detailsURLPtr = &detailsURL
 	}
 
+	var externalID *string
+	if s.manager.externalID != "" {
+		externalID = new(s.manager.externalID)
+	}
+
 	// Only pass Conclusion if it's not empty
 	var conclusionPtr *string
 	if status.Conclusion != "" {
@@ -415,11 +442,18 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 	// already shows to decide whether the request is worth making at all.
 	desired := checkRunFace{
 		name:       name,
+		externalID: s.manager.externalID,
 		status:     status.Status,
 		conclusion: status.Conclusion,
 		detailsURL: detailsURL,
 		title:      title,
 		summary:    output,
+	}
+
+	if externalID == nil {
+		if live := s.getLive(); live != nil {
+			desired.externalID = live.externalID
+		}
 	}
 
 	// Check if we have a check run ID from ObservedState
@@ -441,6 +475,7 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 		// Update existing check run
 		_, _, err = s.client.Checks.UpdateCheckRun(ctx, s.resource.Owner, s.resource.Repo, *checkRunID, github.UpdateCheckRunOptions{
 			Name:       name,
+			ExternalID: externalID,
 			Status:     &status.Status,
 			Conclusion: conclusionPtr,
 			DetailsURL: detailsURLPtr,
@@ -462,6 +497,7 @@ func (s *Session[T]) SetActualState(ctx context.Context, title string, status *S
 	// Create new check run
 	checkRun, _, err := s.client.Checks.CreateCheckRun(ctx, s.resource.Owner, s.resource.Repo, github.CreateCheckRunOptions{
 		Name:       name,
+		ExternalID: externalID,
 		HeadSHA:    s.sha,
 		Status:     &status.Status,
 		Conclusion: conclusionPtr,
