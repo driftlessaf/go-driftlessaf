@@ -321,3 +321,44 @@ func TestNeutralizeUntrustedMarkers(t *testing.T) {
 		}
 	})
 }
+
+// TestCodeFence covers the embedded-backtick boundaries once for every caller
+// that fences untrusted text: the fence must outgrow the longest backtick run,
+// separate runs do not add up, and the three-backtick minimum holds for short
+// runs.
+func TestCodeFence(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in      string
+		wantRun int
+	}{
+		"empty":                    {in: "", wantRun: 0},
+		"no backticks":             {in: "plain text", wantRun: 0},
+		"one":                      {in: "a`b", wantRun: 1},
+		"two":                      {in: "a``b", wantRun: 2},
+		"three":                    {in: "```", wantRun: 3},
+		"four":                     {in: "x\n````\ny", wantRun: 4},
+		"five":                     {in: "`````", wantRun: 5},
+		"separate runs do not add": {in: "`` a ``` b ``", wantRun: 3},
+		"leading and trailing":     {in: "````mid`", wantRun: 4},
+		"multibyte around runs":    {in: "é```ü``", wantRun: 3},
+		"indented closing fence":   {in: "code\n   ```\nmore", wantRun: 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := LongestBacktickRun(tc.in); got != tc.wantRun {
+				t.Errorf("LongestBacktickRun(%q) = %d, want %d", tc.in, got, tc.wantRun)
+			}
+			want := strings.Repeat("`", max(tc.wantRun+1, 3))
+			fence := CodeFence(tc.in)
+			if fence != want {
+				t.Errorf("CodeFence(%q) = %q, want %q", tc.in, fence, want)
+			}
+			// No line of the content, with or without indentation, can close a
+			// block opened by the fence.
+			for line := range strings.SplitSeq(tc.in, "\n") {
+				if strings.HasPrefix(strings.TrimLeft(line, " "), fence) {
+					t.Errorf("line %q closes fence %q", line, fence)
+				}
+			}
+		})
+	}
+}

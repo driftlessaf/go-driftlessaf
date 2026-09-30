@@ -147,3 +147,37 @@ func (p *Prompt) BindRawFenced(name, value string) (*Prompt, error) {
 func (p *Prompt) MustBindRawFenced(name, value string) *Prompt {
 	return Must(p.BindRawFenced(name, value))
 }
+
+// LongestBacktickRun returns the length of the longest run of consecutive
+// backticks in s, the number a Markdown delimiter has to exceed so s cannot
+// close it: CodeFence builds a fenced code block's delimiter from it, and a
+// caller rendering an inline code span can build that delimiter the same way.
+// A code span also needs one space of padding inside the delimiters when s
+// starts or ends with a backtick; otherwise that backtick joins the delimiter
+// run and changes its length: "`a" between two-backtick delimiters opens
+// with a run of three.
+func LongestBacktickRun(s string) int {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
+}
+
+// CodeFence returns a backtick fence for a Markdown code block holding
+// content. CommonMark closes a fenced block only on a backtick run at least as
+// long as the opening one, so the fence is one backtick longer than the longest
+// run in content, and never shorter than the three a fence needs. Content that
+// carries its own fence — untrusted text such as build output or a quoted file
+// — therefore cannot end the block early and render the rest as Markdown.
+//
+// Only the delimiter is returned; the caller writes the block around it, with
+// whatever info string and line layout it needs.
+func CodeFence(content string) string {
+	return strings.Repeat("`", max(LongestBacktickRun(content)+1, 3))
+}
