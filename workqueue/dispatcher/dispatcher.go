@@ -23,8 +23,17 @@ type Callback func(ctx context.Context, key string, opts workqueue.Options) erro
 
 // ServiceCallback returns a Callback that invokes the given service.
 func ServiceCallback(client workqueue.WorkqueueServiceClient) Callback {
+	return ProcessCallback(func(ctx context.Context, req *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error) {
+		return client.Process(ctx, req)
+	})
+}
+
+// ProcessCallback invokes a local processor with the same response handling as
+// ServiceCallback. Requeue delays, retry floors, and dependent keys retain
+// their wire-protocol meaning when the handler runs without a gRPC transport.
+func ProcessCallback(process func(context.Context, *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error)) Callback {
 	return func(ctx context.Context, key string, opts workqueue.Options) error {
-		resp, err := client.Process(ctx, &workqueue.ProcessRequest{
+		resp, err := process(ctx, &workqueue.ProcessRequest{
 			Key:      key,
 			Priority: opts.Priority,
 		})
