@@ -237,7 +237,7 @@ func TestReconciler_RateLimitHandling(t *testing.T) {
 		wantRequeueAfter: 5 * time.Minute,
 	}, {
 		name:             "GitHub AbuseRateLimitError with RetryAfter triggers requeue",
-		reconcilerError:  &github.AbuseRateLimitError{RetryAfter: ptrDuration(2 * time.Minute)},
+		reconcilerError:  &github.AbuseRateLimitError{RetryAfter: new(2 * time.Minute)},
 		wantRequeue:      true,
 		wantRequeueAfter: 2 * time.Minute,
 	}, {
@@ -310,9 +310,4 @@ func TestReconciler_Process_RequeueFloor(t *testing.T) {
 	if !resp.GetRequeueFloor() {
 		t.Error("RequeueFloor = false, want true for RequeueNotBefore")
 	}
-}
-
-//go:fix inline
-func ptrDuration(d time.Duration) *time.Duration {
-	return new(d)
 }

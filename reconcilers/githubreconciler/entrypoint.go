@@ -53,6 +53,7 @@ type MainOption func(*mainOptions)
 type Middleware func(ReconcilerFunc) ReconcilerFunc
 
 type mainOptions struct {
+	runner         func(context.Context, workqueue.WorkqueueServiceServer) error
 	identity       string
 	interceptors   []grpc.UnaryServerInterceptor
 	middleware     []Middleware
@@ -83,8 +84,17 @@ func newClientCacheFor(mo mainOptions, identity string) *ClientCache {
 	return cc
 }
 
+// WithRunner supplies the serving lifetime for a fully constructed reconciler.
+// It preserves the same authentication, cache, attribution, and middleware as
+// the gRPC entrypoint. gRPC server interceptors, including those configured by
+// WithInterceptors, are not applied. The runner must join admitted work before
+// returning; its caller keeps the construction context alive for that entire lifetime.
+func WithRunner(run func(context.Context, workqueue.WorkqueueServiceServer) error) MainOption {
+	return func(o *mainOptions) { o.runner = run }
+}
+
 // WithInterceptors adds gRPC unary server interceptors that run before
-// the default metrics and recovery interceptors.
+// the default metrics and recovery interceptors. It has no effect with WithRunner.
 func WithInterceptors(inter ...grpc.UnaryServerInterceptor) MainOption {
 	return func(o *mainOptions) {
 		o.interceptors = append(o.interceptors, inter...)
@@ -281,6 +291,11 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 	}
 	rec = applyMiddleware(rec, mo.middleware)
 
+	service := NewReconciler(clientCache, append([]Option{WithReconciler(rec)}, mo.reconcilerOpts...)...)
+	if mo.runner != nil {
+		return mo.runner(ctx, service)
+	}
+
 	d := duplex.New(
 		env.Port,
 		grpc.StatsHandler(traceinterceptors.RestoreTraceParentHandler),
@@ -294,10 +309,7 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
-	workqueue.RegisterWorkqueueServiceServer(d.Server, NewReconciler(
-		clientCache,
-		append([]Option{WithReconciler(rec)}, mo.reconcilerOpts...)...,
-	))
+	workqueue.RegisterWorkqueueServiceServer(d.Server, service)
 
 	healthgrpc.RegisterHealthServer(d.Server, health.NewServer())
 
