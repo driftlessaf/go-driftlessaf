@@ -8,15 +8,20 @@ package agenttrace
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // drainCE type-asserts the tracer to access Drain, flushing in-flight sends.
@@ -90,7 +95,12 @@ func TestWithCloudEventEmission_EmitsCloudEvent(t *testing.T) {
 	}
 
 	inner := ByCode[string](func(_ *Trace[string]) {})
-	wrapped := WithCloudEventEmission[string](inner, client, "test-reconciler")
+	wrapped := WithCloudEventEmission[string](
+		inner,
+		client,
+		"test-reconciler",
+		WithBoundedTracePayloads[string](),
+	)
 
 	ctx := WithExecutionContext(t.Context(), ExecutionContext{
 		ReconcilerKey:  "pr:owner/repo/42",
@@ -162,6 +172,276 @@ func TestWithCloudEventEmission_EmitsCloudEvent(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, decoded, ignoreDynamic); diff != "" {
 		t.Errorf("CE body mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestWithCloudEventEmission_BoundsRootTracePayloads(t *testing.T) {
+	var body []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client, err := cloudevents.NewClientHTTP(
+		cloudevents.WithTarget(srv.URL),
+		cehttp.WithClient(*srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("creating test CE client: %v", err)
+	}
+
+	largePayload := strings.Repeat("x", 11_000_000)
+	largeResult := map[string]any{"content": largePayload}
+	var recorded *Trace[map[string]any]
+	inner := ByCode[map[string]any](func(trace *Trace[map[string]any]) { recorded = trace })
+	wrapped := WithCloudEventEmission[map[string]any](
+		inner,
+		client,
+		"test-reconciler",
+		WithBoundedTracePayloads[map[string]any](),
+	)
+
+	ctx := WithPayloadsEnabled(t.Context(), true)
+	ctx = WithTracer[map[string]any](ctx, wrapped)
+	trace, done := StartTrace[map[string]any](ctx, largePayload)
+	call := trace.StartToolCall("tc1", "read_logs", map[string]any{"query": largePayload})
+	call.Complete(map[string]any{"content": largePayload}, nil)
+	trace.AppendReasoning(ReasoningContent{Thinking: largePayload})
+	turn := trace.BeginTurn(0, "google.vertex", "gemini-2.5-flash")
+	turn.RecordTokens(1500, 300)
+	turn.End()
+	done(largeResult, nil)
+	drainCE[map[string]any](wrapped)
+
+	if recorded == nil {
+		t.Fatal("inner tracer did not receive the completed trace")
+	}
+	if got, want := recorded.InputPrompt, largePayload; got != want {
+		t.Errorf("inner trace input prompt length: got %d, want %d", len(got), len(want))
+	}
+	if diff := cmp.Diff(largeResult, recorded.Result); diff != "" {
+		t.Errorf("inner trace result (-want +got):\n%s", diff)
+	}
+
+	if len(body) > maxTraceEventDataBytes {
+		t.Fatalf("bounded root event is %d bytes, limit is %d bytes", len(body), maxTraceEventDataBytes)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("body is not valid JSON: %v\nbody: %s", err, string(body))
+	}
+
+	for _, field := range []string{"input_prompt", "reasoning", "result"} {
+		if _, ok := decoded[field]; !ok {
+			t.Errorf("root event omits payload field %q", field)
+		}
+	}
+	inputPrompt, ok := decoded["input_prompt"].(string)
+	if !ok || inputPrompt == "" || len(inputPrompt) > maxTracePayloadFieldBytes {
+		t.Errorf("input_prompt: got %T with length %d, want a non-empty string of at most %d bytes", decoded["input_prompt"], len(inputPrompt), maxTracePayloadFieldBytes)
+	}
+	if diff := cmp.Diff(map[string]any{}, decoded["result"]); diff != "" {
+		t.Errorf("result (-want +got):\n%s", diff)
+	}
+	reasoning, ok := decoded["reasoning"].([]any)
+	if !ok || len(reasoning) != 1 {
+		t.Fatalf("reasoning: got %#v, want one item", decoded["reasoning"])
+	}
+	reasoningItem, ok := reasoning[0].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning[0]: got %#v, want an object", reasoning[0])
+	}
+	thinking, ok := reasoningItem["thinking"].(string)
+	if !ok || thinking == "" || len(thinking) > maxTracePayloadFieldBytes {
+		t.Errorf("reasoning[0].thinking: got %T with length %d, want a non-empty string of at most %d bytes", reasoningItem["thinking"], len(thinking), maxTracePayloadFieldBytes)
+	}
+	metadata, ok := decoded["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata: got %#v, want an object", decoded["metadata"])
+	}
+	if got, want := metadata[payloadTruncatedMetadataField], true; got != want {
+		t.Errorf("metadata[%q]: got %#v, want %#v", payloadTruncatedMetadataField, got, want)
+	}
+
+	toolCalls, ok := decoded["tool_calls"].([]any)
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("tool_calls: got %#v, want one call", decoded["tool_calls"])
+	}
+	toolCall, ok := toolCalls[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_calls[0]: got %#v, want an object", toolCalls[0])
+	}
+	if diff := cmp.Diff(map[string]any{
+		"id":     "tc1",
+		"name":   "read_logs",
+		"params": map[string]any{},
+		"result": map[string]any{},
+	}, toolCall, ignoreDynamic); diff != "" {
+		t.Errorf("tool call (-want +got):\n%s", diff)
+	}
+
+	wantTurns := []any{map[string]any{
+		"index":         float64(0),
+		"model":         "gemini-2.5-flash",
+		"system":        "google.vertex",
+		"input_tokens":  float64(1500),
+		"output_tokens": float64(300),
+		"failed":        false,
+	}}
+	if diff := cmp.Diff(wantTurns, decoded["turns"], ignoreDynamic); diff != "" {
+		t.Errorf("turns (-want +got):\n%s", diff)
+	}
+}
+
+func TestBoundTracePayloadsRejectsUnboundedStructure(t *testing.T) {
+	largeStructure := strings.Repeat("x", maxTraceEventDataBytes)
+	tests := []struct {
+		name  string
+		event map[string]any
+		want  string
+	}{
+		{
+			name: "no payload fields",
+			event: map[string]any{
+				"metadata": map[string]any{"large": largeStructure},
+			},
+			want: "has no payload fields to truncate",
+		},
+		{
+			name: "structural data exceeds limit",
+			event: map[string]any{
+				"input_prompt": "payload",
+				"metadata":     map[string]any{"large": largeStructure},
+			},
+			want: "trace structural data is",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(test.event)
+			if err != nil {
+				t.Fatalf("marshal event: %v", err)
+			}
+
+			bounded, err := boundTracePayloads(raw)
+			if err == nil {
+				t.Fatalf("boundTracePayloads returned %d bytes, want an error", len(bounded))
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("error: got %q, want text %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBoundTracePayloadsDividesRemainingSpace(t *testing.T) {
+	largePayload := strings.Repeat("x", maxTracePayloadFieldBytes+1024)
+	toolCalls := make([]map[string]any, 128)
+	for i := range toolCalls {
+		toolCalls[i] = map[string]any{
+			"id":     fmt.Sprintf("call-%d", i),
+			"name":   "read_logs",
+			"result": largePayload,
+		}
+	}
+	event := map[string]any{
+		"input_prompt": largePayload,
+		"result":       largePayload,
+		"tool_calls":   toolCalls,
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	if len(raw) <= maxTraceEventDataBytes {
+		t.Fatalf("test event is %d bytes, want more than %d", len(raw), maxTraceEventDataBytes)
+	}
+
+	minimum, payloadFields, err := encodeTraceWithPayloadLimit(raw, 0)
+	if err != nil {
+		t.Fatalf("encode minimum event: %v", err)
+	}
+	fieldLimit := (maxTraceEventDataBytes - len(minimum)) / payloadFields
+	if fieldLimit >= maxTracePayloadFieldBytes {
+		t.Fatalf("per-field limit is %d bytes, want less than the flat %d-byte cap", fieldLimit, maxTracePayloadFieldBytes)
+	}
+
+	bounded, err := boundTracePayloads(raw)
+	if err != nil {
+		t.Fatalf("boundTracePayloads: %v", err)
+	}
+	if len(bounded) > maxTraceEventDataBytes {
+		t.Fatalf("bounded event is %d bytes, limit is %d", len(bounded), maxTraceEventDataBytes)
+	}
+
+	var decoded struct {
+		InputPrompt string `json:"input_prompt"`
+		ToolCalls   []struct {
+			Result string `json:"result"`
+		} `json:"tool_calls"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(bounded, &decoded); err != nil {
+		t.Fatalf("unmarshal bounded event: %v", err)
+	}
+	if got := len(decoded.InputPrompt); got == 0 || got > fieldLimit {
+		t.Errorf("input prompt length: got %d, want 1..%d", got, fieldLimit)
+	}
+	if got := len(decoded.ToolCalls[0].Result); got == 0 || got > fieldLimit {
+		t.Errorf("tool result length: got %d, want 1..%d", got, fieldLimit)
+	}
+	if got, want := decoded.Metadata[payloadTruncatedMetadataField], true; got != want {
+		t.Errorf("metadata[%q]: got %#v, want %#v", payloadTruncatedMetadataField, got, want)
+	}
+}
+
+func TestLimitJSONValuePreservesJSONKind(t *testing.T) {
+	tests := []struct {
+		name  string
+		value json.RawMessage
+		want  any
+	}{
+		{
+			name:  "string",
+			value: json.RawMessage(`"` + strings.Repeat("x", 20) + `"`),
+			want:  strings.Repeat("x", 8),
+		},
+		{
+			name:  "object",
+			value: json.RawMessage(`{"key":"` + strings.Repeat("x", 20) + `"}`),
+			want:  map[string]any{},
+		},
+		{
+			name:  "array",
+			value: json.RawMessage(`["` + strings.Repeat("x", 20) + `"]`),
+			want:  []any{},
+		},
+		{
+			name:  "number",
+			value: json.RawMessage(strings.Repeat("9", 20)),
+			want:  float64(0),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got any
+			if err := json.Unmarshal(limitJSONValue(test.value, 10), &got); err != nil {
+				t.Fatalf("unmarshal limited value: %v", err)
+			}
+
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("limited value (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -257,6 +537,7 @@ func TestSetEventData_MarshalError(t *testing.T) {
 				&ce,
 				trace,
 				omitSensitiveTraceFields,
+				nil,
 				sealSensitiveTraceFields,
 			)
 			got := errorIdentity{
@@ -523,5 +804,155 @@ func TestWithCloudEventEmission_PayloadsDisabled(t *testing.T) {
 	}
 	if got, want := trace.Result, "done"; got != want {
 		t.Errorf("in-memory result: got %q, want %q", got, want)
+	}
+}
+
+var errRoundTrip = errors.New("round trip failed")
+
+// errRoundTripper fails every request before it reaches the network. The
+// CloudEvents client retries and then reports the send as a NACK.
+type errRoundTripper struct{}
+
+func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errRoundTrip
+}
+
+type emissionKey struct {
+	EventType string
+	Outcome   string
+}
+
+// installMetricReader makes a fresh manual reader the global meter provider
+// for the rest of the test. Emitters constructed afterwards record to it.
+func installMetricReader(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+
+	reader := sdkmetric.NewManualReader()
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(previous) })
+
+	return reader
+}
+
+// emissionCounts reads every agenttrace.cloudevent.emissions data point from
+// reader, keyed by its event type and outcome attributes.
+func emissionCounts(t *testing.T, reader *sdkmetric.ManualReader) map[emissionKey]int64 {
+	t.Helper()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+
+	counts := map[emissionKey]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			if md.Name != "agenttrace.cloudevent.emissions" {
+				continue
+			}
+			sum, ok := md.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want an int64 sum", md.Name, md.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				eventType, _ := dp.Attributes.Value("event_type")
+				outcome, _ := dp.Attributes.Value("outcome")
+				counts[emissionKey{eventType.AsString(), outcome.AsString()}] = dp.Value
+			}
+		}
+	}
+
+	return counts
+}
+
+// The emission counter is the only signal dashboards have for events that never
+// reached the broker. Each event must be counted once, under its own event type
+// and outcome, including an event dropped before a send is attempted.
+func TestCloudEventEmissionOutcomes(t *testing.T) {
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer okServer.Close()
+	nackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer nackServer.Close()
+
+	tests := []struct {
+		name            string
+		clientOpts      []cehttp.Option
+		tracerOpts      []CEOption[string]
+		payloadsEnabled bool
+		record          func(t *testing.T, trace *Trace[string])
+		want            map[emissionKey]int64
+	}{
+		{
+			name:            "delivered",
+			clientOpts:      []cehttp.Option{cloudevents.WithTarget(okServer.URL)},
+			payloadsEnabled: true,
+			record: func(t *testing.T, trace *Trace[string]) {
+				turn := trace.BeginTurn(0, "google.vertex", "gemini-2.5-flash")
+				if err := turn.RecordRequest([]map[string]string{{"role": "user", "content": "hi"}}); err != nil {
+					t.Fatalf("RecordRequest: %v", err)
+				}
+				turn.End()
+			},
+			want: map[emissionKey]int64{
+				{EventType, "delivered"}:     1,
+				{SpanEventType, "delivered"}: 1,
+			},
+		},
+		{
+			name:       "server error",
+			clientOpts: []cehttp.Option{cloudevents.WithTarget(nackServer.URL)},
+			want:       map[emissionKey]int64{{EventType, "nack"}: 1},
+		},
+		{
+			// The retries must not inflate the count: one event, one outcome.
+			name: "transport failure",
+			clientOpts: []cehttp.Option{
+				cloudevents.WithTarget(okServer.URL),
+				cehttp.WithRoundTripper(errRoundTripper{}),
+			},
+			want: map[emissionKey]int64{{EventType, "nack"}: 1},
+		},
+		{
+			name:       "encoding failed",
+			clientOpts: []cehttp.Option{cloudevents.WithTarget(okServer.URL)},
+			tracerOpts: []CEOption[string]{WithBoundedTracePayloads[string]()},
+			record: func(_ *testing.T, trace *Trace[string]) {
+				trace.Metadata["large"] = strings.Repeat("x", maxTraceEventDataBytes)
+			},
+			want: map[emissionKey]int64{{EventType, "encoding_failed"}: 1},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := installMetricReader(t)
+
+			client, err := cloudevents.NewClientHTTP(test.clientOpts...)
+			if err != nil {
+				t.Fatalf("creating test CE client: %v", err)
+			}
+
+			inner := ByCode[string](func(*Trace[string]) {})
+			wrapped := WithCloudEventEmission[string](inner, client, "test-reconciler", test.tracerOpts...)
+
+			ctx := WithPayloadsEnabled(t.Context(), test.payloadsEnabled)
+			ctx = WithTracer[string](ctx, wrapped)
+
+			trace, done := StartTrace[string](ctx, "prompt")
+			if test.record != nil {
+				test.record(t, trace)
+			}
+			done("result", nil)
+			drainCE[string](wrapped)
+
+			if diff := cmp.Diff(test.want, emissionCounts(t, reader)); diff != "" {
+				t.Errorf("emission counts (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
