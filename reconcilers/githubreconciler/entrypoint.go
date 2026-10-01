@@ -44,6 +44,10 @@ type Functor[T any] func(
 ) (ReconcilerFunc, error)
 
 // MainOption configures the behavior of Main and its wrappers.
+//
+// A MainOption must only record configuration and be free of side effects:
+// AppMain applies every option once to read the App options, then again
+// inside Main.
 type MainOption func(*mainOptions)
 
 // Middleware wraps a ReconcilerFunc, allowing callers to inject logic before
@@ -66,6 +70,10 @@ type mainOptions struct {
 	// wrapTransport, when set, wraps each GitHub client's authenticated
 	// transport. Set by WithConditionalRequests.
 	wrapTransport func(http.RoundTripper) http.RoundTripper
+	// clientCacheOpts configure the ClientCache. Set by WithClientCacheOptions.
+	clientCacheOpts []ClientCacheOption
+	// appOpts configure the App AppMain builds. Set by WithAppOptions.
+	appOpts []AppOption
 }
 
 // newClientCacheFor builds the ClientCache Main hands to the reconciler
@@ -78,7 +86,7 @@ type mainOptions struct {
 // these fields (WithConditionalRequests above) silently inert, with every
 // test of the thing they configure still passing.
 func newClientCacheFor(mo mainOptions, identity string) *ClientCache {
-	cc := NewClientCache(mo.tsff(identity))
+	cc := NewClientCache(mo.tsff(identity), mo.clientCacheOpts...)
 	cc.installIDFunc = mo.installIDFunc
 	cc.wrapTransport = mo.wrapTransport
 	return cc
@@ -150,6 +158,35 @@ func WithConditionalRequests(opts ...condcache.Option) MainOption {
 	}
 }
 
+// WithClientCacheOptions configures the ClientCache handed to the reconciler,
+// e.g. WithClientCacheSize.
+func WithClientCacheOptions(opts ...ClientCacheOption) MainOption {
+	return func(o *mainOptions) {
+		o.clientCacheOpts = append(o.clientCacheOpts, opts...)
+	}
+}
+
+// WithAppOptions configures the GitHub App AppMain builds, e.g.
+// WithInstallLookupTimeout. Other entrypoints build no App and ignore it.
+func WithAppOptions(opts ...AppOption) MainOption {
+	return func(o *mainOptions) {
+		o.appOpts = append(o.appOpts, opts...)
+	}
+}
+
+// WithOwnerFilter drops keys whose owner f rejects before any GitHub call is
+// made for them; see OwnerFilter. Use it when a reconciler serves only some
+// of the owners that can reach its queue, e.g. one subscribed to every
+// installation of a shared App.
+//
+// It applies to the workqueue reconciler Main, AppMain, RepoMain and OrgMain
+// serve. CLIMain calls the ReconcilerFunc directly for the keys it is given
+// and does not consult it; reconcilers built on the branchreconciler package
+// do not use this Reconciler and are unaffected.
+func WithOwnerFilter(f OwnerFilter) MainOption {
+	return withReconcilerOptions(WithReconcilerOwnerFilter(f))
+}
+
 // WithMiddleware appends middleware layers applied to the ReconcilerFunc before
 // it is invoked. The first argument is outermost: WithMiddleware(A, B) produces
 // A(B(rec)), matching gRPC interceptor ordering.
@@ -182,7 +219,7 @@ func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error
 		return fmt.Errorf("process GitHub App environment config: %w", err)
 	}
 
-	app, err := NewApp(ctx, appEnv.AppID, appEnv.AppKey)
+	app, err := newAppFor(ctx, appEnv.AppID, appEnv.AppKey, opts)
 	if err != nil {
 		return fmt.Errorf("create GitHub App: %w", err)
 	}
@@ -204,6 +241,16 @@ func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error
 			o.middleware = append([]Middleware{appAttribution(appEnv.AppID, app.LookupInstallID)}, o.middleware...)
 		},
 	)...)
+}
+
+// newAppFor builds AppMain's App, applying the App options among opts. It
+// reads them ahead of Main, which applies every option again.
+func newAppFor(ctx context.Context, appID int64, keyURI string, opts []MainOption) (*App, error) {
+	var mo mainOptions
+	for _, o := range opts {
+		o(&mo)
+	}
+	return NewApp(ctx, appID, keyURI, mo.appOpts...)
 }
 
 // RepoMain is the entrypoint for reconcilers that use repo-scoped GitHub
@@ -348,7 +395,7 @@ func CLIMain[T any](ctx context.Context, f Functor[T], cfg T, keys []string, opt
 	}
 
 	tsf := mo.tsff(mo.identity)
-	cc := NewClientCache(tsf)
+	cc := NewClientCache(tsf, mo.clientCacheOpts...)
 
 	rec, err := f(ctx, mo.identity, cc, cfg)
 	if err != nil {

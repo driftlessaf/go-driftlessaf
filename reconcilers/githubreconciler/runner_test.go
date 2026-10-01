@@ -62,7 +62,7 @@ func TestLocalRunnerKeepsAuthenticatedReconcilerConstruction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 || middlewareCalls != 2 || len(cache.clients) != 2 {
-		t.Fatalf("calls=%d, middleware=%d, isolated clients=%d", calls, middlewareCalls, len(cache.clients))
+	if calls != 2 || middlewareCalls != 2 || cache.entries.len() != 2 {
+		t.Fatalf("calls=%d, middleware=%d, isolated clients=%d", calls, middlewareCalls, cache.entries.len())
 	}
 }

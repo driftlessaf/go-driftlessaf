@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/go-github/v88/github"
@@ -101,7 +102,24 @@ type Reconciler struct {
 
 	// useOrgScopedCredentials indicates whether to use org-scoped instead of repo-scoped credentials.
 	useOrgScopedCredentials bool
+
+	// ownerFilter, when set, decides before any GitHub call whether a
+	// resource's owner is handled at all.
+	ownerFilter OwnerFilter
 }
+
+// OwnerFilter reports whether the reconciler handles resources owned by
+// owner. It runs after the key is parsed and before a GitHub client is
+// fetched, so an owner it rejects costs no installation lookup, token mint,
+// or API call. Returning false drops the key as successfully processed;
+// returning an error fails the attempt so the key is retried, which is how
+// a filter that cannot decide fails closed.
+//
+// owner is the login lowercased. GitHub logins are case-insensitive and the
+// client cache and installation lookup fold them, so every spelling of an
+// owner reaches the same installation; the filter sees one spelling too, and
+// should compare against lowercased logins.
+type OwnerFilter func(ctx context.Context, owner string) (bool, error)
 
 // Option configures a Reconciler.
 type Option func(*Reconciler)
@@ -119,6 +137,14 @@ func WithReconciler(f ReconcilerFunc) Option {
 func WithOrgScopedCredentials() Option {
 	return func(r *Reconciler) {
 		r.useOrgScopedCredentials = true
+	}
+}
+
+// WithReconcilerOwnerFilter sets a filter that runs before any GitHub call;
+// see OwnerFilter. Main-based reconcilers use WithOwnerFilter.
+func WithReconcilerOwnerFilter(f OwnerFilter) Option {
+	return func(r *Reconciler) {
+		r.ownerFilter = f
 	}
 }
 
@@ -141,6 +167,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 	resource, err := ParseURL(url)
 	if err != nil {
 		return fmt.Errorf("parsing URL: %w", err)
+	}
+
+	if r.ownerFilter != nil {
+		ok, err := r.ownerFilter(ctx, strings.ToLower(resource.Owner))
+		if err != nil {
+			return fmt.Errorf("filtering owner %q: %w", resource.Owner, err)
+		}
+		if !ok {
+			clog.DebugContext(ctx, "Owner filtered out; dropping", "owner", resource.Owner)
+			return nil
+		}
 	}
 
 	// Get the appropriate GitHub client
