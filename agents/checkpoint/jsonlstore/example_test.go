@@ -38,7 +38,7 @@ func ExampleNew() {
 		Provider:      checkpoint.ProviderAnthropic,
 		ReconcilerKey: "org/repo#7",
 		RunID:         "run-7",
-		ProviderState: json.RawMessage(`{"model":"claude-fable-5"}`),
+		ProviderState: json.RawMessage(`{"model":"claude-opus-5-5"}`),
 	}
 	if err := first.Save(ctx, env.ReconcilerKey, env); err != nil {
 		fmt.Println("error:", err)

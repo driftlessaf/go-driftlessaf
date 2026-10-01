@@ -21,7 +21,7 @@ func sampleEnvelope(runID string) *checkpoint.Envelope {
 	return &checkpoint.Envelope{
 		Version:        checkpoint.EnvelopeVersion,
 		Provider:       "anthropic",
-		Model:          "claude-fable-5",
+		Model:          "claude-opus-5-5",
 		SDKVersion:     "v1.51.1",
 		ConfigDigest:   "sha256:deadbeef",
 		ReconcilerKey:  "org/repo#42",
@@ -34,7 +34,7 @@ func sampleEnvelope(runID string) *checkpoint.Envelope {
 			Name:      "ask_a_friend",
 			InputJSON: json.RawMessage(`{"question":"proceed?"}`),
 		}},
-		ProviderState: json.RawMessage(`{"model":"claude-fable-5","max_tokens":1024}`),
+		ProviderState: json.RawMessage(`{"model":"claude-opus-5-5","max_tokens":1024}`),
 		LoopState:     json.RawMessage(`{"turn":3}`),
 		TraceID:       "trace-abc",
 		Deadline:      time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC),
@@ -100,7 +100,7 @@ func RunConformance(t *testing.T, newStore func() checkpoint.Store) {
 		if got2.PendingToolCalls[0].ID != "toolu_01ABC" {
 			t.Fatalf("store aliased caller-visible slice: %q", got2.PendingToolCalls[0].ID)
 		}
-		if string(got2.ProviderState) != `{"model":"claude-fable-5","max_tokens":1024}` {
+		if string(got2.ProviderState) != `{"model":"claude-opus-5-5","max_tokens":1024}` {
 			t.Fatalf("store aliased raw provider state: %s", got2.ProviderState)
 		}
 	})
@@ -123,7 +123,7 @@ func RunConformance(t *testing.T, newStore func() checkpoint.Store) {
 		if got.PendingToolCalls[0].ID != "toolu_01ABC" {
 			t.Fatalf("store aliased the saved slice: %q", got.PendingToolCalls[0].ID)
 		}
-		if string(got.ProviderState) != `{"model":"claude-fable-5","max_tokens":1024}` {
+		if string(got.ProviderState) != `{"model":"claude-opus-5-5","max_tokens":1024}` {
 			t.Fatalf("store aliased the saved raw provider state: %s", got.ProviderState)
 		}
 	})

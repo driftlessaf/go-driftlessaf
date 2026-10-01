@@ -69,7 +69,7 @@ func TestEnvelopeCarriesAnthropicPayload(t *testing.T) {
 	// block carrying a cache_control breakpoint, and a tool_use block with a
 	// raw-JSON input — the exact shapes a suspended Claude conversation holds.
 	params := anthropic.MessageNewParams{
-		Model:     "claude-fable-5",
+		Model:     "claude-opus-5-5",
 		MaxTokens: 1024,
 		Messages: []anthropic.MessageParam{{
 			Role: anthropic.MessageParamRoleAssistant,

@@ -37,7 +37,7 @@ func ExampleCoordinator() {
 	err = c.Suspend(ctx, "org/repo#42", &checkpoint.Suspension{
 		Version:        checkpoint.EnvelopeVersion,
 		Provider:       checkpoint.ProviderAnthropic,
-		Model:          "claude-fable-5",
+		Model:          "claude-opus-5-5",
 		ConfigDigest:   "sha256:cfg",
 		RunID:          "run-1",
 		Turn:           3,

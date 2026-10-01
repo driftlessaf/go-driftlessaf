@@ -73,7 +73,7 @@ func sampleEnvelope(runID string) *checkpoint.Envelope {
 	return &checkpoint.Envelope{
 		Version:        checkpoint.EnvelopeVersion,
 		Provider:       checkpoint.ProviderAnthropic,
-		Model:          "claude-fable-5",
+		Model:          "claude-opus-5-5",
 		ConfigDigest:   "sha256:deadbeef",
 		ReconcilerKey:  "org/repo#42",
 		RunID:          runID,

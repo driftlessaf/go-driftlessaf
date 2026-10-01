@@ -23,14 +23,14 @@ import (
 // top extracts it with AsSuspension.
 func ExampleNewAskAFriendSuspension() {
 	s := checkpoint.NewAskAFriendSuspension(
-		checkpoint.ProviderAnthropic, "claude-fable-5", "sha256:cfg",
+		checkpoint.ProviderAnthropic, "claude-opus-5-5", "sha256:cfg",
 		3, 12,
 		checkpoint.PendingToolCall{
 			ID:        "toolu_01ABC",
 			Name:      "ask_a_friend",
 			InputJSON: json.RawMessage(`{"question":"Should I force-push?"}`),
 		},
-		json.RawMessage(`{"model":"claude-fable-5","max_tokens":1024}`),
+		json.RawMessage(`{"model":"claude-opus-5-5","max_tokens":1024}`),
 		json.RawMessage(`{"turn":3}`),
 		"trace-abc",
 	)
@@ -145,7 +145,7 @@ func ExampleValidateForResume() {
 	env := checkpoint.Envelope{
 		Version:        checkpoint.EnvelopeVersion,
 		Provider:       checkpoint.ProviderAnthropic,
-		Model:          "claude-fable-5",
+		Model:          "claude-opus-5-5",
 		ConfigDigest:   "sha256:cfg",
 		RemainingTurns: 4,
 		Deadline:       time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
@@ -153,18 +153,18 @@ func ExampleValidateForResume() {
 
 	// The live executor matches the parked envelope: resume may proceed.
 	fmt.Println("match:", checkpoint.ValidateForResume(env,
-		checkpoint.ProviderAnthropic, "claude-fable-5", "sha256:cfg",
+		checkpoint.ProviderAnthropic, "claude-opus-5-5", "sha256:cfg",
 		time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)))
 
 	// The model drifted under the pause: rebuild from scratch instead.
 	err := checkpoint.ValidateForResume(env,
-		checkpoint.ProviderAnthropic, "claude-fable-6", "sha256:cfg",
+		checkpoint.ProviderAnthropic, "claude-sonnet-5-5", "sha256:cfg",
 		time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
 	fmt.Println("drift:", errors.Is(err, checkpoint.ErrConfigDrift))
 
 	// The wake arrived after the envelope's deadline: fail closed.
 	err = checkpoint.ValidateForResume(env,
-		checkpoint.ProviderAnthropic, "claude-fable-5", "sha256:cfg",
+		checkpoint.ProviderAnthropic, "claude-opus-5-5", "sha256:cfg",
 		time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
 	fmt.Println("expired:", err != nil)
 	// Output:
@@ -182,17 +182,17 @@ func ExampleDigestJSON() {
 		MaxTurns int
 	}
 
-	parked, err := checkpoint.DigestJSON(config{Model: "claude-fable-5", MaxTurns: 12})
+	parked, err := checkpoint.DigestJSON(config{Model: "claude-opus-5-5", MaxTurns: 12})
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
-	live, err := checkpoint.DigestJSON(config{Model: "claude-fable-5", MaxTurns: 12})
+	live, err := checkpoint.DigestJSON(config{Model: "claude-opus-5-5", MaxTurns: 12})
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
-	drifted, err := checkpoint.DigestJSON(config{Model: "claude-fable-5", MaxTurns: 6})
+	drifted, err := checkpoint.DigestJSON(config{Model: "claude-opus-5-5", MaxTurns: 6})
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -216,7 +216,7 @@ func Example_storeRoundTrip() {
 		Provider:      checkpoint.ProviderAnthropic,
 		ReconcilerKey: "org/repo#42",
 		RunID:         "run-1",
-		ProviderState: json.RawMessage(`{"model":"claude-fable-5"}`),
+		ProviderState: json.RawMessage(`{"model":"claude-opus-5-5"}`),
 	}
 	if err := store.Save(ctx, env.ReconcilerKey, env); err != nil {
 		fmt.Println("error:", err)

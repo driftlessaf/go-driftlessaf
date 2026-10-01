@@ -25,7 +25,7 @@ func newSuspension(reason string) *checkpoint.Suspension {
 	return &checkpoint.Suspension{
 		Version:       checkpoint.EnvelopeVersion,
 		Provider:      checkpoint.ProviderAnthropic,
-		Model:         "claude-fable-5",
+		Model:         "claude-opus-5-5",
 		ReconcilerKey: testKey,
 		RunID:         "run-1",
 		Turn:          3,
