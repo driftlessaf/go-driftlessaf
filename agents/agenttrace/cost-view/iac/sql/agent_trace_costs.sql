@@ -90,10 +90,17 @@ WITH prices AS (
     STRUCT('gemini-3.1-pro-preview',        'Large Context', NULL, 4.0e-6,  1.8e-5, 4.0e-7,  0.0),
     STRUCT('gemini-3-flash-preview',        'Standard',      NULL, 5.0e-7,  3.0e-6, 5.0e-8,  0.0),
     STRUCT('gemini-3.1-flash-lite-preview', 'Standard',      NULL, 2.5e-7,  1.5e-6, 2.5e-8,  0.0),
+    STRUCT('gemini-3.1-flash-lite',         'Standard',      NULL, 2.5e-7,  1.5e-6, 2.5e-8,  0.0),
     -- gemini-3.5-flash: uniform across context size (no Large Context tier);
     -- $1.50 in / $9.00 out / $0.15 cached-in per MTok (Standard, Global).
     -- https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
-    STRUCT('gemini-3.5-flash',              'Standard',      NULL, 1.5e-6,  9.0e-6, 1.5e-7,  0.0)
+    STRUCT('gemini-3.5-flash',              'Standard',      NULL, 1.5e-6,  9.0e-6, 1.5e-7,  0.0),
+    STRUCT('gemini-3.5-flash-lite',         'Standard',      NULL, 3.0e-7,  2.5e-6, 3.0e-8,  0.0),
+    -- gemini-3.6-flash / gemini-3.8-flash: Google advertises $0.75 / $3.75
+    -- through 2026-12-31, but pays it as 50% credits back on net spend. Each
+    -- request is billed at the $1.50 / $7.50 list rate below.
+    STRUCT('gemini-3.6-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0),
+    STRUCT('gemini-3.8-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0)
   ])
 ),
 attributed AS (
@@ -160,7 +167,11 @@ matched AS (
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.1-pro-preview(-customtools)?(@.*)?$')   THEN 'gemini-3.1-pro-preview'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3-flash-preview(@.*)?$')                   THEN 'gemini-3-flash-preview'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.1-flash-lite-preview(@.*)?$')           THEN 'gemini-3.1-flash-lite-preview'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.1-flash-lite(@.*)?$')                   THEN 'gemini-3.1-flash-lite'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.5-flash(@.*)?$')                        THEN 'gemini-3.5-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.5-flash-lite(@.*)?$')                   THEN 'gemini-3.5-flash-lite'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.6-flash(@.*)?$')                        THEN 'gemini-3.6-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.8-flash(@.*)?$')                        THEN 'gemini-3.8-flash'
       ELSE NULL
     END AS pricing_model
   FROM attributed a
