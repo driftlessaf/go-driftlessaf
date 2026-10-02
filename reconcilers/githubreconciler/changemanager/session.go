@@ -919,7 +919,10 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			if err != nil {
 				return "", err
 			}
-			return fetchFindingLogs(ctx, s.client, s.owner, s.repo, f)
+			if kind != callbacks.FindingKindCICheck {
+				return f.Details, nil
+			}
+			return matchCheckProvider(s.manager.checkProviders, f).Logs(ctx, s.client, s.owner, s.repo, f)
 		},
 		Retry: func(ctx context.Context, kind callbacks.FindingKind, identifier string) error {
 			if kind != callbacks.FindingKindCICheck {
@@ -929,7 +932,7 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			if err != nil {
 				return err
 			}
-			return rerunCICheck(ctx, s.client, s.owner, s.repo, f)
+			return matchCheckProvider(s.manager.checkProviders, f).Rerun(ctx, s.client, s.owner, s.repo, f)
 		},
 		Resolve: func(_ context.Context, identifier string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
