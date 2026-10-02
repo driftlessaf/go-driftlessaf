@@ -8,13 +8,17 @@ package clonemanager
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -40,6 +44,15 @@ func recordTouch(ctx context.Context, paths ...string) {
 // WorktreeCallbacks creates callbacks.WorktreeCallbacks bound to a git worktree.
 // All file operations are scoped to the worktree root directory.
 //
+// Every operation is resolved through an *os.Root opened on that directory.
+// os.Root confines path resolution to the tree by construction: it walks a
+// name component by component and refuses any step — including a symlink
+// whose target escapes — that would leave the root, so a committed symlink
+// (a git tree preserves symlink blobs as real symlinks on checkout) cannot
+// redirect a callback to a file outside the worktree. A lexical check alone
+// (filepath.Join/Clean/Rel) cannot catch this: it never asks the filesystem
+// what a path component actually resolves to.
+//
 // The mutating callbacks write to the worktree on disk only; they never touch
 // the git index. This keeps them safe for concurrent use within a single agent
 // turn, which claudeexecutor requires of tool handlers (it dispatches a turn's
@@ -63,22 +76,37 @@ func recordTouch(ctx context.Context, paths ...string) {
 //     disk, but `git add -A` skips ignored paths, so the file never reaches
 //     the commit tree.
 func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
-	root := wt.Filesystem.Root()
+	rootDir := wt.Filesystem.Root()
+	// Callback tool calls can run in parallel. Keep symlink checks and the
+	// following operation together when another callback can change the tree.
+	var mutationMu sync.RWMutex
 
 	return callbacks.WorktreeCallbacks{
 		ReadFile: func(_ context.Context, path string, offset int64, limit int) (callbacks.ReadResult, error) {
-			fullPath, err := validatePath(root, path)
+			mutationMu.RLock()
+			defer mutationMu.RUnlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return callbacks.ReadResult{}, rootErr
+			}
+			defer root.Close()
+
+			rel, err := relPath(path)
 			if err != nil {
 				return callbacks.ReadResult{}, err
 			}
 
-			if isBinaryFile(fullPath) {
+			if isBinaryFile(rel) {
 				return callbacks.ReadResult{}, fmt.Errorf("file %q appears to be binary", path)
 			}
 
-			f, err := os.Open(fullPath)
-			if err != nil {
+			if err := checkNotSymlinkToGit(root, rel); err != nil {
 				return callbacks.ReadResult{}, err
+			}
+
+			f, err := root.Open(rel)
+			if err != nil {
+				return callbacks.ReadResult{}, wrapRootErr(path, err)
 			}
 			defer f.Close()
 
@@ -135,115 +163,215 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 		},
 
 		WriteFile: func(ctx context.Context, path, content string, mode os.FileMode) error {
-			fullPath, err := validateWritePath(root, path)
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return rootErr
+			}
+			defer root.Close()
+
+			rel, err := writeRelPath(path)
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			if err := checkNotSymlinkToGit(root, rel); err != nil {
 				return err
 			}
-			if err := os.WriteFile(fullPath, []byte(content), mode); err != nil {
-				return err
+			if dir := filepath.Dir(rel); dir != "." {
+				if err := root.MkdirAll(dir, 0o755); err != nil {
+					return wrapRootErr(path, err)
+				}
+			}
+			if err := root.WriteFile(rel, []byte(content), mode); err != nil {
+				return wrapRootErr(path, err)
 			}
 			recordTouch(ctx, path)
 			return nil
 		},
 
 		DeleteFile: func(ctx context.Context, path string) error {
-			fullPath, err := validateWritePath(root, path)
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return rootErr
+			}
+			defer root.Close()
+
+			rel, err := writeRelPath(path)
 			if err != nil {
 				return err
 			}
-			if err := os.Remove(fullPath); err != nil {
+			if err := checkNotSymlinkToGit(root, rel); err != nil {
 				return err
+			}
+			if err := root.Remove(rel); err != nil {
+				return wrapRootErr(path, err)
 			}
 			recordTouch(ctx, path)
 			return nil
 		},
 
 		MoveFile: func(ctx context.Context, src, dst string) error {
-			srcFull, err := validateWritePath(root, src)
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return rootErr
+			}
+			defer root.Close()
+
+			srcRel, err := writeRelPath(src)
 			if err != nil {
 				return err
 			}
-			dstFull, err := validateWritePath(root, dst)
+			if err := checkNotSymlinkToGit(root, srcRel); err != nil {
+				return err
+			}
+			dstRel, err := writeRelPath(dst)
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
+			if err := checkNotSymlinkToGit(root, dstRel); err != nil {
 				return err
 			}
-			if err := os.Rename(srcFull, dstFull); err != nil {
-				return err
+			if dir := filepath.Dir(dstRel); dir != "." {
+				if err := root.MkdirAll(dir, 0o755); err != nil {
+					return wrapRootErr(dst, err)
+				}
+			}
+			if err := root.Rename(srcRel, dstRel); err != nil {
+				return fmt.Errorf("move %q to %q: %w", src, dst, err)
 			}
 			recordTouch(ctx, src, dst)
 			return nil
 		},
 
 		CopyFile: func(ctx context.Context, src, dst string) error {
-			srcFull, err := validatePath(root, src)
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return rootErr
+			}
+			defer root.Close()
+
+			srcRel, err := writeRelPath(src)
 			if err != nil {
 				return err
 			}
-			dstFull, err := validateWritePath(root, dst)
+			if err := checkNotSymlinkToGit(root, srcRel); err != nil {
+				return err
+			}
+			dstRel, err := writeRelPath(dst)
 			if err != nil {
 				return err
 			}
-			data, err := os.ReadFile(srcFull)
+			if err := checkNotSymlinkToGit(root, dstRel); err != nil {
+				return err
+			}
+			data, err := root.ReadFile(srcRel)
 			if err != nil {
-				return err
+				return wrapRootErr(src, err)
 			}
-			srcInfo, err := os.Stat(srcFull)
+			srcInfo, err := root.Stat(srcRel)
 			if err != nil {
-				return err
+				return wrapRootErr(src, err)
 			}
-			if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
-				return err
+			if dir := filepath.Dir(dstRel); dir != "." {
+				if err := root.MkdirAll(dir, 0o755); err != nil {
+					return wrapRootErr(dst, err)
+				}
 			}
-			if err := os.WriteFile(dstFull, data, srcInfo.Mode()); err != nil { //nolint:gosec // G703: path from git worktree
-				return err
+			if err := root.WriteFile(dstRel, data, srcInfo.Mode()); err != nil {
+				return wrapRootErr(dst, err)
 			}
 			recordTouch(ctx, dst)
 			return nil
 		},
 
 		CreateSymlink: func(ctx context.Context, path, target string) error {
-			fullPath, err := validateWritePath(root, path)
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return rootErr
+			}
+			defer root.Close()
+
+			rel, err := writeRelPath(path)
 			if err != nil {
 				return err
 			}
-			if err := validateSymlinkTarget(root, fullPath, target); err != nil {
+			if err := checkNotSymlinkToGit(root, rel); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			if err := validateSymlinkTarget(rel, target); err != nil {
 				return err
 			}
-			if err := os.Symlink(target, fullPath); err != nil {
+			// Keep the target's .. components intact: os.Root resolves them
+			// after following any symlink in the target path.
+			targetPath := filepath.ToSlash(filepath.Dir(rel)) + "/" + filepath.ToSlash(target)
+			if err := checkNotSymlinkToGit(root, targetPath); err != nil {
 				return err
+			}
+			if dir := filepath.Dir(rel); dir != "." {
+				if err := root.MkdirAll(dir, 0o755); err != nil {
+					return wrapRootErr(path, err)
+				}
+			}
+			if err := root.Symlink(target, rel); err != nil {
+				return wrapRootErr(path, err)
 			}
 			recordTouch(ctx, path)
 			return nil
 		},
 
 		Chmod: func(ctx context.Context, path string, mode os.FileMode) error {
-			fullPath, err := validateWritePath(root, path)
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return rootErr
+			}
+			defer root.Close()
+
+			rel, err := writeRelPath(path)
 			if err != nil {
 				return err
 			}
-			if err := os.Chmod(fullPath, mode); err != nil {
+			if err := checkNotSymlinkToGit(root, rel); err != nil {
 				return err
+			}
+			if err := root.Chmod(rel, mode); err != nil {
+				return wrapRootErr(path, err)
 			}
 			recordTouch(ctx, path)
 			return nil
 		},
 
 		ListDirectory: func(_ context.Context, path, filter string, offset, limit int) (callbacks.ListResult, error) {
-			fullPath, err := validatePath(root, path)
+			mutationMu.RLock()
+			defer mutationMu.RUnlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return callbacks.ListResult{}, rootErr
+			}
+			defer root.Close()
+
+			rel, err := relPath(path)
 			if err != nil {
 				return callbacks.ListResult{}, err
 			}
 
-			entries, err := os.ReadDir(fullPath)
+			dirFile, err := root.Open(rel)
+			if err != nil {
+				return callbacks.ListResult{}, wrapRootErr(path, err)
+			}
+			defer dirFile.Close()
+
+			entries, err := dirFile.ReadDir(-1)
 			if err != nil {
 				return callbacks.ListResult{}, err
 			}
@@ -281,7 +409,7 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			}
 
 			for _, e := range filtered {
-				de, err := buildDirEntry(fullPath, e)
+				de, err := buildDirEntry(root, rel, e)
 				if err != nil {
 					continue // Skip entries we can't stat.
 				}
@@ -292,6 +420,14 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 		},
 
 		EditFile: func(ctx context.Context, path, oldString, newString string, replaceAll bool) (callbacks.EditResult, error) {
+			mutationMu.Lock()
+			defer mutationMu.Unlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return callbacks.EditResult{}, rootErr
+			}
+			defer root.Close()
+
 			if len(oldString) == 0 {
 				return callbacks.EditResult{}, errors.New("old_string must not be empty")
 			}
@@ -302,22 +438,46 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 				return callbacks.EditResult{}, fmt.Errorf("new_string is %d bytes; use write_file for large replacements", len(newString))
 			}
 
-			fullPath, err := validateWritePath(root, path)
+			rel, err := writeRelPath(path)
 			if err != nil {
 				return callbacks.EditResult{}, err
 			}
+			if err := checkNotSymlinkToGit(root, rel); err != nil {
+				return callbacks.EditResult{}, err
+			}
+
+			// Confine through root before streaming the edit: this is what
+			// refuses a path that only escapes the worktree via a symlink.
+			// The descriptor opened here is kept and reused for every
+			// subsequent read of this file, and every write below goes
+			// through root as well (a root-confined temp file, renamed into
+			// place with root.Rename). A second, unconfined os.Open of the
+			// lexical fullPath here would reopen a TOCTOU window: a path
+			// component swapped to a symlink between the check and that
+			// later open (or the final rename) could redirect the read, or
+			// the write, outside the worktree.
+			f, err := root.Open(rel)
+			if err != nil {
+				return callbacks.EditResult{}, wrapRootErr(path, err)
+			}
+			defer f.Close()
 
 			// Plan: stream the file to find match offsets.
-			offsets, err := planReplacements(fullPath, []byte(oldString), replaceAll)
+			offsets, err := planReplacements(f, []byte(oldString), replaceAll)
 			if err != nil {
 				return callbacks.EditResult{}, err
 			}
 			if len(offsets) == 0 {
-				return editIgnoringIndentation(fullPath, oldString, newString)
+				result, err := editIgnoringIndentation(root, rel, f, oldString, newString)
+				if err != nil {
+					return callbacks.EditResult{}, err
+				}
+				recordTouch(ctx, path)
+				return result, nil
 			}
 
 			// Execute: stream the file again, replacing at recorded offsets.
-			if err := executeReplacements(fullPath, offsets, len(oldString), []byte(newString)); err != nil {
+			if err := executeReplacements(root, rel, f, offsets, len(oldString), []byte(newString)); err != nil {
 				return callbacks.EditResult{}, err
 			}
 
@@ -326,10 +486,30 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 		},
 
 		SearchCodebase: func(_ context.Context, searchPath, pattern, filter string, offset, limit int) (callbacks.SearchResult, error) {
-			searchRoot, err := validatePath(root, searchPath)
+			mutationMu.RLock()
+			defer mutationMu.RUnlock()
+			root, rootErr := os.OpenRoot(rootDir)
+			if rootErr != nil {
+				return callbacks.SearchResult{}, rootErr
+			}
+			defer root.Close()
+
+			searchRel, err := relPath(searchPath)
 			if err != nil {
 				return callbacks.SearchResult{}, err
 			}
+			if err := checkNotSymlinkToGit(root, searchRel); err != nil {
+				return callbacks.SearchResult{}, err
+			}
+
+			// Preserve the error for a search path that leaves the root.
+			// The walk and each file read below also use root, so a path
+			// changed by another process cannot redirect them outside it.
+			dirFile, err := root.Open(searchRel)
+			if err != nil {
+				return callbacks.SearchResult{}, wrapRootErr(searchPath, err)
+			}
+			dirFile.Close()
 
 			re, err := regexp.Compile(pattern)
 			if err != nil {
@@ -341,14 +521,21 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			need := offset + limit + 1 // +1 to detect whether more remain
 			var allMatches []callbacks.Match
 
-			err = filepath.WalkDir(searchRoot, func(filePath string, d os.DirEntry, walkErr error) error {
+			err = fs.WalkDir(root.FS(), filepath.ToSlash(searchRel), func(filePath string, d fs.DirEntry, walkErr error) error {
 				if walkErr != nil {
 					return nil // Skip inaccessible entries.
 				}
 
+				// Never follow a symlink encountered during the walk: a
+				// symlink committed elsewhere in the tree could otherwise
+				// redirect a read to a different file in the worktree.
+				if d.Type()&os.ModeSymlink != 0 {
+					return nil
+				}
+
 				if d.IsDir() {
-					if strings.HasPrefix(d.Name(), ".") {
-						return filepath.SkipDir
+					if filePath != "." && strings.HasPrefix(d.Name(), ".") {
+						return fs.SkipDir
 					}
 					return nil
 				}
@@ -361,25 +548,19 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 					return nil
 				}
 
-				// Paths are always relative to the worktree root.
-				relPath, err := filepath.Rel(root, filePath)
-				if err != nil {
-					return nil
-				}
-
-				data, err := os.ReadFile(filePath) //nolint:gosec // G122: walking git worktree, developer-controlled
+				data, err := root.ReadFile(filePath)
 				if err != nil {
 					return nil // Skip unreadable files.
 				}
 
 				for _, loc := range re.FindAllIndex(data, -1) {
 					allMatches = append(allMatches, callbacks.Match{
-						Path:   filepath.ToSlash(relPath),
+						Path:   filepath.ToSlash(filePath),
 						Offset: int64(loc[0]),
 						Length: loc[1] - loc[0],
 					})
 					if len(allMatches) >= need {
-						return filepath.SkipAll
+						return fs.SkipAll
 					}
 				}
 
@@ -415,42 +596,109 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 	}
 }
 
-// validatePath ensures path doesn't escape the worktree root via ".." traversal
-// and returns the confined absolute path. It is the confinement every callback
-// applies; the mutating callbacks additionally use [validateWritePath] to refuse
-// writes under the repository's own .git directory.
-func validatePath(root, path string) (string, error) {
-	fullPath := filepath.Join(root, filepath.Clean(path))
-	rel, err := filepath.Rel(root, fullPath)
-	if err != nil {
-		return "", fmt.Errorf("path %q: %w", path, err)
-	}
-	if strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("path %q escapes worktree", path)
-	}
-	return fullPath, nil
-}
+// ErrConfigSymlink marks a package config rejected because its path contains
+// a symlink. The checkout must change before retrying that path can succeed.
+var ErrConfigSymlink = errors.New("config path contains a symlink")
 
-// validateWritePath is validatePath for a mutating callback: it also refuses any
-// path that resolves into the repository's own .git directory. Writing, deleting,
-// moving, or chmod-ing under .git (HEAD, index, config, hooks, info/exclude) would
-// rewrite the repository's state, git config, or hooks — outside the tree the
-// tools are meant to touch, and a way to defeat commit scoping — so a path with a
-// ".git" component is refused. Read callbacks use validatePath, so reading the
-// worktree is unaffected.
-func validateWritePath(root, path string) (string, error) {
-	fullPath, err := validatePath(root, path)
+// SafeConfigPath validates that repoRelPath, resolved against workingTree,
+// stays within the worktree and does not resolve through a symlink, then
+// returns the absolute path a caller may hand to a third-party parser (such
+// as melange's config.ParseConfiguration) that opens a plain filesystem path
+// itself rather than going through WorktreeCallbacks.
+//
+// Such callers read outside os.Root's confinement, so a committed symlink at
+// repoRelPath — a git tree preserves a symlink blob as a real symlink on
+// checkout — could otherwise redirect the read to a file outside the
+// worktree, or to another tracked file such as .git/config. Reconciliation
+// paths (update-bot's reconciler, analyzer, and levelup) call this before
+// parsing a monitored package's config so a legitimate config is never itself
+// a symlink.
+func SafeConfigPath(workingTree, repoRelPath string) (string, error) {
+	root, err := os.OpenRoot(workingTree)
+	if err != nil {
+		return "", fmt.Errorf("opening worktree root: %w", err)
+	}
+	defer root.Close()
+
+	rel, err := relPath(repoRelPath)
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(root, fullPath)
+
+	// Check every component of rel, not only the leaf. root.Lstat follows
+	// symlinks in every path component except the final one, so a
+	// committed intermediate symlink such as "pkg -> .git" would let
+	// root.Lstat("pkg/config") resolve straight through "pkg" and report
+	// on the file it points at instead — passing a leaf-only check for
+	// the very component that redirects the read.
+	if rel != "." {
+		parts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
+		for i, part := range parts {
+			partial := filepath.Join(parts[:i+1]...)
+
+			fi, err := root.Lstat(partial)
+			if err != nil {
+				return "", wrapRootErr(repoRelPath, err)
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("path %q: component %q is a symlink: %w", repoRelPath, part, ErrConfigSymlink)
+			}
+		}
+	}
+
+	return filepath.Join(workingTree, rel), nil
+}
+
+// relPath cleans path into a name safe to pass to a *os.Root method for this
+// worktree: relative to the root, with no leading separator, and rejecting
+// any lexical climb above it. os.Root itself refuses, at the point each
+// method is called, any resolution — including through a symlink — that
+// would leave the root, which is what actually confines the callbacks: a
+// worktree checkout preserves a committed symlink blob as a real symlink on
+// disk, and a purely lexical check here cannot see where such a symlink
+// really points.
+func relPath(path string) (string, error) {
+	rel := filepath.Clean(path)
+	rel = strings.TrimPrefix(rel, string(filepath.Separator))
+	if rel == "" {
+		rel = "."
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes worktree", path)
+	}
+	return rel, nil
+}
+
+// writeRelPath is relPath for a mutating callback: it also refuses any path
+// with a ".git" path component. Writing, deleting, moving, or chmod-ing under
+// .git (HEAD, index, config, hooks, info/exclude) would rewrite the
+// repository's state, git config, or hooks — outside the tree the tools are
+// meant to touch, and a way to defeat commit scoping. Read callbacks use
+// relPath, so reading the worktree is unaffected.
+func writeRelPath(path string) (string, error) {
+	rel, err := relPath(path)
 	if err != nil {
-		return "", fmt.Errorf("path %q: %w", path, err)
+		return "", err
 	}
 	if hasGitComponent(rel) {
 		return "", fmt.Errorf("path %q resolves into the .git directory", path)
 	}
-	return fullPath, nil
+	return rel, nil
+}
+
+// wrapRootErr adds the caller-supplied path to an error from a *os.Root
+// method. os.Root reports any out-of-root resolution — including one that
+// only manifests through a symlink — as a "path escapes from parent" error;
+// that phrasing is preserved but called out explicitly as a worktree escape,
+// since it is the one case callers most need to recognize.
+func wrapRootErr(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "path escapes from parent") {
+		return fmt.Errorf("path %q escapes the worktree (possibly via a symlink): %w", path, err)
+	}
+	return fmt.Errorf("path %q: %w", path, err)
 }
 
 // hasGitComponent reports whether a slash- or OS-separated relative path contains
@@ -468,25 +716,93 @@ func hasGitComponent(rel string) bool {
 
 // validateSymlinkTarget checks that a symlink target will not escape the
 // worktree root. Absolute targets are always rejected. Relative targets are
-// resolved from the symlink's parent directory to verify they stay within root.
-func validateSymlinkTarget(root, linkFullPath, target string) error {
+// resolved lexically from the symlink's own worktree-relative parent
+// directory to verify they stay within root; os.Root additionally enforces
+// this — and rejects an absolute target outright — at the point the symlink
+// is later followed, so this is a fast, clear-error first check rather than
+// the sole guard.
+func validateSymlinkTarget(linkRel, target string) error {
 	if filepath.IsAbs(target) {
 		return fmt.Errorf("symlink target %q is absolute; only relative targets are allowed", target)
 	}
 
-	// Resolve the target relative to the symlink's parent directory.
-	linkDir := filepath.Dir(linkFullPath)
+	// Resolve the target relative to the symlink's parent directory, both
+	// expressed relative to the worktree root.
+	linkDir := filepath.Dir(linkRel)
 	effectivePath := filepath.Clean(filepath.Join(linkDir, target))
 
-	rel, err := filepath.Rel(root, effectivePath)
-	if err != nil {
+	if effectivePath == ".." || strings.HasPrefix(effectivePath, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("symlink target %q resolves outside worktree", target)
 	}
-	if strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("symlink target %q resolves outside worktree", target)
-	}
-	if hasGitComponent(rel) {
+	if hasGitComponent(effectivePath) {
 		return fmt.Errorf("symlink target %q resolves into the .git directory", target)
+	}
+	return nil
+}
+
+// checkNotSymlinkToGit refuses paths that resolve through a symlink into
+// .git. It checks every component, including the components of each symlink
+// target; Lstat on a complete path follows any symlink before the leaf.
+func checkNotSymlinkToGit(root *os.Root, rel string) error {
+	return checkSymlinkChain(root, rel)
+}
+
+// maxSymlinkChainDepth bounds how many hops checkSymlinkChain follows before
+// giving up, guarding against a cycle such as a -> b, b -> a.
+const maxSymlinkChainDepth = 40
+
+// checkSymlinkChain resolves path components in the same order as os.Root.
+// In particular, a ".." in a symlink target applies after any preceding
+// symlink is followed. A missing component is left to the caller to report.
+func checkSymlinkChain(root *os.Root, path string) error {
+	pending := strings.Split(filepath.ToSlash(path), "/")
+	var resolved []string
+	symlinks := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(resolved) == 0 {
+				return fmt.Errorf("path %q resolves outside worktree", path)
+			}
+			resolved = resolved[:len(resolved)-1]
+			continue
+		}
+
+		// Direct reads of .git are allowed, but a symlink must never
+		// redirect a read or write into it.
+		if symlinks > 0 && strings.EqualFold(part, ".git") {
+			return fmt.Errorf("path %q resolves into the .git directory", path)
+		}
+		prefix := filepath.Join(append(resolved, part)...)
+		fi, err := root.Lstat(prefix)
+		if errors.Is(err, os.ErrNotExist) {
+			resolved = append(resolved, part)
+			continue
+		}
+		if err != nil {
+			return wrapRootErr(path, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			resolved = append(resolved, part)
+			continue
+		}
+
+		symlinks++
+		if symlinks > maxSymlinkChainDepth {
+			return fmt.Errorf("path %q: too many levels of symbolic links", path)
+		}
+		target, err := root.Readlink(prefix)
+		if err != nil {
+			return fmt.Errorf("reading symlink %q: %w", prefix, err)
+		}
+		if err := validateSymlinkTarget(prefix, target); err != nil {
+			return fmt.Errorf("path %q already exists as a symlink: %w", prefix, err)
+		}
+		pending = append(strings.Split(filepath.ToSlash(target), "/"), pending...)
 	}
 	return nil
 }
@@ -524,12 +840,14 @@ func matchFilter(name, filter string) bool {
 	return name == filter
 }
 
-// buildDirEntry creates a callbacks.DirEntry from an os.DirEntry.
-func buildDirEntry(parentPath string, e os.DirEntry) (callbacks.DirEntry, error) {
-	fullPath := filepath.Join(parentPath, e.Name())
+// buildDirEntry creates a callbacks.DirEntry from an os.DirEntry, resolving
+// metadata for it through root so a symlinked entry cannot redirect the
+// Lstat/Readlink calls outside the worktree.
+func buildDirEntry(root *os.Root, dirRel string, e os.DirEntry) (callbacks.DirEntry, error) {
+	entryRel := filepath.Join(dirRel, e.Name())
 
 	// Use Lstat so symlinks are not followed.
-	fi, err := os.Lstat(fullPath)
+	fi, err := root.Lstat(entryRel)
 	if err != nil {
 		return callbacks.DirEntry{}, err
 	}
@@ -544,7 +862,7 @@ func buildDirEntry(parentPath string, e os.DirEntry) (callbacks.DirEntry, error)
 	case fi.Mode()&os.ModeSymlink != 0:
 		de.Type = "symlink"
 		de.Size = 0
-		if target, err := os.Readlink(fullPath); err == nil {
+		if target, err := root.Readlink(entryRel); err == nil {
 			de.Target = target
 		}
 	case fi.IsDir():
@@ -618,12 +936,10 @@ const maxEditStringSize = 32 * 1024
 //	  └───────┴─────────────────────┘
 //	    ▲
 //	    └── bytes.Index finds "ABCD" starting at offset 1
-func planReplacements(path string, pattern []byte, replaceAll bool) ([]int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
+func planReplacements(f *os.File, pattern []byte, replaceAll bool) ([]int64, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
 	patLen := len(pattern)
 	const bufSize = 1 << 20
@@ -683,12 +999,12 @@ func planReplacements(path string, pattern []byte, replaceAll bool) ([]int64, er
 // no exact match: it accepts a unique region that differs from old_string only
 // by a constant indentation shift and shifts new_string the same way. Its
 // errors begin with "old_string not found in file".
-func editIgnoringIndentation(path, oldString, newString string) (callbacks.EditResult, error) {
-	m, err := matchIgnoringIndentation(path, oldString)
+func editIgnoringIndentation(root *os.Root, rel string, f *os.File, oldString, newString string) (callbacks.EditResult, error) {
+	m, err := matchIgnoringIndentation(f, oldString)
 	if err != nil {
 		return callbacks.EditResult{}, err
 	}
-	if err := executeReplacements(path, []int64{m.Start}, int(m.End-m.Start), []byte(textedit.ShiftIndentation(newString, m.Shift))); err != nil {
+	if err := executeReplacements(root, rel, f, []int64{m.Start}, int(m.End-m.Start), []byte(textedit.ShiftIndentation(newString, m.Shift))); err != nil {
 		return callbacks.EditResult{}, err
 	}
 	result := callbacks.EditResult{Replacements: 1}
@@ -698,13 +1014,12 @@ func editIgnoringIndentation(path, oldString, newString string) (callbacks.EditR
 	return result, nil
 }
 
-// matchIgnoringIndentation opens path read-only for the streaming scan.
-func matchIgnoringIndentation(path, oldString string) (textedit.Match, error) {
-	f, err := os.Open(path) // #nosec G304 -- path is confined to the worktree by validatePath
-	if err != nil {
+// matchIgnoringIndentation scans the already-open, root-confined descriptor
+// for the streaming scan, rather than reopening the path unconfined.
+func matchIgnoringIndentation(f *os.File, oldString string) (textedit.Match, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return textedit.Match{}, err
 	}
-	defer f.Close()
 	return textedit.MatchIgnoringIndentation(f, oldString)
 }
 
@@ -728,25 +1043,29 @@ func matchIgnoringIndentation(path, oldString string) (textedit.Match, error) {
 // Prefixes are streamed via io.CopyN (bounded memory), old patterns are
 // skipped in the source, and new replacements are written directly. The
 // tail after the last match is streamed via io.Copy.
-func executeReplacements(path string, offsets []int64, oldLen int, newBytes []byte) error {
-	src, err := os.Open(path)
-	if err != nil {
+// src is the already-open, root-confined descriptor for rel (opened once by
+// EditFile via root.Open); the temp file is created and renamed through root
+// as well, so no step of this function reopens the lexical path unconfined —
+// closing the TOCTOU window a second os.Open/os.CreateTemp/os.Rename on the
+// path would otherwise leave between EditFile's confinement check and the
+// actual read/write.
+func executeReplacements(root *os.Root, rel string, src *os.File, offsets []int64, oldLen int, newBytes []byte) error {
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	defer src.Close()
 
 	fi, err := src.Stat()
 	if err != nil {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".edit-*")
+	tmpRel, tmp, err := createTempInRoot(root, filepath.Dir(rel))
 	if err != nil {
 		return err
 	}
 	defer func() {
 		tmp.Close()
-		os.Remove(tmp.Name()) //nolint:gosec // G703: path from internal git worktree
+		root.Remove(tmpRel) //nolint:errcheck // best-effort cleanup; a failed rename already reports the real error
 	}()
 
 	var pos int64
@@ -782,5 +1101,31 @@ func executeReplacements(path string, offsets []int64, oldLen int, newBytes []by
 		return err
 	}
 
-	return os.Rename(tmp.Name(), path) //nolint:gosec // G703: path from internal git worktree
+	return root.Rename(tmpRel, rel)
+}
+
+// createTempInRoot creates a new, exclusively-owned temp file inside dirRel
+// (a worktree-relative directory) confined through root, mirroring
+// os.CreateTemp's collision-retry behavior without ever forming an
+// unconfined absolute path.
+func createTempInRoot(root *os.Root, dirRel string) (string, *os.File, error) {
+	for range 10000 {
+		var suffix [8]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", nil, err
+		}
+		name := ".edit-" + hex.EncodeToString(suffix[:])
+		rel := name
+		if dirRel != "" && dirRel != "." {
+			rel = filepath.Join(dirRel, name)
+		}
+		f, err := root.OpenFile(rel, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return rel, f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", nil, err
+		}
+	}
+	return "", nil, errors.New("failed to create temp file: too many collisions")
 }

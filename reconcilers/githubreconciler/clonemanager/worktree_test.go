@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package clonemanager
 
 import (
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -566,6 +567,249 @@ func TestCreateSymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestWriteFile_SymlinkEscape and TestReadFile_SymlinkEscape reproduce
+// PSEC-2919: a contributor commits a symlink at a monitored package path
+// pointing at a file outside the worktree. Before this fix, the callbacks
+// resolved paths with a lexical filepath.Join/Rel check only, so a
+// pre-existing symlink was followed straight through to os.WriteFile/os.Open,
+// disclosing or overwriting a file the tool was never meant to touch.
+//
+//	SECURITY FINDING: Symlink-Based Worktree Escape in WorktreeCallbacks {
+//	  CWE: CWE-22
+//	  Description: A path committed to the git tree can be a symlink whose
+//	    target resolves outside the worktree root. The callbacks previously
+//	    performed only a lexical filepath.Rel containment check on the
+//	    unresolved path, so a pre-existing symlink was followed by the
+//	    subsequent os.Open/os.WriteFile, redirecting the callback outside the
+//	    intended package path.
+//	  Risk: HIGH
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: WorktreeCallbacks(wt).ReadFile / .WriteFile
+//	  Flow: git blob (symlink) -> worktree checkout -> lexical path check ->
+//	    os.Open/os.WriteFile follows the symlink.
+//	  Exploit: Commit a symlink at the package path pointing (via a relative
+//	    "../" target) at a file outside the worktree; the bot's read/write
+//	    tools then operate on that outside file instead of the package file.
+//	  Impact: Disclosure or corruption of files outside the intended worktree.
+//	}
+func TestWriteFile_SymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("sensitive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel(dir, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("config.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("add symlink", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if err := cb.WriteFile(ctx, "config.yaml", "owned", 0o644); err == nil {
+		t.Fatal("write through symlink escaping the worktree was not blocked")
+	} else if !strings.Contains(err.Error(), "worktree") {
+		t.Fatalf("error: got = %v, wanted mentioning worktree escape", err)
+	}
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "sensitive" {
+		t.Errorf("outside file was modified through symlink escape: got = %q", got)
+	}
+}
+
+func TestReadFile_SymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outside, []byte("sensitive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel(dir, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("config.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("add symlink", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if _, err := cb.ReadFile(ctx, "config.yaml", 0, -1); err == nil {
+		t.Fatal("read through symlink escaping the worktree was not blocked")
+	} else if !strings.Contains(err.Error(), "worktree") {
+		t.Fatalf("error: got = %v, wanted mentioning worktree escape", err)
+	}
+}
+
+// TestWriteFile_SymlinkToGitAlias reproduces the second PSEC-2919 finding: a
+// committed alias such as "alias -> .git/config" passes writeRelPath's purely
+// lexical ".git component" check (it only inspects the requested name, not
+// what the name currently resolves to), so the subsequent root.WriteFile
+// followed the pre-existing symlink straight into git metadata.
+//
+//	SECURITY FINDING: Write Through Symlink Alias Into .git {
+//	  CWE: CWE-59
+//	  Description: writeRelPath rejects a request path that lexically
+//	    contains a ".git" component, but does not check whether the
+//	    requested path already exists as a symlink resolving into .git.
+//	    A committed alias symlink defeats the lexical check while the
+//	    write still lands on git metadata.
+//	  Risk: MEDIUM
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: WorktreeCallbacks(wt).WriteFile
+//	  Flow: git blob (symlink "alias" -> ".git/config") -> worktree
+//	    checkout -> lexical .git check on "alias" (passes) ->
+//	    root.WriteFile follows the symlink into .git/config.
+//	  Exploit: Commit a symlink named "alias" pointing at ".git/config",
+//	    then have the bot write to "alias"; the write lands on the
+//	    repository's git config instead.
+//	  Impact: Corruption of git metadata (or another tracked file) under
+//	    an attacker-chosen alias, defeating commit scoping.
+//	}
+func TestWriteFile_SymlinkToGitAlias(t *testing.T) {
+	wt, root := initWorktree(t)
+
+	original, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink(filepath.Join(".git", "config"), filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("alias"); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if err := cb.WriteFile(ctx, "alias", "owned", 0o644); err == nil {
+		t.Fatal("write through a symlink alias into .git was not blocked")
+	} else if !strings.Contains(err.Error(), ".git") {
+		t.Fatalf("error: got = %v, wanted mentioning .git", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Errorf(".git/config was modified through symlink alias: got = %q, wanted = %q", got, original)
+	}
+}
+
+// TestSafeConfigPath_SymlinkEscape reproduces the first PSEC-2919 finding: a
+// caller such as update-bot's reconciler resolves a monitored package path
+// with filepath.Join and hands it directly to a third-party config parser,
+// which opens the plain filesystem path itself rather than going through
+// WorktreeCallbacks' os.Root confinement. A committed symlink at that path
+// then redirects the read to a file outside the worktree.
+//
+//	SECURITY FINDING: Symlink-Based Worktree Escape in Update Bot Config Read {
+//	  CWE: CWE-22
+//	  Description: reconciler.go / analyzer.go / levelup/main.go built the
+//	    config path with filepath.Join(workingTree, res.Path) and passed it
+//	    straight to melange's config.ParseConfiguration without checking
+//	    whether the path resolves through a symlink.
+//	  Risk: HIGH
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: update-bot Reconciler.Reconcile / analyzer.analyzePath /
+//	    levelup's PR title callback.
+//	  Flow: git blob (symlink) -> worktree checkout -> filepath.Join ->
+//	    config.ParseConfiguration opens the resolved path directly.
+//	  Exploit: Commit a symlink at the monitored package path pointing (via
+//	    a relative "../" target) outside the worktree; the config parser
+//	    reads that outside file instead of the package file.
+//	  Impact: Disclosure of, or unintended processing based on, a file
+//	    outside the intended package scope.
+//	}
+func TestSafeConfigPath_SymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "secret.yaml")
+	if err := os.WriteFile(outside, []byte("sensitive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel(dir, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("config.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("add symlink", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SafeConfigPath(dir, "config.yaml"); err == nil {
+		t.Fatal("resolving a symlinked config path was not blocked")
+	}
+}
+
 func TestChmod(t *testing.T) {
 	wt, root := initWorktree(t)
 	cb := WorktreeCallbacks(wt)
@@ -903,22 +1147,24 @@ func TestSearchCodebaseMatchOffsets(t *testing.T) {
 	}
 }
 
-func TestValidatePath(t *testing.T) {
-	root := t.TempDir()
-
+func TestRelPath(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
+		want    string
 		wantErr string
 	}{{
 		name: "simple file",
 		path: "hello.txt",
+		want: "hello.txt",
 	}, {
 		name: "nested path",
 		path: "a/b/c.txt",
+		want: "a/b/c.txt",
 	}, {
 		name: "dot path",
 		path: ".",
+		want: ".",
 	}, {
 		name:    "parent escape",
 		path:    "../secret",
@@ -932,22 +1178,25 @@ func TestValidatePath(t *testing.T) {
 		path:    "a/b/../../../secret",
 		wantErr: "escapes worktree",
 	}, {
-		// validatePath is read-side confinement: it does not block .git (reads of
+		// relPath is read-side confinement: it does not block .git (reads of
 		// the worktree, including .git, are allowed). The .git write block lives in
-		// validateWritePath; see TestValidateWritePath.
+		// writeRelPath; see TestWriteRelPath.
 		name: "git dir allowed for reads",
 		path: ".git/HEAD",
+		want: ".git/HEAD",
 	}, {
 		name: "gitignore file allowed",
 		path: ".gitignore",
+		want: ".gitignore",
 	}, {
 		name: "github workflow allowed",
 		path: ".github/workflows/x.yml",
+		want: ".github/workflows/x.yml",
 	}}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fullPath, err := validatePath(root, tc.path)
+			got, err := relPath(tc.path)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("error: got = nil, wanted containing %q", tc.wantErr)
@@ -960,26 +1209,26 @@ func TestValidatePath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !strings.HasPrefix(fullPath, root) {
-				t.Errorf("path: got = %q, wanted prefix %q", fullPath, root)
+			if filepath.ToSlash(got) != tc.want {
+				t.Errorf("path: got = %q, wanted = %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// TestValidateWritePath covers the write-side confinement: a mutating callback
+// TestWriteRelPath covers the write-side confinement: a mutating callback
 // must refuse any path resolving into the repository's own .git directory, while
 // still allowing ordinary paths and files merely named like .gitignore/.github.
-func TestValidateWritePath(t *testing.T) {
-	root := t.TempDir()
-
+func TestWriteRelPath(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
+		want    string
 		wantErr string
 	}{{
 		name: "ordinary file",
 		path: "a/b/c.txt",
+		want: "a/b/c.txt",
 	}, {
 		name:    "git dir at root",
 		path:    ".git/HEAD",
@@ -999,14 +1248,16 @@ func TestValidateWritePath(t *testing.T) {
 	}, {
 		name: "gitignore file allowed",
 		path: ".gitignore",
+		want: ".gitignore",
 	}, {
 		name: "github workflow allowed",
 		path: ".github/workflows/x.yml",
+		want: ".github/workflows/x.yml",
 	}}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fullPath, err := validateWritePath(root, tc.path)
+			got, err := writeRelPath(tc.path)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("error: got = nil, wanted containing %q", tc.wantErr)
@@ -1019,63 +1270,61 @@ func TestValidateWritePath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !strings.HasPrefix(fullPath, root) {
-				t.Errorf("path: got = %q, wanted prefix %q", fullPath, root)
+			if filepath.ToSlash(got) != tc.want {
+				t.Errorf("path: got = %q, wanted = %q", got, tc.want)
 			}
 		})
 	}
 }
 
 func TestValidateSymlinkTarget(t *testing.T) {
-	root := t.TempDir()
-
 	tests := []struct {
-		name         string
-		linkFullPath string
-		target       string
-		wantErr      string
+		name    string
+		linkRel string
+		target  string
+		wantErr string
 	}{{
-		name:         "valid relative same dir",
-		linkFullPath: filepath.Join(root, "link.txt"),
-		target:       "hello.txt",
+		name:    "valid relative same dir",
+		linkRel: "link.txt",
+		target:  "hello.txt",
 	}, {
-		name:         "valid relative subdir",
-		linkFullPath: filepath.Join(root, "subdir", "link.txt"),
-		target:       "../hello.txt",
+		name:    "valid relative subdir",
+		linkRel: "subdir/link.txt",
+		target:  "../hello.txt",
 	}, {
-		name:         "absolute rejected",
-		linkFullPath: filepath.Join(root, "link.txt"),
-		target:       "/etc/passwd",
-		wantErr:      "absolute",
+		name:    "absolute rejected",
+		linkRel: "link.txt",
+		target:  "/etc/passwd",
+		wantErr: "absolute",
 	}, {
-		name:         "relative escape from root",
-		linkFullPath: filepath.Join(root, "link.txt"),
-		target:       "../../secret",
-		wantErr:      "outside worktree",
+		name:    "relative escape from root",
+		linkRel: "link.txt",
+		target:  "../../secret",
+		wantErr: "outside worktree",
 	}, {
-		name:         "relative escape from subdir",
-		linkFullPath: filepath.Join(root, "a", "link.txt"),
-		target:       "../../secret",
-		wantErr:      "outside worktree",
+		name:    "relative escape from subdir",
+		linkRel: "a/link.txt",
+		target:  "../../secret",
+		wantErr: "outside worktree",
 	}, {
-		name:         "target into git dir at root",
-		linkFullPath: filepath.Join(root, "link.txt"),
-		target:       ".git/hooks/pre-commit",
-		wantErr:      ".git directory",
+		name:    "target into git dir at root",
+		linkRel: "link.txt",
+		target:  ".git/hooks/pre-commit",
+		wantErr: ".git directory",
 	}, {
-		name:         "target into git dir via subdir",
-		linkFullPath: filepath.Join(root, "a", "link.txt"),
-		target:       "../.git/config",
-		wantErr:      ".git directory",
+		name:    "target into git dir via subdir",
+		linkRel: "a/link.txt",
+		target:  "../.git/config",
+		wantErr: ".git directory",
 	}, {
-		name:         "target to gitignore allowed",
-		linkFullPath: filepath.Join(root, "link.txt"),
-		target:       ".gitignore",
+		name:    "target to gitignore allowed",
+		linkRel: "link.txt",
+		target:  ".gitignore",
 	}}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateSymlinkTarget(root, tc.linkFullPath, tc.target)
+			err := validateSymlinkTarget(tc.linkRel, tc.target)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("error: got = nil, wanted containing %q", tc.wantErr)
@@ -1752,5 +2001,338 @@ func TestReadFileLineAlignedWalk(t *testing.T) {
 	}
 	if assembled.String() != linesFixture {
 		t.Errorf("reassembled: got = %q, want = %q", assembled.String(), linesFixture)
+	}
+}
+
+// TestWriteFile_SymlinkComponentToGit reproduces the reviewer's finding that
+// checkNotSymlinkToGit only Lstat'd the leaf of the requested path. Because
+// root.Lstat follows symlinks in every path component except the last one,
+// a committed intermediate symlink such as "pkg -> .git" made
+// root.Lstat("pkg/config") resolve straight through "pkg" and report on
+// ".git/config" (a regular file) instead — so the leaf-only check passed
+// even though the write still lands on git metadata.
+//
+//	SECURITY FINDING: Write Through Intermediate Symlink Component Into .git {
+//	  CWE: CWE-59
+//	  Description: checkNotSymlinkToGit called root.Lstat(rel) once on the
+//	    full requested path. Lstat resolves symlinks in every path
+//	    component except the final one, so when an intermediate directory
+//	    component (not the leaf) is a committed symlink into .git, the
+//	    single Lstat call silently follows it and inspects the resolved
+//	    target instead of catching the redirecting component.
+//	  Risk: HIGH
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: WorktreeCallbacks(wt).WriteFile
+//	  Flow: git blob (symlink "pkg" -> ".git") -> worktree checkout ->
+//	    leaf-only Lstat("pkg/config") follows "pkg" and reports on
+//	    ".git/config" -> root.WriteFile follows the same intermediate
+//	    symlink into .git.
+//	  Exploit: Commit a directory-entry symlink named "pkg" pointing at
+//	    ".git", then have the bot write to "pkg/config"; the write lands
+//	    on the repository's git config instead.
+//	  Impact: Corruption of git metadata (or another tracked file) via an
+//	    attacker-chosen intermediate path component, defeating commit
+//	    scoping.
+//	}
+func TestWriteFile_SymlinkComponentToGit(t *testing.T) {
+	wt, root := initWorktree(t)
+
+	original, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink(".git", filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("pkg"); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if err := cb.WriteFile(ctx, "pkg/config", "owned", 0o644); err == nil {
+		t.Fatal("write through an intermediate symlink component into .git was not blocked")
+	} else if !strings.Contains(err.Error(), ".git") {
+		t.Fatalf("error: got = %v, wanted mentioning .git", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Errorf(".git/config was modified through an intermediate symlink component: got = %q, wanted = %q", got, original)
+	}
+}
+
+// TestSafeConfigPath_SymlinkComponent reproduces the reviewer's finding that
+// SafeConfigPath only Lstat'd the leaf of the requested path, the same gap
+// as checkNotSymlinkToGit above: a committed intermediate symlink such as
+// "pkg -> .git" is silently followed by a single Lstat call on the full
+// path, so a config parser handed the resulting path would read another
+// tracked file (here .git/config) instead of the intended package config.
+//
+//	SECURITY FINDING: Config Read Through Intermediate Symlink Component {
+//	  CWE: CWE-22
+//	  Description: SafeConfigPath called root.Lstat(rel) once on the full
+//	    requested path. Lstat resolves symlinks in every path component
+//	    except the final one, so an intermediate directory component that
+//	    is itself a committed symlink defeats the leaf-only check.
+//	  Risk: HIGH
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: update-bot Reconciler.Reconcile / analyzer.analyzePath /
+//	    levelup's PR title callback, via SafeConfigPath.
+//	  Flow: git blob (symlink "pkg" -> ".git") -> worktree checkout ->
+//	    leaf-only Lstat("pkg/config.yaml") follows "pkg" and reports on a
+//	    regular file inside .git -> SafeConfigPath returns that path ->
+//	    config.ParseConfiguration reads .git metadata as if it were the
+//	    package config.
+//	  Exploit: Commit a directory-entry symlink named "pkg" pointing at
+//	    ".git", then have the bot resolve "pkg/config.yaml" as a monitored
+//	    package config path.
+//	  Impact: Disclosure of, or unintended processing based on, a tracked
+//	    file outside the intended package scope.
+//	}
+func TestSafeConfigPath_SymlinkComponent(t *testing.T) {
+	wt, root := initWorktree(t)
+
+	if err := os.Symlink(".git", filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("pkg"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SafeConfigPath(root, "pkg/config"); !errors.Is(err, ErrConfigSymlink) {
+		t.Fatalf("resolving through an intermediate symlink: got %v, want ErrConfigSymlink", err)
+	}
+}
+
+// TestReadFile_SymlinkToGit reproduces the reviewer's finding that ReadFile
+// opened the requested path through root.Open without first checking whether
+// the leaf itself is a committed symlink into .git. A contributor can commit
+// "config.yaml -> .git/config" (or any other tracked file); os.Root permits
+// a symlink whose resolved target stays inside the root, so the callback
+// happily returns the target's contents to the bot or agent, disclosing
+// repository metadata that was never meant to be read as this file.
+//
+//	SECURITY FINDING: Read Through Symlink Discloses Git Metadata {
+//	  CWE: CWE-22
+//	  Description: ReadFile validated only that the requested path stays
+//	    lexically within the worktree (via relPath) and is not a binary
+//	    extension, then called root.Open(rel) directly. os.Root confines
+//	    resolution to the root but still follows a symlink whose target
+//	    resolves inside it, so a committed symlink at the requested path
+//	    redirects the read to another tracked file such as .git/config.
+//	  Risk: MEDIUM
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: WorktreeCallbacks(wt).ReadFile
+//	  Flow: git blob (symlink "config.yaml" -> ".git/config") -> worktree
+//	    checkout -> ReadFile("config.yaml") opens the requested path via
+//	    root.Open, which follows the symlink -> contents of .git/config
+//	    returned to the caller as if it were the package config.
+//	  Exploit: Commit a symlink named "config.yaml" pointing at
+//	    ".git/config", then have the bot read "config.yaml".
+//	  Impact: Disclosure of repository metadata (or any other tracked
+//	    file) outside the intended package scope.
+//	}
+func TestReadFile_SymlinkToGit(t *testing.T) {
+	wt, root := initWorktree(t)
+
+	if err := os.Symlink(filepath.Join(".git", "config"), filepath.Join(root, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("config.yaml"); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if _, err := cb.ReadFile(ctx, "config.yaml", 0, -1); err == nil {
+		t.Fatal("reading a symlink into .git was not blocked")
+	} else if !strings.Contains(err.Error(), ".git") {
+		t.Fatalf("error: got = %v, wanted mentioning .git", err)
+	}
+}
+
+// TestWriteFile_SymlinkChainToGit reproduces the reviewer's finding that
+// checkNotSymlinkToGit validated only the direct, lexical target of a
+// symlink component, not the full chain. A committed chain such as
+// "pkg -> alias" and "alias -> .git" passes a direct-target-only check on
+// "pkg" (its immediate target "alias" resolves inside the worktree, not
+// into .git), yet root.WriteFile("pkg/config", ...) still follows the chain
+// one hop further, through "alias", into .git.
+//
+//	SECURITY FINDING: Write Through Symlink Chain Into .git {
+//	  CWE: CWE-59
+//	  Description: checkNotSymlinkToGit read a symlink component's target
+//	    and validated only that single hop with validateSymlinkTarget. It
+//	    never checked whether that target was itself a symlink resolving
+//	    further into .git, so a two-hop chain defeated the check.
+//	  Risk: MEDIUM
+//	  Confidence: 9
+//	  Attacker: Any contributor able to commit to a monitored repository.
+//	  Entry: WorktreeCallbacks(wt).WriteFile
+//	  Flow: git blobs (symlink "pkg" -> "alias", symlink "alias" -> ".git")
+//	    -> worktree checkout -> checkNotSymlinkToGit validates "pkg"'s
+//	    direct target "alias" as worktree-internal and stops -> root.
+//	    WriteFile("pkg/config", ...) follows "pkg" to "alias" to ".git".
+//	  Exploit: Commit "pkg -> alias" and "alias -> .git", then have the
+//	    bot write to "pkg/config"; the write lands on git metadata.
+//	  Impact: Corruption of git metadata (or another tracked file),
+//	    defeating commit scoping.
+//	}
+func TestWriteFile_SymlinkChainToGit(t *testing.T) {
+	wt, root := initWorktree(t)
+
+	original, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink(".git", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("alias", filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("alias"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("pkg"); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if err := cb.WriteFile(ctx, "pkg/config", "owned", 0o644); err == nil {
+		t.Fatal("write through a chained symlink into .git was not blocked")
+	} else if !strings.Contains(err.Error(), ".git") {
+		t.Fatalf("error: got = %v, wanted mentioning .git", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Errorf(".git/config was modified through a chained symlink: got = %q, wanted = %q", got, original)
+	}
+}
+
+// SECURITY FINDING: A symlink in a target path's parent can hide .git from a
+// leaf-only chain check. Both callback writes and newly created links must
+// reject this path before it can change repository metadata.
+func TestSymlinkTargetParentToGit(t *testing.T) {
+	for _, parent := range []string{"alias", "sub"} {
+		t.Run(parent, func(t *testing.T) {
+			wt, root := initWorktree(t)
+			original, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(".git", filepath.Join(root, parent)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(parent, "config"), filepath.Join(root, "pkg")); err != nil {
+				t.Fatal(err)
+			}
+
+			cb := WorktreeCallbacks(wt)
+			if err := cb.WriteFile(t.Context(), "pkg", "owned", 0o644); err == nil {
+				t.Fatal("write through symlink target parent was not rejected")
+			}
+			if err := cb.CreateSymlink(t.Context(), "other", filepath.Join(parent, "config")); err == nil {
+				t.Fatal("symlink targeting .git through another link was not rejected")
+			}
+			got, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(original) {
+				t.Fatal("git config changed through symlink chain")
+			}
+		})
+	}
+}
+
+// SECURITY FINDING: CopyFile must not read Git metadata through a committed
+// source symlink and publish it as a tracked file.
+func TestCopyFileRejectsSourceSymlinkToGit(t *testing.T) {
+	wt, root := initWorktree(t)
+	if err := os.Symlink(filepath.Join(".git", "config"), filepath.Join(root, "secret.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	cb := WorktreeCallbacks(wt)
+	if err := cb.CopyFile(t.Context(), "secret.yaml", "copied.yaml"); err == nil {
+		t.Fatal("copy from symlink into .git was not rejected")
+	}
+	if _, err := os.Stat(filepath.Join(root, "copied.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("copied file exists or stat failed: %v", err)
+	}
+}
+
+// A ".." after a symlink applies to the resolved target, not the symlink's
+// lexical name. Cleaning the path before checking it misses this .git alias.
+func TestSymlinkTargetDotDotToGit(t *testing.T) {
+	wt, root := initWorktree(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(".git", "hooks"), filepath.Join(root, "s")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("s/../config", filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootHandle.Close()
+	if _, err := rootHandle.ReadFile("pkg"); err != nil {
+		t.Fatalf("test fixture must resolve through os.Root: %v", err)
+	}
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	if _, err := cb.ReadFile(ctx, ".git/config", 0, -1); err != nil {
+		t.Fatalf("direct .git read must remain available: %v", err)
+	}
+	if _, err := cb.ReadFile(ctx, "pkg", 0, -1); err == nil {
+		t.Fatal("read through a symlink and .. into .git was not rejected")
+	}
+	if err := cb.WriteFile(ctx, "pkg", "owned", 0o644); err == nil {
+		t.Fatal("write through a symlink and .. into .git was not rejected")
+	}
+	if err := cb.CopyFile(ctx, "pkg", "copied.yaml"); err == nil {
+		t.Fatal("copy through a symlink and .. into .git was not rejected")
+	}
+	if err := cb.CreateSymlink(ctx, "other", "s/../config"); err == nil {
+		t.Fatal("new symlink targeting .git through .. was not rejected")
+	}
+	if err := cb.CopyFile(ctx, ".git/config", "copied.yaml"); err == nil {
+		t.Fatal("copy directly from .git was not rejected")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "other")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new symlink exists or stat failed: %v", err)
+	}
+}
+
+func TestSearchCodebaseRejectsSymlinkToGit(t *testing.T) {
+	wt, root := initWorktree(t)
+	if err := os.Symlink(".git", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	cb := WorktreeCallbacks(wt)
+	if _, err := cb.SearchCodebase(t.Context(), "alias", ".*", "", 0, 10); err == nil {
+		t.Fatal("search through a symlink into .git was not rejected")
 	}
 }
