@@ -89,23 +89,3 @@ func TestFindingCallbacksResolveReplyValidateIdentifier(t *testing.T) {
 		})
 	}
 }
-
-// TestFindingCallbacksGetLogsReviewFinding checks that a review finding's
-// logs are its Details, even when a check provider would match its URL.
-func TestFindingCallbacksGetLogsReviewFinding(t *testing.T) {
-	const threadURL = "https://github.com/o/r/pull/1#discussion_r1"
-	s := &Session[testData]{
-		manager: &CM[testData]{checkProviders: []CheckProvider{&fakeProvider{prefix: "https://github.com/"}}},
-		findings: []callbacks.Finding{
-			{Kind: callbacks.FindingKindReview, Identifier: "PRRT_1", Details: "the thread", DetailsURL: threadURL},
-		},
-	}
-
-	got, err := s.FindingCallbacks().GetLogs(t.Context(), callbacks.FindingKindReview, "PRRT_1")
-	if err != nil {
-		t.Fatalf("GetLogs: %v", err)
-	}
-	if got != "the thread" {
-		t.Errorf("GetLogs: got = %q, want = %q", got, "the thread")
-	}
-}

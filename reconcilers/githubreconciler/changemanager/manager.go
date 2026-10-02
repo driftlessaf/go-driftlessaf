@@ -268,9 +268,6 @@ type CM[T any] struct {
 	// trustedReviewAuthors are GitHub login names trusted regardless of
 	// author association; see WithTrustedReviewAuthors.
 	trustedReviewAuthors map[string]struct{}
-	// checkProviders handle CI check findings, the first match winning; see
-	// WithCheckProviders.
-	checkProviders []CheckProvider
 }
 
 // GraphQL types for querying check runs
@@ -491,8 +488,6 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 	if cm.excludeMergeCommitsFromBudget && cm.dynamicCommitBudget {
 		return nil, errors.New("WithMergeCommitsExcludedFromBudget cannot be combined with WithDynamicCommitBudget")
 	}
-	// After the options, so configured providers are tried first.
-	cm.checkProviders = append(cm.checkProviders, githubActions{})
 
 	return cm, nil
 }
