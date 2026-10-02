@@ -77,12 +77,17 @@ func WithRoutedModel[Request promptbuilder.Bindable, Response any](providerModel
 // This is a wider range than Claude (0.0-1.0) allowing for more creative outputs
 // Lower values (e.g., 0.1) produce more deterministic outputs
 // Higher values (e.g., 1.5-2.0) produce very creative/random outputs
+//
+// Without this option, the executor sends a temperature of 0.1 to Gemini 2.x
+// models and omits it for Gemini 3 models, which are tuned for the provider
+// default. Low values can cause Gemini 3 models to loop.
 func WithTemperature[Request promptbuilder.Bindable, Response any](temperature float32) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if temperature < 0.0 || temperature > 2.0 {
 			return fmt.Errorf("temperature must be between 0.0 and 2.0, got %f", temperature)
 		}
 		e.temperature = temperature
+		e.temperatureSet = true
 		e.omitTemperature = false
 		return nil
 	}
@@ -91,7 +96,8 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temperature f
 // WithoutTemperature omits the sampling temperature from provider requests.
 // Explicit routes use this when their effective capabilities narrow sampling
 // parameters out, even if the logical model family normally supports them.
-// Direct and legacy construction continue to send the executor default.
+// Without either option, direct and legacy construction send the executor
+// default described on WithTemperature.
 func WithoutTemperature[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		e.omitTemperature = true

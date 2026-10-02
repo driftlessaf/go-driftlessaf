@@ -104,7 +104,6 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 		// stable rubric in the system instruction preserves the prompt boundary
 		// while allowing Gemini's implicit prefix caching where eligible.
 		googleexecutor.WithoutCacheControl[*Request, *Judgement](),
-		googleexecutor.WithTemperature[*Request, *Judgement](0.1),
 		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
 		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
 		googleexecutor.WithResponseSchema[*Request, *Judgement](responseSchema),

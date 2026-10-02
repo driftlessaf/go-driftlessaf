@@ -20,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/effort"
+	agentmodel "chainguard.dev/driftlessaf/agents/model"
+
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
@@ -67,14 +70,14 @@ func detectProjectID(ctx context.Context, t *testing.T) string {
 
 // getTestModel returns the model to use for tests.
 // Falls back to environment variable VERTEX_AI_TEST_MODEL if set,
-// otherwise defaults to gemini-2.5-flash.
+// otherwise defaults to gemini-3.8-flash.
 // This allows CI to use a model with higher quota (e.g., gemini-1.5-flash)
 // while quota increase requests are being processed.
 func getTestModel() string {
 	if model := os.Getenv("VERTEX_AI_TEST_MODEL"); model != "" {
 		return model
 	}
-	return "gemini-2.5-flash"
+	return "gemini-3.8-flash"
 }
 
 func TestExecutorWithThinking(t *testing.T) {
@@ -111,13 +114,20 @@ Please solve this problem and provide your answer in JSON format:
 	model := getTestModel()
 	t.Logf("Using model: %s", model)
 
+	// Gemini 3.x takes a discrete thinking level, so enable thinking through
+	// WithEffort there; Gemini 2.x keeps the raw token budget.
+	thinking := googleexecutor.WithThinking[*simpleRequest, *simpleResponse](2048)
+	if agentmodel.Resolve(model).ThinkingControl == agentmodel.ThinkingControlLevel {
+		thinking = googleexecutor.WithEffort[*simpleRequest, *simpleResponse](effort.Medium)
+	}
+
 	// Create executor with thinking enabled and retry for rate limit handling
 	exec, err := googleexecutor.New[*simpleRequest, *simpleResponse](
 		client,
 		prompt,
 		googleexecutor.WithModel[*simpleRequest, *simpleResponse](model),
 		googleexecutor.WithMaxOutputTokens[*simpleRequest, *simpleResponse](8192),
-		googleexecutor.WithThinking[*simpleRequest, *simpleResponse](2048), // Enable thinking with modest budget
+		thinking,
 		googleexecutor.WithResponseMIMEType[*simpleRequest, *simpleResponse]("application/json"),
 		googleexecutor.WithRetryConfig[*simpleRequest, *simpleResponse](retry.RetryConfig{
 			MaxRetries:  3,

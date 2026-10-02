@@ -76,7 +76,7 @@ func NewOpenAICompatible[Req promptbuilder.Bindable, Resp, CB any](
 }
 
 // newOpenAICompatAgent creates an agent using Vertex AI's OpenAI-compatible endpoint.
-// Model names use publisher/model format (e.g. "google/gemini-2.5-pro").
+// Model names use publisher/model format (e.g. "google/gemini-3.1-pro-preview").
 func newOpenAICompatAgent[Req promptbuilder.Bindable, Resp, CB any](
 	ctx context.Context,
 	projectID, region, model string,

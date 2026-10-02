@@ -43,8 +43,8 @@ type config struct {
 	EnableAutofix  bool   `env:"ENABLE_AUTOFIX,default=false"`
 	AutofixLabel   string `env:"AUTOFIX_LABEL,default=driftlessaf/autofix"`
 	GCPProjectID   string `env:"GCP_PROJECT_ID"`
-	GCPRegion      string `env:"GCP_REGION,default=us-central1"`
-	Model          string `env:"AGENT_MODEL,default=gemini-2.5-flash"`
+	GCPRegion      string `env:"GCP_REGION,default=global"`
+	Model          string `env:"AGENT_MODEL,default=gemini-3.8-flash"`
 	MaxFixAttempts int    `env:"MAX_FIX_ATTEMPTS,default=2"`
 
 	// Ask-a-friend (suspend/resume) demo configuration. Opt-in and off by

@@ -29,7 +29,7 @@ are parameterized, allowing different agents to reuse the same core logic:
 	executor, err := googleexecutor.New[*MyRequest, *MyResponse](
 	    client,
 	    promptTemplate,
-	    googleexecutor.WithModel[*MyRequest, *MyResponse]("gemini-2.5-flash"),
+	    googleexecutor.WithModel[*MyRequest, *MyResponse]("gemini-3.8-flash"),
 	)
 
 # Tool Support
@@ -71,7 +71,9 @@ The executor supports various configuration options:
 # Thinking Mode
 
 Thinking mode allows Gemini to show its internal reasoning process. When enabled,
-thought blocks are captured in the trace:
+thought blocks are captured in the trace. WithThinking sets a raw token budget,
+which Gemini 2.x models take; Gemini 3.x models, including the default, take a
+discrete thinking level, so use WithEffort with them:
 
 	executor, err := googleexecutor.New[*Request, *Response](
 	    client,
@@ -127,8 +129,7 @@ The executor provides comprehensive error handling:
 	executor, err := googleexecutor.New[*Request, *Response](
 	    client,
 	    tmpl,
-	    googleexecutor.WithModel[*Request, *Response]("gemini-2.5-flash"),
-	    googleexecutor.WithTemperature[*Request, *Response](0.1),
+	    googleexecutor.WithModel[*Request, *Response]("gemini-3.8-flash"),
 	    googleexecutor.WithResponseMIMEType[*Request, *Response]("application/json"),
 	)
 

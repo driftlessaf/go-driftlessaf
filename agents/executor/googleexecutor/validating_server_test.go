@@ -124,7 +124,7 @@ func genPairingViolations(body []byte) []string {
 // returns. expireTime is fixed far in the future so getOrCreateCache treats it
 // as valid; the name is what resume-side context-cache re-creation (PR 8)
 // asserts against. usageMetadata.totalTokenCount drives the cache-write metric.
-const cachedContentReply = `{"name":"cachedContents/test-cache","model":"models/gemini-2.5-flash","expireTime":"2099-01-01T00:00:00Z","usageMetadata":{"totalTokenCount":5}}`
+const cachedContentReply = `{"name":"cachedContents/test-cache","model":"models/gemini-3.8-flash","expireTime":"2099-01-01T00:00:00Z","usageMetadata":{"totalTokenCount":5}}`
 
 // newValidatingGenerateContentServer returns an httptest server that stands in
 // for the Gemini generateContent API. For each generateContent request it
@@ -285,7 +285,7 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 	wantTurns := []agenttrace.RecordedTurn{
 		{
 			Index:               0,
-			Model:               "gemini-2.5-flash",
+			Model:               "gemini-3.8-flash",
 			Provider:            "gcp.vertex_ai",
 			System:              agenttrace.SystemGoogleVertex,
 			CacheTTLSeconds:     &ttl,
@@ -295,7 +295,7 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 		},
 		{
 			Index:           1,
-			Model:           "gemini-2.5-flash",
+			Model:           "gemini-3.8-flash",
 			Provider:        "gcp.vertex_ai",
 			System:          agenttrace.SystemGoogleVertex,
 			CacheTTLSeconds: &ttl,

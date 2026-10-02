@@ -69,6 +69,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	model              string
 	capabilityModel    string
 	temperature        float32
+	temperatureSet     bool // WithTemperature was applied
 	omitTemperature    bool
 	maxOutputTokens    int32
 	maxTurns           int // maximum conversation turns before aborting
@@ -149,9 +150,9 @@ func New[Request promptbuilder.Bindable, Response any](
 	exec := &executor[Request, Response]{
 		client:              client,
 		prompt:              prompt,
-		model:               "gemini-2.5-flash",         // Default to Gemini 2.5 Flash
-		capabilityModel:     "gemini-2.5-flash",         // Same identity on the legacy path
-		temperature:         0.1,                        // Default temperature for consistency
+		model:               "gemini-3.8-flash",         // Default to Gemini 3.8 Flash
+		capabilityModel:     "gemini-3.8-flash",         // Same identity on the legacy path
+		temperature:         0.1,                        // Default for Gemini 2.x only; see generationConfig
 		maxOutputTokens:     8192,                       // Default max tokens
 		maxTurns:            DefaultMaxTurns,            // Default max conversation turns
 		retryConfig:         retry.DefaultRetryConfig(), // Default retry config for rate limit handling
@@ -919,7 +920,11 @@ func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentC
 		MaxOutputTokens: e.maxOutputTokens,
 		Labels:          e.resourceLabels,
 	}
-	if !e.omitTemperature {
+	// Gemini 3 models are tuned for the provider's default temperature, and
+	// low values can cause looping or degraded output, so the 0.1 executor
+	// default applies only to Gemini 2.x. An explicit WithTemperature is sent
+	// for any model.
+	if !e.omitTemperature && (e.temperatureSet || !usesThinkingLevel(e.capabilityModel)) {
 		config.Temperature = new(e.temperature)
 	}
 	return config

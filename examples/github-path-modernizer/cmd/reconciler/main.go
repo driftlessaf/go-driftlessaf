@@ -8,11 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -28,8 +26,8 @@ import (
 
 type config struct {
 	// Model configuration
-	Model       string `env:"MODEL,default=gemini-2.5-flash"`
-	ModelRegion string `env:"MODEL_REGION"` // Defaults to detected GCP region
+	Model       string `env:"MODEL,default=gemini-3.8-flash"`
+	ModelRegion string `env:"MODEL_REGION,default=global"` // Gemini 3.x serves only on the global endpoint
 }
 
 // New constructs the path modernizer reconciler.
@@ -38,12 +36,6 @@ func New(ctx context.Context, identity string, cc *githubreconciler.ClientCache,
 	if err != nil {
 		return nil, fmt.Errorf("detect project ID: %w", err)
 	}
-
-	zone, err := metadata.ZoneWithContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get zone from metadata: %w", err)
-	}
-	modelRegion := cmp.Or(cfg.ModelRegion, zone[:strings.LastIndex(zone, "-")])
 
 	signer, err := gitsign.NewSigner(ctx)
 	if err != nil {
@@ -58,8 +50,8 @@ func New(ctx context.Context, identity string, cc *githubreconciler.ClientCache,
 		),
 	)
 
-	clog.InfoContext(ctx, "Initializing modernizer agent", "model", cfg.Model, "region", modelRegion)
-	agent, err := newAgent(ctx, projectID, modelRegion, cfg.Model, tools)
+	clog.InfoContext(ctx, "Initializing modernizer agent", "model", cfg.Model, "region", cfg.ModelRegion)
+	agent, err := newAgent(ctx, projectID, cfg.ModelRegion, cfg.Model, tools)
 	if err != nil {
 		return nil, fmt.Errorf("create modernizer agent: %w", err)
 	}

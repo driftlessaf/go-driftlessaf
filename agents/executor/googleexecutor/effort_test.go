@@ -45,8 +45,9 @@ func TestWithEffortValidation(t *testing.T) {
 			name: "budget tier exceeds max_output_tokens",
 			opts: []Option[*testBindable, *testResponse]{
 				// The default max_output_tokens is 8192; xhigh maps to 24576 on
-				// the default gemini-2.5-flash model, which must be rejected.
+				// a budget-controlled gemini-2.5 model, which must be rejected.
 				WithEffort[*testBindable, *testResponse](effort.XHigh),
+				WithModel[*testBindable, *testResponse]("gemini-2.5-flash"),
 			},
 			wantErr: true,
 		},
@@ -54,6 +55,7 @@ func TestWithEffortValidation(t *testing.T) {
 			name: "budget tier fits raised max_output_tokens",
 			opts: []Option[*testBindable, *testResponse]{
 				WithEffort[*testBindable, *testResponse](effort.XHigh),
+				WithModel[*testBindable, *testResponse]("gemini-2.5-flash"),
 				WithMaxOutputTokens[*testBindable, *testResponse](65536),
 			},
 		},

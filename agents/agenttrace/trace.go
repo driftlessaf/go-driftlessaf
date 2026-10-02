@@ -250,7 +250,7 @@ type Trace[T any] struct {
 	Source string `json:"source,omitempty"`
 
 	// Model identifies the LLM the executor drove this trace against
-	// (e.g. "claude-sonnet-4-6", "gemini-2.5-pro"). Populated lazily by
+	// (e.g. "claude-sonnet-4-6", "gemini-3.1-pro-preview"). Populated lazily by
 	// BeginTurn from the first turn's model — assumes a single-model
 	// trace, which matches every executor in the codebase. Per-turn
 	// model lives on Turns[i].Model so multi-model traces can still be

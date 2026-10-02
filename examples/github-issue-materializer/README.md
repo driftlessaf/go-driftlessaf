@@ -62,8 +62,8 @@ The service is configured via environment variables:
 | `OCTO_IDENTITY` | OctoSTS identity for GitHub authentication | (required) |
 | `METRICS_PORT` | Prometheus metrics port | `2112` |
 | `ENABLE_PPROF` | Enable pprof endpoints | `false` |
-| `MATERIALIZER_MODEL` | AI model to use | `gemini-2.5-flash` |
-| `MATERIALIZER_REGION` | GCP region for the model | `us-central1` |
+| `MATERIALIZER_MODEL` | AI model to use | `gemini-3.8-flash` |
+| `MATERIALIZER_REGION` | GCP region for the model | `global` |
 
 ## Integration
 

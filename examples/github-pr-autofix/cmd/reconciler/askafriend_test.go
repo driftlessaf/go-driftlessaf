@@ -368,7 +368,7 @@ func TestAskAFriendResumeFailureSurfacesForRetry(t *testing.T) {
 // reconcile.
 func TestAskAFriendRequiresClaudeModel(t *testing.T) {
 	cfg := &config{
-		Model:                  "gemini-2.5-flash",
+		Model:                  "gemini-3.8-flash",
 		AskAFriendWakeInterval: time.Second,
 		AskAFriendSnapshotPath: filepath.Join(t.TempDir(), "checkpoints.jsonl"),
 	}

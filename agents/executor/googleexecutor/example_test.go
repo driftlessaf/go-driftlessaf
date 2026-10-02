@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"chainguard.dev/driftlessaf/agents/effort"
+
 	"github.com/chainguard-dev/clog"
 
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
@@ -45,7 +47,7 @@ func Example() {
 	// Create Gemini client
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  "my-project",
-		Location: "us-central1",
+		Location: "global",
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
@@ -91,7 +93,7 @@ func Example_withOptions() {
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  "my-project",
-		Location: "us-central1",
+		Location: "global",
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
@@ -107,7 +109,7 @@ func Example_withOptions() {
 	executor, err := googleexecutor.New[*MathRequest, *MathResponse](
 		client,
 		prompt,
-		googleexecutor.WithModel[*MathRequest, *MathResponse]("gemini-2.5-flash"),
+		googleexecutor.WithModel[*MathRequest, *MathResponse]("gemini-3.8-flash"),
 		googleexecutor.WithTemperature[*MathRequest, *MathResponse](0.1),
 		googleexecutor.WithMaxOutputTokens[*MathRequest, *MathResponse](4096),
 		googleexecutor.WithResponseMIMEType[*MathRequest, *MathResponse]("application/json"),
@@ -131,7 +133,7 @@ func Example_withThinking() {
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  "my-project",
-		Location: "us-central1",
+		Location: "global",
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
@@ -143,13 +145,14 @@ func Example_withThinking() {
 		clog.FatalContextf(ctx, "Failed to create prompt: %v", err)
 	}
 
-	// Enable thinking mode with a 2048 token budget
+	// Enable thinking mode. Gemini 3.x takes a discrete thinking level, which
+	// WithEffort selects; use WithThinking for a Gemini 2.x token budget.
 	executor, err := googleexecutor.New[*MathRequest, *MathResponse](
 		client,
 		prompt,
-		googleexecutor.WithModel[*MathRequest, *MathResponse]("gemini-2.5-flash"),
+		googleexecutor.WithModel[*MathRequest, *MathResponse]("gemini-3.8-flash"),
 		googleexecutor.WithMaxOutputTokens[*MathRequest, *MathResponse](8192),
-		googleexecutor.WithThinking[*MathRequest, *MathResponse](2048),
+		googleexecutor.WithEffort[*MathRequest, *MathResponse](effort.Medium),
 		googleexecutor.WithResponseMIMEType[*MathRequest, *MathResponse]("application/json"),
 	)
 	if err != nil {
@@ -171,7 +174,7 @@ func Example_withSystemInstructions() {
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  "my-project",
-		Location: "us-central1",
+		Location: "global",
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {

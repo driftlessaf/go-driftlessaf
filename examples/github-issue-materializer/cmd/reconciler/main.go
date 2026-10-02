@@ -8,11 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -28,8 +26,8 @@ import (
 
 type config struct {
 	// Materializer model configuration
-	MaterializerModel  string `env:"MATERIALIZER_MODEL,default=gemini-2.5-flash"`
-	MaterializerRegion string `env:"MATERIALIZER_REGION"` // Defaults to detected GCP region
+	MaterializerModel  string `env:"MATERIALIZER_MODEL,default=gemini-3.8-flash"`
+	MaterializerRegion string `env:"MATERIALIZER_REGION,default=global"` // Gemini 3.x serves only on the global endpoint
 }
 
 // New constructs the issue materializer reconciler.
@@ -38,12 +36,6 @@ func New(ctx context.Context, identity string, cc *githubreconciler.ClientCache,
 	if err != nil {
 		return nil, fmt.Errorf("detect project ID: %w", err)
 	}
-
-	zone, err := metadata.ZoneWithContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get zone from metadata: %w", err)
-	}
-	materializerRegion := cmp.Or(cfg.MaterializerRegion, zone[:strings.LastIndex(zone, "-")])
 
 	signer, err := gitsign.NewSigner(ctx)
 	if err != nil {
@@ -58,8 +50,8 @@ func New(ctx context.Context, identity string, cc *githubreconciler.ClientCache,
 		),
 	)
 
-	clog.InfoContext(ctx, "Initializing materializer agent", "model", cfg.MaterializerModel, "region", materializerRegion)
-	mat, err := newAgent(ctx, projectID, materializerRegion, cfg.MaterializerModel, tools)
+	clog.InfoContext(ctx, "Initializing materializer agent", "model", cfg.MaterializerModel, "region", cfg.MaterializerRegion)
+	mat, err := newAgent(ctx, projectID, cfg.MaterializerRegion, cfg.MaterializerModel, tools)
 	if err != nil {
 		return nil, fmt.Errorf("create materializer: %w", err)
 	}

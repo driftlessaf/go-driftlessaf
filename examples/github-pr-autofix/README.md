@@ -9,7 +9,7 @@ with AI-powered auto-fixing using the metaagent framework.
   is set to `true` and validation fails, an AI agent running on Vertex AI
   automatically fixes the PR title and/or description.
 - Supports both **Gemini** and **Claude** models, selected via the `AGENT_MODEL` env var,
-  which defaults to `gemini-2.5-flash`.
+  which defaults to `gemini-3.8-flash`.
 - Updates the PR title to conventional commit format.
 - Generates a meaningful description from PR context, including the list of validation
   issues and the list of changed files.
@@ -29,8 +29,8 @@ integration, and error handling.
 | `ENABLE_AUTOFIX` | `false` | Master switch — when false, behaves identically to the validator |
 | `AUTOFIX_LABEL` | `driftlessaf/autofix` | PR label that gates agent execution |
 | `GCP_PROJECT_ID` | — | Vertex AI project. Required when `ENABLE_AUTOFIX=true`. |
-| `GCP_REGION` | `us-central1` | Vertex AI region |
-| `AGENT_MODEL` | `gemini-2.5-flash` | Model identifier passed to Vertex AI |
+| `GCP_REGION` | `global` | Vertex AI region |
+| `AGENT_MODEL` | `gemini-3.8-flash` | Model identifier passed to Vertex AI |
 | `MAX_FIX_ATTEMPTS` | `2` | Max agent invocations per PR generation, where a generation is the hash of SHA, title, and body |
 
 **Switching to Claude Sonnet:**
