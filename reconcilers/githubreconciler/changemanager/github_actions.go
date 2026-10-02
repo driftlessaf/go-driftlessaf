@@ -94,52 +94,51 @@ func cleanLogs(logs string) string {
 	return logs
 }
 
-// rerunCICheck reruns a failed check run. Actions check runs (details URL points
-// at a job) are rerun job-by-job; others (e.g. a reconciler's status check) are
-// re-requested by check run ID, as the GitHub UI "Re-run" button does.
-func rerunCICheck(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) error {
-	// GitHub Actions: rerun just the failed job parsed from the details URL.
-	if matches := actionsURLRegex.FindStringSubmatch(f.DetailsURL); len(matches) >= 3 {
-		jobID, err := strconv.ParseInt(matches[2], 10, 64)
-		if err != nil {
-			return fmt.Errorf("parse job ID from URL %q: %w", f.DetailsURL, err)
-		}
-		if _, err := gh.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
-			return fmt.Errorf("rerun job %d: %w", jobID, err)
-		}
-		return nil
-	}
+// githubActions is the built-in provider for check runs of GitHub Actions
+// jobs, whose details URL names the job: logs come from the job's log
+// archive, and a rerun reruns just that job.
+type githubActions struct{}
 
-	// Other check runs: re-request by check run ID (the finding's Identifier).
-	checkRunID, err := strconv.ParseInt(f.Identifier, 10, 64)
+var _ CheckProvider = (*githubActions)(nil)
+
+// Match implements CheckProvider.
+func (githubActions) Match(f callbacks.Finding) bool {
+	return actionsURLRegex.MatchString(f.DetailsURL)
+}
+
+// Logs implements CheckProvider.
+func (githubActions) Logs(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) (string, error) {
+	jobID, err := actionsJobID(f)
 	if err != nil {
-		return fmt.Errorf("parse check run ID from identifier %q: %w", f.Identifier, err)
+		return "", err
 	}
-	if _, err := gh.Checks.ReRequestCheckRun(ctx, owner, repo, checkRunID); err != nil {
-		return fmt.Errorf("re-request check run %d: %w", checkRunID, err)
+	if jobID == 0 {
+		return f.Details, nil
+	}
+	return getGitHubActionsLogs(ctx, gh, owner, repo, jobID)
+}
+
+// Rerun implements CheckProvider.
+func (githubActions) Rerun(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) error {
+	jobID, err := actionsJobID(f)
+	if err != nil {
+		return err
+	}
+	if _, err := gh.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
+		return fmt.Errorf("rerun job %d: %w", jobID, err)
 	}
 	return nil
 }
 
-// fetchFindingLogs fetches logs for a finding based on its details URL.
-// Supports GitHub Actions logs and GCP console log URLs. For unrecognized
-// URL formats, returns the finding's Details as a fallback.
-func fetchFindingLogs(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) (string, error) {
-	if f.DetailsURL == "" {
-		return f.Details, nil
+// actionsJobID parses the job ID from an Actions finding's details URL.
+func actionsJobID(f callbacks.Finding) (int64, error) {
+	matches := actionsURLRegex.FindStringSubmatch(f.DetailsURL)
+	if len(matches) < 3 {
+		return 0, fmt.Errorf("details URL %q names no GitHub Actions job", f.DetailsURL)
 	}
-
-	// Check if it's a GitHub Actions URL
-	if matches := actionsURLRegex.FindStringSubmatch(f.DetailsURL); len(matches) > 2 {
-		jobID, err := strconv.ParseInt(matches[2], 10, 64)
-		if err != nil {
-			return "", fmt.Errorf("parse job ID from URL %q: %w", f.DetailsURL, err)
-		}
-		if jobID != 0 {
-			return getGitHubActionsLogs(ctx, gh, owner, repo, jobID)
-		}
+	jobID, err := strconv.ParseInt(matches[2], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse job ID from URL %q: %w", f.DetailsURL, err)
 	}
-
-	// For unrecognized URL formats, return Details as a fallback.
-	return f.Details, nil
+	return jobID, nil
 }
