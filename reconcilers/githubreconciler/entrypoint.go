@@ -24,7 +24,7 @@ import (
 	"github.com/chainguard-dev/terraform-infra-common/pkg/profiler"
 	"github.com/google/go-github/v88/github"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
-	"github.com/sethvargo/go-envconfig"
+	goenvconfig "github.com/sethvargo/go-envconfig"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
@@ -215,7 +215,7 @@ func AppMain[T any](ctx context.Context, f Functor[T], opts ...MainOption) error
 		AppID  int64  `env:"GITHUB_APP_ID,required"`
 		AppKey string `env:"GITHUB_APP_KEY,required"`
 	}
-	if err := envconfig.Process(ctx, &appEnv); err != nil {
+	if err := goenvconfig.Process(ctx, &appEnv); err != nil {
 		return fmt.Errorf("process GitHub App environment config: %w", err)
 	}
 
@@ -314,7 +314,7 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 		MetricsPort  int    `env:"METRICS_PORT,default=2112"`
 		EnablePprof  bool   `env:"ENABLE_PPROF,default=false"`
 	}{}
-	if err := envconfig.Process(ctx, env); err != nil {
+	if err := goenvconfig.Process(ctx, env); err != nil {
 		return fmt.Errorf("process environment config: %w", err)
 	}
 
@@ -362,9 +362,43 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 
 	d.RegisterListenAndServeMetrics(env.MetricsPort, env.EnablePprof)
 
+	// ListenAndServe does not watch ctx, so the signal is bridged here: on
+	// SIGTERM (or any other ctx cancellation) the server is shut down with a
+	// bounded deadline, shorter than Cloud Run's grace period, so the process
+	// exits cleanly instead of being SIGKILLed once that grace period elapses.
+	// ListenAndServe runs in its own goroutine so Main can wait on whichever
+	// of ctx.Done() or the serve error arrives first; if ctx wins, d.Shutdown
+	// drains in-flight requests before Main waits for ListenAndServe to
+	// actually return, rather than racing ahead the moment it reports
+	// http.ErrServerClosed, which happens as soon as shutdown starts.
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- d.ListenAndServe(ctx)
+	}()
+
 	clog.InfoContext(ctx, "Starting reconciler", "port", env.Port)
-	return d.ListenAndServe(ctx)
+
+	var serveErr error
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
+		defer cancel()
+		if err := d.Shutdown(shutdownCtx); err != nil {
+			clog.WarnContext(ctx, "reconciler server shutdown did not finish cleanly", "error", err)
+		}
+		serveErr = <-serveErrCh
+	case serveErr = <-serveErrCh:
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
+	}
+	return nil
 }
+
+// shutdownGrace bounds how long Main waits for the duplex server to shut
+// down once ctx is cancelled, so it stays well inside Cloud Run's SIGTERM to
+// SIGKILL grace period.
+const shutdownGrace = 8 * time.Second
 
 // CLIMain runs a reconciler locally in a loop. Each key is reconciled in its
 // own goroutine with a 1m delay between iterations. The function blocks until
