@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -29,6 +30,13 @@ var errIssueInactive = errors.New("issue is no longer eligible for publication")
 
 // reconcileIssue processes an issue URL and runs the agent to create/update a PR.
 func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
+	return r.reconcileIssueOnce(ctx, res, gh, false)
+}
+
+// reconcileIssueOnce is one pass of reconcileIssue. rechecked reports that an
+// earlier pass found the PR's mergeability unknown and waited for GitHub to
+// compute it, so this pass does not wait again.
+func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, rechecked bool) error {
 	log := clog.FromContext(ctx)
 
 	// Fetch the issue
@@ -48,6 +56,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 	creator := issue.GetUser().GetLogin()
 
 	state := changeSession.State()
+	if rechecked {
+		log.With("settled", !state.IsUnknown(), "after", r.mergeabilityRecheck.String()).Info("Read PR mergeability again")
+	}
 
 	// A human has taken over: honor the skip contract and leave the PR and the
 	// issue completely untouched, labels included.
@@ -75,6 +86,20 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssue(ctx context.Context, res *git
 		if _, err := gh.Issues.RemoveLabelForIssue(ctx, res.Owner, res.Repo, res.Number, r.draftLabel); err != nil {
 			log.With("error", err).Warn("Failed to remove draft label from issue after PR was promoted out of draft")
 		}
+	}
+
+	// Only the unknown-mergeability case below waits on mergeability, so wait
+	// only when no earlier case would decide the reconcile. The next pass reads
+	// the issue again too, since it can change while this one waits.
+	if !rechecked && r.mergeabilityRecheck > 0 && state.IsUnknown() && issue.GetState() != "closed" &&
+		(r.requiredLabel == "" || hasLabel(issue, r.requiredLabel)) &&
+		!state.HitMaxCommits() && !state.HasFindings() && !state.HasPendingChecks() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(r.mergeabilityRecheck):
+		}
+		return r.reconcileIssueOnce(ctx, res, gh, true)
 	}
 
 	var usePRBranch bool

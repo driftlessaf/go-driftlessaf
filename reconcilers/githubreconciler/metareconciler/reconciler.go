@@ -66,6 +66,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// WithRequeueOnUnknownMergeability.
 	unknownMergeabilityRequeueAfter time.Duration
 
+	// mergeabilityRecheck, when positive, is how long a reconcile waits to read
+	// the PR again when its mergeability is unknown and nothing else needs
+	// acting on, before falling back to the requeue. Zero (the default) skips
+	// the second read. See WithMergeabilityRecheck.
+	mergeabilityRecheck time.Duration
+
 	// giveUp, when set, surfaces an agent's deliberate no-op explanation on the
 	// PR as a single marker comment. Nil is a safe no-op receiver. See
 	// WithGiveUpComment.
@@ -247,6 +253,20 @@ const defaultUnknownMergeabilityRequeueAfter = 30 * time.Second
 func WithRequeueOnUnknownMergeability[Req promptbuilder.Bindable, Resp Result, CB any](after time.Duration) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.unknownMergeabilityRequeueAfter = after
+	}
+}
+
+// WithMergeabilityRecheck makes a reconcile that finds the PR's mergeability
+// unknown, with nothing else to act on, wait the given delay and read the PR
+// once more before the unknown-mergeability handling configured by
+// WithRequeueOnUnknownMergeability. GitHub starts computing mergeability when it is
+// read and resets it whenever the base branch moves. On a busy repository the
+// base can move between a read and the requeued reconcile, so every reconcile
+// sees it unknown; the second read sees the computation the first one started.
+// Off by default.
+func WithMergeabilityRecheck[Req promptbuilder.Bindable, Resp Result, CB any](after time.Duration) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.mergeabilityRecheck = after
 	}
 }
 
