@@ -17,6 +17,13 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
+// linkedIssuePriority is the workqueue priority of an issue re-queued by an
+// event on its PR: a review, a CI result, a push. It is fixed, like
+// metapathreconciler's re-queue priority, and independent of the priority the
+// PR event itself arrived at: finishing an open PR outranks starting a new
+// issue, which the github-metareconciler module queues at 50 by default.
+const linkedIssuePriority = 200
+
 // reconcilePullRequest handles PR events by finding linked issues with the required
 // label and queueing them for re-processing.
 func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, res *githubreconciler.Resource, gh *github.Client) error {
@@ -42,7 +49,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcilePullRequest(ctx context.Context, re
 	// Queue all linked issues for processing
 	keys := make([]workqueue.QueueKey, 0, len(issueURLs))
 	for _, url := range issueURLs {
-		keys = append(keys, workqueue.QueueKey{Key: url})
+		keys = append(keys, workqueue.QueueKey{Key: url, Priority: linkedIssuePriority})
 	}
 	return workqueue.QueueKeys(keys...)
 }
