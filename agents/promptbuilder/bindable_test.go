@@ -165,7 +165,7 @@ func TestNoopBinding(t *testing.T) {
 
 	t.Run("Noop implements Bindable interface", func(t *testing.T) {
 		// Compile-time check that Noop implements Bindable
-		var _ promptbuilder.Bindable = promptbuilder.Noop{}
+		var _ promptbuilder.Bindable = (*promptbuilder.Noop)(nil)
 
 		// Also test through interface
 		var bindable promptbuilder.Bindable = promptbuilder.Noop{}
