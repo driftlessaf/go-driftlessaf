@@ -59,7 +59,7 @@ require (
 	google.golang.org/api v0.297.0
 	google.golang.org/genai v1.70.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260825221802-da73d73af1c5
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -243,7 +243,7 @@ require (
 	github.com/snabb/httpreaderat v1.0.4 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/spiffe/go-spiffe/v2 v2.7.0 // indirect
+	github.com/spiffe/go-spiffe/v2 v2.8.1 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
 	github.com/theupdateframework/go-tuf v0.7.0 // indirect
