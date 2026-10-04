@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package googleexecutor_test
 
 import (
+	stdcmp "cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,19 +44,6 @@ type validatingGenReqBody struct {
 			} `json:"functionResponse"`
 		} `json:"parts"`
 	} `json:"contents"`
-}
-
-// pairingKey identifies a functionCall or functionResponse for pairing: the
-// provider-assigned id when present, falling back to the tool name. Gemini
-// does not always populate functionCall ids, but when it does the executor
-// echoes them onto the functionResponse, so ids give per-call granularity
-// (two parallel calls to one tool pair independently) while the name fallback
-// keeps id-less transcripts checkable.
-func pairingKey(id, name string) string {
-	if id != "" {
-		return id
-	}
-	return name
 }
 
 // genPairingViolations parses a generateContent request body and returns a
@@ -103,11 +91,11 @@ func genPairingViolations(body []byte) []string {
 		answered := make(map[string]int, len(next.Parts))
 		for _, p := range next.Parts {
 			if p.FunctionResponse != nil {
-				answered[pairingKey(p.FunctionResponse.ID, p.FunctionResponse.Name)]++
+				answered[stdcmp.Or(p.FunctionResponse.ID, p.FunctionResponse.Name)]++
 			}
 		}
 		for _, call := range calls {
-			key := pairingKey(call.id, call.name)
+			key := stdcmp.Or(call.id, call.name)
 			if answered[key] == 0 {
 				violations = append(violations, fmt.Sprintf(
 					"functionCall %q in model content %d has no matching functionResponse in the following user content",

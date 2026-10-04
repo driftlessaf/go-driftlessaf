@@ -459,7 +459,7 @@ func TestClientCache_EvictOrgCompareAndPrefix(t *testing.T) {
 		if _, err := cc.Get(ctx, org, repo); err != nil {
 			t.Fatalf("Get(%s/%s): %v", org, repo, err)
 		}
-		e, ok := cc.entries.get(cc.getKey(org, repo))
+		e, ok := cc.entries.get(clientCacheKey(org, repo))
 		if !ok {
 			t.Fatalf("no entry for %s/%s", org, repo)
 		}

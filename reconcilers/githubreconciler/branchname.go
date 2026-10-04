@@ -27,8 +27,8 @@ func PathToBranchSuffix(path string) string {
 func BranchSuffixToPath(suffix string) string {
 	parts := strings.Split(suffix, "/")
 	for i, part := range parts {
-		if strings.HasPrefix(part, "_dot_") {
-			parts[i] = "." + part[len("_dot_"):]
+		if rest, ok := strings.CutPrefix(part, "_dot_"); ok {
+			parts[i] = "." + rest
 		}
 	}
 	return strings.Join(parts, "/")

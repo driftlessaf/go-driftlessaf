@@ -130,10 +130,10 @@ func NewClientCache(tokenSourceFunc TokenSourceFunc, opts ...ClientCacheOption) 
 	}
 }
 
-// getKey returns the cache key for an org/repo combination.
+// clientCacheKey returns the cache key for an org/repo combination.
 // GitHub logins are case-insensitive, so the org part is folded: every
 // spelling of an org shares its entries, and evictOrg finds them all.
-func (cc *ClientCache) getKey(org, repo string) string {
+func clientCacheKey(org, repo string) string {
 	return fmt.Sprintf("%s/%s", strings.ToLower(org), repo)
 }
 
@@ -150,7 +150,7 @@ func (cc *ClientCache) LookupInstallID(ctx context.Context, org string) (int64, 
 
 // Get returns a GitHub client for the given org/repo, creating one if needed.
 func (cc *ClientCache) Get(ctx context.Context, org, repo string) (*github.Client, error) {
-	key := cc.getKey(org, repo)
+	key := clientCacheKey(org, repo)
 	if e, ok := cc.entries.get(key); ok {
 		if client := e.client.Load(); client != nil {
 			clog.DebugContext(ctx, "Using cached GitHub client", "org", org, "repo", repo)
@@ -210,7 +210,7 @@ func (cc *ClientCache) TokenSourceFor(ctx context.Context, org, repo string) (oa
 // entryFor returns org/repo's cache entry, creating it with a fresh token
 // source if needed.
 func (cc *ClientCache) entryFor(ctx context.Context, org, repo string) (*cacheEntry, error) {
-	key := cc.getKey(org, repo)
+	key := clientCacheKey(org, repo)
 	if e, ok := cc.entries.get(key); ok {
 		clog.DebugContext(ctx, "Using cached GitHub token source", "org", org, "repo", repo)
 		return e, nil
