@@ -78,6 +78,10 @@ The package provides multiple binding methods for different data formats:
 	// would break them
 	p, err = p.BindRawFenced("evidence", fileContents)
 
+FenceUntrusted builds the same fence as a string, for a caller that composes
+a prompt section itself, and FenceUntrustedWithPreamble does so with the
+caller's own data-contract line in place of the generic one.
+
 Each method also has a Must variant that panics on error:
 
 	p = p.MustBindStringLiteral("key", "value")

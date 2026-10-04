@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -39,7 +40,7 @@ type rawFencedBinding struct {
 }
 
 func (b *rawFencedBinding) value(*buildState) (string, error) {
-	return fenceUntrustedFrom(cmp.Or(b.entropy, rand.Reader), b.val)
+	return fenceUntrustedFrom(cmp.Or(b.entropy, rand.Reader), rawFencePreamble, b.val)
 }
 
 // FenceUntrusted wraps content in a nonce-delimited untrusted-content fence
@@ -63,16 +64,43 @@ func (b *rawFencedBinding) value(*buildState) (string, error) {
 // Bound the content BEFORE fencing it, never after: truncating a fenced block
 // is how the closing marker gets cut and the fence silently opened.
 func FenceUntrusted(content string) (string, error) {
-	return fenceUntrustedFrom(rand.Reader, content)
+	return fenceUntrustedFrom(rand.Reader, rawFencePreamble, content)
 }
 
-// fenceUntrustedFrom is [FenceUntrusted] over an injectable entropy source, so
-// the fail-closed path is testable without touching process-global state.
+// FenceUntrustedWithPreamble is [FenceUntrusted] with the caller's preamble in
+// place of the generic one, for a caller whose data contract says more than
+// "this is data". A malware-analysis prompt is the motivating case: it also
+// tells the model that content trying to redirect the analysis is itself
+// evidence, which the generic sentence cannot say for it.
+//
+// Only that one line is the caller's. The markers, the nonce, and the
+// neutralizing of marker-shaped content lines are the same as every other
+// fence this package builds, so a prompt that mixes the two forms still has a
+// single boundary format and [UntrustedMarkerShaped] still recognizes both.
+//
+// The preamble must be one non-empty line that does not carry the marker
+// shape; anything else is refused with an error rather than rendered, since a
+// marker-shaped preamble would forge a boundary inside its own fence.
+func FenceUntrustedWithPreamble(preamble, content string) (string, error) {
+	return fenceUntrustedFrom(rand.Reader, preamble, content)
+}
+
+// fenceUntrustedFrom is [FenceUntrustedWithPreamble] over an injectable entropy
+// source, so the fail-closed path is testable without touching process-global
+// state.
 //
 // Unexported deliberately: no caller outside this package needs to choose the
 // randomness, and this package is published, where withdrawing a symbol later
 // is a breaking change.
-func fenceUntrustedFrom(entropy io.Reader, content string) (string, error) {
+func fenceUntrustedFrom(entropy io.Reader, preamble, content string) (string, error) {
+	switch {
+	case preamble == "":
+		return "", errors.New("raw fence preamble is empty")
+	case strings.ContainsAny(preamble, "\r\n"):
+		return "", fmt.Errorf("raw fence preamble spans more than one line: %q", preamble)
+	case UntrustedMarkerShaped(preamble):
+		return "", fmt.Errorf("raw fence preamble carries the fence marker shape: %q", preamble)
+	}
 	var nonce [rawFenceNonceBytes]byte
 	if _, err := io.ReadFull(entropy, nonce[:]); err != nil {
 		// Fail closed: rendering the content behind a predictable boundary
@@ -81,7 +109,7 @@ func fenceUntrustedFrom(entropy io.Reader, content string) (string, error) {
 	}
 	token := hex.EncodeToString(nonce[:])
 	return rawFenceBeginPrefix + " [" + token + "] -----\n" +
-		rawFencePreamble + "\n" +
+		preamble + "\n" +
 		NeutralizeUntrustedMarkers(content) +
 		"\n" + rawFenceEndPrefix + " [" + token + "] -----", nil
 }
