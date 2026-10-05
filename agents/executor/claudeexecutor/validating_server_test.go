@@ -66,6 +66,9 @@ type validatingReqBody struct {
 //   - cache breakpoint budget: the total number of cache_control markers across
 //     the tool definitions, the system blocks, and every message content block
 //     never exceeds validatingServerMaxCacheBreakpoints.
+//   - cache TTL order: walking the markers in prefix order (tools, system,
+//     messages), no 1-hour marker follows a 5-minute one. An omitted ttl is
+//     the 5-minute default.
 //
 // script returns the SSE events (raw JSON, one per event) to stream for the
 // given 1-based request number; body is the parsed-out raw request body so a
@@ -106,8 +109,9 @@ func assertRequestValid(t *testing.T, reqNum int, body []byte) {
 }
 
 // requestViolations parses an Anthropic Messages request body and returns a
-// message for every violation of the two invariants the validating server
-// enforces (tool_use/tool_result pairing and the cache-breakpoint budget).
+// message for every violation of the invariants the validating server
+// enforces (tool_use/tool_result pairing, the cache-breakpoint budget, and the
+// cache TTL order).
 // A nil return means the body is well-formed; a parse error is reported as a
 // single violation. Returning violations (rather than asserting inline) lets
 // the Rejects tests below prove the guard actually fires on broken bodies.
@@ -119,29 +123,53 @@ func requestViolations(body []byte) []string {
 
 	var violations []string
 
-	// Count cache_control markers across tools, system, and messages.
-	markers := 0
+	// Collect cache_control markers across tools, system, and messages, in the
+	// prefix order the API reads them.
+	var markers []*json.RawMessage
 	for _, tl := range parsed.Tools {
 		if tl.CacheControl != nil {
-			markers++
+			markers = append(markers, tl.CacheControl)
 		}
 	}
 	for _, sys := range parsed.System {
 		if sys.CacheControl != nil {
-			markers++
+			markers = append(markers, sys.CacheControl)
 		}
 	}
 	for _, m := range parsed.Messages {
 		for _, cb := range m.Content {
 			if cb.CacheControl != nil {
-				markers++
+				markers = append(markers, cb.CacheControl)
 			}
 		}
 	}
-	if markers > validatingServerMaxCacheBreakpoints {
+	if len(markers) > validatingServerMaxCacheBreakpoints {
 		violations = append(violations, fmt.Sprintf(
 			"%d cache_control markers exceeds the API limit of %d",
-			markers, validatingServerMaxCacheBreakpoints))
+			len(markers), validatingServerMaxCacheBreakpoints))
+	}
+
+	// A 1-hour entry must not follow a 5-minute one.
+	sawFiveMinute := false
+	for i, raw := range markers {
+		var cc struct {
+			TTL string `json:"ttl"`
+		}
+		if err := json.Unmarshal(*raw, &cc); err != nil {
+			violations = append(violations, fmt.Sprintf("cache_control marker %d: invalid JSON: %v", i, err))
+			continue
+		}
+		switch cc.TTL {
+		case "1h":
+			if sawFiveMinute {
+				violations = append(violations, fmt.Sprintf(
+					"cache_control marker %d has ttl 1h after a 5-minute marker", i))
+			}
+		case "", "5m":
+			sawFiveMinute = true
+		default:
+			violations = append(violations, fmt.Sprintf("cache_control marker %d has unsupported ttl %q", i, cc.TTL))
+		}
 	}
 
 	// Every tool_use block in an assistant message must be answered by a
@@ -245,6 +273,48 @@ func TestRequestViolationsCacheBudget(t *testing.T) {
 			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","cache_control":{"type":"ephemeral"}}]}]}`
 	if got := requestViolations([]byte(wellFormed)); len(got) != 0 {
 		t.Errorf("requestViolations flagged a well-formed in-budget body: %v", got)
+	}
+}
+
+// TestRequestViolationsCacheTTLOrder proves the TTL-order check fires when a
+// 1-hour marker follows a 5-minute one in prefix order, and accepts the
+// orders the API allows.
+func TestRequestViolationsCacheTTLOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantError bool
+	}{{
+		name: "5m tool then 1h system",
+		body: `{"tools":[{"cache_control":{"type":"ephemeral"}}],
+			"system":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}]}`,
+		wantError: true,
+	}, {
+		name: "1h system then explicit 5m message",
+		body: `{"system":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}],
+			"messages":[{"role":"user","content":[{"type":"text","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]}`,
+	}, {
+		name: "5m message then 1h message",
+		body: `{"messages":[{"role":"user","content":[
+			{"type":"text","cache_control":{"type":"ephemeral"}},
+			{"type":"text","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`,
+		wantError: true,
+	}, {
+		name: "all 1h",
+		body: `{"tools":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}],
+			"system":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}],
+			"messages":[{"role":"user","content":[{"type":"text","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`,
+	}, {
+		name:      "unsupported ttl",
+		body:      `{"system":[{"cache_control":{"type":"ephemeral","ttl":"30m"}}]}`,
+		wantError: true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := requestViolations([]byte(tc.body))
+			if gotError := len(got) > 0; gotError != tc.wantError {
+				t.Errorf("requestViolations: got = %v, want violation = %t", got, tc.wantError)
+			}
+		})
 	}
 }
 

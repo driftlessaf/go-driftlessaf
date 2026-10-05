@@ -10,6 +10,7 @@ package claudeexecutor_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
@@ -221,3 +222,119 @@ When investigating production issues:
 5. Implement a fix or rollback to restore service
 6. Document the root cause and prevention measures
 7. Update runbooks and alerts to catch similar issues earlier`
+
+// longTurnGap is how long the tool call in TestExecutorCacheTTLSurvivesLongTurn
+// holds the conversation between turn 1 and turn 2. It is past the 5-minute
+// TTL with a minute of margin, so the 5-minute entries turn 1 wrote have
+// expired when turn 2 asks for them.
+const longTurnGap = 6 * time.Minute
+
+// TestExecutorCacheTTLSurvivesLongTurn reproduces a turn that outlives the
+// 5-minute prompt cache: a tool call holds the conversation for longer than
+// 5 minutes between turn 1 and turn 2. Under the 1-hour TTL, turn 2 reads the
+// prefix turn 1 wrote; under the 5-minute default, turn 2 writes it again.
+// The two arms run in parallel against distinct prefixes, so neither reads
+// the other's entries. Each arm takes over six minutes; run with -timeout 15m.
+func TestExecutorCacheTTLSurvivesLongTurn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits past the 5-minute cache TTL")
+	}
+	ctx := t.Context()
+	projectID := detectProjectID(ctx, t)
+
+	const (
+		region = "global"
+		model  = "claude-sonnet-4-5@20250929"
+	)
+	client := anthropic.NewClient(
+		vertex.WithGoogleAuth(ctx, region, projectID, "https://www.googleapis.com/auth/cloud-platform"),
+	)
+
+	for _, tc := range []struct {
+		name     string
+		ttl      time.Duration
+		wantRead bool
+	}{
+		{name: "5m", ttl: 5 * time.Minute, wantRead: false},
+		{name: "1h", ttl: time.Hour, wantRead: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A per-arm nonce at the head of the system prompt keeps each
+			// arm's cache entries its own.
+			base, err := promptbuilder.NewPrompt("Run {{nonce}}.\n\n" + largeSystemPrompt)
+			if err != nil {
+				t.Fatalf("NewPrompt(system): %v", err)
+			}
+			system, err := base.BindJSON("nonce", time.Now().UnixNano())
+			if err != nil {
+				t.Fatalf("BindJSON(nonce): %v", err)
+			}
+			prompt, err := promptbuilder.NewPrompt(`Call the wait tool exactly once, then respond with JSON: {"answer": "done"}`)
+			if err != nil {
+				t.Fatalf("NewPrompt: %v", err)
+			}
+			exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
+				client, prompt,
+				claudeexecutor.WithModel[errCapRequest, errCapResponse](model),
+				claudeexecutor.WithSystemInstructions[errCapRequest, errCapResponse](system),
+				claudeexecutor.WithCacheTTL[errCapRequest, errCapResponse](tc.ttl),
+			)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			tools := map[string]claudetool.Metadata[errCapResponse]{
+				"wait": claudetool.FromTool(toolcall.Tool[errCapResponse]{
+					Def: toolcall.Definition{
+						Name:        "wait",
+						Description: "Wait for the background job to finish.",
+						Parameters: []toolcall.Parameter{
+							{Name: "reason", Type: "string", Description: "Why you are waiting.", Required: true},
+						},
+					},
+					Handler: func(ctx context.Context, _ toolcall.ToolCall, _ *agenttrace.Trace[errCapResponse], _ *errCapResponse) map[string]any {
+						select {
+						case <-time.After(longTurnGap):
+						case <-ctx.Done():
+						}
+						return map[string]any{"status": "finished"}
+					},
+				}),
+			}
+
+			tracer := &recordingTracer{}
+			if _, err := exec.Execute(agenttrace.WithTracer[errCapResponse](ctx, tracer), errCapRequest{}, tools); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if len(tracer.traces) != 1 || len(tracer.traces[0].Turns) < 2 {
+				t.Fatalf("recorded turns: got %d traces, want one trace with at least 2 turns", len(tracer.traces))
+			}
+			first, second := tracer.traces[0].Turns[0], tracer.traces[0].Turns[1]
+			t.Logf("turn 1: cache_read=%d cache_creation=%d; turn 2 started %v later: cache_read=%d cache_creation=%d",
+				first.CacheReadTokens, first.CacheCreationTokens, second.StartTime.Sub(first.StartTime).Round(time.Second),
+				second.CacheReadTokens, second.CacheCreationTokens)
+
+			if gap := second.StartTime.Sub(first.StartTime); gap < longTurnGap {
+				t.Fatalf("turn gap: got = %v, want >= %v", gap, longTurnGap)
+			}
+			if first.CacheCreationTokens == 0 {
+				t.Fatal("turn 1 wrote no cache entries; the prefix is below the model's cacheable minimum")
+			}
+			if want := int64(tc.ttl / time.Second); second.CacheTTLSeconds == nil || *second.CacheTTLSeconds != want {
+				t.Errorf("turn 2 CacheTTLSeconds: got = %v, want = %d", second.CacheTTLSeconds, want)
+			}
+			if tc.wantRead {
+				if second.CacheReadTokens < first.CacheCreationTokens {
+					t.Errorf("turn 2 cache_read: got = %d, want >= turn 1's %d written tokens", second.CacheReadTokens, first.CacheCreationTokens)
+				}
+				return
+			}
+			if second.CacheReadTokens != 0 || second.CacheCreationTokens < first.CacheCreationTokens {
+				t.Errorf("turn 2: got cache_read = %d, cache_creation = %d; want 0 read and >= %d re-written",
+					second.CacheReadTokens, second.CacheCreationTokens, first.CacheCreationTokens)
+			}
+		})
+	}
+}

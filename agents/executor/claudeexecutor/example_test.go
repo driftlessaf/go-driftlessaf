@@ -8,6 +8,7 @@ package claudeexecutor_test
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -118,4 +119,32 @@ func ExampleWithAppendedSystemInstructions() {
 	)
 	fmt.Println(executor != nil && err == nil)
 	// Output: true
+}
+
+// ExampleWithCacheTTL demonstrates keeping cache breakpoints alive for an hour,
+// for an agent whose turns can generate for longer than the 5-minute default.
+// Any TTL other than 5 minutes or 1 hour is rejected.
+func ExampleWithCacheTTL() {
+	prompt, err := promptbuilder.NewPrompt("Respond to the request.")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	executor, err := claudeexecutor.NewWithMessages[promptbuilder.Noop, *struct{}](
+		anthropic.NewClient(option.WithAPIKey("example")).Messages,
+		prompt,
+		claudeexecutor.WithCacheTTL[promptbuilder.Noop, *struct{}](time.Hour),
+	)
+	fmt.Println(executor != nil && err == nil)
+
+	_, err = claudeexecutor.NewWithMessages[promptbuilder.Noop, *struct{}](
+		anthropic.NewClient(option.WithAPIKey("example")).Messages,
+		prompt,
+		claudeexecutor.WithCacheTTL[promptbuilder.Noop, *struct{}](30*time.Minute),
+	)
+	fmt.Println(err != nil)
+	// Output:
+	// true
+	// true
 }

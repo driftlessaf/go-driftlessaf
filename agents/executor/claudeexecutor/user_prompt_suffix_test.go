@@ -146,7 +146,7 @@ func TestUserPromptSuffixBudgetWithinLimit(t *testing.T) {
 	}
 
 	// Seed as Execute does: the suffix option implies the first-user marker.
-	tail := newTailBreakpoints(params)
+	tail := newTailBreakpoints(params, "")
 	tail.positions = seedFirstUserTail(exec.cacheControl, exec.cacheFirstUserBlock, params)
 	if got, want := len(tail.positions), 1; got != want {
 		t.Fatalf("seeded tail positions: got = %d, want = %d", got, want)

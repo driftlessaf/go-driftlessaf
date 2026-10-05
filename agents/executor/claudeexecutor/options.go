@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
@@ -289,7 +290,8 @@ func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.Ret
 // costs for multi-turn agentic workflows. The API caches the request prefix (tool
 // definitions + system prompt) and serves it at 10% of the normal input token price
 // on subsequent turns. The only cost is a 1.25x write premium on the first turn,
-// which is amortized across all subsequent cache reads within the 5-min TTL.
+// which is amortized across all subsequent cache reads within the TTL (5 minutes
+// by default; see WithCacheTTL).
 //
 // You would only disable this if you have a single-turn agent that runs less than
 // once every 5 minutes, where the 1.25x write cost would never be recouped.
@@ -297,6 +299,39 @@ func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.Ret
 func WithoutCacheControl[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		e.cacheControl = false
+		return nil
+	}
+}
+
+// WithCacheTTL sets the lifetime of every cache breakpoint the executor places.
+// Anthropic accepts two values: 5 minutes (the default) and 1 hour; any other
+// duration is an error.
+//
+// An entry's lifetime is measured from the start of the request that reads or
+// writes it, so the time a turn spends generating counts against it. When one
+// turn generates for longer than 5 minutes, the next turn finds the 5-minute
+// entry expired and writes the whole conversation prefix again. A 1-hour write
+// costs 2x the base input price instead of 1.25x, but only on newly written
+// tokens, while one miss re-bills the entire prefix, so agents whose turns
+// regularly run past 5 minutes are cheaper on the 1-hour TTL.
+//
+// Every marker the executor places carries the TTL. Under the 1-hour TTL,
+// markers a caller placed on its own tool definitions are raised to 1 hour as
+// well, because the API rejects a request whose 1-hour entries follow a
+// 5-minute one. Combining the 1-hour TTL with WithoutCacheControl is an error.
+// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+func WithCacheTTL[Request promptbuilder.Bindable, Response any](ttl time.Duration) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		switch ttl {
+		case 5 * time.Minute:
+			// The API default; leaving the field unset keeps request bytes
+			// identical to an executor configured without this option.
+			e.cacheTTL = ""
+		case time.Hour:
+			e.cacheTTL = anthropic.CacheControlEphemeralTTLTTL1h
+		default:
+			return fmt.Errorf("cache TTL must be 5m or 1h, got %v", ttl)
+		}
 		return nil
 	}
 }

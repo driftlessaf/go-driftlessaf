@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
@@ -196,6 +197,104 @@ func TestResumeStripsStaleCacheControl(t *testing.T) {
 	// completing the tool_use/tool_result pairing.
 	if !strings.Contains(string(firstBody), "BEGIN HUMAN ANSWER") {
 		t.Errorf("resumed request does not carry the framed human answer: %s", firstBody)
+	}
+}
+
+// TestResumeRestampsCacheTTL parks under the default 5-minute TTL and resumes
+// under WithCacheTTL(time.Hour). The envelope's digest, stamped by an executor
+// without the option, still validates, and the resumed request carries the
+// 1-hour TTL on every marker, the captured 5-minute system marker included, so
+// no 5-minute entry precedes a 1-hour one (which the validating server, like
+// the API, rejects).
+func TestResumeRestampsCacheTTL(t *testing.T) {
+	const systemText = "system instructions"
+	providerState, _ := staleCacheProviderState(t)
+
+	// The digest the parking executor stamped: its static prefix, with the
+	// system marker on the default (omitted) TTL.
+	digest, err := checkpoint.DigestJSON(anthropic.MessageNewParams{
+		Model:       defaultResumeModel,
+		MaxTokens:   8192,
+		Tools:       []anthropic.ToolUnionParam{},
+		Temperature: anthropic.Float(0.1),
+		System: []anthropic.TextBlockParam{{
+			Text:         systemText,
+			CacheControl: anthropic.NewCacheControlEphemeralParam(),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("DigestJSON: %v", err)
+	}
+
+	finalTurn := []string{
+		`{"type":"message_start","message":{"id":"msg_resume","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"usage":{"input_tokens":30,"output_tokens":5}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\"answer\":\"resumed\"}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	}
+	var firstBody []byte
+	srv := newValidatingAnthropicServer(t, func(reqNum int, body []byte) []string {
+		if reqNum == 1 {
+			firstBody = append([]byte(nil), body...)
+		}
+		return finalTurn
+	})
+
+	client := anthropic.NewClient(
+		option.WithBaseURL(srv.URL),
+		option.WithAPIKey("test"),
+		option.WithMaxRetries(0),
+	)
+	prompt, err := promptbuilder.NewPrompt("go")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+	system, err := promptbuilder.NewPrompt(systemText)
+	if err != nil {
+		t.Fatalf("NewPrompt(system): %v", err)
+	}
+	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
+		client, prompt,
+		claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+		claudeexecutor.WithSystemInstructions[errCapRequest, errCapResponse](system),
+		claudeexecutor.WithCacheTTL[errCapRequest, errCapResponse](time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resumer, ok := exec.(claudeexecutor.Resumer[errCapRequest, errCapResponse])
+	if !ok {
+		t.Fatal("executor does not satisfy Resumer")
+	}
+
+	env := checkpoint.Envelope{
+		Version:        checkpoint.EnvelopeVersion,
+		Provider:       "anthropic",
+		Model:          defaultResumeModel,
+		ConfigDigest:   digest,
+		RemainingTurns: 5,
+		Reason:         "awaiting answer",
+		PendingToolCalls: []checkpoint.PendingToolCall{{
+			ID:   "toolu_ask",
+			Name: askAFriendToolName,
+		}},
+		ProviderState: providerState,
+	}
+	answers := map[string]string{"toolu_ask": "yes, ship it"}
+	if _, err := resumer.Resume(t.Context(), env, answers, map[string]claudetool.Metadata[errCapResponse]{}); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	if firstBody == nil {
+		t.Fatal("validating server never received the resumed request")
+	}
+	markers := strings.Count(string(firstBody), `"cache_control"`)
+	withTTL := strings.Count(string(firstBody), `"ttl":"1h"`)
+	if markers == 0 || withTTL != markers {
+		t.Errorf("resumed request markers: got %d cache_control and %d with ttl 1h, want every marker on 1h: %s",
+			markers, withTTL, firstBody)
 	}
 }
 

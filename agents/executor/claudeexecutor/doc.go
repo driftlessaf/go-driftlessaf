@@ -71,6 +71,7 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithSystemInstructions: Provide system-level instructions
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)
+//   - WithCacheTTL: Set the cache breakpoint lifetime to 5 minutes (default) or 1 hour
 //   - WithUserPromptSuffix: Render a static suffix as a second block of the
 //     initial user message, outside the shared cacheable prefix (off by default)
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
@@ -91,7 +92,13 @@ SPDX-License-Identifier: Apache-2.0
 // (current and previous) so a turn that appends many blocks — for example
 // several parallel tool calls — still resumes from the prior turn's cache
 // entry. Cache reads and writes are reported per turn via the
-// gen_ai.usage.cache_* metrics and on the trace.
+// gen_ai.usage.cache_* metrics and on the trace, along with the cache TTL.
+//
+// Breakpoints live for 5 minutes by default, measured from the start of each
+// request, so a turn that generates for longer than that finds the cache
+// expired and writes the whole prefix again. WithCacheTTL(time.Hour) keeps
+// entries alive across such turns at a higher write price (2x the base input
+// price instead of 1.25x); every marker the executor places carries it.
 //
 // WithUserPromptSuffix extends the shared prefix across executions: it splits
 // the initial user message into a leading payload block (the rendered prompt,

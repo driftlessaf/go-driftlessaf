@@ -52,14 +52,20 @@ type tailBreakpoints struct {
 	// positions holds the currently marked blocks, oldest first, at most
 	// limit entries.
 	positions []tailPosition
+	// ttl is the lifetime each tail marker carries. It must match the static
+	// prefix's markers: the API rejects a request whose 1-hour entries follow
+	// a 5-minute one.
+	ttl anthropic.CacheControlEphemeralTTL
 }
 
 // newTailBreakpoints builds a tracker whose marker budget is whatever remains
 // of the API's maxCacheBreakpoints after the markers already present on the
-// assembled request's static prefix, capped at tailBreakpointLimit.
-func newTailBreakpoints(params anthropic.MessageNewParams) *tailBreakpoints {
+// assembled request's static prefix, capped at tailBreakpointLimit. Its
+// markers carry ttl.
+func newTailBreakpoints(params anthropic.MessageNewParams, ttl anthropic.CacheControlEphemeralTTL) *tailBreakpoints {
 	return &tailBreakpoints{
 		limit: min(tailBreakpointLimit, maxCacheBreakpoints-staticBreakpointCount(params)),
+		ttl:   ttl,
 	}
 }
 
@@ -87,6 +93,14 @@ func hasBreakpoint(cc anthropic.CacheControlEphemeralParam) bool {
 	return !param.IsOmitted(cc)
 }
 
+// cacheMarker returns a cache_control marker carrying ttl. An empty ttl is
+// left off the wire, which the API reads as its 5-minute default.
+func cacheMarker(ttl anthropic.CacheControlEphemeralTTL) anthropic.CacheControlEphemeralParam {
+	marker := anthropic.NewCacheControlEphemeralParam()
+	marker.TTL = ttl
+	return marker
+}
+
 // advance moves the tail breakpoint to the last cacheable content block of the
 // newest message, clearing the oldest tracked marker once the limit is
 // exceeded. It is a no-op when the tail is already marked (no new messages
@@ -103,7 +117,7 @@ func (tb *tailBreakpoints) advance(messages []anthropic.MessageParam) {
 	if n := len(tb.positions); n > 0 && tb.positions[n-1] == pos {
 		return
 	}
-	*blockCacheControl(&messages[pos.message].Content[pos.block]) = anthropic.NewCacheControlEphemeralParam()
+	*blockCacheControl(&messages[pos.message].Content[pos.block]) = cacheMarker(tb.ttl)
 	tb.positions = append(tb.positions, pos)
 	for len(tb.positions) > tb.limit {
 		old := tb.positions[0]

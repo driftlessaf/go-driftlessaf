@@ -218,7 +218,7 @@ func TestTailBreakpointsSeededFromFirstUserBlock(t *testing.T) {
 		t.Fatalf("assembleParams: %v", err)
 	}
 
-	tail := newTailBreakpoints(params)
+	tail := newTailBreakpoints(params, "")
 	tail.positions = append(tail.positions, tailPosition{message: 0, block: 0})
 
 	// Turn 0: the tail is the block the option already marked — no duplicate.
@@ -258,7 +258,7 @@ func TestTailBreakpointsTotalWithinLimit(t *testing.T) {
 	}
 
 	// Seed as Execute does when the first-user-block option is on.
-	tail := newTailBreakpoints(params)
+	tail := newTailBreakpoints(params, "")
 	tail.positions = append(tail.positions, tailPosition{message: 0, block: 0})
 
 	total := func() int {
@@ -344,7 +344,7 @@ func TestTailBudgetRespectsCallerMarkers(t *testing.T) {
 				t.Fatalf("assembleParams: %v", err)
 			}
 
-			tail := newTailBreakpoints(params)
+			tail := newTailBreakpoints(params, "")
 			if got, want := tail.limit, tt.wantTailLimit; got != want {
 				t.Errorf("tail limit: got = %d, want = %d", got, want)
 			}

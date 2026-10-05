@@ -75,11 +75,7 @@ func (e *executor[Request, Response]) Resume(
 	// any state is touched. ValidateForResume takes now as a parameter (rather
 	// than reading the clock itself) so the checkpoint package's own deadline
 	// tests can inject one; this call site supplies wall-clock time.
-	staticParams, _, _, serr := e.buildStaticParams(tools)
-	if serr != nil {
-		return response, fmt.Errorf("build static params for digest: %w", serr)
-	}
-	digest, derr := checkpoint.DigestJSON(staticParams)
+	digest, derr := e.configDigest(tools)
 	if derr != nil {
 		return response, derr
 	}
@@ -100,6 +96,19 @@ func (e *executor[Request, Response]) Resume(
 	// markers (tool definitions, system) are left intact — they are re-counted by
 	// newTailBreakpoints so the reseeded tail stays within budget.
 	stripMessageCacheControl(params.Messages)
+
+	// Re-stamp the static prefix from the live configuration. The digest
+	// excludes the cache TTL, so an envelope parked under one TTL validates
+	// under another, but the captured tool and system markers still carry the
+	// suspend-time TTL: left in place, a 5-minute marker would precede the
+	// live 1-hour tail markers, which the API rejects. The digest has proved
+	// the rest of the prefix identical, so the resumed request matches what
+	// Execute would build.
+	live, _, _, serr := e.buildStaticParams(tools, e.cacheTTL)
+	if serr != nil {
+		return response, fmt.Errorf("resume: build static params: %w", serr)
+	}
+	params.Tools, params.System = live.Tools, live.System
 
 	// Pair the framed human answer to the persisted pending tool_use ID(s). This
 	// completes the tool_use/tool_result pairing the API requires: the suspend
@@ -132,7 +141,7 @@ func (e *executor[Request, Response]) Resume(
 	// A fresh tail tracker: its budget is derived from the (surviving) static
 	// prefix markers, and it reseeds markers on the growing tail as the resumed
 	// conversation continues.
-	tail := newTailBreakpoints(params)
+	tail := newTailBreakpoints(params, e.cacheTTL)
 
 	// Cap the envelope's remaining budget at the live executor's configured
 	// maxTurns. The turn budget is loop config, not part of the request digest,

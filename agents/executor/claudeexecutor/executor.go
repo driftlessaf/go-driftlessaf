@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
@@ -84,10 +85,16 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// history (the rendered prompt and every prior tool result) is cached
 	// incrementally rather than re-billed at full input price on every turn — see
 	// tailBreakpoints. Cached tokens are read at 10% of the base input token price
-	// (5-min TTL, shared across all requests with the same prefix within the same org).
+	// (for the cacheTTL lifetime, shared across all requests with the same prefix
+	// within the same org).
 	// Enabled by default — disable with WithoutCacheControl() if needed.
 	// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 	cacheControl bool
+
+	// cacheTTL is the lifetime carried by every cache breakpoint the executor
+	// places. Empty leaves the field off the wire, which the API reads as its
+	// 5-minute default. Set via WithCacheTTL.
+	cacheTTL anthropic.CacheControlEphemeralTTL
 
 	// cacheFirstUserBlock, when true, places an additional cache breakpoint on the
 	// first user content block (the rendered prompt). This caches the initial user
@@ -263,6 +270,9 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 	if e.forceSubmitToolChoice && e.thinkingBudgetTokens != nil {
 		return nil, errors.New("WithForceSubmitToolChoice is incompatible with WithThinking: the API rejects a forced tool_choice while extended thinking is active")
 	}
+	if e.cacheTTL != "" && !e.cacheControl {
+		return nil, errors.New("WithCacheTTL is incompatible with WithoutCacheControl: there are no cache breakpoints to carry the TTL")
+	}
 
 	// A suspend tool must not share the terminal submit tool's name: the two
 	// route to different post-quiesce outcomes (submit commits a result and
@@ -391,7 +401,7 @@ func (e *executor[Request, Response]) Execute(
 	// a marker on the first user block during assembly, that marker is seeded
 	// as the initial tail so the rotation accounts for it and eventually
 	// reclaims its slot. See tailBreakpoints for the mechanics.
-	tail := newTailBreakpoints(params)
+	tail := newTailBreakpoints(params, e.cacheTTL)
 	tail.positions = seedFirstUserTail(e.cacheControl, e.cacheFirstUserBlock, params)
 
 	// A fresh Execute runs the full turn budget starting at turn 0. Resume
@@ -621,7 +631,7 @@ func (e *executor[Request, Response]) runConversation(
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
-		llmTurn := trace.BeginTurnWithAttribution(turn, e.modelName, e.attribution)
+		llmTurn := trace.BeginTurnWithAttribution(turn, e.modelName, e.servingAttribution())
 		defer func() {
 			// A suspension is an intentional halt, not a failure: the shared
 			// carve-out keeps the turn from being marked Failed (the trace-level
@@ -736,9 +746,11 @@ func (e *executor[Request, Response]) runConversation(
 		// Record prompt cache metrics. The API response includes two cache-specific
 		// token counts alongside the regular input/output tokens:
 		//   - cache_read_input_tokens:     tokens served from cache (cheap, 0.1x price)
-		//   - cache_creation_input_tokens: tokens written to cache (1.25x price, amortized over reads)
-		// These are recorded as OTel counters and on the per-turn span so the
-		// cost view can apply per-call cache pricing accurately.
+		//   - cache_creation_input_tokens: tokens written to cache (1.25x price on
+		//     the 5-minute TTL, 2x on the 1-hour TTL, amortized over reads)
+		// These are recorded as OTel counters and on the per-turn span, alongside
+		// the turn's cache TTL (servingAttribution), so the cost view can apply
+		// per-call cache pricing accurately.
 		if e.cacheControl {
 			cacheRead := message.Usage.CacheReadInputTokens
 			cacheCreation := message.Usage.CacheCreationInputTokens
@@ -747,7 +759,9 @@ func (e *executor[Request, Response]) runConversation(
 				llmTurn.RecordCacheTokens(cacheRead, cacheCreation)
 				clog.DebugContext(ctx, "Prompt cache metrics",
 					"cache_read_tokens", cacheRead,
-					"cache_creation_tokens", cacheCreation)
+					"cache_creation_tokens", cacheCreation,
+					"cache_creation_5m_tokens", message.Usage.CacheCreation.Ephemeral5mInputTokens,
+					"cache_creation_1h_tokens", message.Usage.CacheCreation.Ephemeral1hInputTokens)
 			}
 		}
 
@@ -1109,6 +1123,27 @@ func (e *executor[Request, Response]) runConversation(
 	return response, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, turnBudget)
 }
 
+// servingAttribution returns the route attribution for one turn, stamped with
+// the lifetime of the cache breakpoints the request carries so the cost view
+// can price the turn's cache writes. Without caching there is no TTL to
+// record.
+func (e *executor[Request, Response]) servingAttribution() agenttrace.Attribution {
+	attribution := e.attribution
+	if e.cacheControl {
+		attribution.Serving.CacheTTLSeconds = new(cacheTTLSeconds(e.cacheTTL))
+	}
+	return attribution
+}
+
+// cacheTTLSeconds converts a marker TTL to seconds. Empty is the API's
+// 5-minute default.
+func cacheTTLSeconds(ttl anthropic.CacheControlEphemeralTTL) int64 {
+	if ttl == anthropic.CacheControlEphemeralTTLTTL1h {
+		return int64(time.Hour / time.Second)
+	}
+	return int64(5 * time.Minute / time.Second)
+}
+
 // buildStaticParams builds the turn-invariant request prefix: the sorted tool
 // definitions (including the advertised terminal submit tool), the sampling
 // parameters, the system prompt, and the cache breakpoints on those blocks. It
@@ -1119,8 +1154,10 @@ func (e *executor[Request, Response]) runConversation(
 // the caller can respect maxCacheBreakpoints when placing any further markers),
 // and a flag indicating that an explicitly-set temperature was dropped for a
 // model that does not accept sampling params, so the caller can log the warning
-// with its context.
-func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, int, bool, error) {
+// with its context. The cache breakpoints carry ttl: requests pass the
+// executor's configured TTL, and the resume config digest passes none so the
+// digest does not depend on it (see configDigest).
+func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudetool.Metadata[Response], ttl anthropic.CacheControlEphemeralTTL) (anthropic.MessageNewParams, int, bool, error) {
 	// Build tool definitions for Claude, sorted by name for deterministic ordering.
 	//
 	// Why sort? The Anthropic API uses prompt caching to avoid re-processing the
@@ -1172,10 +1209,18 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// (skip) rather than push the request past the limit and draw a
 	// non-retryable 400. The first-user-block breakpoint is only placed when
 	// room remains.
+	//
+	// Under the 1-hour TTL a caller's own markers are raised to 1 hour too: the
+	// API rejects a request whose 1-hour entries follow a 5-minute one, and
+	// tool definitions come first in the prefix. toolDefs holds copies, so the
+	// caller's definitions are untouched.
 	breakpoints := 0
 	for i := range toolDefs {
-		if hasBreakpoint(toolDefs[i].OfTool.CacheControl) {
+		if cc := &toolDefs[i].OfTool.CacheControl; hasBreakpoint(*cc) {
 			breakpoints++
+			if ttl == anthropic.CacheControlEphemeralTTLTTL1h {
+				cc.TTL = ttl
+			}
 		}
 	}
 
@@ -1192,7 +1237,7 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// same tool set (cache is keyed by content hash, not by session).
 	if e.cacheControl && len(toolDefs) > 0 && breakpoints < maxCacheBreakpoints &&
 		!hasBreakpoint(toolDefs[len(toolDefs)-1].OfTool.CacheControl) {
-		toolDefs[len(toolDefs)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		toolDefs[len(toolDefs)-1].OfTool.CacheControl = cacheMarker(ttl)
 		breakpoints++
 	}
 
@@ -1245,7 +1290,7 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 		// definitions AND the system prompt together. On subsequent turns, the API
 		// reads both from cache instead of re-processing them as fresh input tokens.
 		if e.cacheControl && breakpoints < maxCacheBreakpoints {
-			systemBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			systemBlock.CacheControl = cacheMarker(ttl)
 			breakpoints++
 		}
 		params.System = []anthropic.TextBlockParam{systemBlock}
@@ -1268,7 +1313,7 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 // breakpoint-count guard in one place that tests can drive directly without a
 // live client.
 func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, bool, error) {
-	params, breakpoints, dropTemperatureWarn, err := e.buildStaticParams(tools)
+	params, breakpoints, dropTemperatureWarn, err := e.buildStaticParams(tools, e.cacheTTL)
 	if err != nil {
 		return anthropic.MessageNewParams{}, false, err
 	}
@@ -1308,7 +1353,7 @@ func (e *executor[Request, Response]) assembleParams(prompt, promptSuffix string
 	if e.cacheControl && e.cacheFirstUserBlock && breakpoints < maxCacheBreakpoints &&
 		len(params.Messages) > 0 && len(params.Messages[0].Content) > 0 {
 		if tb := params.Messages[0].Content[0].OfText; tb != nil {
-			tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			tb.CacheControl = cacheMarker(e.cacheTTL)
 		}
 	}
 

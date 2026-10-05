@@ -100,11 +100,7 @@ func (e *executor[Request, Response]) buildSuspension(
 	// system, sampling) — exactly the configuration a resume must match to
 	// replay safely. buildStaticParams leaves Messages unset, so the digest is
 	// stable across turns and independent of the growing conversation.
-	staticParams, _, _, err := e.buildStaticParams(tools)
-	if err != nil {
-		return nil, fmt.Errorf("build static params for digest: %w", err)
-	}
-	digest, err := checkpoint.DigestJSON(staticParams)
+	digest, err := e.configDigest(tools)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +116,21 @@ func (e *executor[Request, Response]) buildSuspension(
 			Name:      suspendCall.Name,
 			InputJSON: normalizeToolUseInput(suspendCall.Input),
 		}, providerState, loopStateJSON, traceID), nil
+}
+
+// configDigest digests the turn-invariant request prefix (tools, system,
+// sampling) that a resume must match to replay safely. The prefix is built
+// without a cache TTL, so the digest does not depend on it: the TTL changes
+// what a request costs, not what the model sees, and Resume re-stamps the
+// restored prefix with the live TTL. Because an unset TTL is omitted from the
+// marshaled markers, envelopes from executors without WithCacheTTL keep the
+// digest they were parked with.
+func (e *executor[Request, Response]) configDigest(tools map[string]claudetool.Metadata[Response]) (string, error) {
+	staticParams, _, _, err := e.buildStaticParams(tools, "")
+	if err != nil {
+		return "", fmt.Errorf("build static params for digest: %w", err)
+	}
+	return checkpoint.DigestJSON(staticParams)
 }
 
 // loopState is the executor-loop bookkeeping a suspension carries so a resumed
