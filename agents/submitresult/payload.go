@@ -24,13 +24,14 @@ import (
 // submit tool schema.
 const reasoningDescription = "Explain why you are confident this result is complete and accurate."
 
-// ErrParameter marks a submit rejected before its payload could be parsed,
-// for one of three causes: the arguments did not decode as JSON, a required
-// parameter was absent or of the wrong JSON type, or coercion declined a
-// stringified payload. Every recording wraps the cause, so a trace names
-// which one fired instead of collapsing all three into one string. Consumers
-// gating on the class match this sentinel with errors.Is rather than the
-// message: an unparsed-arguments cause quotes model-controlled text.
+// ErrParameter marks a submit rejected before its payload could be parsed, for
+// one of four causes: the arguments did not decode as JSON, a required
+// parameter was absent or of the wrong JSON type, coercion declined a
+// stringified payload, or a payload written inside the reasoning string could
+// not be recovered. Every recording wraps the cause, so a trace names which one
+// fired instead of collapsing them into one string. Consumers gating on the
+// class match this sentinel with errors.Is rather than the message: an
+// unparsed-arguments cause quotes model-controlled text.
 var ErrParameter = errors.New("parameter error")
 
 // payloadEchoLimit bounds the prefix of a stringified payload echoed into a
@@ -81,7 +82,24 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 	}
 
 	payloadRaw, err := params.Extract[map[string]any](args, opts.PayloadFieldName)
-	if err != nil {
+	switch {
+	case err == nil:
+	case args[opts.PayloadFieldName] == nil && strings.Contains(reasoning, parameterOpener(opts.PayloadFieldName)):
+		// reasoning is empty under OmitReasoning, so this arm never fires
+		// there.
+		prose, nested, ok := nestedPayload(reasoning, opts.PayloadFieldName)
+		if !ok {
+			cause := fmt.Errorf("%w: reasoning contains a %s block, so the %s was written inside the reasoning string, and it could not be recovered from there; send the %s as its own parameter, not inside reasoning",
+				err, parameterOpener(opts.PayloadFieldName), opts.PayloadFieldName, opts.PayloadFieldName)
+			trace.RejectedToolCall(id, name, args, fmt.Errorf("%w: %w", ErrParameter, cause))
+			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", cause)}
+		}
+		clog.WarnContext(ctx, "Recovered submit payload nested in reasoning",
+			"tool", name,
+			"field", opts.PayloadFieldName,
+		)
+		payloadRaw, reasoning = nested, prose
+	default:
 		coerced, ok := coerceStringPayload(args, opts.PayloadFieldName)
 		if !ok {
 			cause := err
@@ -197,6 +215,57 @@ func isTagName(name string) bool {
 		}
 	}
 	return true
+}
+
+// parameterOpener is the tool-call markup that opens the named parameter.
+func parameterOpener(field string) string {
+	return `<parameter name="` + field + `">`
+}
+
+// nestedPayload recovers a payload the model wrote inside its reasoning
+// string. A model that closes reasoning with `</reasoning>` instead of
+// `</parameter>` turns the payload parameter's opening tag and the whole
+// payload into reasoning text, so the payload parameter never arrives even
+// though the payload itself is intact.
+//
+// It reports ok when what follows the first opener for field is one JSON
+// object trailed by nothing but closing tokens, the same rule
+// coerceStringPayload applies, so a second opener declines it. Prose that
+// holds an opener for any other parameter declines it too, since that
+// parameter's value would otherwise pass as reasoning. prose is the text
+// before the opener without the tags that closed the reasoning argument,
+// which is the reasoning a well-formed call would have carried.
+func nestedPayload(reasoning, field string) (prose string, payload map[string]any, ok bool) {
+	before, after, found := strings.Cut(reasoning, parameterOpener(field))
+	if !found || strings.Contains(before, `<parameter name=`) {
+		return "", nil, false
+	}
+
+	dec := json.NewDecoder(strings.NewReader(after))
+	if err := dec.Decode(&payload); err != nil || payload == nil {
+		return "", nil, false
+	}
+	if !onlyClosingTokens(after[dec.InputOffset():]) {
+		return "", nil, false
+	}
+	return trimArgumentClose(before), payload, true
+}
+
+// trimArgumentClose removes the whitespace and the `</reasoning>` or
+// `</parameter>` tags that end s: the markup a model writes to close the
+// reasoning argument. Any other trailing markup belongs to the prose.
+func trimArgumentClose(s string) string {
+	for {
+		s = strings.TrimRight(s, " \t\r\n")
+		rest, ok := strings.CutSuffix(s, "</reasoning>")
+		if !ok {
+			rest, ok = strings.CutSuffix(s, "</parameter>")
+		}
+		if !ok {
+			return s
+		}
+		s = rest
+	}
 }
 
 // parsePayload converts a raw payload object (as received from the model) into

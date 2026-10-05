@@ -7,6 +7,7 @@ package claudeexecutor_test
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/google/go-cmp/cmp"
 )
 
 // submitCallTurn renders the SSE events for an assistant turn that calls
@@ -147,6 +149,77 @@ func TestSubmitRejectedByValidatorKeepsLoopGoing(t *testing.T) {
 		if !strings.Contains(second, want) {
 			t.Errorf("second request missing %q in rejection tool result:\n%s", want, second)
 		}
+	}
+}
+
+// TestSubmitNestedInReasoningMeetsTheValidators drives a run whose first
+// submission wrote its result inside reasoning. The recovered result must
+// reach the validators as a well-formed call would have carried it, with only
+// the prose as reasoning, so a recovered result never passes where the same
+// result sent normally would fail; a rejection keeps the loop going.
+func TestSubmitNestedInReasoningMeetsTheValidators(t *testing.T) {
+	prose := rand.Text()
+	var mu sync.Mutex
+	var requests [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, body)
+		n := len(requests)
+		mu.Unlock()
+
+		events := submitCallTurn(t, "msg_01", "toolu_s1", map[string]any{
+			"reasoning": prose + "</reasoning>\n" + `<parameter name="result">{"answer":"wrong"}`,
+		})
+		if n > 1 {
+			events = submitCallTurn(t, "msg_02", "toolu_s2", submitInput("correct"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sseBody(t, events))
+	}))
+	t.Cleanup(srv.Close)
+
+	type validated struct{ Answer, Reasoning string }
+	var seen []validated
+	rejectWrong := func(_ context.Context, r errCapResponse, reasoning string) ([]callbacks.Finding, error) {
+		mu.Lock()
+		seen = append(seen, validated{Answer: r.Answer, Reasoning: reasoning})
+		mu.Unlock()
+		if r.Answer != "correct" {
+			return []callbacks.Finding{{
+				Kind:       callbacks.FindingKindReview,
+				Identifier: "wrong-answer",
+				Details:    "the answer is not correct",
+			}}, nil
+		}
+		return nil, nil
+	}
+
+	exec := newSubmitExecutor(t, srv, rejectWrong)
+
+	resp, err := exec.Execute(t.Context(), errCapRequest{}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := resp.Answer, "correct"; got != want {
+		t.Errorf("resp.Answer: got = %q, want = %q", got, want)
+	}
+	want := []validated{
+		{Answer: "wrong", Reasoning: prose},
+		{Answer: "correct", Reasoning: submitInput("correct")["reasoning"].(string)},
+	}
+	if diff := cmp.Diff(want, seen); diff != "" {
+		t.Errorf("validated submissions (-want, +got):\n%s", diff)
+	}
+	if got, want := len(requests), 2; got != want {
+		t.Fatalf("API requests: got = %d, want = %d", got, want)
+	}
+	if second := string(requests[1]); !strings.Contains(second, "wrong-answer") {
+		t.Errorf("second request missing the validator's finding in the rejection tool result:\n%s", second)
 	}
 }
 

@@ -27,15 +27,20 @@ SPDX-License-Identifier: Apache-2.0
 // of rejecting it with a parameter error. The object may be followed by
 // spurious closing delimiters or closing markup tags such as `</invoke>`.
 // Strings that do not contain a JSON object, or that carry other content
-// after it, are still rejected back to the model.
+// after it, are still rejected back to the model. When the payload parameter
+// is absent because the model wrote it inside the reasoning string, after a
+// `<parameter name="...">` opener for the payload field, the same rule
+// recovers it from there and the reasoning keeps only the prose before the
+// opener; a nested payload that rule declines is rejected with a hint naming
+// where the payload went.
 //
 // A rejection records ErrParameter wrapping the cause — the same corrective
 // hint the model receives, naming the parameter at fault — so the trace an
-// engineer reads says which of the three causes fired (arguments that did not
-// decode, an absent or mistyped parameter, or a stringified payload coercion
-// declined) rather than collapsing them into one string. A declined
-// stringified payload also records its length and a bounded, quoted opening
-// prefix, which is what distinguishes a wrapped object from a YAML document
-// from a truncated write. Consumers that gate on the class match ErrParameter
-// with errors.Is, never the message.
+// engineer reads says which of the four causes fired (arguments that did not
+// decode, an absent or mistyped parameter, a stringified payload coercion
+// declined, or a nested payload recovery declined) rather than collapsing them
+// into one string. A declined stringified payload also records its length and a
+// bounded, quoted opening prefix, which is what distinguishes a wrapped object
+// from a YAML document from a truncated write. Consumers that gate on the class
+// match ErrParameter with errors.Is, never the message.
 package submitresult
