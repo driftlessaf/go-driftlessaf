@@ -29,18 +29,25 @@ type Recorder struct {
 	codeFromError func(error) int
 }
 
-// NewRecorder builds a Recorder for one executor instance. provider is the
-// OTel gen_ai.provider.name value for the serving backend (for example
+// NewRecorder builds a Recorder for one executor instance. model is the exact
+// provider model ID, recorded as gen_ai.request.model. reportedModel, when set
+// and different, replaces it in the model label, so a route's logical model
+// rather than a deployment-specific provider ID groups the metrics. provider is
+// the OTel gen_ai.provider.name value for the serving backend (for example
 // "gcp.vertex_ai", "anthropic", or "openai-compat"). codeFromError maps a
 // backend API error to the HTTP-style response code recorded by
 // RecordAPIRequest; backends that do not record genai.api.requests may pass
 // nil and must not call RecordAPIRequest or WithAPIRequestCounter.
-func NewRecorder(genai *metrics.GenAI, model, provider string, resourceLabels map[string]string, codeFromError func(error) int) *Recorder {
-	attrs := make([]attribute.KeyValue, 0, len(resourceLabels)+1)
+func NewRecorder(genai *metrics.GenAI, model, reportedModel, provider string, resourceLabels map[string]string, codeFromError func(error) int) *Recorder {
+	attrs := make([]attribute.KeyValue, 0, len(resourceLabels)+2)
 	for k, v := range resourceLabels {
 		attrs = append(attrs, attribute.String(k, v))
 	}
 	attrs = append(attrs, attribute.String("gen_ai.provider.name", provider))
+	// Caller attributes are recorded last, so this overrides the model label.
+	if reportedModel != "" && reportedModel != model {
+		attrs = append(attrs, attribute.String("model", reportedModel))
+	}
 	return &Recorder{
 		genai:         genai,
 		model:         model,

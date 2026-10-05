@@ -120,7 +120,7 @@ func TestBedrockResponsesRoutedContinuation(t *testing.T) {
 		if got, want := turn.ServingLocation, "us-west-2"; got != want {
 			t.Errorf("serving location: got = %q, want = %q", got, want)
 		}
-		if turn.Provider != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) || turn.Model != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel || turn.ReasoningTokens != 1 || turn.CacheReadTokens != 2 {
+		if turn.Provider != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) || turn.Model != route.Selection.LogicalModel || turn.ProviderModelID != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel || turn.ReasoningTokens != 1 || turn.CacheReadTokens != 2 {
 			t.Errorf("turn=%+v", turn)
 		}
 	}

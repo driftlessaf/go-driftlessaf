@@ -122,7 +122,7 @@ func New[Request promptbuilder.Bindable, Response any](client responses.Response
 		client:   client,
 		config:   cfg,
 		submit:   submit,
-		recorder: telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), cfg.Model, cfg.Attribution.ProviderName, cfg.ResourceLabels, statusCode),
+		recorder: telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), cfg.Model, cfg.Attribution.LogicalModel, cfg.Attribution.ProviderName, cfg.ResourceLabels, statusCode),
 	}, nil
 }
 

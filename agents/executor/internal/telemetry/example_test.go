@@ -19,6 +19,7 @@ func ExampleNewRecorder() {
 	rec := telemetry.NewRecorder(
 		metrics.NewGenAI("chainguard.ai.agents"),
 		"claude-sonnet-4",
+		"",
 		"anthropic",
 		map[string]string{"team": "platform"},
 		func(error) int { return -1 },
@@ -34,6 +35,7 @@ func ExampleRecorder() {
 	rec := telemetry.NewRecorder(
 		metrics.NewGenAI("chainguard.ai.agents"),
 		"gemini-2.5-flash",
+		"",
 		"gcp.vertex_ai",
 		nil,
 		func(error) int { return -1 },
@@ -51,6 +53,7 @@ func ExampleRecorder_RecordAPIRequest() {
 	rec := telemetry.NewRecorder(
 		metrics.NewGenAI("chainguard.ai.agents"),
 		"gemini-2.5-flash",
+		"",
 		"gcp.vertex_ai",
 		nil,
 		func(err error) int {
@@ -74,6 +77,7 @@ func ExampleRecorder_WithAPIRequestCounter() {
 	rec := telemetry.NewRecorder(
 		metrics.NewGenAI("chainguard.ai.agents"),
 		"gemini-2.5-flash",
+		"",
 		"gcp.vertex_ai",
 		nil,
 		func(error) int { return 503 },

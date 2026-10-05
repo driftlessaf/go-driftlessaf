@@ -436,8 +436,11 @@ func TestAnthropicInferenceAuthenticationFailureDoesNotFallBack(t *testing.T) {
 		t.Fatalf("recorded traces/turns: got = %d/%d, want = 1/1", len(tracer.traces), len(tracer.traces[0].Turns))
 	}
 	turn := tracer.traces[0].Turns[0]
-	if turn.Model != providerModelID {
-		t.Errorf("trace model: got = %q, want = %q", turn.Model, providerModelID)
+	if turn.Model != directSelection.LogicalModel {
+		t.Errorf("trace model: got = %q, want = %q", turn.Model, directSelection.LogicalModel)
+	}
+	if turn.ProviderModelID != providerModelID {
+		t.Errorf("trace provider model ID: got = %q, want = %q", turn.ProviderModelID, providerModelID)
 	}
 	if turn.Provider != agenttrace.SystemAnthropic || turn.System != agenttrace.SystemAnthropic {
 		t.Errorf("trace provider/system: got = %q/%q, want = %q/%q", turn.Provider, turn.System, agenttrace.SystemAnthropic, agenttrace.SystemAnthropic)

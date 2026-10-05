@@ -350,7 +350,7 @@ func (c *Client) askOne(ctx context.Context, req Request) (*Response, error) {
 	var recorder *telemetry.Recorder
 	cfg := c.retry
 	if c.genai != nil {
-		recorder = telemetry.NewRecorder(c.genai, req.Model, c.providerName, c.resourceLabels, responseCode)
+		recorder = telemetry.NewRecorder(c.genai, req.Model, "", c.providerName, c.resourceLabels, responseCode)
 		cfg = recorder.WithAPIRequestCounter(ctx, cfg)
 	}
 

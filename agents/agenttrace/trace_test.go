@@ -132,6 +132,59 @@ func TestBeginTurnServingContext(t *testing.T) {
 	}
 }
 
+func TestBeginTurnWithAttributionModelIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                string
+		modelName           string
+		logicalModel        string
+		wantModel           string
+		wantProviderModelID string
+	}{{
+		name:                "differing IDs report logical model and keep provider ID",
+		modelName:           "us.anthropic.claude-sonnet-5",
+		logicalModel:        "claude-sonnet-5",
+		wantModel:           "claude-sonnet-5",
+		wantProviderModelID: "us.anthropic.claude-sonnet-5",
+	}, {
+		name:         "equal IDs leave provider ID empty",
+		modelName:    "claude-sonnet-5",
+		logicalModel: "claude-sonnet-5",
+		wantModel:    "claude-sonnet-5",
+	}, {
+		name:         "empty logical model falls back to provider ID",
+		modelName:    "us.anthropic.claude-sonnet-5",
+		logicalModel: "",
+		wantModel:    "us.anthropic.claude-sonnet-5",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), randomString())
+			turn := trace.BeginTurnWithAttribution(0, tt.modelName, Attribution{
+				ProviderName: SystemBedrock,
+				System:       SystemBedrock,
+				LogicalModel: tt.logicalModel,
+			})
+			turn.End()
+			// A later turn must not change the latched trace model.
+			trace.BeginTurnWithAttribution(1, "other-provider-id", Attribution{LogicalModel: "other"}).End()
+
+			if diff := cmp.Diff(tt.wantModel, trace.Model); diff != "" {
+				t.Errorf("Trace.Model (-want +got):\n%s", diff)
+			}
+			got := trace.Turns[0]
+			if diff := cmp.Diff(tt.wantModel, got.Model); diff != "" {
+				t.Errorf("turn Model (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantProviderModelID, got.ProviderModelID); diff != "" {
+				t.Errorf("turn ProviderModelID (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestServingContextValidate(t *testing.T) {
 	t.Parallel()
 	negativeTTL := int64(-1)

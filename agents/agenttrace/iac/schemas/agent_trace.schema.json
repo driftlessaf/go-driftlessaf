@@ -41,6 +41,7 @@
       {"name": "provider", "type": "STRING", "mode": "NULLABLE"},
       {"name": "system", "type": "STRING", "mode": "NULLABLE"},
       {"name": "logical_model", "type": "STRING", "mode": "NULLABLE"},
+      {"name": "provider_model_id", "type": "STRING", "mode": "NULLABLE"},
       {"name": "protocol", "type": "STRING", "mode": "NULLABLE"},
       {"name": "serving_location", "type": "STRING", "mode": "NULLABLE"},
       {"name": "inference_mode", "type": "STRING", "mode": "NULLABLE"},

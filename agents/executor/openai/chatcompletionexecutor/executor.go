@@ -141,7 +141,7 @@ func New[Request promptbuilder.Bindable, Response any](
 	// resource labels. codeFromError is nil because this executor does not
 	// record genai.api.requests: it has no error→code mapping yet, and wiring
 	// one up is a behavior change tracked separately.
-	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, e.attribution.ProviderName, e.resourceLabels, nil)
+	e.telemetry = telemetry.NewRecorder(metrics.NewGenAI("chainguard.ai.agents"), e.modelName, e.attribution.LogicalModel, e.attribution.ProviderName, e.resourceLabels, nil)
 
 	return e, nil
 }

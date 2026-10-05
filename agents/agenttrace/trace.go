@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package agenttrace
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -154,11 +155,15 @@ type LLMTurn[T any] struct {
 // CloudEvent payload). Token counts reflect a single turn rather than
 // cumulative totals on the parent Trace.
 type RecordedTurn struct {
-	Index               int       `json:"index"`
-	Model               string    `json:"model,omitempty"`
-	Provider            string    `json:"provider,omitempty"`
-	System              string    `json:"system,omitempty"`
-	LogicalModel        string    `json:"logical_model,omitempty"`
+	Index        int    `json:"index"`
+	Model        string `json:"model,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	System       string `json:"system,omitempty"`
+	LogicalModel string `json:"logical_model,omitempty"`
+	// ProviderModelID is the exact model ID sent to the provider, such as an
+	// inference profile ARN, when it differs from Model. Model reports the
+	// logical model when one is set.
+	ProviderModelID     string    `json:"provider_model_id,omitempty"`
 	Protocol            string    `json:"protocol,omitempty"`
 	ServingLocation     string    `json:"serving_location,omitempty"`
 	InferenceMode       string    `json:"inference_mode,omitempty"`
@@ -489,18 +494,23 @@ func (t *Trace[T]) BeginTurnWithAttribution(turn int, modelName string, attribut
 		attrs = append(attrs, attribute.String("driftlessaf.protocol", attribution.Protocol))
 	}
 
+	// The chat span and gen_ai.request.model name the exact provider model ID
+	// per OTel GenAI semconv. The trace, turn, and recorded span report the
+	// logical model when a route has one, so a deployment-specific provider ID
+	// such as an inference profile ARN does not split reporting by model.
 	newCtx, span := tr.Start(parentCtx, "chat "+modelName,
 		oteltrace.WithAttributes(attrs...))
+	reportedModel := cmp.Or(attribution.LogicalModel, modelName)
 
 	t.mu.Lock()
 	t.ctx = newCtx
 	// Latch the trace-level model from the first turn that names one. The
 	// root span name follows OTel GenAI semconv "{operation} {model}" — the
 	// model isn't known when the trace starts, so we set it here.
-	if t.Model == "" && modelName != "" {
-		t.Model = modelName
+	if t.Model == "" && reportedModel != "" {
+		t.Model = reportedModel
 		if t.span != nil {
-			t.span.SetName("invoke_agent " + modelName)
+			t.span.SetName("invoke_agent " + reportedModel)
 		}
 	}
 	t.mu.Unlock()
@@ -511,7 +521,7 @@ func (t *Trace[T]) BeginTurnWithAttribution(turn int, modelName string, attribut
 		prevCtx: parentCtx,
 		record: RecordedTurn{
 			Index:           turn,
-			Model:           modelName,
+			Model:           reportedModel,
 			Provider:        attribution.ProviderName,
 			System:          attribution.System,
 			LogicalModel:    attribution.LogicalModel,
@@ -521,6 +531,9 @@ func (t *Trace[T]) BeginTurnWithAttribution(turn int, modelName string, attribut
 			ServiceTier:     attribution.Serving.ServiceTier,
 			StartTime:       time.Now(),
 		},
+	}
+	if modelName != reportedModel {
+		llmTurn.record.ProviderModelID = modelName
 	}
 	if attribution.Serving.CacheTTLSeconds != nil {
 		ttl := *attribution.Serving.CacheTTLSeconds

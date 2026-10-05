@@ -72,7 +72,7 @@ func ExampleGateSubmission() {
 
 	ctx := context.Background()
 	trace, _ := agenttrace.StartTrace[reviewResult](ctx, "prompt")
-	rec := telemetry.NewRecorder(metrics.NewGenAI("example"), "model", "provider", nil, nil)
+	rec := telemetry.NewRecorder(metrics.NewGenAI("example"), "model", "", "provider", nil, nil)
 
 	// The backend's submit handler parsed the model's call into an accepted
 	// outcome; the gate runs the validators and commits the response.

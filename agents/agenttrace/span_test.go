@@ -183,8 +183,8 @@ func TestBuildRecordedSpan_ShapeAndHashStability(t *testing.T) {
 	if span.AgentName != "materializer" {
 		t.Errorf("agent_name: got %q, want %q", span.AgentName, "materializer")
 	}
-	if span.ModelID != "claude-sonnet-4-7" {
-		t.Errorf("model_id: got %q", span.ModelID)
+	if span.ModelID != "reasoning" {
+		t.Errorf("model_id: got %q, want %q", span.ModelID, "reasoning")
 	}
 	if span.PromptHash == "" {
 		t.Error("prompt_hash must be set")
@@ -198,6 +198,8 @@ func TestBuildRecordedSpan_ShapeAndHashStability(t *testing.T) {
 		"system":        "anthropic",
 		"logical_model": "reasoning",
 		"protocol":      "anthropic-messages",
+
+		"provider_model_id": "claude-sonnet-4-7",
 	}
 	for key, want := range wantMetadata {
 		if got := metadata[key]; got != want {

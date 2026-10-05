@@ -197,7 +197,7 @@ func New[Request promptbuilder.Bindable, Response any](
 	if exec.retryRequestTimeouts {
 		codeFromError = responseCodeFromErrorWithRequestTimeout
 	}
-	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, exec.attribution.ProviderName, exec.resourceLabels, codeFromError)
+	exec.telemetry = telemetry.NewRecorder(genaiMetrics, exec.model, exec.attribution.LogicalModel, exec.attribution.ProviderName, exec.resourceLabels, codeFromError)
 
 	return exec, nil
 }

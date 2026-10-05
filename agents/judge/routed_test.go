@@ -871,7 +871,14 @@ func assertJudgeRouteTraces(
 			continue
 		}
 		turn := trace.Turns[0]
-		if turn.Model != providerModelID || turn.Provider != providerName || turn.System != legacySystem || turn.LogicalModel != logicalModelID || turn.Protocol != string(protocol) {
+		wantProviderModelID := providerModelID
+		if providerModelID == logicalModelID {
+			wantProviderModelID = ""
+		}
+		if turn.ProviderModelID != wantProviderModelID {
+			t.Errorf("trace %d provider model ID = %q, want %q", i, turn.ProviderModelID, wantProviderModelID)
+		}
+		if turn.Model != logicalModelID || turn.Provider != providerName || turn.System != legacySystem || turn.LogicalModel != logicalModelID || turn.Protocol != string(protocol) {
 			t.Errorf("trace %d route = model:%q provider:%q system:%q logical:%q protocol:%q", i, turn.Model, turn.Provider, turn.System, turn.LogicalModel, turn.Protocol)
 		}
 	}

@@ -400,7 +400,7 @@ func TestBedrockChatRoutedToolLoopAndAttribution(t *testing.T) {
 		if got, want := turn.ServingLocation, "us-east-1"; got != want {
 			t.Errorf("serving location: got = %q, want = %q", got, want)
 		}
-		if turn.Model != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel || turn.Provider != agenttrace.SystemBedrock || turn.System != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) {
+		if turn.Model != route.Selection.LogicalModel || turn.ProviderModelID != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel || turn.Provider != agenttrace.SystemBedrock || turn.System != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) {
 			t.Errorf("incorrect routed attribution: %+v", turn)
 		}
 		if turn.InputTokens != 7 || turn.OutputTokens != 3 {

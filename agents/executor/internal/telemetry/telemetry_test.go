@@ -11,6 +11,11 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
+	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestResponseCodeAttr(t *testing.T) {
@@ -46,7 +51,7 @@ func TestResponseCodeAttr(t *testing.T) {
 func TestWithAPIRequestCounter_PreservesBaseCallback(t *testing.T) {
 	t.Parallel()
 
-	r := NewRecorder(metrics.NewGenAI("test"), "gemini-test", "gcp.vertex_ai", nil, func(error) int { return -1 })
+	r := NewRecorder(metrics.NewGenAI("test"), "gemini-test", "", "gcp.vertex_ai", nil, func(error) int { return -1 })
 	var got []error
 	cfg := retry.RetryConfig{
 		OnAttemptError: func(err error) { got = append(got, err) },
@@ -67,10 +72,85 @@ func TestWithAPIRequestCounter_PreservesBaseCallback(t *testing.T) {
 func TestWithAPIRequestCounter_NilBase(t *testing.T) {
 	t.Parallel()
 
-	r := NewRecorder(metrics.NewGenAI("test"), "gemini-test", "gcp.vertex_ai", nil, func(error) int { return -1 })
+	r := NewRecorder(metrics.NewGenAI("test"), "gemini-test", "", "gcp.vertex_ai", nil, func(error) int { return -1 })
 	cfg := retry.RetryConfig{} // OnAttemptError is nil
 	wrapped := r.WithAPIRequestCounter(t.Context(), cfg)
 
 	// Must not panic.
 	wrapped.OnAttemptError(errors.New("boom"))
+}
+
+// TestRecordTokens_ModelLabel swaps the global meter provider, so neither it
+// nor its subtests may run in parallel.
+func TestRecordTokens_ModelLabel(t *testing.T) {
+	const providerModel = "us.anthropic.claude-sonnet-5"
+	tests := []struct {
+		name          string
+		reportedModel string
+		wantModel     string
+	}{{
+		name:          "reported model overrides the model label",
+		reportedModel: "claude-sonnet-5",
+		wantModel:     "claude-sonnet-5",
+	}, {
+		name:          "empty reported model keeps the provider model",
+		reportedModel: "",
+		wantModel:     providerModel,
+	}, {
+		name:          "equal reported model keeps the provider model",
+		reportedModel: providerModel,
+		wantModel:     providerModel,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			previous := otel.GetMeterProvider()
+			otel.SetMeterProvider(provider)
+			t.Cleanup(func() {
+				otel.SetMeterProvider(previous)
+				if err := provider.Shutdown(t.Context()); err != nil {
+					t.Error(err)
+				}
+			})
+
+			r := NewRecorder(metrics.NewGenAI(t.Name()), providerModel, tt.reportedModel, "aws.bedrock", nil, nil)
+			r.RecordTokens(t.Context(), 10, 5)
+
+			var data metricdata.ResourceMetrics
+			if err := reader.Collect(t.Context(), &data); err != nil {
+				t.Fatal(err)
+			}
+			var got []map[string]string
+			for _, scope := range data.ScopeMetrics {
+				for _, metric := range scope.Metrics {
+					if metric.Name != "genai.token.prompt" {
+						continue
+					}
+					sum, ok := metric.Data.(metricdata.Sum[int64])
+					if !ok {
+						t.Fatalf("genai.token.prompt data = %T, want Sum[int64]", metric.Data)
+					}
+					for _, point := range sum.DataPoints {
+						got = append(got, map[string]string{
+							"model":                stringAttr(point.Attributes, "model"),
+							"gen_ai.request.model": stringAttr(point.Attributes, "gen_ai.request.model"),
+						})
+					}
+				}
+			}
+			want := []map[string]string{{
+				"model":                tt.wantModel,
+				"gen_ai.request.model": providerModel,
+			}}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("genai.token.prompt attributes (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func stringAttr(set attribute.Set, key string) string {
+	v, _ := set.Value(attribute.Key(key))
+	return v.AsString()
 }

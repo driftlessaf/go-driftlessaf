@@ -289,7 +289,7 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 
 	// The recorder is built after options so it captures the final model,
 	// provider, and resource labels.
-	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.attribution.ProviderName, e.resourceLabels, responseCodeFromError)
+	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.attribution.LogicalModel, e.attribution.ProviderName, e.resourceLabels, responseCodeFromError)
 
 	return e, nil
 }

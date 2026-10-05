@@ -144,7 +144,7 @@ func TestRuntimeClaudeToolLoop(t *testing.T) {
 		if got, want := turn.ServingLocation, "us-west-2"; got != want {
 			t.Errorf("serving location: got = %q, want = %q", got, want)
 		}
-		if turn.Provider != agenttrace.SystemBedrock || turn.System != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) || turn.Model != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel {
+		if turn.Provider != agenttrace.SystemBedrock || turn.System != agenttrace.SystemBedrock || turn.Protocol != string(route.Protocol) || turn.Model != route.Selection.LogicalModel || turn.ProviderModelID != route.ProviderModelID || turn.LogicalModel != route.Selection.LogicalModel {
 			t.Errorf("incorrect attribution: %+v", turn)
 		}
 		if turn.InputTokens != 7 || turn.OutputTokens != 3 || turn.CacheReadTokens != 2 {

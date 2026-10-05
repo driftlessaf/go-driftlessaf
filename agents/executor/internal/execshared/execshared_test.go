@@ -228,7 +228,7 @@ func TestGateSubmissionRejectionKinds(t *testing.T) {
 	type reviewResult struct {
 		Verdict string `json:"verdict"`
 	}
-	rec := telemetry.NewRecorder(metrics.NewGenAI("test"), "model", "provider", nil, nil)
+	rec := telemetry.NewRecorder(metrics.NewGenAI("test"), "model", "", "provider", nil, nil)
 	outcome := toolcall.SubmitOutcome[reviewResult]{
 		Accepted:   true,
 		Response:   reviewResult{Verdict: "pass"},

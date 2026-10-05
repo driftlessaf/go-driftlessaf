@@ -196,6 +196,9 @@ func (lt *LLMTurn[T]) buildRecordedSpan() (RecordedSpan, bool) {
 	if lt.record.LogicalModel != "" {
 		metaMap["logical_model"] = lt.record.LogicalModel
 	}
+	if lt.record.ProviderModelID != "" {
+		metaMap["provider_model_id"] = lt.record.ProviderModelID
+	}
 	if lt.record.Protocol != "" {
 		metaMap["protocol"] = lt.record.Protocol
 	}
