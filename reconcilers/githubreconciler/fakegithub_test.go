@@ -31,6 +31,15 @@ import (
 // tokens that happen to expire between calls.
 const fakeTokenTTL = time.Hour
 
+// fakeAppPermissions is what fakeGitHub grants a mint that asks for no
+// particular permissions: everything the installation grants the App.
+var fakeAppPermissions = map[string]string{
+	"contents":      "write",
+	"issues":        "write",
+	"metadata":      "read",
+	"pull_requests": "write",
+}
+
 // fakeGitHub serves the GitHub endpoints an App-backed ClientCache touches,
 // with GitHub's shapes:
 //
@@ -38,7 +47,9 @@ const fakeTokenTTL = time.Hour
 //     App's installation on that account, 404 when there is none;
 //   - POST /app/installations/{id}/access_tokens: 201 with a fakeTokenTTL
 //     token for a live installation, mintStatus (default 404, what GitHub
-//     answers for a deleted installation) for any other ID;
+//     answers for a deleted installation) for any other ID. The token's
+//     permissions are the request's, or fakeAppPermissions when it asks for
+//     none, unless grant is set;
 //   - GET /repos/{owner}/{repo}: 200 when the bearer token was minted for an
 //     installation that is still live, 401 Bad credentials otherwise.
 //
@@ -55,6 +66,9 @@ type fakeGitHub struct {
 	login map[string]string
 	// mintStatus answers a mint for an installation that is not live.
 	mintStatus int
+	// grant, when set, is the permission set every mint answers with,
+	// whatever the request asked for.
+	grant map[string]string
 	// lookupStatus, when set, answers both installation lookup endpoints.
 	lookupStatus int
 	// block, when set for an owner, parks its organization lookup until the
@@ -199,13 +213,30 @@ func (f *fakeGitHub) mint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, f.mintStatus)
 		return
 	}
+	var req struct {
+		Permissions map[string]string `json:"permissions"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	permissions := fakeAppPermissions
+	switch {
+	case f.grant != nil:
+		permissions = f.grant
+	case req.Permissions != nil:
+		permissions = req.Permissions
+	}
 	token := fmt.Sprintf("tok-%d-%d", id, f.mintCalls[id])
 	f.tokens[token] = id
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"token":      token,
-		"expires_at": time.Now().Add(fakeTokenTTL).UTC().Format(time.RFC3339),
+		"token":       token,
+		"expires_at":  time.Now().Add(fakeTokenTTL).UTC().Format(time.RFC3339),
+		"permissions": permissions,
 	})
 }
 

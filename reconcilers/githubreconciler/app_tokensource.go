@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,6 +54,10 @@ type App struct {
 
 	lookupTimeout time.Duration
 	negativeTTL   time.Duration
+
+	// permissions, when set, is the exact permission set every installation
+	// token is minted with (see WithInstallationPermissions).
+	permissions *github.InstallationPermissions
 }
 
 // ErrNoInstallation is returned (wrapped) by LookupInstallID when GitHub
@@ -97,6 +102,20 @@ func WithInstallLookupTimeout(d time.Duration) AppOption {
 // non-positive value keeps the default.
 func WithInstallLookupNegativeTTL(d time.Duration) AppOption {
 	return func(a *App) { a.negativeTTL = cmp.Or(max(d, 0), DefaultInstallLookupNegativeTTL) }
+}
+
+// WithInstallationPermissions makes every installation token the App mints
+// carry exactly perms instead of every permission the installation grants
+// the App. GitHub refuses a mint that asks for a permission the App does not
+// hold, and includes metadata read in every token, so metadata read is
+// added to perms when they name no metadata level. A token GitHub answers with any other permission set is
+// refused rather than used, so a process built with this option never holds
+// more than perms, whatever the App itself is granted.
+func WithInstallationPermissions(perms github.InstallationPermissions) AppOption {
+	if perms.Metadata == nil {
+		perms.Metadata = new("read")
+	}
+	return func(a *App) { a.permissions = &perms }
 }
 
 // NewApp creates an App from a key URI — gcpkms:// for a Cloud KMS key
@@ -300,7 +319,7 @@ func (a *App) InstallationTokenSource(ctx context.Context, installID int64, repo
 }
 
 func (a *App) installationTokenSource(ctx context.Context, installID int64, repo string) *appTokenSource {
-	ts := &appTokenSource{ctx: ctx, atr: a.atr, installID: installID, repo: repo}
+	ts := &appTokenSource{ctx: ctx, atr: a.atr, installID: installID, repo: repo, permissions: a.permissions}
 	ts.itr = ts.newTransport()
 	return ts
 }
@@ -373,6 +392,11 @@ type appTokenSource struct {
 	atr       *ghinstallation.AppsTransport
 	installID int64
 	repo      string
+	// permissions, when set, is requested on every mint and must be exactly
+	// what GitHub grants.
+	permissions *github.InstallationPermissions
+	// readMu serializes reads of the token a transport holds (see read).
+	readMu sync.Mutex
 	// onGone, when set, runs when GitHub answers 404 to a mint for the
 	// installation (see isInstallationGone).
 	onGone func()
@@ -416,9 +440,10 @@ func (ts *appTokenSource) installationID() int64 { return ts.installID }
 
 func (ts *appTokenSource) newTransport() *ghinstallation.Transport {
 	itr := ghinstallation.NewFromAppsTransport(ts.atr, ts.installID)
-	if ts.repo != "" {
-		itr.InstallationTokenOptions = &github.InstallationTokenOptions{
-			Repositories: []string{ts.repo},
+	if ts.repo != "" || ts.permissions != nil {
+		itr.InstallationTokenOptions = &github.InstallationTokenOptions{Permissions: ts.permissions}
+		if ts.repo != "" {
+			itr.InstallationTokenOptions.Repositories = []string{ts.repo}
 		}
 	}
 	return itr
@@ -429,15 +454,11 @@ func (ts *appTokenSource) Token() (*oauth2.Token, error) {
 	itr := ts.itr
 	ts.mu.Unlock()
 
-	tok, err := itr.Token(ts.ctx)
+	tok, expiresAt, err := ts.read(itr)
 	if err != nil {
 		if ts.onGone != nil && isInstallationGone(err) {
 			ts.onGone()
 		}
-		return nil, err
-	}
-	expiresAt, _, err := itr.Expiry()
-	if err != nil {
 		return nil, err
 	}
 	ts.mu.Lock()
@@ -450,6 +471,31 @@ func (ts *appTokenSource) Token() (*oauth2.Token, error) {
 		TokenType:   "Bearer",
 		Expiry:      expiresAt,
 	}, nil
+}
+
+// read returns itr's token and its expiry, checking its permissions when
+// ts asks for particular ones. itr's Token refreshes the token under its
+// own lock, but its Permissions and Expiry read it without one, so readMu
+// keeps a concurrent refresh from changing the token between the three and
+// the check from passing on another token than the one returned.
+func (ts *appTokenSource) read(itr *ghinstallation.Transport) (string, time.Time, error) {
+	ts.readMu.Lock()
+	defer ts.readMu.Unlock()
+	tok, err := itr.Token(ts.ctx)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if ts.permissions != nil {
+		granted, err := itr.Permissions()
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if !reflect.DeepEqual(granted, *ts.permissions) {
+			return "", time.Time{}, fmt.Errorf("installation %d granted a token with permissions other than the ones requested", ts.installID)
+		}
+	}
+	expiresAt, _, err := itr.Expiry()
+	return tok, expiresAt, err
 }
 
 // expireToken drops the cached installation token if it is still token and

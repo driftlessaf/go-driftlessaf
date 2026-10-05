@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,7 +18,70 @@ import (
 	"time"
 
 	jwt "github.com/golang-jwt/jwt/v4"
+	"github.com/google/go-github/v88/github"
 )
+
+// An App built with WithInstallationPermissions asks for exactly those
+// permissions on every mint and refuses a token GitHub grants any other
+// set; without it, a token carries whatever the installation grants.
+func TestWithInstallationPermissions(t *testing.T) {
+	narrow := github.InstallationPermissions{
+		Contents:     new("read"),
+		Metadata:     new("read"),
+		PullRequests: new("write"),
+	}
+	for _, tc := range []struct {
+		name    string
+		opts    []AppOption
+		grant   map[string]string
+		wantErr bool
+	}{{
+		name: "no option takes what the installation grants",
+	}, {
+		name: "granted as requested",
+		opts: []AppOption{WithInstallationPermissions(narrow)},
+	}, {
+		name: "metadata read is added",
+		opts: []AppOption{WithInstallationPermissions(github.InstallationPermissions{
+			Contents:     new("read"),
+			PullRequests: new("write"),
+		})},
+		grant: map[string]string{"contents": "read", "metadata": "read", "pull_requests": "write"},
+	}, {
+		name:    "granted more than requested",
+		opts:    []AppOption{WithInstallationPermissions(narrow)},
+		grant:   fakeAppPermissions,
+		wantErr: true,
+	}, {
+		name:    "granted less than requested",
+		opts:    []AppOption{WithInstallationPermissions(narrow)},
+		grant:   map[string]string{"contents": "read", "metadata": "read"},
+		wantErr: true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeGitHub(map[string]int64{"acme": 42})
+			fake.grant = tc.grant
+			srv := httptest.NewServer(fake)
+			t.Cleanup(srv.Close)
+			app := newTestApp(t, srv.Client().Transport, srv.URL, tc.opts...)
+
+			// Both the repository-scoped and the org-wide mint.
+			for _, repo := range []string{"widgets", ""} {
+				ts, err := app.RepoTokenSource(t.Context(), "acme", repo)
+				if err != nil {
+					t.Fatalf("RepoTokenSource(%q): %v", repo, err)
+				}
+				tok, err := ts.Token()
+				if gotErr := err != nil; gotErr != tc.wantErr {
+					t.Fatalf("Token(%q): got err = %v, want error = %t", repo, err, tc.wantErr)
+				}
+				if err == nil && tok.AccessToken == "" {
+					t.Errorf("Token(%q): empty token", repo)
+				}
+			}
+		})
+	}
+}
 
 func TestNewAppFromFile(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
