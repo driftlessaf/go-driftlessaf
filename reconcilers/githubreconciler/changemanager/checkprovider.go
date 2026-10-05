@@ -67,6 +67,14 @@ func (checkRun) Logs(_ context.Context, _ *github.Client, _, _ string, f callbac
 
 // Rerun implements CheckProvider.
 func (checkRun) Rerun(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) error {
+	return ReRequestCheckRun(ctx, gh, owner, repo, f)
+}
+
+// ReRequestCheckRun re-requests the check run named by a CI check finding's
+// Identifier, which sends check_run.rerequested to the App that created it.
+// It is how the change manager reruns a check no provider matches, for
+// providers whose checks are rerun the same way.
+func ReRequestCheckRun(ctx context.Context, gh *github.Client, owner, repo string, f callbacks.Finding) error {
 	checkRunID, err := strconv.ParseInt(f.Identifier, 10, 64)
 	if err != nil {
 		return fmt.Errorf("parse check run ID from identifier %q: %w", f.Identifier, err)
