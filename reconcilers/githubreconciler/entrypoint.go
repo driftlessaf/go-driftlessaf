@@ -381,10 +381,17 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 	var serveErr error
 	select {
 	case <-ctx.Done():
+		// One line as the drain starts and one as it ends, so a SIGKILL in
+		// between shows which side of the deadline it landed on. The cause
+		// names the signal when signal.NotifyContext cancelled ctx.
+		start := time.Now()
+		clog.InfoContext(ctx, "reconciler server draining", "cause", context.Cause(ctx), "deadline", shutdownGrace.String())
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 		defer cancel()
 		if err := d.Shutdown(shutdownCtx); err != nil {
-			clog.WarnContext(ctx, "reconciler server shutdown did not finish cleanly", "error", err)
+			clog.WarnContext(ctx, "reconciler server shutdown did not finish cleanly", "error", err, "elapsed", time.Since(start).String())
+		} else {
+			clog.InfoContext(ctx, "reconciler server drained", "elapsed", time.Since(start).String())
 		}
 		serveErr = <-serveErrCh
 	case serveErr = <-serveErrCh:
