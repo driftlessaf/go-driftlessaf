@@ -240,12 +240,16 @@ func TestCollectFindings(t *testing.T) {
 			cr(5, "sbom", "COMPLETED", "NEUTRAL"),
 			cr(6, "flaky", "COMPLETED", "CANCELLED"), // not FAILURE -> not a finding
 			{Typename: "StatusContext"},              // legacy commit status -> ignored
+			cr(7, "eligibility", "COMPLETED", "FAILURE"),
+			cr(8, "eligibility-rerun", "IN_PROGRESS", ""),
 		},
 		// PageInfo.HasNextPage is false, so paginateRollupContexts is never called
 		// and the nil gqlClient is safe.
 	}
+	// Ignored runs are neither findings nor pending, whatever they conclude.
+	ignored := map[string]struct{}{"eligibility": {}, "eligibility-rerun": {}}
 
-	findings, pending, err := collectFindings(t.Context(), nil, "owner", "repo", "sha", contexts)
+	findings, pending, err := collectFindings(t.Context(), nil, "owner", "repo", "sha", contexts, ignored)
 	if err != nil {
 		t.Fatalf("collectFindings: %v", err)
 	}
@@ -338,7 +342,7 @@ func TestCollectFindings_PaginatesRollupContexts(t *testing.T) {
 	initial.PageInfo.HasNextPage = true
 	initial.PageInfo.EndCursor = "cursor-1"
 
-	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial)
+	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial, nil)
 	if err != nil {
 		t.Fatalf("collectFindings: %v", err)
 	}
@@ -374,7 +378,7 @@ func TestCollectFindings_PaginationErrorPropagates(t *testing.T) {
 	initial.PageInfo.HasNextPage = true
 	initial.PageInfo.EndCursor = "cursor-1"
 
-	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial)
+	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial, nil)
 	if err == nil {
 		t.Fatal("collectFindings: got nil error, want pagination error")
 	}

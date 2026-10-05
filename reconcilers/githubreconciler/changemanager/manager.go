@@ -247,6 +247,21 @@ func WithManagedLabels[T any](labels ...string) Option[T] {
 	}
 }
 
+// WithIgnoredChecks names check runs the reconciler cannot act on. A run with
+// one of these names never becomes a finding or a pending check, whatever its
+// status or conclusion, so it cannot trigger an iteration or hold the PR as
+// pending. Use it for checks that gate something other than CI, such as an
+// auto-merge eligibility verdict, or that fail for reasons no commit can fix.
+func WithIgnoredChecks[T any](names ...string) Option[T] {
+	return func(cm *CM[T]) {
+		set := make(map[string]struct{}, len(names))
+		for _, n := range names {
+			set[n] = struct{}{}
+		}
+		cm.ignoredChecks = set
+	}
+}
+
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
@@ -271,6 +286,9 @@ type CM[T any] struct {
 	// checkProviders handle CI check findings, the first match winning; see
 	// WithCheckProviders.
 	checkProviders []CheckProvider
+	// ignoredChecks are check run names excluded from findings and pending
+	// checks; see WithIgnoredChecks.
+	ignoredChecks map[string]struct{}
 }
 
 // GraphQL types for querying check runs
@@ -702,7 +720,7 @@ func (cm *CM[T]) NewSession(
 		if len(pr.Commits.Nodes) > 0 {
 			commit := pr.Commits.Nodes[0].Commit
 			var err error
-			findings, pendingChecks, err = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.StatusCheckRollup.Contexts)
+			findings, pendingChecks, err = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.StatusCheckRollup.Contexts, cm.ignoredChecks)
 			if err != nil {
 				return nil, fmt.Errorf("collecting findings: %w", err)
 			}
@@ -886,12 +904,13 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 // checks) and pendingChecks (names of checks not yet complete). Failed and
 // pending runs are classified client-side from each CheckRun's conclusion/status,
 // since the flat rollup is not pre-filtered like the old per-suite checkRuns
-// queries were.
+// queries were. Runs named in ignored are skipped entirely.
 func collectFindings(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha string,
 	initialContexts gqlRollupContextsConnection,
+	ignored map[string]struct{},
 ) (findings []callbacks.Finding, pendingChecks []string, err error) {
 	processContexts := func(nodes []gqlStatusCheckRollupContext) {
 		for _, n := range nodes {
@@ -901,6 +920,9 @@ func collectFindings(
 				continue
 			}
 			run := n.CheckRun
+			if _, skip := ignored[run.Name]; skip {
+				continue
+			}
 			_, pending := pendingCheckStatuses[run.Status]
 			switch {
 			case run.Conclusion == "FAILURE":
