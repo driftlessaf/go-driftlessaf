@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"sync"
+
+	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 )
 
 const (
@@ -119,7 +121,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 			return resp, err
 		}
 		t.remember(key, resp)
-		mRequests.WithLabelValues("miss").Inc()
+		mark(resp, "miss")
 		return resp, nil
 	}
 
@@ -137,7 +139,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		// remembered body no longer describes this URL.
 		t.forget(key)
 		t.remember(key, resp)
-		mRequests.WithLabelValues("changed").Inc()
+		mark(resp, "changed")
 		return resp, nil
 	}
 
@@ -146,8 +148,22 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	mRequests.WithLabelValues("hit").Inc()
-	return cached.replay(r, resp), nil
+	replayed := cached.replay(r, resp)
+	mark(replayed, "hit")
+	return replayed, nil
+}
+
+// mark counts the revalidation outcome and tags the response with it, after
+// remember has copied the headers, so the tag is never stored and replayed.
+// The instrumented transport above (httpmetrics) logs the tag as the
+// github_api_call cache field and removes it: replay turns a 304
+// into a 200, so without it a hit is indistinguishable from a paid read.
+func mark(resp *http.Response, result string) {
+	mRequests.WithLabelValues(result).Inc()
+	if resp.Header == nil {
+		resp.Header = make(http.Header, 1)
+	}
+	resp.Header.Set(httpmetrics.CacheResultHeader, result)
 }
 
 // replay rebuilds the remembered response as the 200 it was, carrying this

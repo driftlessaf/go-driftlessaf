@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 )
 
 // origin is a fake GitHub that answers a single resource conditionally, the
@@ -414,4 +416,53 @@ func TestConcurrentReadsAreSafe(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// TestResponsesCarryCacheResult pins the tag httpmetrics logs as the
+// github_api_call cache field. The replay turns a 304 into a 200, so the tag
+// is the only thing that tells a hit from a paid read above this transport;
+// and it must never be stored, or every later replay would report the
+// outcome of the read that filled the entry.
+func TestResponsesCarryCacheResult(t *testing.T) {
+	o := &origin{body: `{"v":1}`, etag: `W/"v1"`, remaining: 15000}
+	rt, url := newOrigin(t, o)
+
+	steps := []struct {
+		name   string
+		change func()
+		want   string
+	}{{
+		name: "first read",
+		want: "miss",
+	}, {
+		name: "unchanged",
+		want: "hit",
+	}, {
+		name: "moved",
+		change: func() {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			o.body, o.etag = `{"v":2}`, `W/"v2"`
+		},
+		want: "changed",
+	}, {
+		name: "unchanged after move",
+		want: "hit",
+	}}
+	for _, step := range steps {
+		if step.change != nil {
+			step.change()
+		}
+		if got := get(t, rt, url).header.Get(httpmetrics.CacheResultHeader); got != step.want {
+			t.Errorf("%s: %s = %q, want = %q", step.name, httpmetrics.CacheResultHeader, got, step.want)
+		}
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for key, e := range rt.entries {
+		if v := e.header.Get(httpmetrics.CacheResultHeader); v != "" {
+			t.Errorf("entry %q stored %s = %q, want = absent", key, httpmetrics.CacheResultHeader, v)
+		}
+	}
 }

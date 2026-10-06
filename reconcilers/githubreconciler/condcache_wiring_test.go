@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/google/go-github/v88/github"
 	"golang.org/x/oauth2"
 )
@@ -181,5 +182,27 @@ func TestConditionalRequestsAreScopedPerClient(t *testing.T) {
 
 	if first.Client().Transport == second.Client().Transport {
 		t.Error("two repositories share one transport, and so one response cache; a cached body must be reachable only by the credentials that fetched it")
+	}
+}
+
+// TestCacheResultTagDoesNotReachCaller pins that the tag condcache sets for
+// the access log is removed by the instrumented transport the ClientCache
+// puts above it, so a reconciler never sees it on a response.
+func TestCacheResultTagDoesNotReachCaller(t *testing.T) {
+	o := &conditionalOrigin{remaining: 5000}
+	client := clientFor(t, o.start(t), WithConditionalRequests())
+
+	for _, read := range []string{"miss", "hit"} {
+		_, resp, err := client.PullRequests.Get(t.Context(), "acme", "widgets", 7)
+		if err != nil {
+			t.Fatalf("%s read: PullRequests.Get: %v", read, err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get(httpmetrics.CacheResultHeader); got != "" {
+			t.Errorf("%s read: %s on the caller's response = %q, want = absent", read, httpmetrics.CacheResultHeader, got)
+		}
+	}
+	if got, want := o.conditional, 1; got != want {
+		t.Errorf("conditional requests reaching the origin: got = %d, want = %d", got, want)
 	}
 }

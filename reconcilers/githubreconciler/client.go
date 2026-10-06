@@ -173,8 +173,11 @@ func (cc *ClientCache) Get(ctx context.Context, org, repo string) (*github.Clien
 		//
 		// Any wrapper sits BELOW httpmetrics, which sdk.NewClient puts outermost.
 		// A conditional-request cache therefore still shows up as a request in
-		// the metrics and the access log, which is correct: the call is made, it
-		// just answers 304 and costs no quota.
+		// the metrics and the access log, but as the 200 it replays, not the 304
+		// GitHub answered. condcache tags each response with its outcome
+		// (httpmetrics.CacheResultHeader), which the access log records as its
+		// cache field; that field, not status_code, tells a revalidation hit
+		// from a paid read.
 		transport := installationTransport(ctx, e.tokenSource, func() { cc.evictOrg(org, e.seq, e.installID) })
 		if cc.wrapTransport != nil {
 			transport = cc.wrapTransport(transport)

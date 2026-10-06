@@ -13,10 +13,9 @@ import (
 // mRequests counts GETs through the Transport by what the revalidation found.
 //
 // The "hit" share is the only direct measure of what this package saves. A
-// hit is a 304, which the instrumented transport below records as an ordinary
-// request and which never appears as a saving in the GitHub request log —
-// the call still happens, it just does not draw on the rate limit. Nothing
-// else reports that distinction.
+// hit is a 304 replayed as a 200, so the instrumented transport above records
+// it as an ordinary request; per request, only the cache field of its
+// github_api_call log (see mark) tells it apart.
 var mRequests = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "github_conditional_requests_total",
