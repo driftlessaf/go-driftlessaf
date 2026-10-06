@@ -8,6 +8,7 @@ package condcache
 import (
 	"bytes"
 	"cmp"
+	"container/list"
 	"io"
 	"net/http"
 	"sync"
@@ -22,7 +23,12 @@ const (
 	// DefaultMaxEntryBytes bounds one remembered body. A response larger than
 	// this is returned to the caller untouched and simply not remembered, so
 	// the cap costs revalidation opportunities, never correctness.
-	DefaultMaxEntryBytes = 64 << 10
+	//
+	// It is sized for the largest responses a reconciler re-reads: a page of
+	// 100 check runs carrying their output text, or a page of pulls/{n}/files
+	// with patches, runs to hundreds of KiB. Those are the reads whose 304s
+	// save the most budget, so a cap below them caches only what is cheap.
+	DefaultMaxEntryBytes = 1 << 20
 
 	// DefaultMaxTotalBytes bounds every remembered body together. Without it
 	// the real ceiling would be MaxEntries times MaxEntryBytes, which is the
@@ -70,6 +76,13 @@ type entry struct {
 	body   []byte
 }
 
+// slot is an entry's place in the recency list, which needs the key to find
+// the map entry again when it evicts from the back.
+type slot struct {
+	key string
+	entry
+}
+
 // Transport revalidates GETs with If-None-Match and replays the remembered
 // body on 304. See the package doc for scope and freshness.
 //
@@ -81,8 +94,10 @@ type Transport struct {
 	maxEntryBytes int
 	maxTotalBytes int
 
-	mu      sync.Mutex
-	entries map[string]entry
+	mu sync.Mutex
+	// entries indexes recency, whose front is the most recently used.
+	entries map[string]*list.Element
+	recency list.List
 	bytes   int
 }
 
@@ -96,7 +111,7 @@ func New(base http.RoundTripper, opts ...Option) *Transport {
 		maxEntries:    DefaultMaxEntries,
 		maxEntryBytes: DefaultMaxEntryBytes,
 		maxTotalBytes: DefaultMaxTotalBytes,
-		entries:       make(map[string]entry),
+		entries:       make(map[string]*list.Element),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -200,17 +215,21 @@ func (t *Transport) remember(key string, resp *http.Response) {
 		return
 	}
 
+	// A body larger than the total budget could only be stored by exceeding
+	// it, so the total caps the per-entry limit too.
+	limit := min(t.maxEntryBytes, t.maxTotalBytes)
+
 	// Read one byte past the cap so an oversized body is detected without
 	// buffering it whole, then hand the caller back everything either way:
 	// what was read, followed by whatever remains unread.
-	head, err := io.ReadAll(io.LimitReader(resp.Body, int64(t.maxEntryBytes)+1))
+	head, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		// The caller's read will fail the same way; leave the body as it is
 		// rather than masking the error behind a partial replacement.
 		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), errReader{err}))
 		return
 	}
-	if len(head) > t.maxEntryBytes {
+	if len(head) > limit {
 		rest := resp.Body
 		resp.Body = &joinedBody{Reader: io.MultiReader(bytes.NewReader(head), rest), closer: rest}
 		return
@@ -221,35 +240,52 @@ func (t *Transport) remember(key string, resp *http.Response) {
 	t.put(key, entry{etag: etag, header: resp.Header.Clone(), body: head})
 }
 
+// get returns the entry for key and marks it most recently used: a
+// revalidation is a use whether it ends in a hit or replaces the body.
 func (t *Transport) get(key string) (entry, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	e, ok := t.entries[key]
-	return e, ok
+	el, ok := t.entries[key]
+	if !ok {
+		return entry{}, false
+	}
+	t.recency.MoveToFront(el)
+	return el.Value.(*slot).entry, true
 }
 
 func (t *Transport) forget(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if e, ok := t.entries[key]; ok {
-		t.bytes -= len(e.body)
-		delete(t.entries, key)
+	if el, ok := t.entries[key]; ok {
+		t.drop(el)
 	}
 }
 
-// put stores an entry, resetting the whole cache when either bound is
-// reached. Wholesale reset rather than piecemeal eviction, as elsewhere in
-// this stack: a dropped entry costs one uncached read, which is what every
-// read cost before the cache existed, and the working set is far below the
-// bounds in practice.
+// drop removes one entry and its bytes. The caller holds t.mu.
+func (t *Transport) drop(el *list.Element) {
+	s := t.recency.Remove(el).(*slot)
+	t.bytes -= len(s.body)
+	delete(t.entries, s.key)
+}
+
+// put stores an entry as the most recently used, first evicting the least
+// recently used entries until both bounds leave room for it. Recency rather
+// than arbitrary order matters because one admitted body can be as large as
+// hundreds of the small reads, such as a pull request GET, that a reconciler
+// repeats on every pass; those stay at the front and survive. remember never
+// passes a body larger than maxTotalBytes, so the loop always ends with room.
 func (t *Transport) put(key string, e entry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.entries) >= t.maxEntries || t.bytes+len(e.body) > t.maxTotalBytes {
-		t.entries = make(map[string]entry, t.maxEntries)
-		t.bytes = 0
+	// Two concurrent misses on one URL both store; count the body once.
+	if el, ok := t.entries[key]; ok {
+		t.drop(el)
 	}
-	t.entries[key] = e
+	for len(t.entries) >= t.maxEntries || t.bytes+len(e.body) > t.maxTotalBytes {
+		t.drop(t.recency.Back())
+		mEvictions.Inc()
+	}
+	t.entries[key] = t.recency.PushFront(&slot{key: key, entry: e})
 	t.bytes += len(e.body)
 }
 

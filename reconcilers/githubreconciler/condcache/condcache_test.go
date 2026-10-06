@@ -231,6 +231,17 @@ func TestPassThrough(t *testing.T) {
 		prepare:        func(o *origin) { o.body = strings.Repeat("x", 2048) },
 		opts:           []Option{WithMaxEntryBytes(512)},
 		wantQuotaSpent: 2,
+	}, {
+		name:           "a body over the total budget is not remembered",
+		method:         http.MethodGet,
+		prepare:        func(o *origin) { o.body = strings.Repeat("x", 2048) },
+		opts:           []Option{WithMaxTotalBytes(512)},
+		wantQuotaSpent: 2,
+	}, {
+		name:           "a body over the default size cap is not remembered",
+		method:         http.MethodGet,
+		prepare:        func(o *origin) { o.body = strings.Repeat("x", DefaultMaxEntryBytes+1) },
+		wantQuotaSpent: 2,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := &origin{body: "{}", etag: `W/"v1"`, remaining: 15000}
@@ -356,6 +367,140 @@ func TestOversizedBodyIsStillDeliveredWhole(t *testing.T) {
 	}
 }
 
+// TestLargeListingRevalidatesAtDefaults pins that the default entry cap
+// admits the large responses reconcilers re-read on every poll: a page of
+// check runs with output text, or of pulls/{n}/files with patches, is
+// hundreds of KiB, and only a remembered body can be answered with a 304.
+func TestLargeListingRevalidatesAtDefaults(t *testing.T) {
+	want := strings.Repeat("c", 512<<10)
+	o := &origin{body: want, etag: `W/"v1"`, remaining: 15000}
+	rt, url := newOrigin(t, o)
+
+	for range 2 {
+		if got := get(t, rt, url); got.body != want {
+			t.Fatalf("body length = %d, want = %d", len(got.body), len(want))
+		}
+	}
+	if got, want := o.notModified, 1; got != want {
+		t.Errorf("304 responses: got = %d, want = %d (the second read should revalidate)", got, want)
+	}
+}
+
+// TestTotalBudgetEvictsOnlyWhatIsNeeded pins how the two default bounds
+// interact: the total budget holds DefaultMaxTotalBytes/DefaultMaxEntryBytes
+// bodies of the maximum size, and the next one evicts a single entry to make
+// room rather than letting the cache grow past the budget or emptying it.
+func TestTotalBudgetEvictsOnlyWhatIsNeeded(t *testing.T) {
+	rt := New(nil)
+	body := make([]byte, DefaultMaxEntryBytes)
+	fit := DefaultMaxTotalBytes / DefaultMaxEntryBytes
+
+	for i := range fit {
+		rt.put(strconv.Itoa(i), entry{etag: `W/"v1"`, body: body})
+	}
+	if got, want := len(rt.entries), fit; got != want {
+		t.Fatalf("entries before the budget is reached: got = %d, want = %d", got, want)
+	}
+	if got, want := rt.bytes, DefaultMaxTotalBytes; got != want {
+		t.Fatalf("bytes before the budget is reached: got = %d, want = %d", got, want)
+	}
+
+	rt.put("overflow", entry{etag: `W/"v1"`, body: body})
+	if got, want := len(rt.entries), fit; got != want {
+		t.Errorf("entries after overflowing the budget: got = %d, want = %d", got, want)
+	}
+	if got, want := rt.bytes, DefaultMaxTotalBytes; got != want {
+		t.Errorf("bytes after overflowing the budget: got = %d, want = %d", got, want)
+	}
+	if _, ok := rt.entries["overflow"]; !ok {
+		t.Error("the entry that overflowed the budget was not kept")
+	}
+}
+
+// TestEvictsLeastRecentlyUsed pins the eviction order: a small entry read
+// since a large one was stored outlives it, so admitting a large body under
+// pressure costs the stale entry rather than the hot one.
+func TestEvictsLeastRecentlyUsed(t *testing.T) {
+	rt := New(nil, WithMaxTotalBytes(1000))
+	rt.put("small", entry{etag: `W/"s"`, body: make([]byte, 10)})
+	rt.put("large", entry{etag: `W/"l"`, body: make([]byte, 600)})
+
+	// A revalidation is a use: it moves small ahead of large.
+	if _, ok := rt.get("small"); !ok {
+		t.Fatal("small entry missing before any eviction")
+	}
+
+	rt.put("incoming", entry{etag: `W/"i"`, body: make([]byte, 500)})
+	if _, ok := rt.entries["large"]; ok {
+		t.Error("the least recently used entry survived; it should have been evicted")
+	}
+	for _, key := range []string{"small", "incoming"} {
+		if _, ok := rt.entries[key]; !ok {
+			t.Errorf("entry %q was evicted; only the least recently used should go", key)
+		}
+	}
+	if got, want := rt.bytes, 510; got != want {
+		t.Errorf("bytes: got = %d, want = %d", got, want)
+	}
+}
+
+// TestLargeBodyEvictsOnlyAsNeeded pins that a large body admitted to a full
+// cache evicts from the least recently used end only until it fits, leaving
+// the more recent entries in place.
+func TestLargeBodyEvictsOnlyAsNeeded(t *testing.T) {
+	rt := New(nil, WithMaxTotalBytes(1000))
+	for i := range 10 {
+		rt.put(strconv.Itoa(i), entry{etag: `W/"v1"`, body: make([]byte, 100)})
+	}
+
+	rt.put("large", entry{etag: `W/"v1"`, body: make([]byte, 350)})
+
+	// 350 bytes needs four 100-byte entries gone, oldest first.
+	for i := range 10 {
+		_, ok := rt.entries[strconv.Itoa(i)]
+		if want := i >= 4; ok != want {
+			t.Errorf("entry %d present: got = %t, want = %t", i, ok, want)
+		}
+	}
+	if got, want := rt.bytes, 950; got != want {
+		t.Errorf("bytes: got = %d, want = %d", got, want)
+	}
+	if got, want := rt.recency.Len(), len(rt.entries); got != want {
+		t.Errorf("recency list length: got = %d, want = %d (it must track the map)", got, want)
+	}
+}
+
+// TestEntryCountEvictsLeastRecentlyUsed pins that the entry bound evicts in
+// the same order as the byte bound.
+func TestEntryCountEvictsLeastRecentlyUsed(t *testing.T) {
+	rt := New(nil, WithMaxEntries(2))
+	rt.put("a", entry{etag: `W/"v1"`})
+	rt.put("b", entry{etag: `W/"v1"`})
+	rt.get("a")
+	rt.put("c", entry{etag: `W/"v1"`})
+
+	if _, ok := rt.entries["b"]; ok {
+		t.Error("entry b survived; it was the least recently used")
+	}
+	for _, key := range []string{"a", "c"} {
+		if _, ok := rt.entries[key]; !ok {
+			t.Errorf("entry %q was evicted", key)
+		}
+	}
+}
+
+// TestOverwriteCountsBytesOnce pins that storing a key twice, as two
+// concurrent misses on one URL do, leaves its body counted once.
+func TestOverwriteCountsBytesOnce(t *testing.T) {
+	rt := New(nil)
+	for range 2 {
+		rt.put("k", entry{etag: `W/"v1"`, body: make([]byte, 100)})
+	}
+	if got, want := rt.bytes, 100; got != want {
+		t.Errorf("bytes: got = %d, want = %d", got, want)
+	}
+}
+
 // TestKeyedByAccept pins that two representations of one URL do not collide.
 // GitHub serves different media types at the same path — raw blob bytes
 // versus the JSON envelope — and serving one where the other was asked for
@@ -460,8 +605,8 @@ func TestResponsesCarryCacheResult(t *testing.T) {
 
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	for key, e := range rt.entries {
-		if v := e.header.Get(httpmetrics.CacheResultHeader); v != "" {
+	for key, el := range rt.entries {
+		if v := el.Value.(*slot).header.Get(httpmetrics.CacheResultHeader); v != "" {
 			t.Errorf("entry %q stored %s = %q, want = absent", key, httpmetrics.CacheResultHeader, v)
 		}
 	}

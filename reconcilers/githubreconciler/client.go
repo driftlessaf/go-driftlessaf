@@ -47,10 +47,12 @@ type TokenSourceFunc func(ctx context.Context, org, repo string) (oauth2.TokenSo
 //
 // Worst case, with WithConditionalRequests on, each client's cache can hold
 // up to condcache.DefaultMaxTotalBytes (32 MiB) of bodies, so the bound on
-// that memory is this size times that figure (16 GiB at the defaults). Real
-// caches hold what the reconciler re-reads, far below the cap, but a
-// reconciler that enables conditional requests across many repositories
-// should size the two bounds together.
+// that memory is this size times that figure (16 GiB at the defaults). A
+// client fills its budget once it re-reads 32 maximum-size (1 MiB) bodies,
+// such as check-run or pulls/{n}/files pages, so a busy repository can
+// reach the per-client figure. A reconciler that enables conditional
+// requests across many repositories should size the two bounds together
+// against its memory limit.
 const DefaultClientCacheSize = 512
 
 // ClientCacheOption configures a ClientCache.

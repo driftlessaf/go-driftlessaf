@@ -23,3 +23,10 @@ var mRequests = promauto.NewCounterVec(
 	},
 	[]string{"result"}, // hit | miss | changed
 )
+
+// mEvictions counts entries dropped to make room for another. A rate that
+// tracks the miss rate means a client's working set exceeds its budget.
+var mEvictions = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "github_conditional_cache_evictions_total",
+	Help: "Conditional-request cache entries evicted to stay within a bound.",
+})
