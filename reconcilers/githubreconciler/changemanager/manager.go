@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"text/template"
@@ -218,19 +219,20 @@ func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
 // either form, "some-reviewer" or "some-reviewer[bot]", and matches whether the
 // author arrives suffixed (the REST shape) or bare with __typename "Bot" (the
 // GraphQL shape GitHub returns for an App). The default (empty allowlist) keeps
-// association-only filtering.
+// association-only filtering. Repeated calls add to the set.
 func WithTrustedReviewAuthors[T any](logins ...string) Option[T] {
 	return func(cm *CM[T]) {
 		if len(logins) == 0 {
 			return
 		}
-		set := make(map[string]struct{}, len(logins))
+		if cm.trustedReviewAuthors == nil {
+			cm.trustedReviewAuthors = make(map[string]struct{}, len(logins))
+		}
 		for _, l := range logins {
 			if l != "" {
-				set[l] = struct{}{}
+				cm.trustedReviewAuthors[l] = struct{}{}
 			}
 		}
-		cm.trustedReviewAuthors = set
 	}
 }
 
@@ -241,9 +243,14 @@ func WithTrustedReviewAuthors[T any](logins ...string) Option[T] {
 // based on the current state (e.g. a "manual review needed" label applied
 // only when a diff requires it). Labels not listed here are never removed.
 // Labels exceeding GitHub's limit use the same normalized name as Upsert.
+// Repeated calls add to the set.
 func WithManagedLabels[T any](labels ...string) Option[T] {
 	return func(cm *CM[T]) {
-		cm.managedLabels = normalizeLabels(labels)
+		for _, l := range normalizeLabels(labels) {
+			if !slices.Contains(cm.managedLabels, l) {
+				cm.managedLabels = append(cm.managedLabels, l)
+			}
+		}
 	}
 }
 
@@ -252,13 +259,19 @@ func WithManagedLabels[T any](labels ...string) Option[T] {
 // status or conclusion, so it cannot trigger an iteration or hold the PR as
 // pending. Use it for checks that gate something other than CI, such as an
 // auto-merge eligibility verdict, or that fail for reasons no commit can fix.
+// Repeated calls add to the set.
+//
+// Runs match by name alone, and any GitHub App can create a run with a listed
+// name. Ignoring a run only stops the reconciler acting on it, so name a check
+// here only if nothing else relies on the reconciler to act on that check.
 func WithIgnoredChecks[T any](names ...string) Option[T] {
 	return func(cm *CM[T]) {
-		set := make(map[string]struct{}, len(names))
-		for _, n := range names {
-			set[n] = struct{}{}
+		if cm.ignoredChecks == nil {
+			cm.ignoredChecks = make(map[string]struct{}, len(names))
 		}
-		cm.ignoredChecks = set
+		for _, n := range names {
+			cm.ignoredChecks[n] = struct{}{}
+		}
 	}
 }
 

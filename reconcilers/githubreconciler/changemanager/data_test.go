@@ -8,6 +8,7 @@ package changemanager
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -387,5 +388,52 @@ func TestCollectFindings_PaginationErrorPropagates(t *testing.T) {
 	}
 	if findings != nil || pending != nil {
 		t.Errorf("partial results returned alongside error: findings=%v pending=%v", findings, pending)
+	}
+}
+
+func TestWithIgnoredChecksAppends(t *testing.T) {
+	cm, err := New[testData]("test-bot",
+		template.Must(template.New("title").Parse("x")),
+		template.Must(template.New("body").Parse("x")),
+		WithIgnoredChecks[testData]("a"),
+		WithIgnoredChecks[testData]("b"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := map[string]struct{}{"a": {}, "b": {}}
+	if !maps.Equal(cm.ignoredChecks, want) {
+		t.Errorf("ignoredChecks: got = %v, want = %v", cm.ignoredChecks, want)
+	}
+}
+
+func TestWithTrustedReviewAuthorsAppends(t *testing.T) {
+	cm, err := New[testData]("test-bot",
+		template.Must(template.New("title").Parse("x")),
+		template.Must(template.New("body").Parse("x")),
+		WithTrustedReviewAuthors[testData]("a[bot]"),
+		WithTrustedReviewAuthors[testData]("b[bot]"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := map[string]struct{}{"a[bot]": {}, "b[bot]": {}}
+	if !maps.Equal(cm.trustedReviewAuthors, want) {
+		t.Errorf("trustedReviewAuthors: got = %v, want = %v", cm.trustedReviewAuthors, want)
+	}
+}
+
+func TestWithManagedLabelsAppends(t *testing.T) {
+	cm, err := New[testData]("test-bot",
+		template.Must(template.New("title").Parse("x")),
+		template.Must(template.New("body").Parse("x")),
+		WithManagedLabels[testData]("a", "b"),
+		WithManagedLabels[testData]("b", "c"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if want := []string{"a", "b", "c"}; !slices.Equal(cm.managedLabels, want) {
+		t.Errorf("managedLabels: got = %v, want = %v", cm.managedLabels, want)
 	}
 }
