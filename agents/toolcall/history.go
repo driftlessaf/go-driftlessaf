@@ -7,8 +7,12 @@ package toolcall
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
+	"sort"
+	"unicode/utf8"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -54,6 +58,22 @@ const (
 	// returned in a single list_commits call.
 	maxListCommitsLimit = 100
 
+	// defaultListCommitsLimit is the number of commits list_commits returns
+	// when the caller passes no limit.
+	defaultListCommitsLimit = 10
+
+	// maxListCommitsFiles is the maximum number of files listed per commit.
+	// A merge from main can touch tens of thousands of files.
+	maxListCommitsFiles = 200
+
+	// maxListCommitsMessageBytes is the maximum size of a commit message in
+	// a list_commits response.
+	maxListCommitsMessageBytes = 4000
+
+	// maxListCommitsBytes is the maximum size of an encoded list_commits
+	// response.
+	maxListCommitsBytes = 256000
+
 	// maxFileDiffLimit is the maximum number of bytes that can be returned
 	// in a single get_file_diff call.
 	maxFileDiffLimit = 100000
@@ -63,12 +83,19 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 	return map[string]Tool[Resp]{
 		"list_commits": {
 			Def: Definition{
-				Name:        "list_commits",
-				Description: "List commits since the base branch in reverse chronological order. Each commit includes its changed files with diff sizes in bytes, allowing you to decide which diffs to fetch with get_file_diff.",
+				Name: "list_commits",
+				Description: fmt.Sprintf("List commits since the base branch in reverse chronological order. Each commit includes its changed files with diff sizes in bytes, allowing you to decide which diffs to fetch with get_file_diff. "+
+					"The response is at most limit_bytes (%d) bytes, and truncated is true when anything is cut. "+
+					"Each commit lists at most %d files and %d bytes of message. files_total counts all of its files, files_omitted counts the files not listed, and message_truncated marks a cut message. "+
+					"To list the omitted files of a commit, call list_commits again with offset at that commit, limit 1, and files_offset set to its files_next_offset. "+
+					"To read the change to a file you know, call get_file_diff(path, start, end) with start at the next older commit and end at the commit. "+
+					"When the byte bound drops trailing commits, next_offset points at the first dropped commit.", maxListCommitsBytes, maxListCommitsFiles, maxListCommitsMessageBytes),
 				Parameters: []Parameter{{
 					Name: "offset", Type: "integer", Description: "Number of commits to skip (default: 0)", Required: false,
 				}, {
-					Name: "limit", Type: "integer", Description: fmt.Sprintf("Maximum commits to return (default: 20, max: %d)", maxListCommitsLimit), Required: false,
+					Name: "limit", Type: "integer", Description: fmt.Sprintf("Maximum commits to return (default: %d, max: %d)", defaultListCommitsLimit, maxListCommitsLimit), Required: false,
+				}, {
+					Name: "files_offset", Type: "integer", Description: "Number of files to skip in each commit's file list (default: 0)", Required: false,
 				}},
 				Annotations: &ToolAnnotations{
 					ReadOnly:    true,
@@ -82,15 +109,22 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 				if errResp != nil {
 					return errResp
 				}
-				limit, errResp := OptionalParam[int](call, "limit", 20)
+				limit, errResp := OptionalParam[int](call, "limit", defaultListCommitsLimit)
 				if errResp != nil {
 					return errResp
 				}
 				if limit > maxListCommitsLimit {
 					return params.Error("limit %d exceeds maximum of %d", limit, maxListCommitsLimit)
 				}
+				filesOffset, errResp := OptionalParam[int](call, "files_offset", 0)
+				if errResp != nil {
+					return errResp
+				}
+				if filesOffset < 0 {
+					return params.Error("files_offset %d must not be negative", filesOffset)
+				}
 
-				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"offset": offset, "limit": limit})
+				tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"offset": offset, "limit": limit, "files_offset": filesOffset})
 
 				result, err := cb.ListCommits(ctx, offset, limit)
 				if err != nil {
@@ -100,7 +134,7 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 					return resp
 				}
 
-				resp := formatCommitListResult(result)
+				resp := formatCommitListResult(result, offset, filesOffset)
 				tc.Complete(resp, nil)
 				return resp
 			},
@@ -174,37 +208,137 @@ func historyToolDefs[Resp any](cb callbacks.HistoryCallbacks) map[string]Tool[Re
 	}
 }
 
-func formatCommitListResult(result callbacks.CommitListResult) map[string]any {
+// formatCommitListResult encodes a page of commits within
+// maxListCommitsBytes. It drops whole trailing commits first, so next_offset
+// never skips or repeats a commit, and only cuts the file list of a page's
+// sole commit.
+func formatCommitListResult(result callbacks.CommitListResult, offset, filesOffset int) map[string]any {
 	commits := make([]map[string]any, 0, len(result.Commits))
+	truncated := false
 	for _, c := range result.Commits {
-		commit := map[string]any{
-			"sha":     c.SHA,
-			"message": c.Message,
-		}
-
-		files := make([]map[string]any, 0, len(c.Files))
-		for _, f := range c.Files {
-			file := map[string]any{
-				"path":      f.Path,
-				"type":      f.Type,
-				"diff_size": f.DiffSize,
-			}
-			if f.OldPath != "" {
-				file["old_path"] = f.OldPath
-			}
-			files = append(files, file)
-		}
-		commit["files"] = files
-
+		commit, cut := formatCommit(c, filesOffset, maxListCommitsFiles)
+		truncated = truncated || cut
 		commits = append(commits, commit)
 	}
 
 	resp := map[string]any{
-		"commits": commits,
-		"total":   result.Total,
+		"commits":     commits,
+		"total":       result.Total,
+		"limit_bytes": maxListCommitsBytes,
 	}
 	if result.NextOffset != nil {
 		resp["next_offset"] = *result.NextOffset
 	}
+	if truncated {
+		resp["truncated"] = true
+	}
+	if encodedSize(resp) <= maxListCommitsBytes {
+		return resp
+	}
+
+	// The base size assumes truncated and the largest next_offset, so the
+	// kept prefix stays within the bound whatever those fields hold.
+	resp["truncated"] = true
+	resp["commits"] = []map[string]any{}
+	resp["next_offset"] = max(offset+len(commits), result.Total)
+	size := encodedSize(resp)
+	kept := 0
+	for i, commit := range commits {
+		next := encodedSize(commit)
+		if i > 0 {
+			next++ // comma
+		}
+		if size+next > maxListCommitsBytes {
+			break
+		}
+		size += next
+		kept++
+	}
+	kept = min(max(kept, 1), len(commits))
+	resp["commits"] = commits[:kept]
+	switch {
+	case kept < len(commits):
+		resp["next_offset"] = offset + kept
+	case result.NextOffset != nil:
+		resp["next_offset"] = *result.NextOffset
+	default:
+		delete(resp, "next_offset")
+	}
+
+	if kept == 1 && encodedSize(resp) > maxListCommitsBytes {
+		c := result.Commits[0]
+		// The message cap keeps a commit with no files within the bound, so
+		// sort.Search finds at least zero files that fit.
+		fits := sort.Search(maxListCommitsFiles+1, func(n int) bool {
+			commit, _ := formatCommit(c, filesOffset, n)
+			resp["commits"] = []map[string]any{commit}
+			return encodedSize(resp) > maxListCommitsBytes
+		}) - 1
+		commit, _ := formatCommit(c, filesOffset, max(fits, 0))
+		resp["commits"] = []map[string]any{commit}
+	}
 	return resp
+}
+
+// formatCommit encodes one commit with at most maxFiles files, starting at
+// filesOffset. It reports whether it cut the message or the file list.
+func formatCommit(c callbacks.CommitInfo, filesOffset, maxFiles int) (map[string]any, bool) {
+	commit := map[string]any{
+		"sha":         c.SHA,
+		"message":     c.Message,
+		"files_total": len(c.Files),
+	}
+	cut := false
+	if len(c.Message) > maxListCommitsMessageBytes {
+		commit["message"] = truncateUTF8(c.Message, maxListCommitsMessageBytes)
+		commit["message_truncated"] = true
+		cut = true
+	}
+
+	start := min(filesOffset, len(c.Files))
+	end := min(start+maxFiles, len(c.Files))
+	files := make([]map[string]any, 0, end-start)
+	for _, f := range c.Files[start:end] {
+		file := map[string]any{
+			"path":      f.Path,
+			"type":      f.Type,
+			"diff_size": f.DiffSize,
+		}
+		if f.OldPath != "" {
+			file["old_path"] = f.OldPath
+		}
+		files = append(files, file)
+	}
+	commit["files"] = files
+	if omitted := len(c.Files) - len(files); omitted > 0 {
+		commit["files_omitted"] = omitted
+	}
+	if end < len(c.Files) {
+		commit["files_next_offset"] = end
+		cut = true
+	}
+	return commit, cut
+}
+
+// encodedSize returns the JSON size of v. An encoding failure reports the
+// largest size, so the caller trims rather than sends an unmeasured response.
+func encodedSize(v any) int {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return math.MaxInt
+	}
+	return len(b)
+}
+
+// truncateUTF8 returns the longest prefix of s that is at most maxBytes bytes
+// and does not split a multi-byte rune.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
 }

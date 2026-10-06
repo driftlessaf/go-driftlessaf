@@ -7,7 +7,9 @@ package toolcall
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -152,6 +154,32 @@ func TestFindingSearchContent(t *testing.T) {
 		}
 	})
 
+	t.Run("limit above the cap returns at most maxFindingSearchLimit", func(t *testing.T) {
+		s := strings.Repeat("ERROR: retry failed\n", 1_000)
+		matches, total, err := findingSearchContent(s, "ERROR", 0, 1_000)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(matches) != maxFindingSearchLimit {
+			t.Errorf("len(matches): got = %d, want = %d", len(matches), maxFindingSearchLimit)
+		}
+		if total <= len(matches) {
+			t.Errorf("total: got = %d, want > %d so the caller knows to page", total, len(matches))
+		}
+
+		// Paging past the cap with skip reaches the next page.
+		matches, _, err = findingSearchContent(s, "ERROR", maxFindingSearchLimit, 1_000)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(matches) != maxFindingSearchLimit {
+			t.Fatalf("len(matches) at skip %d: got = %d, want = %d", maxFindingSearchLimit, len(matches), maxFindingSearchLimit)
+		}
+		if want := int64(maxFindingSearchLimit * len("ERROR: retry failed\n")); matches[0]["offset"] != want {
+			t.Errorf("first offset at skip %d: got = %v, want = %d", maxFindingSearchLimit, matches[0]["offset"], want)
+		}
+	})
+
 	t.Run("pagination with skip", func(t *testing.T) {
 		matches, total, err := findingSearchContent("err1\nerr2\nerr3\nerr4\nerr5\n", "err", 2, 2)
 		if err != nil {
@@ -212,6 +240,72 @@ func TestFindingSearchContent(t *testing.T) {
 			t.Errorf("total: got = %d, want ≤ %d", total, maxFindingSearchMatches)
 		}
 	})
+}
+
+// TestSearchFindingLogsResponseBound checks the response size that the
+// search_finding_logs description and doc.go promise: at most 10,000 bytes plus
+// the echoed kind and identifier. The worst case is a full page of matches, each
+// carrying the widest offset and length an int can hold, and a pattern of
+// maximum length whose every byte JSON escapes to six.
+func TestSearchFindingLogsResponseBound(t *testing.T) {
+	const (
+		maxResponseBytes = 10_000
+		kind             = "check"
+		identifier       = "ci"
+	)
+
+	// json.Marshal escapes '<' as a \u escape, six bytes per pattern byte.
+	pattern := strings.Repeat("<", maxFindingPatternLength)
+	logs := strings.Repeat(pattern+"\n", maxFindingSearchLimit+1)
+
+	tools := findingLogTools[string](func(context.Context, callbacks.FindingKind, string) (string, error) {
+		return logs, nil
+	})
+	trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+	resp := tools["search_finding_logs"].Handler(t.Context(), ToolCall{
+		ID:   "search-bound",
+		Name: "search_finding_logs",
+		Args: map[string]any{
+			"kind":       kind,
+			"identifier": identifier,
+			"pattern":    pattern,
+			"limit":      float64(maxFindingSearchLimit),
+		},
+	}, trace, nil)
+	if msg, ok := resp["error"]; ok {
+		t.Fatalf("search_finding_logs: got error %v", msg)
+	}
+
+	matches, ok := resp["matches"].([]map[string]any)
+	if !ok {
+		t.Fatalf("matches: got type %T, want []map[string]any", resp["matches"])
+	}
+	if len(matches) != maxFindingSearchLimit {
+		t.Fatalf("len(matches): got = %d, want = %d", len(matches), maxFindingSearchLimit)
+	}
+	// A log large enough to reach these values cannot be built in a unit test,
+	// so widen each pointer to the largest value its type allows. Keeping the
+	// handler's own maps preserves the real response shape.
+	for i, m := range matches {
+		if _, ok := m["offset"].(int64); !ok {
+			t.Fatalf("match[%d] offset: got type %T, want int64", i, m["offset"])
+		}
+		if _, ok := m["length"].(int); !ok {
+			t.Fatalf("match[%d] length: got type %T, want int", i, m["length"])
+		}
+		m["offset"] = int64(math.MaxInt64)
+		m["length"] = math.MaxInt
+	}
+
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	got := len(b) - len(kind) - len(identifier)
+	t.Logf("worst-case encoded response minus kind and identifier: %d bytes", got)
+	if got > maxResponseBytes {
+		t.Errorf("encoded response minus kind and identifier: got = %d bytes, want <= %d", got, maxResponseBytes)
+	}
 }
 
 // TestFindingToolsConcurrentDuplicateCalls is a race regression test: executors

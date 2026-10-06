@@ -23,6 +23,9 @@ const (
 	maxFindingReadLimit     = 1_000_000
 	maxFindingPatternLength = 512
 	maxFindingSearchMatches = 1000
+	// maxFindingSearchLimit caps the matches returned per page; callers page
+	// past it with skip.
+	maxFindingSearchLimit = 100
 
 	// maxFindingReplyBytes bounds a model-authored review-thread reply before it
 	// is posted to GitHub. The prompt asks for one or two sentences; the cap is
@@ -476,13 +479,14 @@ func searchFindingLogsTool[Resp any](fetch func(context.Context, string, string)
 		Def: Definition{
 			Name: "search_finding_logs",
 			Description: "Search log content for a finding using a regex pattern. Returns compact match pointers (byte offset, length) without content. " +
+				"Each response is at most 10000 bytes plus the kind and identifier it echoes. " +
 				"Use read_finding_logs with the returned offset to view matches in context, padding the offset and limit as needed for surrounding context.",
 			Parameters: []Parameter{
 				{Name: "kind", Type: "string", Description: "The kind of finding (from the request's findings list)", Required: true},
 				{Name: "identifier", Type: "string", Description: "The identifier of the finding (from the request's findings list)", Required: true},
 				{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
 				{Name: "skip", Type: "integer", Description: "Number of matches to skip for pagination (default: 0)", Required: false},
-				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 20)", Required: false},
+				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 20, max: 100)", Required: false},
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
@@ -592,6 +596,7 @@ func findingSearchContent(s string, pattern string, skip, limit int) ([]map[stri
 	// totalFound is therefore an upper-bounded count: when totalFound == need,
 	// there may be more matches beyond the cap. Callers should treat total_matches
 	// as a lower bound in that case. This matches loganalyzer's behavior.
+	limit = min(limit, maxFindingSearchLimit)
 	need := min(skip+limit+1, maxFindingSearchMatches)
 	indices := re.FindAllStringIndex(s, need)
 	totalFound := len(indices)

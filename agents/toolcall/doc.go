@@ -54,6 +54,36 @@ SPDX-License-Identifier: Apache-2.0
 //	claudeTools := provider.ClaudeTools(tools)
 //	googleTools := provider.GoogleTools(tools)
 //
+// # Result Bounds
+//
+// A tool result goes into the model context, so each tool that can return
+// unbounded content caps it and tells the model how to fetch the rest.
+//
+// list_commits returns 10 commits by default and 100 at most. A merge from the
+// base branch can touch tens of thousands of files, so the response also has
+// these bounds:
+//   - Each commit lists at most 200 files and 4,000 bytes of message.
+//   - The encoded response is at most 256,000 bytes. The limit_bytes field
+//     reports this value.
+//
+// The response sets truncated when anything is cut. Each commit carries
+// files_total (all its files), files_omitted (files not listed), and
+// message_truncated. When the byte bound drops trailing commits, next_offset
+// points at the first dropped commit, so a following page neither skips nor
+// repeats a commit. The bound cuts the file list only for a page of one
+// commit.
+//
+// The files_offset parameter skips files in every commit of the page. To list
+// the omitted files of one commit, call list_commits with offset at that
+// commit, limit 1, and files_offset set to its files_next_offset. To read the
+// change to a known file, call get_file_diff(path, start, end).
+//
+// search_finding_logs returns at most 100 matches per page. Callers page past
+// that cap with skip. Each match is an offset and length pointer with no log
+// content, so the encoded response is at most 10,000 bytes plus the kind and
+// identifier arguments it echoes. That figure allows for a 512-byte pattern
+// whose every byte JSON escapes to six.
+//
 // # Callback Sources
 //
 // Factory functions for callbacks are provided by other packages:
