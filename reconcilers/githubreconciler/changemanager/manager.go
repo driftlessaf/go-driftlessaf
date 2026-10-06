@@ -544,6 +544,16 @@ type SessionOption func(*sessionConfig)
 
 type sessionConfig struct {
 	branchPrefix string
+	skipChecks   bool
+}
+
+// WithoutGlobalStatus omits global CI status fetching for callers that do not use them.
+// This is useful for integrations that do not need or want to see data from other applications.
+// PR metadata and review findings remain available.
+// CI failures do not trigger WithFindingsIteration; HasPendingChecks returns false
+// without establishing that CI passed.
+func WithoutGlobalStatus() SessionOption {
+	return func(sc *sessionConfig) { sc.skipChecks = true }
 }
 
 // WithBranchPrefix overrides the CM identity as the head-branch prefix for
@@ -653,7 +663,7 @@ func (cm *CM[T]) NewSession(
 							Commit struct {
 								StatusCheckRollup struct {
 									Contexts gqlRollupContextsConnection `graphql:"contexts(first: 100)"`
-								} `graphql:"statusCheckRollup"`
+								} `graphql:"statusCheckRollup @include(if: $includeChecks)"`
 							}
 						}
 					} `graphql:"commits(last: 1)"`
@@ -670,10 +680,11 @@ func (cm *CM[T]) NewSession(
 	}
 
 	if err := gqlClient.Query(ctx, "GetPRInfo", &query, map[string]any{
-		"owner":   githubv4.String(owner),
-		"repo":    githubv4.String(repo),
-		"headRef": githubv4.String(branchName),
-		"baseRef": githubv4.String(ref),
+		"owner":         githubv4.String(owner),
+		"repo":          githubv4.String(repo),
+		"headRef":       githubv4.String(branchName),
+		"baseRef":       githubv4.String(ref),
+		"includeChecks": githubv4.Boolean(!sc.skipChecks),
 	}); err != nil {
 		return nil, fmt.Errorf("querying pull request: %w", err)
 	}
@@ -717,7 +728,7 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect all check runs, handling pagination
-		if len(pr.Commits.Nodes) > 0 {
+		if !sc.skipChecks && len(pr.Commits.Nodes) > 0 {
 			commit := pr.Commits.Nodes[0].Commit
 			var err error
 			findings, pendingChecks, err = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.StatusCheckRollup.Contexts, cm.ignoredChecks)
