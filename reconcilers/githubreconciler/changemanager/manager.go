@@ -275,6 +275,31 @@ func WithIgnoredChecks[T any](names ...string) Option[T] {
 	}
 }
 
+// WithCheckSuites reads check runs through the head commit's check suites
+// rather than its statusCheckRollup. The rollup also carries commit statuses, so
+// reading it requires the statuses permission on top of checks, though only
+// check runs are consumed; with this option the token needs checks but not
+// statuses. Enable it once the reconciler's GitHub App has checks: read, since
+// without it every session fails rather than seeing no checks.
+//
+// appIDs, when given, limits the suites read to those created by the named
+// GitHub Apps (e.g. 15368 for GitHub Actions), so another app's checks cannot
+// trigger an iteration or hold the PR as pending. Each app beyond the first
+// costs one more GraphQL request per session, and the session query bills 2
+// GraphQL points rather than the rollup's 1 regardless of appIDs, because
+// checkSuites(100) x checkRuns(100) is priced on page size.
+func WithCheckSuites[T any](appIDs ...int64) Option[T] {
+	return func(cm *CM[T]) {
+		cm.checkSuites = true
+		cm.checkApps = nil
+		for _, id := range appIDs {
+			if !slices.Contains(cm.checkApps, id) {
+				cm.checkApps = append(cm.checkApps, id)
+			}
+		}
+	}
+}
+
 // CM manages the lifecycle of GitHub Pull Requests for a specific identity.
 // It uses Go templates to generate PR titles and bodies from generic data of type T.
 type CM[T any] struct {
@@ -302,6 +327,10 @@ type CM[T any] struct {
 	// ignoredChecks are check run names excluded from findings and pending
 	// checks; see WithIgnoredChecks.
 	ignoredChecks map[string]struct{}
+	// checkSuites reads checks through check suites rather than the rollup,
+	// limited to the suites of checkApps when non-empty; see WithCheckSuites.
+	checkSuites bool
+	checkApps   []int64
 }
 
 // GraphQL types for querying check runs
@@ -316,14 +345,38 @@ type gqlCheckRunNode struct {
 	Text       string
 }
 
+type gqlCheckRunsConnection struct {
+	PageInfo struct {
+		HasNextPage bool
+		EndCursor   string
+	}
+	Nodes []gqlCheckRunNode
+}
+
+// gqlCheckSuiteNode is one check suite of the head commit with its latest
+// check runs; superseded attempts of a rerun check are excluded so they cannot
+// resurface as findings.
+type gqlCheckSuiteNode struct {
+	Id        string
+	CheckRuns gqlCheckRunsConnection `graphql:"checkRuns(first: 100, filterBy: {checkType: LATEST})"`
+}
+
+// gqlCheckSuitesConnection is a commit's checkSuites connection; see
+// WithCheckSuites.
+type gqlCheckSuitesConnection struct {
+	PageInfo struct {
+		HasNextPage bool
+		EndCursor   string
+	}
+	Nodes []gqlCheckSuiteNode
+}
+
 // gqlStatusCheckRollupContext is one node of a commit's statusCheckRollup.contexts
 // union connection. Only CheckRun contexts are consumed; StatusContext (legacy
-// commit statuses) are ignored, matching the prior checkSuites-based behavior.
+// commit statuses) are ignored.
 //
-// The flat rollup replaces the old checkSuites(100) × checkRuns(100) nesting,
-// which billed 3 GraphQL points; the rollup bills 1. Failed and pending runs are
-// derived client-side from each run's conclusion/status (see collectFindings)
-// rather than via the server-side filterBy the suite query used.
+// The flat rollup bills 1 GraphQL point where checkSuites(100) x checkRuns(100)
+// bills 2, but requires the statuses permission; see WithCheckSuites.
 type gqlStatusCheckRollupContext struct {
 	Typename string          `graphql:"__typename"`
 	CheckRun gqlCheckRunNode `graphql:"... on CheckRun"`
@@ -338,7 +391,7 @@ type gqlRollupContextsConnection struct {
 }
 
 // pendingCheckStatuses is the set of CheckRun status values (uppercase GraphQL
-// enums) that count as "not yet complete". Mirrors the prior pendingRuns filterBy.
+// enums) that count as "not yet complete".
 var pendingCheckStatuses = map[string]struct{}{
 	"QUEUED":      {},
 	"IN_PROGRESS": {},
@@ -605,7 +658,9 @@ func branchNameFor(prefix string, res *githubreconciler.Resource) (branchName, r
 // - Issue resources: {identity}/issue-{number}
 //
 // NewSession uses a GraphQL query to fetch PR info and check runs in a single
-// request, with pagination for repos with many checks.
+// request, with pagination for repos with many checks. Check runs are read
+// through the head commit's statusCheckRollup, which needs the checks and
+// statuses permissions, unless WithCheckSuites is set.
 func (cm *CM[T]) NewSession(
 	ctx context.Context,
 	client *github.Client,
@@ -654,58 +709,28 @@ func (cm *CM[T]) NewSession(
 		awaitingReviewThreads map[string]struct{}
 	)
 
-	// Initial query for PR and first page of check suites/runs
-	var query struct {
-		Repository struct {
-			PullRequests struct {
-				Nodes []struct {
-					Number     int
-					Url        string
-					Body       string
-					Mergeable  string // MERGEABLE, CONFLICTING, UNKNOWN
-					IsDraft    bool
-					HeadRefOid string
-					Labels     struct {
-						Nodes []struct {
-							Name string
-						}
-					} `graphql:"labels(first: 100)"`
-					Commits struct {
-						TotalCount int
-						Nodes      []struct {
-							Commit struct {
-								StatusCheckRollup struct {
-									Contexts gqlRollupContextsConnection `graphql:"contexts(first: 100)"`
-								} `graphql:"statusCheckRollup @include(if: $includeChecks)"`
-							}
-						}
-					} `graphql:"commits(last: 1)"`
-					Assignees struct {
-						Nodes []struct {
-							Login string
-						}
-					} `graphql:"assignees(first: 100)"`
-					ReviewThreads gqlReviewThreadsConnection `graphql:"reviewThreads(first: 100)"`
-					Reviews       gqlReviewBodiesConnection  `graphql:"reviews(first: 100)"`
-				}
-			} `graphql:"pullRequests(headRefName: $headRef, baseRefName: $baseRef, states: [OPEN], first: 1)"`
-		} `graphql:"repository(owner: $owner, name: $repo)"`
-	}
-
-	if err := gqlClient.Query(ctx, "GetPRInfo", &query, map[string]any{
+	vars := map[string]any{
 		"owner":         githubv4.String(owner),
 		"repo":          githubv4.String(repo),
 		"headRef":       githubv4.String(branchName),
 		"baseRef":       githubv4.String(ref),
 		"includeChecks": githubv4.Boolean(!sc.skipChecks),
-	}); err != nil {
-		return nil, fmt.Errorf("querying pull request: %w", err)
+	}
+	var pr *prInfo
+	if cm.checkSuites {
+		// The first app's suites ride along with the PR query; collect fetches
+		// any further apps' suites separately.
+		vars["checkSuiteFilter"] = checkSuiteFilter(cm.checkApps, 0)
+		pr, err = queryPRInfo[suiteChecks](ctx, gqlClient, vars)
+	} else {
+		pr, err = queryPRInfo[rollupChecks](ctx, gqlClient, vars)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// Process the PR if one exists
-	if len(query.Repository.PullRequests.Nodes) > 0 {
-		pr := query.Repository.PullRequests.Nodes[0]
-
+	if pr != nil {
 		prNumber = pr.Number
 		prURL = pr.Url
 		prBody = pr.Body
@@ -731,7 +756,7 @@ func (cm *CM[T]) NewSession(
 			prAssignees = append(prAssignees, assignee.Login)
 		}
 
-		commitCount = pr.Commits.TotalCount
+		commitCount = pr.commitCount
 		budgetCommits = commitCount
 		if cm.excludeMergeCommitsFromBudget && cm.maxCommits > 0 {
 			budgetCommits, err = countNonMergeCommits(ctx, gqlClient, owner, repo, prNumber)
@@ -741,10 +766,9 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect all check runs, handling pagination
-		if !sc.skipChecks && len(pr.Commits.Nodes) > 0 {
-			commit := pr.Commits.Nodes[0].Commit
+		if !sc.skipChecks && pr.checks != nil {
 			var err error
-			findings, pendingChecks, err = collectFindings(ctx, gqlClient, owner, repo, pr.HeadRefOid, commit.StatusCheckRollup.Contexts, cm.ignoredChecks)
+			findings, pendingChecks, err = pr.checks.collect(ctx, gqlClient, owner, repo, pr.HeadRefOid, cm.checkApps, cm.ignoredChecks)
 			if err != nil {
 				return nil, fmt.Errorf("collecting findings: %w", err)
 			}
@@ -923,69 +947,199 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 	return findings
 }
 
+// prInfoFields are the GetPRInfo pull request fields other than its head
+// commit's checks.
+type prInfoFields struct {
+	Number     int
+	Url        string
+	Body       string
+	Mergeable  string // MERGEABLE, CONFLICTING, UNKNOWN
+	IsDraft    bool
+	HeadRefOid string
+	Labels     struct {
+		Nodes []struct {
+			Name string
+		}
+	} `graphql:"labels(first: 100)"`
+	Assignees struct {
+		Nodes []struct {
+			Login string
+		}
+	} `graphql:"assignees(first: 100)"`
+	ReviewThreads gqlReviewThreadsConnection `graphql:"reviewThreads(first: 100)"`
+	Reviews       gqlReviewBodiesConnection  `graphql:"reviews(first: 100)"`
+}
+
+// prInfo is the open pull request found by GetPRInfo.
+type prInfo struct {
+	prInfoFields
+	commitCount int
+	// checks is the first page of the head commit's checks, nil when the PR
+	// has no commits.
+	checks headChecks
+}
+
+// headChecks selects a head commit's check runs in the GetPRInfo query, and
+// collects findings from them, paginating past the first page.
+type headChecks interface {
+	collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, apps []int64, ignored map[string]struct{}) ([]callbacks.Finding, []string, error)
+}
+
+// rollupChecks reads checks through statusCheckRollup (the default).
+type rollupChecks struct {
+	StatusCheckRollup struct {
+		Contexts gqlRollupContextsConnection `graphql:"contexts(first: 100)"`
+	} `graphql:"statusCheckRollup @include(if: $includeChecks)"`
+}
+
+func (r rollupChecks) collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, _ []int64, ignored map[string]struct{}) ([]callbacks.Finding, []string, error) {
+	return collectFindings(ctx, gqlClient, owner, repo, sha, r.StatusCheckRollup.Contexts, ignored)
+}
+
+// suiteChecks reads checks through check suites; see WithCheckSuites.
+type suiteChecks struct {
+	CheckSuites gqlCheckSuitesConnection `graphql:"checkSuites(first: 100, filterBy: $checkSuiteFilter) @include(if: $includeChecks)"`
+}
+
+func (s suiteChecks) collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, apps []int64, ignored map[string]struct{}) ([]callbacks.Finding, []string, error) {
+	return collectSuiteFindings(ctx, gqlClient, owner, repo, sha, apps, s.CheckSuites, ignored)
+}
+
+// queryPRInfo runs GetPRInfo, selecting the head commit's checks with C. It
+// returns nil when no open pull request matches.
+func queryPRInfo[C headChecks](ctx context.Context, gqlClient *graphqlclient.GraphQLClient, vars map[string]any) (*prInfo, error) {
+	var query struct {
+		Repository struct {
+			PullRequests struct {
+				Nodes []struct {
+					prInfoFields
+					Commits struct {
+						TotalCount int
+						Nodes      []struct {
+							Commit C
+						}
+					} `graphql:"commits(last: 1)"`
+				}
+			} `graphql:"pullRequests(headRefName: $headRef, baseRefName: $baseRef, states: [OPEN], first: 1)"`
+		} `graphql:"repository(owner: $owner, name: $repo)"`
+	}
+	if err := gqlClient.Query(ctx, "GetPRInfo", &query, vars); err != nil {
+		return nil, fmt.Errorf("querying pull request: %w", err)
+	}
+	if len(query.Repository.PullRequests.Nodes) == 0 {
+		return nil, nil
+	}
+	node := query.Repository.PullRequests.Nodes[0]
+	pr := &prInfo{prInfoFields: node.prInfoFields, commitCount: node.Commits.TotalCount}
+	if len(node.Commits.Nodes) > 0 {
+		pr.checks = node.Commits.Nodes[0].Commit
+	}
+	return pr, nil
+}
+
+// checkSuiteFilter returns the checkSuites filter selecting the i-th of apps,
+// or nil, which selects every app's suites, when apps is empty.
+func checkSuiteFilter(apps []int64, i int) *githubv4.CheckSuiteFilter {
+	if len(apps) == 0 {
+		return nil
+	}
+	return &githubv4.CheckSuiteFilter{AppID: githubv4.NewInt(githubv4.Int(apps[i]))}
+}
+
 // collectFindings extracts findings and pending checks from the head commit's
 // statusCheckRollup contexts, handling pagination. Returns findings (failed
-// checks) and pendingChecks (names of checks not yet complete). Failed and
-// pending runs are classified client-side from each CheckRun's conclusion/status,
-// since the flat rollup is not pre-filtered like the old per-suite checkRuns
-// queries were. Runs named in ignored are skipped entirely.
+// checks) and pendingChecks (names of checks not yet complete). Runs named in
+// ignored are skipped entirely.
+//
+// A pagination failure is fatal: returning truncated findings would let a
+// red/pending PR read as green downstream.
 func collectFindings(
 	ctx context.Context,
 	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha string,
 	initialContexts gqlRollupContextsConnection,
 	ignored map[string]struct{},
-) (findings []callbacks.Finding, pendingChecks []string, err error) {
-	processContexts := func(nodes []gqlStatusCheckRollupContext) {
-		for _, n := range nodes {
-			// StatusContext (legacy commit statuses) and any other non-CheckRun
-			// contexts are ignored, matching the prior checkSuites behavior.
-			if n.Typename != "CheckRun" {
-				continue
-			}
-			run := n.CheckRun
-			if _, skip := ignored[run.Name]; skip {
-				continue
-			}
-			_, pending := pendingCheckStatuses[run.Status]
-			switch {
-			case run.Conclusion == "FAILURE":
-				findings = append(findings, callbacks.Finding{
-					Kind:       callbacks.FindingKindCICheck,
-					Identifier: fmt.Sprintf("%d", run.DatabaseId),
-					Name:       run.Name,
-					Details:    formatCheckRunDetails(run.Name, run.Status, run.Conclusion, run.Title, run.Summary, run.Text, run.DetailsUrl),
-					DetailsURL: run.DetailsUrl,
-				})
-			case pending:
-				pendingChecks = append(pendingChecks, run.Name)
-			}
-		}
+) ([]callbacks.Finding, []string, error) {
+	c := &checkCollector{gqlClient: gqlClient, owner: owner, repo: repo, sha: sha, ignored: ignored}
+	if err := c.addContexts(ctx, initialContexts); err != nil {
+		return nil, nil, err
 	}
+	return c.findings, c.pendingChecks, nil
+}
 
-	processContexts(initialContexts.Nodes)
-
-	// Paginate through remaining contexts if the head commit has >100 checks.
-	// A pagination failure is fatal (see paginateRollupContexts): returning
-	// truncated findings would let a red/pending PR read as green downstream.
-	if initialContexts.PageInfo.HasNextPage {
-		if err := paginateRollupContexts(ctx, gqlClient, owner, repo, sha, initialContexts.PageInfo.EndCursor, processContexts); err != nil {
+// collectSuiteFindings is collectFindings for check suites (see
+// WithCheckSuites), handling pagination of suites and of runs within a suite.
+// initialSuites holds the suites of the first of apps (or of every app, when
+// apps is empty); the suites of the remaining apps are fetched here.
+func collectSuiteFindings(
+	ctx context.Context,
+	gqlClient *graphqlclient.GraphQLClient,
+	owner, repo, sha string,
+	apps []int64,
+	initialSuites gqlCheckSuitesConnection,
+	ignored map[string]struct{},
+) ([]callbacks.Finding, []string, error) {
+	c := &checkCollector{gqlClient: gqlClient, owner: owner, repo: repo, sha: sha, ignored: ignored}
+	if err := c.addSuites(ctx, checkSuiteFilter(apps, 0), initialSuites); err != nil {
+		return nil, nil, err
+	}
+	for i := 1; i < len(apps); i++ {
+		if err := c.fetchSuites(ctx, checkSuiteFilter(apps, i), nil); err != nil {
 			return nil, nil, err
 		}
 	}
-
-	return findings, pendingChecks, nil
+	return c.findings, c.pendingChecks, nil
 }
 
-// paginateRollupContexts fetches additional statusCheckRollup contexts for a
-// commit, when the head commit has more than 100 checks.
-func paginateRollupContexts(
-	ctx context.Context,
-	gqlClient *graphqlclient.GraphQLClient,
-	owner, repo, sha, cursor string,
-	process func([]gqlStatusCheckRollupContext),
-) error {
+// checkCollector accumulates findings and pending checks across the pages of a
+// commit's check suites and their check runs.
+type checkCollector struct {
+	gqlClient        *graphqlclient.GraphQLClient
+	owner, repo, sha string
+	ignored          map[string]struct{}
+
+	findings      []callbacks.Finding
+	pendingChecks []string
+}
+
+// addRuns classifies check runs: a FAILURE conclusion becomes a finding and a
+// not-yet-complete status a pending check. Any other conclusion (including
+// CANCELLED and TIMED_OUT) is ignored.
+func (c *checkCollector) addRuns(runs []gqlCheckRunNode) {
+	for _, run := range runs {
+		if _, skip := c.ignored[run.Name]; skip {
+			continue
+		}
+		_, pending := pendingCheckStatuses[run.Status]
+		switch {
+		case run.Conclusion == "FAILURE":
+			c.findings = append(c.findings, callbacks.Finding{
+				Kind:       callbacks.FindingKindCICheck,
+				Identifier: fmt.Sprintf("%d", run.DatabaseId),
+				Name:       run.Name,
+				Details:    formatCheckRunDetails(run.Name, run.Status, run.Conclusion, run.Title, run.Summary, run.Text, run.DetailsUrl),
+				DetailsURL: run.DetailsUrl,
+			})
+		case pending:
+			c.pendingChecks = append(c.pendingChecks, run.Name)
+		}
+	}
+}
+
+// addContexts processes one page of statusCheckRollup contexts, then fetches
+// the remaining pages. StatusContext (legacy commit statuses) and any other
+// non-CheckRun contexts are ignored.
+func (c *checkCollector) addContexts(ctx context.Context, contexts gqlRollupContextsConnection) error {
 	for {
+		for _, n := range contexts.Nodes {
+			if n.Typename == "CheckRun" {
+				c.addRuns([]gqlCheckRunNode{n.CheckRun})
+			}
+		}
+		if !contexts.PageInfo.HasNextPage {
+			return nil
+		}
+
 		var query struct {
 			Repository struct {
 				Object struct {
@@ -997,29 +1151,81 @@ func paginateRollupContexts(
 				} `graphql:"object(oid: $sha)"`
 			} `graphql:"repository(owner: $owner, name: $repo)"`
 		}
-
-		// Do NOT swallow this error. A failed page (transient 502, rate-limit
-		// throttle, etc.) would otherwise leave findings/pendingChecks truncated
-		// to the pages fetched so far; if the failing runs live beyond page 1, a
-		// red/pending PR reads as green downstream. Propagating the error fails
-		// the reconcile so the workqueue retries — matching the prior shape, where
-		// a failed initial query was always fatal.
-		if err := gqlClient.Query(ctx, "PaginateRollupContexts", &query, map[string]any{
-			"owner":  githubv4.String(owner),
-			"repo":   githubv4.String(repo),
-			"sha":    githubv4.GitObjectID(sha),
-			"cursor": githubv4.String(cursor),
+		if err := c.gqlClient.Query(ctx, "PaginateRollupContexts", &query, map[string]any{
+			"owner":  githubv4.String(c.owner),
+			"repo":   githubv4.String(c.repo),
+			"sha":    githubv4.GitObjectID(c.sha),
+			"cursor": githubv4.String(contexts.PageInfo.EndCursor),
 		}); err != nil {
 			return fmt.Errorf("paginating status check rollup contexts: %w", err)
 		}
+		contexts = query.Repository.Object.Commit.StatusCheckRollup.Contexts
+	}
+}
 
-		contexts := query.Repository.Object.Commit.StatusCheckRollup.Contexts
-		process(contexts.Nodes)
-
-		if !contexts.PageInfo.HasNextPage {
-			break
+// addSuites processes one page of check suites selected by filter, then
+// fetches the remaining runs of any suite and the remaining pages of suites.
+func (c *checkCollector) addSuites(ctx context.Context, filter *githubv4.CheckSuiteFilter, suites gqlCheckSuitesConnection) error {
+	for _, suite := range suites.Nodes {
+		c.addRuns(suite.CheckRuns.Nodes)
+		if suite.CheckRuns.PageInfo.HasNextPage {
+			if err := c.fetchRuns(ctx, suite.Id, suite.CheckRuns.PageInfo.EndCursor); err != nil {
+				return err
+			}
 		}
-		cursor = contexts.PageInfo.EndCursor
+	}
+	if suites.PageInfo.HasNextPage {
+		return c.fetchSuites(ctx, filter, githubv4.NewString(githubv4.String(suites.PageInfo.EndCursor)))
 	}
 	return nil
+}
+
+// fetchSuites fetches the commit's check suites selected by filter, starting
+// after cursor (from the first suite when cursor is nil).
+func (c *checkCollector) fetchSuites(ctx context.Context, filter *githubv4.CheckSuiteFilter, cursor *githubv4.String) error {
+	var query struct {
+		Repository struct {
+			Object struct {
+				Commit struct {
+					CheckSuites gqlCheckSuitesConnection `graphql:"checkSuites(first: 100, after: $cursor, filterBy: $checkSuiteFilter)"`
+				} `graphql:"... on Commit"`
+			} `graphql:"object(oid: $sha)"`
+		} `graphql:"repository(owner: $owner, name: $repo)"`
+	}
+	if err := c.gqlClient.Query(ctx, "PaginateCheckSuites", &query, map[string]any{
+		"owner":            githubv4.String(c.owner),
+		"repo":             githubv4.String(c.repo),
+		"sha":              githubv4.GitObjectID(c.sha),
+		"cursor":           cursor,
+		"checkSuiteFilter": filter,
+	}); err != nil {
+		return fmt.Errorf("paginating check suites: %w", err)
+	}
+	return c.addSuites(ctx, filter, query.Repository.Object.Commit.CheckSuites)
+}
+
+// fetchRuns fetches the remaining check runs of a suite with more than 100.
+func (c *checkCollector) fetchRuns(ctx context.Context, suiteID, cursor string) error {
+	for {
+		var query struct {
+			Node struct {
+				CheckSuite struct {
+					CheckRuns gqlCheckRunsConnection `graphql:"checkRuns(first: 100, after: $cursor, filterBy: {checkType: LATEST})"`
+				} `graphql:"... on CheckSuite"`
+			} `graphql:"node(id: $suiteId)"`
+		}
+		if err := c.gqlClient.Query(ctx, "PaginateCheckRuns", &query, map[string]any{
+			"suiteId": githubv4.ID(suiteID),
+			"cursor":  githubv4.String(cursor),
+		}); err != nil {
+			return fmt.Errorf("paginating check runs: %w", err)
+		}
+
+		runs := query.Node.CheckSuite.CheckRuns
+		c.addRuns(runs.Nodes)
+		if !runs.PageInfo.HasNextPage {
+			return nil
+		}
+		cursor = runs.PageInfo.EndCursor
+	}
 }
