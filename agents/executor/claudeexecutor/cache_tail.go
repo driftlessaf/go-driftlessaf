@@ -23,8 +23,9 @@ const tailBreakpointLimit = 2
 
 // tailPosition identifies one content block within params.Messages by index.
 // Indices remain valid for the lifetime of an execution because the
-// conversation loop only ever appends messages and never mutates the content
-// slices of earlier messages.
+// conversation loop only ever appends messages, and input-budget reduction
+// (reduceToolResults) replaces a block at its existing message and block index
+// rather than inserting or removing blocks.
 type tailPosition struct {
 	message int
 	block   int

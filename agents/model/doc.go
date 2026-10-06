@@ -22,4 +22,13 @@ SPDX-License-Identifier: Apache-2.0
 // newest capability surface for its backend — a deliberate bias, so a
 // freshly released model works without a registry change and the exception
 // tables grow only when a model is verified to reject a parameter.
+//
+// Info.ContextWindow is the exception to that bias. It is the serving context
+// window in tokens, input and output together, and an executor that enforces
+// an input budget trusts it. A wrong window either rejects requests that
+// fit or lets requests through that the provider refuses. It therefore comes
+// from a table of exact base ids (the id before "@"), not prefixes, and lists
+// only windows verified against the provider. Every other id reports 0,
+// which means unknown, and a caller that needs a window must supply it.
+// Add an id to the table only after its window is verified.
 package model

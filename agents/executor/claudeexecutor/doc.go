@@ -78,6 +78,8 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //   - WithTruncatedToolCallRetries: Bound the retries when the output-token cap
 //     cuts off a tool call (defaults to 1)
+//   - WithInputBudget: Keep every request inside the model's context window
+//     (off by default; see Input Budget)
 //
 // # Prompt Caching
 //
@@ -108,6 +110,67 @@ SPDX-License-Identifier: Apache-2.0
 // reviewers examining one changeset through different lenses — read the
 // tools + system + payload prefix from a single cache entry instead of each
 // re-paying the payload at full input price.
+//
+// # Input Budget
+//
+// A provider rejects a request whose input and max_tokens together exceed the
+// model's context window, and resending the same conversation fails the same
+// way. WithInputBudget(contextWindow) checks each request before the provider
+// sees it. Without the option the executor makes no count_tokens call.
+//
+// A contextWindow of 0 takes the window from the provider-facts registry
+// (model.Info.ContextWindow) for the logical model. A positive value
+// overrides the registry. NewWithMessages fails when the window is unknown or
+// the budget is 0 or less, whatever the order of the options.
+//
+// The budget is the window, less the request's max_tokens, less 1% of the
+// window for drift between count_tokens and the serving count. For a
+// 1,000,000-token window and 32,000 max_tokens it is 958,000 tokens.
+//
+// Before every provider call, after the cache tail advances, the executor
+// checks the request in this order:
+//
+//  1. A local upper bound, the JSON bytes of the count request plus 4,096,
+//     is at most the budget: send the request. A text token is never shorter
+//     than a byte, so no count call is made. A request with an image or
+//     document block, in a message or a tool result, has no local bound: the
+//     provider tokenises the decoded media, so the request is always counted.
+//  2. Otherwise Messages.CountTokens counts the request with the fields the
+//     request sends: model, messages, system, tools, tool_choice and
+//     thinking. A transient failure retries like a streamed turn and then
+//     requeues. Any other failure returns an error and sends nothing.
+//  3. A count over the budget reduces the oldest eligible older tool results
+//     until the estimated saving covers the excess, then recounts. A count
+//     still over the budget reduces every eligible result and recounts again.
+//  4. A count still over the budget returns *InputTooLargeError and makes no
+//     provider call.
+//
+// A turn over the budget makes three count calls at most.
+//
+// An older tool result is one before the last assistant message. A result
+// that the model has not read yet is never reduced. A result is eligible
+// when its content is text only, it is not an error (IsError, or a top-level
+// "error" key in its JSON), it is at least 4,096 bytes, and it is not
+// reduced already. Results of the submit tool and the suspend tool are never
+// reduced, because they carry the validator findings and the human answer.
+//
+// Reduction replaces the result in place with a JSON stub. The stub keeps
+// tool_use_id, so the tool_use block stays paired. Its fields are
+// executor_reduced, tool, tool_use_id, original_bytes, the top-level scalar
+// values of the original result (such as paging offsets), findings, the first
+// and last 1,024 bytes as head and tail, and a note that tells the model to call the
+// tool again. findings keeps every string at any depth beneath an error,
+// errors, error_message, findings or summary key, because some results (such
+// as a nested log analysis) cost a model call to produce again. Each string
+// is cut to 512 bytes and each path to 256 bytes, and the findings JSON is
+// at most 2,048 bytes. Reduction invalidates the prompt cache from the first
+// reduced block, so the next request writes the cache again.
+//
+// InputTooLargeError unwraps to executor.ErrInputTooLarge, so a caller can
+// match it without importing this package. Its text avoids the phrases that
+// classify an error as a stream failure or a turn-limit stop. A turn that
+// reduces or rejects logs one clog line and increments the pseudo-tool
+// counter input_budget_reduction or input_budget_rejection.
 //
 // # Extended Thinking
 //

@@ -217,6 +217,27 @@ func WithRoutedModel[Request promptbuilder.Bindable, Response any](providerModel
 	}
 }
 
+// WithInputBudget makes every turn fit the model's serving context window
+// before the provider is called. The input budget is the window minus the
+// request's max_tokens minus a 1% tolerance for drift between count_tokens and
+// the serving count. A turn over the budget has its older tool results
+// shortened in place, and a turn that still does not fit fails with an
+// *InputTooLargeError that wraps executor.ErrInputTooLarge.
+//
+// A contextWindow of 0 takes the window from model.Resolve for the
+// capability model, and a positive value overrides it. New fails when no
+// window is known or the budget leaves no room for input.
+func WithInputBudget[Request promptbuilder.Bindable, Response any](contextWindow int64) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if contextWindow < 0 {
+			return fmt.Errorf("context window must not be negative, got %d", contextWindow)
+		}
+		e.inputBudgetEnabled = true
+		e.contextWindow = contextWindow
+		return nil
+	}
+}
+
 // WithThinking enables extended thinking mode with the specified token budget
 // The budget_tokens parameter sets the maximum tokens Claude can use for reasoning
 // This must be less than max_tokens and at least 1024 tokens is recommended

@@ -142,6 +142,23 @@ type Config[Resp, CB any] struct {
 	// forced tool_choice. See claudeexecutor.WithMaxToolCallsBeforeFinalize.
 	MaxToolCallsBeforeFinalize int
 
+	// EnforceInputBudget, when true, checks each request's input tokens
+	// before the model call and, when the input does not fit the serving
+	// model's context window less the output headroom, reduces older tool
+	// results and, if it still does not fit, fails with an error matching
+	// agentexecutor.ErrInputTooLarge instead of sending a request the
+	// provider would reject. Claude backend only: the Gemini and
+	// OpenAI-compatible backends, and routed protocols other than Anthropic
+	// Messages, reject it at construction. See claudeexecutor.WithInputBudget.
+	EnforceInputBudget bool
+
+	// InputContextWindow overrides the context window, in tokens, that
+	// EnforceInputBudget measures against. Zero resolves the window from the
+	// provider-facts registry for the serving model, and construction fails
+	// when the registry does not know it. Ignored unless EnforceInputBudget
+	// is set; must not be negative.
+	InputContextWindow int64
+
 	// SuspendToolName, when non-empty, enables the ask-a-friend suspend/resume
 	// capability: the backend advertises a held-out tool by this name, and when
 	// the model calls it, Execute returns a *checkpoint.Suspension (extract it

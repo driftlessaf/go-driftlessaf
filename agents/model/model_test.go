@@ -39,6 +39,10 @@ func TestResolve(t *testing.T) {
 	// a forced tool_choice: Fable 5.1, Opus 5.5, and Sonnet 5.5.
 	claudeAutoToolChoice := claudeAdaptive
 	claudeAutoToolChoice.AutomaticToolChoiceOnly = true
+	claudeOpus55 := claudeAutoToolChoice
+	claudeOpus55.ContextWindow = 1_000_000
+	claudeOpus48 := claudeAdaptive
+	claudeOpus48.ContextWindow = 1_000_000
 	geminiBudget := model.Info{
 		Backend:         model.BackendGemini,
 		Efforts:         fullScale,
@@ -70,8 +74,8 @@ func TestResolve(t *testing.T) {
 		{"claude-fable-5-1@default", claudeAutoToolChoice},
 		{"anthropic.claude-fable-5-1", claudeAutoToolChoice},
 		{"claude-fable-5-10", claudeAdaptive},
-		{"claude-opus-5-5", claudeAutoToolChoice},
-		{"claude-opus-5-5@default", claudeAutoToolChoice},
+		{"claude-opus-5-5", claudeOpus55},
+		{"claude-opus-5-5@default", claudeOpus55},
 		{"claude-opus-5", claudeAdaptive},
 		{"claude-sonnet-5-5", claudeAutoToolChoice},
 		{"claude-sonnet-5-5@default", claudeAutoToolChoice},
@@ -130,7 +134,7 @@ func TestResolve(t *testing.T) {
 		// Claude ids with the Opus 4.7 surface: full effort scale, sampling
 		// params and extended-thinking budget removed.
 		{"claude-opus-4-7", claudeAdaptive},
-		{"claude-opus-4-8@default", claudeAdaptive},
+		{"claude-opus-4-8@default", claudeOpus48},
 		{"claude-fable-5@default", claudeAdaptive},
 		{"claude-mythos-5-1@default", claudeAdaptive},
 		{"claude-sonnet-5@20260301", claudeAdaptive},
@@ -191,6 +195,39 @@ func TestInfoSupportsEffort(t *testing.T) {
 			t.Parallel()
 			if got := model.Resolve(tt.id).SupportsEffort(tt.level); got != tt.want {
 				t.Errorf("Resolve(%q).SupportsEffort(%q) = %v, want %v", tt.id, tt.level, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveContextWindow pins that only verified base ids report a window:
+// a neighbouring id, an older family member or an unknown id reports 0, so an
+// input budget cannot run on a guessed limit.
+func TestResolveContextWindow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		id   string
+		want int64
+	}{
+		{"claude-opus-5-5", 1_000_000},
+		{"claude-opus-5-5@default", 1_000_000},
+		{"anthropic.claude-opus-5-5", 1_000_000},
+		{"claude-opus-4-8", 1_000_000},
+		{"claude-opus-4-8@20260101", 1_000_000},
+		{"claude-opus-4-8-1", 0},
+		{"claude-opus-4-7", 0},
+		{"claude-opus-5", 0},
+		{"claude-sonnet-4-6", 0},
+		{"claude-sonnet-5-5@default", 0},
+		{"gemini-2.5-pro", 0},
+		{"made-up-model-7", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			if got := model.Resolve(tt.id).ContextWindow; got != tt.want {
+				t.Errorf("Resolve(%q).ContextWindow: got = %d, want = %d", tt.id, got, tt.want)
 			}
 		})
 	}

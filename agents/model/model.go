@@ -67,6 +67,10 @@ type Info struct {
 	AutomaticToolChoiceOnly bool
 	// ThinkingControl is the Gemini thinking-knob generation the model takes.
 	ThinkingControl ThinkingControl
+	// ContextWindow is the serving context window in tokens, covering input
+	// and output together. Zero means unknown: callers that enforce an input
+	// budget must supply the window themselves.
+	ContextWindow int64
 }
 
 // SupportsEffort reports whether the provider accepts the effort level
@@ -96,6 +100,14 @@ var automaticToolChoiceOnlyModels = []string{
 	"claude-fable-5-1",
 	"claude-opus-5-5",
 	"claude-sonnet-5-5",
+}
+
+// contextWindows maps Claude base ids to verified serving context windows.
+// Keys are exact base ids, not prefixes, so a new model reports an unknown
+// window until its limit is verified rather than inheriting a neighbour's.
+var contextWindows = map[string]int64{
+	"claude-opus-4-8": 1_000_000,
+	"claude-opus-5-5": 1_000_000,
 }
 
 var samplingParamsRemovedPrefixes = []string{
@@ -175,6 +187,7 @@ func claudeInfo(id string) Info {
 	base, _, _ := strings.Cut(id, "@")
 	// Forced tool_choice (any or a named tool) is rejected with a 400.
 	info.AutomaticToolChoiceOnly = slices.Contains(automaticToolChoiceOnlyModels, base)
+	info.ContextWindow = contextWindows[base]
 	if !hasAnyPrefix(id, samplingParamsRemovedPrefixes) {
 		info.SamplingParams = true
 		info.ExtendedThinkingBudget = true

@@ -8,6 +8,7 @@ package metaagent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -42,6 +43,10 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 
 	if config.MaxToolCallsBeforeFinalize != 0 {
 		return nil, fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the Gemini backend", config.MaxToolCallsBeforeFinalize)
+	}
+
+	if config.EnforceInputBudget {
+		return nil, errors.New("EnforceInputBudget is not supported on the Gemini backend")
 	}
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{

@@ -8,6 +8,7 @@ package metaagent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -263,6 +264,9 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	}
 	if config.MaxToolCallsBeforeFinalize != 0 {
 		return fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the OpenAI-compatible backend", config.MaxToolCallsBeforeFinalize)
+	}
+	if config.EnforceInputBudget {
+		return errors.New("EnforceInputBudget is not supported on the OpenAI-compatible backend")
 	}
 	return nil
 }

@@ -185,6 +185,13 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// retried before the run fails with a *TruncatedToolCallError. Set via
 	// WithTruncatedToolCallRetries. See maxtokens.go.
 	truncatedToolCallRetries int
+
+	// inputBudgetEnabled turns on the per-turn input budget, and
+	// contextWindow is the window it is derived from: after New it holds
+	// the resolved window, never 0, whenever the budget is enabled. Set via
+	// WithInputBudget. See inputbudget.go.
+	inputBudgetEnabled bool
+	contextWindow      int64
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -272,6 +279,17 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 	}
 	if e.cacheTTL != "" && !e.cacheControl {
 		return nil, errors.New("WithCacheTTL is incompatible with WithoutCacheControl: there are no cache breakpoints to carry the TTL")
+	}
+	// Checked after all options so WithModel, WithRoutedModel and
+	// WithMaxTokens may come in any order relative to WithInputBudget.
+	if e.inputBudgetEnabled {
+		e.contextWindow = cmp.Or(e.contextWindow, model.Resolve(e.capabilityModelName).ContextWindow)
+		if e.contextWindow == 0 {
+			return nil, fmt.Errorf("WithInputBudget: no context window is known for model %q; pass it explicitly", e.capabilityModelName)
+		}
+		if budget := inputBudget(e.contextWindow, e.maxTokens); budget <= 0 {
+			return nil, fmt.Errorf("WithInputBudget: max_tokens %d leaves no input budget in the %d-token context window of model %q", e.maxTokens, e.contextWindow, e.capabilityModelName)
+		}
 	}
 
 	// A suspend tool must not share the terminal submit tool's name: the two
@@ -498,6 +516,13 @@ func (e *executor[Request, Response]) runConversation(
 	}
 	availableTools := availableToolNames(tools, heldOutNames...)
 
+	// protectedResult names the tools whose results input-budget reduction
+	// never shortens: a submit result carries the validator findings the
+	// model must address, and a suspend result carries the human answer.
+	protectedResult := func(name string) bool {
+		return name != "" && (name == submitToolName || name == suspendToolName)
+	}
+
 	// Held-out submit and suspend tools are absent from the map, so in a
 	// policed run they carry no policy and their arguments are withheld.
 	policies := make(map[string]*toolcall.ArgLogPolicy, len(tools))
@@ -657,6 +682,17 @@ func (e *executor[Request, Response]) runConversation(
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
 		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
+
+		// The budget runs after the tail advance and before RecordRequest so
+		// the request counted, the request traced and the request sent are
+		// the same. Count calls stay out of genai.api.requests.
+		if e.inputBudgetEnabled {
+			countCfg := e.retryConfig
+			countCfg.OnAttemptError = llmTurn.RecordError
+			if err := e.enforceInputBudget(ctx, countCfg, &params, protectedResult); err != nil {
+				return response, true, err
+			}
+		}
 
 		// Capture the cumulative prompt as sent to Anthropic. params.Messages
 		// grows across turns (tool results are appended in-place after each
