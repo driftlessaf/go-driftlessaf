@@ -71,6 +71,12 @@ type Info struct {
 	// and output together. Zero means unknown: callers that enforce an input
 	// budget must supply the window themselves.
 	ContextWindow int64
+	// ExplicitRouteOnly reports that the model must be constructed from a
+	// route that names its protocol. Only OpenAI Responses preserves these
+	// models' native effort scale; Chat Completions maps xhigh and max to
+	// high. A constructor that infers the protocol from the id shape must
+	// reject them rather than pick one.
+	ExplicitRouteOnly bool
 }
 
 // SupportsEffort reports whether the provider accepts the effort level
@@ -149,6 +155,14 @@ var preXHighEffortModelPrefixes = []string{
 	"claude-opus-4-6",
 }
 
+// explicitRouteOnlyPrefixes lists the lower-cased "publisher/" prefixes whose
+// models set Info.ExplicitRouteOnly. They match case-insensitively, like the
+// backend routing shapes, because they gate routing rather than a request
+// parameter.
+var explicitRouteOnlyPrefixes = []string{
+	"xai/",
+}
+
 // Resolve returns the capability Info for the given model id. The backend is
 // determined from the id's routing shape, matching prefixes
 // case-insensitively; ids that match no known shape resolve to the zero Info
@@ -170,9 +184,10 @@ func Resolve(id string) Info {
 		// Chat Completions maps xhigh/max to "high". Responses preserves
 		// native effort; its route declarations restrict model support.
 		return Info{
-			Backend:        BackendOpenAICompat,
-			Efforts:        slices.Clone(fullEfforts),
-			SamplingParams: true,
+			Backend:           BackendOpenAICompat,
+			Efforts:           slices.Clone(fullEfforts),
+			SamplingParams:    true,
+			ExplicitRouteOnly: hasAnyPrefix(lower, explicitRouteOnlyPrefixes),
 		}
 	default:
 		return Info{}

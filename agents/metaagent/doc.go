@@ -19,7 +19,9 @@ SPDX-License-Identifier: Apache-2.0
 // executor path is used:
 //   - Models starting with "gemini-" use Google's Generative AI SDK (native)
 //   - Models starting with "claude-" use the configured legacy Claude backend
-//   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
+//   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible
+//     Chat Completions endpoint, except ids whose model.Info sets
+//     ExplicitRouteOnly (such as "xai/*"), which New rejects
 //
 // NewRouted is the recommended constructor for new agents and migrations.
 // NewVertexRouter configures declared Vertex routes for one project and region.

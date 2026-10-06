@@ -60,6 +60,8 @@ func TestResolve(t *testing.T) {
 		Efforts:        fullScale,
 		SamplingParams: true,
 	}
+	openAICompatExplicitRoute := openAICompat
+	openAICompatExplicitRoute.ExplicitRouteOnly = true
 	systemOne := model.Info{Backend: model.BackendSystemOne}
 
 	tests := []struct {
@@ -84,9 +86,15 @@ func TestResolve(t *testing.T) {
 		{"anthropic.claude-sonnet-4-6", claudePreXHigh},
 		{"meta/llama-3.3-70b-instruct-maas", openAICompat},
 		{"mistralai/mistral-large", openAICompat},
+		{"google/gemini-3.5-flash", openAICompat},
 		{"gpt-4o", openAICompat},
+		{"gpt-5", openAICompat},
 		{"gpt-5.6-terra", openAICompat},
 		{"GPT-5.6-TERRA", openAICompat},
+		// xAI ids need an explicit route; the publisher match is
+		// case-insensitive, like the backend routing shapes.
+		{"xai/grok-4.7", openAICompatExplicitRoute},
+		{"XAI/Grok-4.7", openAICompatExplicitRoute},
 		// System One ids carry no parameter surface; aliases and versioned ids
 		// resolve alike and the prefix match is case-insensitive.
 		{"jev-latest", systemOne},

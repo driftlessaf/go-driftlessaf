@@ -110,6 +110,42 @@ func TestNewModelSelection(t *testing.T) {
 	}
 }
 
+// TestNewRejectsExplicitRouteOnlyModels pins that New refuses explicit-route
+// ids before it loads credentials. GOOGLE_APPLICATION_CREDENTIALS names a
+// missing file, so a constructor that reached credential discovery would fail
+// with the token-source error instead; the Gemini publisher row proves that.
+func TestNewRejectsExplicitRouteOnlyModels(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "missing-credentials.json"))
+
+	userPrompt, err := promptbuilder.NewPrompt("payload")
+	if err != nil {
+		t.Fatalf("NewPrompt() error = %v", err)
+	}
+	config := Config[*testResponse, testCallbacks]{
+		UserPrompt: userPrompt,
+		Tools: toolcall.NewFindingToolsProvider[*testResponse, toolcall.WorktreeTools[toolcall.EmptyTools]](
+			toolcall.NewWorktreeToolsProvider[*testResponse, toolcall.EmptyTools](
+				toolcall.NewEmptyToolsProvider[*testResponse]())),
+	}
+
+	tests := []struct {
+		model   string
+		wantErr string
+	}{
+		{model: "xai/grok-4.7", wantErr: `model "xai/grok-4.7" requires an explicit route; construct it with NewWithTarget or NewRouted`},
+		{model: "XAI/Grok-4.7", wantErr: `model "XAI/Grok-4.7" requires an explicit route`},
+		{model: "google/gemini-3.5-flash", wantErr: "creating GCP token source"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			_, err := New[*testRequest](t.Context(), "test-project", "global", tt.model, config)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("New(%q): got = %v, want error containing %q", tt.model, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestEffortWiredOnGoogleAndOpenAIBackends pins the cross-backend Effort
 // contract: Config.Effort must reach the Gemini and OpenAI-compatible
 // backends' executor options rather than being silently dropped. A valid

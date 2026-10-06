@@ -28,13 +28,17 @@ type Agent[Req promptbuilder.Bindable, Resp, CB any] interface {
 // The modelName parameter determines which provider implementation is used:
 //   - Models starting with "gemini-" use Google's Generative AI SDK (native)
 //   - Models starting with "claude-" use the configured legacy Claude backend
-//   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible endpoint
+//   - Models in "publisher/model" format use Vertex AI's OpenAI-compatible
+//     Chat Completions endpoint, except ids whose model.Info sets
+//     ExplicitRouteOnly (such as "xai/*"), which New rejects; construct those
+//     with NewWithTarget or NewRouted
 func New[Req promptbuilder.Bindable, Resp, CB any](
 	ctx context.Context,
 	projectID, region, modelName string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
-	switch model.Resolve(modelName).Backend {
+	info := model.Resolve(modelName)
+	switch info.Backend {
 	case model.BackendGemini:
 		return newGoogleAgent[Req, Resp, CB](ctx, projectID, region, modelName, config)
 	case model.BackendClaude:
@@ -44,6 +48,9 @@ func New[Req promptbuilder.Bindable, Resp, CB any](
 		// Vertex AI endpoint in this compatibility constructor.
 		if !strings.Contains(modelName, "/") {
 			break
+		}
+		if info.ExplicitRouteOnly {
+			return nil, fmt.Errorf("model %q requires an explicit route; construct it with NewWithTarget or NewRouted", modelName)
 		}
 		// publisher/model format routes to the Vertex AI OpenAI-compatible endpoint
 		return newOpenAICompatAgent[Req, Resp, CB](ctx, projectID, region, modelName, config)
