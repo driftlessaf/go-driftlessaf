@@ -86,8 +86,9 @@ func (i Info) SupportsEffort(l effort.Level) bool {
 }
 
 // fullEfforts is the complete provider-neutral scale. Claude models with the
-// Opus 4.7 effort surface accept every level natively; the Gemini and
-// OpenAI-compatible executors map the whole scale onto their own controls.
+// Opus 4.7 effort surface accept every level natively; the Gemini and OpenAI
+// Chat Completions executors map the whole scale onto their own controls. The
+// OpenAI Responses executor sends the level unchanged.
 var fullEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max}
 
 // preXHighEfforts is the scale accepted by effort-capable Claude models that
@@ -181,8 +182,9 @@ func Resolve(id string) Info {
 		// is state plus typed questions, so Info carries only the backend.
 		return Info{Backend: BackendSystemOne}
 	case strings.HasPrefix(lower, "gpt-"), strings.Contains(id, "/"):
-		// Chat Completions maps xhigh/max to "high". Responses preserves
-		// native effort; its route declarations restrict model support.
+		// Chat Completions maps xhigh/max to "high". Responses sends the
+		// level unchanged, and a model can reject some levels, so a
+		// Responses route must declare only the levels its model accepts.
 		return Info{
 			Backend:           BackendOpenAICompat,
 			Efforts:           slices.Clone(fullEfforts),

@@ -64,8 +64,11 @@ not a quality score or a reason to replay a potentially billable partial stream.
 The 8 MiB request cap includes the entire replayed conversation and encrypted
 reasoning. Exceeding it is also a non-retryable execution-limit failure.
 
-Low, medium, and high reasoning effort are sent directly. XHigh and Max clamp
-to high, matching the existing OpenAI-compatible executor's supported scale.
+Every reasoning effort level is sent unchanged; the executor does not clamp
+xhigh or max. Routed construction rejects a level that the route doesn't
+declare, so declare only the levels the provider accepts for that model. A
+recognized provider-reported level that differs from the request fails the
+execution.
 Explicit thinking budgets, sampling controls, explicit prompt-cache boundaries,
 suspend/resume, hosted tools, and configurable refusal nudges aren't advertised.
 
