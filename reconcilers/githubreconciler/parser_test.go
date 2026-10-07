@@ -17,6 +17,12 @@ func TestParseURL(t *testing.T) {
 		want    *Resource
 		wantErr bool
 	}{{
+		name: "commit with branch context",
+		url:  "https://github.com/owner/repo/commit/abc123?branch=release%2Fv1",
+		want: &Resource{Owner: "owner", Repo: "repo", Type: ResourceTypeCommit, Ref: "abc123", URL: "https://github.com/owner/repo/commit/abc123?branch=release%2Fv1"},
+	}, {
+		name: "commit rejects extra path", url: "https://github.com/owner/repo/commit/abc123/file", wantErr: true,
+	}, {
 		name: "valid issue URL",
 		url:  "https://github.com/owner/repo/issues/123",
 		want: &Resource{

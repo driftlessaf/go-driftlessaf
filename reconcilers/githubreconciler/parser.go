@@ -17,6 +17,7 @@ import (
 // Expected formats:
 //   - https://github.com/org/repo/issues/123
 //   - https://github.com/org/repo/pull/123
+//   - https://github.com/org/repo/commit/sha
 //   - https://github.com/org/repo/blob/ref/path/to/file
 //   - https://github.com/org/repo/tree/ref/path/to/dir
 //
@@ -78,6 +79,12 @@ func ParseURL(uri string) (*Resource, error) {
 			Type:   resType,
 			URL:    uri,
 		}, nil
+
+	case "commit":
+		if len(parts) != 4 || parts[3] == "" {
+			return nil, fmt.Errorf("invalid commit path: %s", parsed.Path)
+		}
+		return &Resource{Owner: owner, Repo: repo, Type: ResourceTypeCommit, URL: uri, Ref: parts[3]}, nil
 
 	case "blob", "tree":
 		if len(parts) < 5 {

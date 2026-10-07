@@ -28,7 +28,7 @@ import (
 // and returns an error if reconciliation fails.
 type ReconcilerFunc func(ctx context.Context, res *Resource, gh *github.Client) error
 
-// Resource represents a parsed GitHub resource (issue, pull request, or path).
+// Resource represents a parsed GitHub resource (issue, pull request, commit, or path).
 type Resource struct {
 	// Owner is the GitHub organization or user.
 	Owner string
@@ -47,7 +47,7 @@ type Resource struct {
 	URL string
 
 	// Ref is the branch, tag, or commit SHA.
-	// Only set for ResourceTypePath.
+	// Only set for ResourceTypePath and ResourceTypeCommit.
 	Ref string
 
 	// Path is the file or directory path.
@@ -64,6 +64,9 @@ const (
 
 	// ResourceTypePullRequest represents a GitHub pull request.
 	ResourceTypePullRequest ResourceType = "pull_request"
+
+	// ResourceTypeCommit represents a commit in a repository.
+	ResourceTypeCommit ResourceType = "commit"
 
 	// ResourceTypePath represents a file or directory path in a repository.
 	ResourceTypePath ResourceType = "path"
@@ -83,6 +86,8 @@ func (r *Resource) String() string {
 	switch r.Type {
 	case ResourceTypeIssue, ResourceTypePullRequest:
 		return fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number)
+	case ResourceTypeCommit:
+		return fmt.Sprintf("%s/%s@%s", r.Owner, r.Repo, r.Ref)
 	case ResourceTypePath:
 		return fmt.Sprintf("%s/%s@%s:%s", r.Owner, r.Repo, r.Ref, r.Path)
 	default:
