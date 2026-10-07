@@ -21,9 +21,10 @@ SPDX-License-Identifier: Apache-2.0
 // must match source_dataset_id.
 //
 // Models recognised today: Claude Fable 5, Claude Opus 4.5-4.8, Claude
-// Sonnet/Haiku 4.5+, Gemini 2.0/2.5/3.x families — with or without a Vertex
-// '@version' suffix. Unknown models produce NULL costs (visible signal rather
-// than silent zero) so that drift in model usage is noticeable.
+// Sonnet/Haiku 4.5+, Gemini 2.0/2.5/3.x families, and xAI Grok 4.7 — with or
+// without a Vertex '@version' suffix. Unknown models produce NULL costs
+// (visible signal rather than silent zero) so that drift in model usage is
+// noticeable.
 resource "google_bigquery_table" "agent_trace_costs" {
   project    = var.project_id
   dataset_id = var.view_dataset_id

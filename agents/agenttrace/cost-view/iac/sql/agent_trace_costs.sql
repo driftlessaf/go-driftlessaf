@@ -1,4 +1,4 @@
--- Cost estimates for Anthropic Claude and Gemini traffic. Rates are currently
+-- Cost estimates for Claude, Gemini, and Grok traffic. Rates are currently
 -- provider-agnostic: Anthropic direct (api.anthropic.com) list prices match
 -- Vertex AI Global region list prices for every model below, so one price row
 -- covers both serving paths. Each price row carries a pricing_provider field
@@ -29,7 +29,7 @@
 -- Context tier identically — same gating predicate, same per-turn
 -- granularity. Sonnet 4.6 is uniform-priced on both providers so the tier
 -- never engages today; the logic is in place for Sonnet 4.5 / Gemini 2.5
--- Pro / 3.x Pro traffic.
+-- Pro / 3.x Pro / Grok 4.7 traffic.
 --
 -- Model matching prefers the first non-empty turns[].logical_model value and
 -- falls back to the trace-level model for historical rows. The logical model
@@ -100,7 +100,14 @@ WITH prices AS (
     -- through 2026-12-31, but pays it as 50% credits back on net spend. Each
     -- request is billed at the $1.50 / $7.50 list rate below.
     STRUCT('gemini-3.6-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0),
-    STRUCT('gemini-3.8-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0)
+    STRUCT('gemini-3.8-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0),
+    -- grok-4.7 (xAI on Vertex AI): $2.00 in / $6.00 out / $0.50 cached-in per
+    -- MTok up to 200K input tokens. Above 200K, every token in the call bills
+    -- at $4.00 / $12.00 / $1.00. No cache-write charge. xAI direct rates match
+    -- (https://docs.x.ai/developers/pricing). Retrieved 2026-10-06 from
+    -- https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
+    STRUCT('grok-4.7',                      'Standard',      NULL, 2.0e-6,  6.0e-6, 5.0e-7,  0.0),
+    STRUCT('grok-4.7',                      'Large Context', NULL, 4.0e-6,  1.2e-5, 1.0e-6,  0.0)
   ])
 ),
 attributed AS (
@@ -172,6 +179,7 @@ matched AS (
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.5-flash-lite(@.*)?$')                   THEN 'gemini-3.5-flash-lite'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.6-flash(@.*)?$')                        THEN 'gemini-3.6-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.8-flash(@.*)?$')                        THEN 'gemini-3.8-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(xai/)?grok-4\.7(@.*)?$')                                   THEN 'grok-4.7'
       ELSE NULL
     END AS pricing_model
   FROM attributed a
@@ -214,7 +222,7 @@ SELECT
     SELECT SUM(
       COALESCE(turn.input_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.input_price,
            p_std.input_price)
@@ -225,7 +233,7 @@ SELECT
     SELECT SUM(
       COALESCE(turn.output_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.output_price,
            p_std.output_price)
@@ -236,7 +244,7 @@ SELECT
     SELECT SUM(
       COALESCE(turn.cache_read_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.cache_read_price,
            p_std.cache_read_price)
@@ -247,7 +255,7 @@ SELECT
     SELECT SUM(
       COALESCE(turn.cache_creation_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.cache_creation_price,
            p_std.cache_creation_price)
@@ -258,25 +266,25 @@ SELECT
     SELECT SUM(
       COALESCE(turn.input_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.input_price,
            p_std.input_price)
       + COALESCE(turn.output_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.output_price,
            p_std.output_price)
       + COALESCE(turn.cache_read_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.cache_read_price,
            p_std.cache_read_price)
       + COALESCE(turn.cache_creation_tokens, 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
-             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview'
+             'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
            p_large.cache_creation_price,
            p_std.cache_creation_price)
