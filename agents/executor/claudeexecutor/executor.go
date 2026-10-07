@@ -1100,7 +1100,7 @@ func (e *executor[Request, Response]) runConversation(
 			params.Messages = append(params.Messages, anthropic.MessageParam{
 				Role: anthropic.MessageParamRoleUser,
 				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("You must call the submit_result tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call submit_result with an appropriate error or summary."),
+					anthropic.NewTextBlock(fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName)),
 				},
 			})
 			// Auto-only models receive the prompt without a forced tool choice.
