@@ -14,9 +14,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
-	"github.com/openai/openai-go"
-	oaiparam "github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	oaiparam "github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // OpenAITool constructs the OpenAI executor metadata for the submit_result tool.
@@ -34,7 +34,7 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 		return openaistool.SubmitMetadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
 	}
 
-	handler := func(ctx context.Context, tc openai.ChatCompletionMessageToolCall, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
+	handler := func(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 			// Recoverable, like every other submit rejection: the parse error
@@ -47,7 +47,7 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 	}
 
 	return openaistool.SubmitMetadata[Response]{
-		Definition: openai.ChatCompletionToolParam{
+		Definition: openai.ChatCompletionFunctionToolParam{
 			Function: shared.FunctionDefinitionParam{
 				Name:        opts.ToolName,
 				Description: oaiparam.NewOpt(opts.Description),

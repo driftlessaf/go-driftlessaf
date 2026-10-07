@@ -20,9 +20,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // validatingOpenAIReqBody is the subset of the chat-completions request the
@@ -165,10 +165,10 @@ func TestValidatingOpenAIServerAcceptsPairedTranscript(t *testing.T) {
 
 	submit := func() (openaistool.SubmitMetadata[errCapResponse], error) {
 		return openaistool.SubmitMetadata[errCapResponse]{
-			Definition: openai.ChatCompletionToolParam{
+			Definition: openai.ChatCompletionFunctionToolParam{
 				Function: shared.FunctionDefinitionParam{Name: "submit_result"},
 			},
-			Handler: func(context.Context, openai.ChatCompletionMessageToolCall, *agenttrace.Trace[errCapResponse]) toolcall.SubmitOutcome[errCapResponse] {
+			Handler: func(context.Context, openai.ChatCompletionMessageToolCallUnion, *agenttrace.Trace[errCapResponse]) toolcall.SubmitOutcome[errCapResponse] {
 				return toolcall.SubmitOutcome[errCapResponse]{
 					Accepted:   true,
 					Response:   errCapResponse{Answer: "done"},

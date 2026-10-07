@@ -19,9 +19,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/google/go-cmp/cmp"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 func TestTerminalStreamDiagnostics(t *testing.T) {

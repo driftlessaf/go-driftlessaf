@@ -11,8 +11,8 @@ import (
 	"net/http"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )

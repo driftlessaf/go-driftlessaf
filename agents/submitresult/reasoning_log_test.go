@@ -18,7 +18,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 )
 
@@ -173,7 +173,7 @@ func submitViaOpenAI(t *testing.T, ctx context.Context) toolcall.SubmitOutcome[*
 		t.Fatalf("OpenAIToolForResponse: %v", err)
 	}
 	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
-	tc := openai.ChatCompletionMessageToolCall{ID: "s1"}
+	tc := openai.ChatCompletionMessageToolCallUnion{ID: "s1"}
 	tc.Function.Name = submit.Definition.Function.Name
 	tc.Function.Arguments = string(mustMarshal(t, submitInputWithReasoning()))
 	return submit.Handler(ctx, tc, trace)

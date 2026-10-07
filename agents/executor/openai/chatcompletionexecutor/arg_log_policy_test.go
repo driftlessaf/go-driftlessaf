@@ -25,8 +25,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"github.com/chainguard-dev/clog"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 // Stand-ins for confidential caller input: a tool argument holding a string

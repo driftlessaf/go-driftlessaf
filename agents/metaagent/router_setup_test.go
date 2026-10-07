@@ -12,8 +12,8 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 )
 

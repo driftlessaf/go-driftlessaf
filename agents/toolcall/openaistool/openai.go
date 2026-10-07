@@ -13,21 +13,21 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/params"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Metadata describes a tool available to the OpenAI agent.
 type Metadata[Response any] struct {
 	// Definition is the tool definition for OpenAI.
-	Definition openai.ChatCompletionToolParam
+	Definition openai.ChatCompletionFunctionToolParam
 
 	// Handler processes the tool call.
 	// If the handler sets *result to a non-zero value, the executor will immediately exit with that response.
 	Handler func(
 		ctx context.Context,
-		toolCall openai.ChatCompletionMessageToolCall,
+		toolCall openai.ChatCompletionMessageToolCallUnion,
 		trace *agenttrace.Trace[Response],
 		result *Response,
 	) map[string]any
@@ -44,7 +44,7 @@ type Metadata[Response any] struct {
 // final result and ends the agent loop.
 type SubmitMetadata[Response any] struct {
 	// Definition is the tool definition for OpenAI.
-	Definition openai.ChatCompletionToolParam
+	Definition openai.ChatCompletionFunctionToolParam
 
 	// Handler parses a submit tool call into a SubmitOutcome. It performs no
 	// side effects on the run: committing the response is the executor's
@@ -53,7 +53,7 @@ type SubmitMetadata[Response any] struct {
 	// their completion reflects the validation verdict.
 	Handler func(
 		ctx context.Context,
-		toolCall openai.ChatCompletionMessageToolCall,
+		toolCall openai.ChatCompletionMessageToolCallUnion,
 		trace *agenttrace.Trace[Response],
 	) toolcall.SubmitOutcome[Response]
 }
@@ -81,7 +81,7 @@ func Map[Resp any](tools map[string]toolcall.Tool[Resp]) map[string]Metadata[Res
 	return m
 }
 
-func toolParam(def toolcall.Definition) openai.ChatCompletionToolParam {
+func toolParam(def toolcall.Definition) openai.ChatCompletionFunctionToolParam {
 	props := make(map[string]any, len(def.Parameters)+1)
 	required := []string{"reasoning"}
 
@@ -98,7 +98,7 @@ func toolParam(def toolcall.Definition) openai.ChatCompletionToolParam {
 		}
 	}
 
-	return openai.ChatCompletionToolParam{
+	return openai.ChatCompletionFunctionToolParam{
 		Function: shared.FunctionDefinitionParam{
 			Name:        def.Name,
 			Description: param.NewOpt(def.Description),
@@ -111,8 +111,8 @@ func toolParam(def toolcall.Definition) openai.ChatCompletionToolParam {
 	}
 }
 
-func handler[Resp any](t toolcall.Tool[Resp]) func(context.Context, openai.ChatCompletionMessageToolCall, *agenttrace.Trace[Resp], *Resp) map[string]any {
-	return func(ctx context.Context, tc openai.ChatCompletionMessageToolCall, trace *agenttrace.Trace[Resp], result *Resp) map[string]any {
+func handler[Resp any](t toolcall.Tool[Resp]) func(context.Context, openai.ChatCompletionMessageToolCallUnion, *agenttrace.Trace[Resp], *Resp) map[string]any {
+	return func(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, trace *agenttrace.Trace[Resp], result *Resp) map[string]any {
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 			trace.BadToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, errors.New("failed to parse params"))

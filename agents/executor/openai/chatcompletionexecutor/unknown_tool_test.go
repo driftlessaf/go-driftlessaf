@@ -23,8 +23,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 // unknownToolCompletionJSON renders a completion whose single tool call names

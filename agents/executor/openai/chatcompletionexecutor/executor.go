@@ -26,9 +26,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
 	"github.com/chainguard-dev/clog"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Interface is the public interface for OpenAI-compatible agent execution.
@@ -185,9 +185,9 @@ func (e *executor[Request, Response]) Execute(
 	submitToolName := e.submitToolName()
 
 	// Build tool definitions.
-	toolDefs := make([]openai.ChatCompletionToolParam, 0, len(tools)+1)
+	toolDefs := make([]openai.ChatCompletionToolUnionParam, 0, len(tools)+1)
 	for _, meta := range tools {
-		toolDefs = append(toolDefs, meta.Definition)
+		toolDefs = append(toolDefs, functionTool(meta.Definition))
 	}
 	// Advertise the terminal submit tool alongside the regular tools. It lives
 	// outside the tools map — dispatch routes it through evaluateSubmission —
@@ -195,7 +195,7 @@ func (e *executor[Request, Response]) Execute(
 	// the same name takes precedence, matching dispatch.
 	if submitToolName != "" {
 		if _, exists := tools[submitToolName]; !exists {
-			toolDefs = append(toolDefs, e.submitTool.Definition)
+			toolDefs = append(toolDefs, functionTool(e.submitTool.Definition))
 		}
 	}
 
@@ -286,7 +286,7 @@ func (e *executor[Request, Response]) Execute(
 	// accepted the call and the registered result validators passed, so
 	// resultPtr holds the run's final result — even when that result is the
 	// zero value.
-	executeToolCall := func(tc openai.ChatCompletionMessageToolCall, args map[string]any, resultPtr *Response) (string, bool, error) {
+	executeToolCall := func(tc openai.ChatCompletionMessageToolCallUnion, args map[string]any, resultPtr *Response) (string, bool, error) {
 		kvs := []any{"tool", argLog.ToolName(tc.Function.Name), "id", tc.ID}
 		kvs = argLog.AppendArgs(kvs, tc.Function.Name, args)
 		clog.InfoContext(ctx, "Executing tool call", kvs...)
@@ -437,7 +437,7 @@ func (e *executor[Request, Response]) Execute(
 			invalidResponseRetries = 0
 
 			// Add assistant message with tool calls to conversation.
-			reqParams.Messages = append(reqParams.Messages, choice.Message.ToParam())
+			reqParams.Messages = append(reqParams.Messages, assistantMessage(choice.Message))
 
 			// Dispatch the turn's tool calls under a bounded pool, collecting all
 			// results before checking for a final result so the conversation
@@ -457,8 +457,8 @@ func (e *executor[Request, Response]) Execute(
 			perCallResults := make([]Response, len(toolCalls))
 
 			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
-				func(tc openai.ChatCompletionMessageToolCall) bool { return heldOut(tc.Function.Name) },
-				func(i int, tc openai.ChatCompletionMessageToolCall) {
+				func(tc openai.ChatCompletionMessageToolCallUnion) bool { return heldOut(tc.Function.Name) },
+				func(i int, tc openai.ChatCompletionMessageToolCallUnion) {
 					resJSON, committed, cerr := executeToolCall(tc, parsedArgs[i], &perCallResults[i])
 					if cerr != nil {
 						outcomes[i] = toolOutcome{err: cerr}
@@ -499,7 +499,7 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
-			reqParams.Messages = append(reqParams.Messages, choice.Message.ToParam())
+			reqParams.Messages = append(reqParams.Messages, assistantMessage(choice.Message))
 			reqParams.Messages = append(reqParams.Messages,
 				openai.UserMessage(fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName)),
 			)
@@ -568,9 +568,39 @@ func decodeToolArguments(arguments string) (map[string]any, error) {
 	return args, nil
 }
 
+// functionTool wraps a function tool definition in the request's tool union.
+func functionTool(def openai.ChatCompletionFunctionToolParam) openai.ChatCompletionToolUnionParam {
+	return openai.ChatCompletionToolUnionParam{OfFunction: &def}
+}
+
+// assistantMessage converts a completion message into the assistant message
+// replayed on the next request. Every tool call is replayed as a function
+// call. The SDK's ToParam picks the variant from each call's "type" field and
+// encodes a call without one as null, and some OpenAI-compatible providers
+// omit that field. The executor only advertises function tools, so a function
+// call is the only call it can dispatch.
+func assistantMessage(msg openai.ChatCompletionMessage) openai.ChatCompletionMessageParamUnion {
+	asst := msg.ToAssistantMessageParam()
+	// Replace the SDK's tool calls. With no calls the slice stays nil, which
+	// keeps tool_calls out of the request.
+	asst.ToolCalls = nil
+	for _, tc := range msg.ToolCalls {
+		asst.ToolCalls = append(asst.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+			OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+				ID: tc.ID,
+				Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+					Arguments: tc.Function.Arguments,
+					Name:      tc.Function.Name,
+				},
+			},
+		})
+	}
+	return openai.ChatCompletionMessageParamUnion{OfAssistant: &asst}
+}
+
 func (e *executor[Request, Response]) requestParams(
 	messages []openai.ChatCompletionMessageParamUnion,
-	tools []openai.ChatCompletionToolParam,
+	tools []openai.ChatCompletionToolUnionParam,
 ) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model:    e.modelName,
@@ -611,7 +641,7 @@ func (e *executor[Request, Response]) submitToolName() string {
 // committed as the run's final result (written through resultPtr).
 func (e *executor[Request, Response]) evaluateSubmission(
 	ctx context.Context,
-	tc openai.ChatCompletionMessageToolCall,
+	tc openai.ChatCompletionMessageToolCallUnion,
 	args map[string]any,
 	trace *agenttrace.Trace[Response],
 	resultPtr *Response,

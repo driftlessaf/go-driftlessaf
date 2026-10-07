@@ -14,7 +14,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 )
 

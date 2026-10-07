@@ -9,7 +9,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 // isRetryableOpenAIError checks if an error is a retryable OpenAI API error.

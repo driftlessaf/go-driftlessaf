@@ -19,7 +19,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/anthropics/anthropic-sdk-go"
 	sdkoption "github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"

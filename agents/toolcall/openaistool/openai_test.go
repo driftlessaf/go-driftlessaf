@@ -14,7 +14,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/google/go-cmp/cmp"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 func TestError(t *testing.T) {
@@ -148,7 +148,7 @@ func TestHandler_ValidArgs(t *testing.T) {
 	}
 
 	meta := FromTool(tool)
-	tc := openai.ChatCompletionMessageToolCall{
+	tc := openai.ChatCompletionMessageToolCallUnion{
 		ID: "call_123"}
 	tc.Function.Name = "test_tool"
 	tc.Function.Arguments = `{"reasoning":"testing","query":"hello"}`
@@ -178,7 +178,7 @@ func TestHandler_InvalidJSON(t *testing.T) {
 	}
 
 	meta := FromTool(tool)
-	tc := openai.ChatCompletionMessageToolCall{
+	tc := openai.ChatCompletionMessageToolCallUnion{
 		ID: "call_bad"}
 	tc.Function.Name = "test_tool"
 	tc.Function.Arguments = "not json"

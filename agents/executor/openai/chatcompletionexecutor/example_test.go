@@ -13,8 +13,8 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 type myRequest struct {

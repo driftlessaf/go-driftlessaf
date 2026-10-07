@@ -25,7 +25,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"github.com/google/go-cmp/cmp"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 // These tests exercise the real SDK and executor against an HTTP server, not

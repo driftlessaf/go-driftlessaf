@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 func TestIsRetryableOpenAIError(t *testing.T) {

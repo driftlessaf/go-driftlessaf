@@ -18,7 +18,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/chainguard-dev/clog"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 )
 
@@ -446,7 +446,7 @@ func TestOpenAISubmitAcceptsValidPayload(t *testing.T) {
 	ctx := t.Context()
 	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
-	call := openai.ChatCompletionMessageToolCall{ID: "s1"}
+	call := openai.ChatCompletionMessageToolCallUnion{ID: "s1"}
 	call.Function.Name = submit.Definition.Function.Name
 	call.Function.Arguments = string(mustMarshal(t, validInput()))
 	outcome := submit.Handler(ctx, call, trace)
@@ -474,7 +474,7 @@ func TestOpenAISubmitCoercesStringifiedPayload(t *testing.T) {
 	ctx := t.Context()
 	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
-	call := openai.ChatCompletionMessageToolCall{ID: "s1"}
+	call := openai.ChatCompletionMessageToolCallUnion{ID: "s1"}
 	call.Function.Name = submit.Definition.Function.Name
 	call.Function.Arguments = string(mustMarshal(t, doubleEncodedInput()))
 	outcome := submit.Handler(ctx, call, trace)
@@ -496,7 +496,7 @@ func TestOpenAISubmitRejectsMalformedPayload(t *testing.T) {
 	ctx := t.Context()
 	trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
-	call := openai.ChatCompletionMessageToolCall{ID: "s1"}
+	call := openai.ChatCompletionMessageToolCallUnion{ID: "s1"}
 	call.Function.Name = submit.Definition.Function.Name
 	call.Function.Arguments = string(mustMarshal(t, malformedInput()))
 	outcome := submit.Handler(ctx, call, trace)
@@ -544,7 +544,7 @@ func TestSubmitRejectsUnparseableArgumentsAsRecoverable(t *testing.T) {
 		ctx := t.Context()
 		trace, _ := agenttrace.StartTrace[*sampleResult](ctx, "prompt")
 
-		call := openai.ChatCompletionMessageToolCall{ID: "s1"}
+		call := openai.ChatCompletionMessageToolCallUnion{ID: "s1"}
 		call.Function.Name = submit.Definition.Function.Name
 		call.Function.Arguments = `{"reasoning":`
 		outcome := submit.Handler(ctx, call, trace)

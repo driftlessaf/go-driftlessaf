@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 // httpFailure retains only allowlisted error categories and a narrowly validated

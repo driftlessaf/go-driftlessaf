@@ -17,7 +17,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 )
 

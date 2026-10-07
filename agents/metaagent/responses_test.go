@@ -15,8 +15,8 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/toolcall"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 func responsesRoute() modelrouter.Route {

@@ -16,7 +16,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Option is a functional option for configuring the executor.

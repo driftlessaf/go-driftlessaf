@@ -14,8 +14,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 // NewBedrockOpenAIResponsesAdapter constructs a native Responses adapter using

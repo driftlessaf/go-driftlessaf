@@ -11,16 +11,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 	"golang.org/x/oauth2"
 )
 
@@ -48,9 +48,6 @@ func TestVertexResponsesTransport(t *testing.T) {
 						t.Errorf("unexpected header %q", name)
 					}
 				}
-				if got, want := r.URL.Path, "/v1/projects/test-project/locations/"+tc.region+"/endpoints/openapi/responses"; got != want {
-					t.Errorf("path: got = %q, want = %q", got, want)
-				}
 				var body map[string]any
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Error(err)
@@ -63,10 +60,6 @@ func TestVertexResponsesTransport(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"error":{"message":"fixture"}}`)
 			}))
 			defer server.Close()
-			target, err := url.Parse(server.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
 			adapter, err := newVertexOpenAIResponsesAdapter("test-project", tc.region, func(_ context.Context, scopes ...string) (oauth2.TokenSource, error) {
 				if len(scopes) != 1 || scopes[0] != vertexCloudPlatformScope {
 					t.Errorf("unexpected scopes: %v", scopes)
@@ -86,14 +79,33 @@ func TestVertexResponsesTransport(t *testing.T) {
 				t.Fatal(err)
 			}
 			service := binding.Responses()
-			_, err = service.New(t.Context(), responses.ResponseNewParams{Model: route.ProviderModelID}, option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+
+			// The SDK refuses a request whose origin a middleware moved away
+			// from the base URL, so the endpoint is checked here and answered
+			// without a network call.
+			attempts := 0
+			_, err = service.New(t.Context(), responses.ResponseNewParams{Model: route.ProviderModelID}, option.WithMiddleware(func(r *http.Request, _ option.MiddlewareNext) (*http.Response, error) {
+				attempts++
 				if r.URL.Host != tc.host || r.URL.Scheme != "https" {
 					t.Errorf("endpoint: got = %s, want HTTPS host %q", r.URL, tc.host)
 				}
-				r.URL.Scheme = target.Scheme
-				r.URL.Host = target.Host
-				return next(r)
+				if got, want := r.URL.Path, "/v1/projects/test-project/locations/"+tc.region+"/endpoints/openapi/responses"; got != want {
+					t.Errorf("path: got = %q, want = %q", got, want)
+				}
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"fixture"}}`)),
+					Request:    r,
+				}, nil
 			}))
+			if err == nil || attempts != 1 {
+				t.Errorf("endpoint attempts: got = %d, want = 1 with error", attempts)
+			}
+
+			// The bound HTTP client attaches the OAuth token and the request
+			// carries no OpenAI account headers.
+			_, err = service.New(t.Context(), responses.ResponseNewParams{Model: route.ProviderModelID}, option.WithBaseURL(server.URL))
 			if err == nil || requests != 1 {
 				t.Errorf("request count: got = %d, want = 1 with error", requests)
 			}

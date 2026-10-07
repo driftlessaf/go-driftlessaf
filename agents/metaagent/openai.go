@@ -18,8 +18,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -64,6 +64,11 @@ func NewOpenAICompatible[Req promptbuilder.Bindable, Resp, CB any](
 	client := openai.NewClient(
 		option.WithBaseURL(provider.BaseURL),
 		option.WithAPIKey(provider.APIKey),
+		// The SDK's own default client stops waiting for response headers
+		// after 10 minutes. A non-streaming completion sends its headers only
+		// when generation ends, so that bound would cut off long reasoning
+		// turns. http.DefaultClient has no such bound.
+		option.WithHTTPClient(http.DefaultClient),
 	)
 
 	return newOpenAICompatibleAgentWithClient[Req, Resp, CB](

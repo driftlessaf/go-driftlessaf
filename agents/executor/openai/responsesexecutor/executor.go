@@ -27,9 +27,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/responses"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Config configures a credential-free Responses executor. Zero numeric limits
@@ -392,7 +392,17 @@ func (e *executor[Request, Response]) dispatch(ctx context.Context, calls []resp
 		if len(b) > maxPayloadBytes {
 			return false, false, nil, errors.New("responses tool result exceeds byte limit")
 		}
-		outputs = append(outputs, responses.ResponseInputItemParamOfFunctionCallOutput(calls[i].CallID, string(b)))
+		outputs = append(outputs, functionCallOutput(calls[i].CallID, string(b)))
 	}
 	return accepted, usable, outputs, nil
+}
+
+// functionCallOutput builds the text result item for one function call. The
+// SDK's ResponseInputItemParamOfFunctionCallOutput helper takes only the
+// output, so it cannot set the call_id that pairs the result with its call.
+func functionCallOutput(callID, output string) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemUnionParam{OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
+		CallID: param.NewOpt(callID),
+		Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{OfString: param.NewOpt(output)},
+	}}
 }

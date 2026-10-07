@@ -12,7 +12,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/openai/responsesexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 type request struct{}

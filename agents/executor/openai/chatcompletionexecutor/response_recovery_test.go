@@ -18,8 +18,8 @@ import (
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 type responseToolCall struct {
@@ -332,5 +332,88 @@ func TestEmptyResponseWithTerminalFinishReasonIsNotRetried(t *testing.T) {
 	}
 	if got, want := requests.Load(), int32(1); got != want {
 		t.Errorf("API requests: got = %d, want = %d", got, want)
+	}
+}
+
+// TestUntypedToolCallIsReplayedAsFunctionCall covers OpenAI-compatible
+// providers that omit "type" on a tool call. The SDK encodes such a call as
+// null when it builds the assistant message, which leaves the transcript with
+// a tool result that answers no call. The executor must replay it as a
+// function call.
+func TestUntypedToolCallIsReplayedAsFunctionCall(t *testing.T) {
+	const arguments = `{"reasoning":"look it up","query":"worker run"}`
+	var lookups atomic.Int32
+	replay := make(chan []byte, 1)
+	srv := newValidatingOpenAIServer(t, func(reqNum int, body []byte) string {
+		if reqNum == 1 {
+			typed := toolCallCompletionJSON(t, "chatcmpl-untyped", responseToolCall{
+				id:        "call_untyped",
+				name:      "lookup",
+				arguments: arguments,
+			})
+			// json.Marshal sorts map keys, so "type" closes the tool call.
+			untyped := strings.Replace(typed, `,"type":"function"}`, "}", 1)
+			if untyped == typed {
+				t.Errorf("completion fixture has no tool-call type to remove: %s", typed)
+			}
+			return untyped
+		}
+		replay <- append([]byte(nil), body...)
+		return submitCompletionJSON(t, "chatcmpl-good", "call_good", "recovered")
+	})
+
+	exec := newResponseRecoveryExecutor(t, srv.URL, "go", 5)
+	tools := map[string]openaistool.Metadata[errCapResponse]{
+		"lookup": openaistool.FromTool(toolcall.Tool[errCapResponse]{
+			Def: toolcall.Definition{Name: "lookup", Description: "looks something up"},
+			Handler: func(context.Context, toolcall.ToolCall, *agenttrace.Trace[errCapResponse], *errCapResponse) map[string]any {
+				lookups.Add(1)
+				return map[string]any{"ok": true}
+			},
+		}),
+	}
+
+	resp, err := exec.Execute(t.Context(), errCapRequest{}, tools)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := resp.Answer, "recovered"; got != want {
+		t.Errorf("resp.Answer: got = %q, want = %q", got, want)
+	}
+	if got, want := lookups.Load(), int32(1); got != want {
+		t.Errorf("lookup handler calls: got = %d, want = %d", got, want)
+	}
+
+	var second struct {
+		Messages []struct {
+			Role      string            `json:"role"`
+			ToolCalls []json.RawMessage `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(<-replay, &second); err != nil {
+		t.Fatalf("unmarshal replay request: %v", err)
+	}
+	var replayed []json.RawMessage
+	for _, m := range second.Messages {
+		if m.Role == "assistant" {
+			replayed = m.ToolCalls
+		}
+	}
+	if len(replayed) != 1 {
+		t.Fatalf("replayed tool calls: got = %d, want = 1", len(replayed))
+	}
+	var call struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(replayed[0], &call); err != nil {
+		t.Fatalf("unmarshal replayed tool call %s: %v", replayed[0], err)
+	}
+	if call.ID != "call_untyped" || call.Type != "function" || call.Function.Name != "lookup" || call.Function.Arguments != arguments {
+		t.Errorf("replayed tool call: got = %s, want function call_untyped lookup", replayed[0])
 	}
 }

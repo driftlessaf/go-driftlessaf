@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 func TestHTTPFailureDiagnostics(t *testing.T) {

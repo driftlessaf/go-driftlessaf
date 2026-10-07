@@ -13,7 +13,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 type testRequest struct{}

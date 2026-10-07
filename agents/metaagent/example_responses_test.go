@@ -11,7 +11,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 func ExampleNewOpenAIResponsesBinding() {

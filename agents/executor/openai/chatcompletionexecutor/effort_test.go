@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/effort"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // TestWithEffortMapping checks the option validates the shared scale and

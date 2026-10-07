@@ -21,9 +21,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/openaistool"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // slowToolAndSubmitTurnJSON is a completion for an assistant turn that calls
@@ -84,10 +84,10 @@ func TestSubmitEvaluatedAfterToolHandlers(t *testing.T) {
 		prompt,
 		chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](func() (openaistool.SubmitMetadata[errCapResponse], error) {
 			return openaistool.SubmitMetadata[errCapResponse]{
-				Definition: openai.ChatCompletionToolParam{
+				Definition: openai.ChatCompletionFunctionToolParam{
 					Function: shared.FunctionDefinitionParam{Name: "submit_result"},
 				},
-				Handler: func(_ context.Context, tc openai.ChatCompletionMessageToolCall, _ *agenttrace.Trace[errCapResponse]) toolcall.SubmitOutcome[errCapResponse] {
+				Handler: func(_ context.Context, tc openai.ChatCompletionMessageToolCallUnion, _ *agenttrace.Trace[errCapResponse]) toolcall.SubmitOutcome[errCapResponse] {
 					var args struct {
 						Answer string `json:"answer"`
 					}
