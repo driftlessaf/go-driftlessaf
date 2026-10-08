@@ -13,7 +13,6 @@ import (
 	kmetrics "chainguard.dev/go-grpc-kit/pkg/metrics"
 	traceinterceptors "chainguard.dev/go-grpc-kit/pkg/trace"
 	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/memusage"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -55,9 +54,9 @@ func WithInterceptors(inter ...grpc.UnaryServerInterceptor) Option {
 }
 
 // ListenAndServe registers srv and a health service on a duplex gRPC server,
-// starts the metrics listener and memusage.Heartbeat, and blocks until ctx is
-// cancelled or the server fails. Callers set up profiling, metrics, and
-// tracing exporters before calling it, as githubreconciler.Main does.
+// starts the metrics listener, and blocks until ctx is cancelled or the
+// server fails. Callers set up profiling, metrics, and tracing exporters
+// before calling it, as githubreconciler.Main does.
 func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, opts ...Option) error {
 	o := options{port: 8080, metricsPort: 2112}
 	for _, opt := range opts {
@@ -80,8 +79,6 @@ func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, o
 	workqueue.RegisterWorkqueueServiceServer(d.Server, srv)
 	healthgrpc.RegisterHealthServer(d.Server, health.NewServer())
 	d.RegisterListenAndServeMetrics(o.metricsPort, o.enablePprof)
-	// The heartbeat outlives ctx so it still logs while the server drains.
-	go memusage.Heartbeat(context.WithoutCancel(ctx))
 
 	clog.InfoContext(ctx, "Starting workqueue server", "port", o.port)
 	return d.ListenAndServe(ctx)
