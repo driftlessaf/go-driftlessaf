@@ -113,8 +113,9 @@ var automaticToolChoiceOnlyModels = []string{
 // Keys are exact base ids, not prefixes, so a new model reports an unknown
 // window until its limit is verified rather than inheriting a neighbour's.
 var contextWindows = map[string]int64{
-	"claude-opus-4-8": 1_000_000,
-	"claude-opus-5-5": 1_000_000,
+	"claude-opus-4-8":  1_000_000,
+	"claude-opus-5-5":  1_000_000,
+	"claude-haiku-5-5": 1_000_000,
 }
 
 var samplingParamsRemovedPrefixes = []string{

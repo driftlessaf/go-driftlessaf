@@ -43,6 +43,8 @@ func TestResolve(t *testing.T) {
 	claudeOpus55.ContextWindow = 1_000_000
 	claudeOpus48 := claudeAdaptive
 	claudeOpus48.ContextWindow = 1_000_000
+	claudeHaiku55 := claudeAdaptive
+	claudeHaiku55.ContextWindow = 1_000_000
 	geminiBudget := model.Info{
 		Backend:         model.BackendGemini,
 		Efforts:         fullScale,
@@ -74,9 +76,9 @@ func TestResolve(t *testing.T) {
 		{"claude-mythos-5-1", claudeAdaptive},
 		{"claude-fable-5-1", claudeAutoToolChoice},
 		// Haiku 5.5 takes the adaptive surface but accepts a forced tool_choice.
-		{"claude-haiku-5-5", claudeAdaptive},
-		{"claude-haiku-5-5@default", claudeAdaptive},
-		{"anthropic.claude-haiku-5-5", claudeAdaptive},
+		{"claude-haiku-5-5", claudeHaiku55},
+		{"claude-haiku-5-5@default", claudeHaiku55},
+		{"anthropic.claude-haiku-5-5", claudeHaiku55},
 		{"claude-fable-5-1@default", claudeAutoToolChoice},
 		{"anthropic.claude-fable-5-1", claudeAutoToolChoice},
 		{"claude-fable-5-10", claudeAdaptive},
@@ -230,6 +232,8 @@ func TestResolveContextWindow(t *testing.T) {
 		{"claude-opus-4-8", 1_000_000},
 		{"claude-opus-4-8@20260101", 1_000_000},
 		{"claude-opus-4-8-1", 0},
+		{"claude-haiku-5-5", 1_000_000},
+		{"claude-haiku-5-5@default", 1_000_000},
 		{"claude-opus-4-7", 0},
 		{"claude-opus-5", 0},
 		{"claude-sonnet-4-6", 0},
