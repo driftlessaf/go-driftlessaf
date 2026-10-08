@@ -36,7 +36,7 @@ func ExampleNewWithMessages() {
 // ExampleWithModel demonstrates configuring the Claude model used by the
 // executor.
 func ExampleWithModel() {
-	opt := claudeexecutor.WithModel[promptbuilder.Noop, *struct{}]("claude-3-opus@20240229")
+	opt := claudeexecutor.WithModel[promptbuilder.Noop, *struct{}]("claude-sonnet-5-5")
 	fmt.Printf("option is nil: %v\n", opt == nil)
 	// Output: option is nil: false
 }

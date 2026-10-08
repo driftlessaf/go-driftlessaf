@@ -134,17 +134,20 @@ var samplingParamsRemovedPrefixes = []string{
 // parameter (output_config.effort): the API returns a 400 when it is set.
 // Unlisted ids — including future ones — are assumed effort-capable, so a
 // freshly released model keeps the newest surface by default and this list
-// only grows when a model is verified to reject the parameter.
+// only grows when a model is verified to reject the parameter. An entry
+// leaves the list only after the Claude API, Vertex AI and Bedrock have all
+// retired its models: the partner platforms keep models past the Claude API
+// date, so "claude-3" still covers claude-3-5-haiku on Vertex AI. The dated
+// Sonnet 4 and Opus 4 prefixes match the Bedrock ids after Resolve strips
+// "anthropic.".
 var noEffortModelPrefixes = []string{
-	"claude-2",
 	"claude-3",
-	"claude-instant",
 	"claude-haiku-4",
 	"claude-sonnet-4@",
-	"claude-sonnet-4-0",
+	"claude-sonnet-4-20250514",
 	"claude-sonnet-4-5",
 	"claude-opus-4@",
-	"claude-opus-4-0",
+	"claude-opus-4-20250514",
 	"claude-opus-4-1",
 }
 

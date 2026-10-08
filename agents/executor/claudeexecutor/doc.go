@@ -26,7 +26,7 @@ SPDX-License-Identifier: Apache-2.0
 //	exec, err := claudeexecutor.NewWithMessages[*Request, *Response](
 //	    client.Messages,
 //	    tmpl,
-//	    claudeexecutor.WithModel[*Request, *Response]("claude-3-opus@20240229"),
+//	    claudeexecutor.WithModel[*Request, *Response]("claude-sonnet-5-5"),
 //	    claudeexecutor.WithMaxTokens[*Request, *Response](16000),
 //	)
 //	if err != nil {
