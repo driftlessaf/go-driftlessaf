@@ -93,8 +93,13 @@ SPDX-License-Identifier: Apache-2.0
 // full input price on every turn of the loop. Two tail markers are retained
 // (current and previous) so a turn that appends many blocks — for example
 // several parallel tool calls — still resumes from the prior turn's cache
-// entry. Cache reads and writes are reported per turn via the
-// gen_ai.usage.cache_* metrics and on the trace, along with the cache TTL.
+// entry. A request that advertises no tools and has no refusal nudge cannot
+// continue past the model's first reply, so it gets no moving tail
+// breakpoint, which no later turn would read. The first-user-block marker
+// that WithCacheFirstUserBlock or WithUserPromptSuffix places for reuse
+// across executions is unaffected. Cache reads and writes are reported per
+// turn via the gen_ai.usage.cache_* metrics and on the trace, along with the
+// cache TTL.
 //
 // Breakpoints live for 5 minutes by default, measured from the start of each
 // request, so a turn that generates for longer than that finds the cache

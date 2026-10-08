@@ -421,6 +421,13 @@ func (e *executor[Request, Response]) Execute(
 	// reclaims its slot. See tailBreakpoints for the mechanics.
 	tail := newTailBreakpoints(params, e.cacheTTL)
 	tail.positions = seedFirstUserTail(e.cacheControl, e.cacheFirstUserBlock, params)
+	// A request that advertises no tools ends on the model's first reply
+	// unless the refusal nudge retries it, so a tail marker would write the
+	// whole prompt to the cache at the cache-write price (1.25x input, or 2x
+	// with a one-hour TTL) with no later turn to read it. The static-prefix markers stay: other executions share them.
+	if len(params.Tools) == 0 && e.refusalNudgeMaxRetries == 0 {
+		tail.limit = 0
+	}
 
 	// A fresh Execute runs the full turn budget starting at turn 0. Resume
 	// (resume.go) shares the same loop with a restored params, a startTurn past
