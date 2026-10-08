@@ -835,10 +835,9 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
-			name := e.submitToolName()
 			redirectResp, err := e.sendWithRetry(ctx, turnCfg, "send_submit_redirect", "failed to send submit_result redirect", func() (*genai.GenerateContentResponse, error) {
 				return send(ctx, &genai.Part{
-					Text: fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", name, name),
+					Text: fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName),
 				})
 			})
 			if err != nil {
