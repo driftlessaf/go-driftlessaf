@@ -22,6 +22,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/schema"
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -171,6 +172,12 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 	}
 	if e.config.Effort != "" {
 		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(e.config.Effort)}
+	}
+	// Only function calls advance the loop, so a text-only turn is unusable.
+	// Models that reject a forced tool_choice keep the provider default and
+	// rely on the continuation nudge instead.
+	if !model.Resolve(e.config.Attribution.LogicalModel).AutomaticToolChoiceOnly {
+		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsRequired)}
 	}
 	invalid := 0
 	turns := 0

@@ -38,6 +38,11 @@ in a parallel batch. Only an accepted, validated submission commits a result.
   to 16 MiB and 32,768 events; completed payloads are limited to 8 MiB.
 - A completed response can contain at most 128 function calls. Repeated call IDs
   and unsupported output/event types fail closed before dispatch.
+- Requests set `tool_choice` to `required`, because only function calls
+  advance the conversation. Models that the `agents/model` registry marks
+  `AutomaticToolChoiceOnly` keep the provider default, `auto`. A turn without a
+  function call gets a user message that asks the model to continue with the
+  tools.
 - Three consecutive turns without usable tool work or an accepted submission
   end the execution. This bounds correction of invalid JSON, invalid terminal
   payloads, unknown tools, and refusals.

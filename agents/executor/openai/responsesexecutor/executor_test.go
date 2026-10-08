@@ -133,6 +133,10 @@ func TestNativeContinuation(t *testing.T) {
 		if diff := cmp.Diff(map[string]any{"effort": "xhigh"}, r["reasoning"]); diff != "" {
 			t.Error(diff)
 		}
+		// Ordinary tool turns and the terminal turn both require a call.
+		if r["tool_choice"] != "required" {
+			t.Errorf("tool_choice: got = %v, want = required", r["tool_choice"])
+		}
 	}
 	items := requests[1]["input"].([]any)
 	if len(items) != 4 {
@@ -147,6 +151,70 @@ func TestNativeContinuation(t *testing.T) {
 	def := requests[0]["tools"].([]any)[1].(map[string]any)["parameters"].(map[string]any)
 	if def["$defs"] == nil || def["x-fixture"] != true {
 		t.Error("tool schema extensions dropped")
+	}
+}
+
+func TestToolChoice(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name         string
+		logicalModel string
+		// wantChoice nil means the field is omitted: the provider default, auto.
+		wantChoice   any
+		wantRequests int
+		wantErr      string
+	}{
+		{name: "OpenAI route requires a call", logicalModel: "gpt-5.6-sol", wantChoice: "required", wantRequests: 1},
+		{name: "xAI route requires a call", logicalModel: "xai/grok-4.7", wantChoice: "required", wantRequests: 1},
+		{name: "automatic-only model keeps the default", logicalModel: "claude-sonnet-5-5", wantRequests: 3, wantErr: "three consecutive unusable turns"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config(t)
+			cfg.Attribution.LogicalModel = tt.logicalModel
+			var bodies []map[string]any
+			// The fake honors tool_choice: it answers in prose unless a call
+			// is required, which is what Grok on Vertex does under auto.
+			e := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				bodies = append(bodies, body)
+				id := fmt.Sprint(len(bodies))
+				if body["tool_choice"] == "required" {
+					emit(w, submit(id, "done"))
+					return
+				}
+				emit(w, map[string]any{"id": "msg_" + id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "The token is in this sentence.", "annotations": []any{}}}})
+			}, cfg)
+			got, err := e.Execute(t.Context(), request{}, nil)
+			if tt.wantErr == "" {
+				if err != nil || got.Text != "done" {
+					t.Fatalf("Execute: got = %+v, %v, want = accepted submission", got, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Execute error: got = %v, want containing %q", err, tt.wantErr)
+			}
+			if len(bodies) != tt.wantRequests {
+				t.Fatalf("requests: got = %d, want = %d", len(bodies), tt.wantRequests)
+			}
+			for i, body := range bodies {
+				if got := body["tool_choice"]; got != tt.wantChoice {
+					t.Errorf("request %d tool_choice: got = %v, want = %v", i, got, tt.wantChoice)
+				}
+				if i == 0 {
+					continue
+				}
+				// Each text-only turn is followed by the continuation nudge.
+				items := body["input"].([]any)
+				last := items[len(items)-1].(map[string]any)
+				if content, _ := last["content"].(string); last["role"] != "user" || !strings.Contains(content, "terminal tool") {
+					t.Errorf("request %d last input item: got = %v, want = continuation nudge", i, last)
+				}
+			}
+		})
 	}
 }
 
