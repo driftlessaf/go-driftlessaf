@@ -573,11 +573,14 @@ func (e *executor[Request, Response]) Execute(
 		// its token count belongs to that request's turn. The cost view prices
 		// Gemini cache creation at zero while retaining the count for usage
 		// accounting.
+		// Cache reads are recorded even without cacheControl: Gemini reports
+		// implicit cache hits in CachedContentTokenCount and bills them at the
+		// cache-read rate.
 		createdTokens := int64(0)
 		if turn == 0 {
 			createdTokens = cacheCreationTokens
 		}
-		if e.cacheControl && (cacheReadTokens > 0 || createdTokens > 0) {
+		if cacheReadTokens > 0 || createdTokens > 0 {
 			llmTurn.RecordCacheTokens(cacheReadTokens, createdTokens)
 		}
 
@@ -896,7 +899,7 @@ func (e *executor[Request, Response]) Execute(
 		llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.servingAttribution(usedCache))
 		inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
 		llmTurn.RecordTokens(inputTokens, outputTokens)
-		if e.cacheControl && response.UsageMetadata.CachedContentTokenCount > 0 {
+		if response.UsageMetadata.CachedContentTokenCount > 0 {
 			llmTurn.RecordCacheTokens(int64(response.UsageMetadata.CachedContentTokenCount), 0)
 		}
 		llmTurn.End()
@@ -1051,8 +1054,8 @@ func ptr[T any](v T) *T {
 }
 
 // recordTokenMetrics unpacks the genai usage-metadata shape into the shared
-// recorder. When context caching is active and the response includes cached
-// tokens, OTel cache metrics are also recorded. Per-turn cache token
+// recorder. When the response includes cached tokens, from explicit or
+// implicit caching, OTel cache metrics are also recorded. Per-turn cache token
 // attribution onto the trace happens in executeTurn
 // (LLMTurn.RecordCacheTokens) — this path only emits the OTel metrics counter.
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, usage *genai.GenerateContentResponseUsageMetadata) {
@@ -1063,7 +1066,7 @@ func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, us
 	inputTokens, outputTokens := inputOutputTokenCounts(usage)
 	e.telemetry.RecordTokens(ctx, inputTokens, outputTokens)
 
-	if e.cacheControl && usage.CachedContentTokenCount > 0 {
+	if usage.CachedContentTokenCount > 0 {
 		e.telemetry.RecordCacheTokens(ctx, int64(usage.CachedContentTokenCount), 0)
 		clog.DebugContext(ctx, "Prompt cache metrics",
 			"cache_read_tokens", usage.CachedContentTokenCount)
@@ -1071,7 +1074,9 @@ func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, us
 }
 
 // inputOutputTokenCounts normalises Gemini's usage categories into the input
-// and output totals used by traces and metrics.
+// and output totals used by traces and metrics. PromptTokenCount includes
+// CachedContentTokenCount; agent_trace_costs.sql subtracts cache reads from
+// Gemini input, so excluding them here would double-correct.
 func inputOutputTokenCounts(usage *genai.GenerateContentResponseUsageMetadata) (int64, int64) {
 	inputTokens := int64(usage.PromptTokenCount) + int64(usage.ToolUsePromptTokenCount)
 	outputTokens := int64(usage.CandidatesTokenCount) + int64(usage.ThoughtsTokenCount)

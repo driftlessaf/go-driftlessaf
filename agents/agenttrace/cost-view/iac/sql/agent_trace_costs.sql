@@ -31,6 +31,19 @@
 -- never engages today; the logic is in place for Sonnet 4.5 / Gemini 2.5
 -- Pro / 3.x Pro / Grok 4.7 traffic.
 --
+-- Gemini input_tokens include cached tokens: googleexecutor records
+-- PromptTokenCount, which per the genai usage metadata contract counts
+-- CachedContentTokenCount too, and records the cached share again as
+-- cache_read_tokens. Gemini input is therefore priced on input_tokens minus
+-- cache_read_tokens so cached tokens bill once, at the cache-read rate. The
+-- tier predicate keeps the full input_tokens, because Vertex tiers on the
+-- whole prompt. Claude input_tokens already exclude cache reads. Correcting
+-- here rather than in the executor keeps historical rows with recorded cache
+-- reads right; changing what googleexecutor records would double-correct.
+-- Rows whose implicit cache hits carry no cache_read_tokens stay priced at
+-- the full input rate; older rows from executors without explicit caching,
+-- such as the judge, are in that set.
+--
 -- Model matching prefers the first non-empty turns[].logical_model value and
 -- falls back to the trace-level model for historical rows. The logical model
 -- is stable across serving providers, while routed trace-level model values
@@ -217,10 +230,12 @@ priced AS (
 SELECT
   m.* EXCEPT (p_std, p_large),
   -- Per-call sums over turns[]. Each turn picks its own tier based on
-  -- that call's input_tokens against the 200K threshold.
+  -- that call's input_tokens against the 200K threshold. Gemini input cost
+  -- excludes cache_read_tokens (see header).
   (
     SELECT SUM(
-      COALESCE(turn.input_tokens, 0) *
+      GREATEST(COALESCE(turn.input_tokens, 0)
+        - IF(STARTS_WITH(m.pricing_model, 'gemini-'), COALESCE(turn.cache_read_tokens, 0), 0), 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),
@@ -264,7 +279,8 @@ SELECT
   ) AS cache_creation_cost_usd,
   (
     SELECT SUM(
-      COALESCE(turn.input_tokens, 0) *
+      GREATEST(COALESCE(turn.input_tokens, 0)
+        - IF(STARTS_WITH(m.pricing_model, 'gemini-'), COALESCE(turn.cache_read_tokens, 0), 0), 0) *
         IF(turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ),

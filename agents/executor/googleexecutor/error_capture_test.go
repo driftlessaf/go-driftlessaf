@@ -278,18 +278,36 @@ func TestExecutorRecordsUnprocessedResponseAtMaxTurnsExhaustion(t *testing.T) {
 }
 
 // Companion to TestExecutorRecordsUnprocessedResponseAtMaxTurnsExhaustion:
-// when context caching is enabled, the synthetic final turn must also
-// route the unprocessed response's CachedContentTokenCount onto its
+// the synthetic final turn must also route the unprocessed response's CachedContentTokenCount onto its
 // CacheReadTokens record. Without per-turn cache attribution the cost
 // view applies the cache-discount once at the wrong granularity (or
 // not at all on the synthetic turn), which would silently skew the
 // effective rate on maxTurns-exhausted runs.
 //
-// Uses the default cacheControl=true; getOrCreateCache is gated on
-// `systemInstruction != nil || len(tools) > 0` (executor.go around the
-// chat.Create call), so with neither configured the cache-creation
-// HTTP endpoint is never hit — we only need to fake generateContent.
+// Runs with the default cacheControl=true and with WithoutCacheControl.
+// getOrCreateCache is gated on `systemInstruction != nil || len(tools) > 0`
+// (executor.go around the chat.Create call), so with neither configured the
+// cache-creation HTTP endpoint is never hit and every reported cached token
+// is an implicit cache hit. Those reads must land on the trace either way:
+// Gemini bills them at the cache-read rate, and the judge runs without
+// explicit caching.
 func TestExecutorRecordsUnprocessedCacheTokensAtMaxTurnsExhaustion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		extraOpts []googleexecutor.Option[errCapRequest, errCapResponse]
+	}{
+		{name: "cache control enabled"},
+		{name: "cache control disabled", extraOpts: []googleexecutor.Option[errCapRequest, errCapResponse]{
+			googleexecutor.WithoutCacheControl[errCapRequest, errCapResponse](),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testRecordsUnprocessedCacheTokens(t, tc.extraOpts...)
+		})
+	}
+}
+
+func testRecordsUnprocessedCacheTokens(t *testing.T, extraOpts ...googleexecutor.Option[errCapRequest, errCapResponse]) {
 	var requestCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Distinct cache counts per response (10*N) plus the same prompt /
@@ -316,15 +334,11 @@ func TestExecutorRecordsUnprocessedCacheTokensAtMaxTurnsExhaustion(t *testing.T)
 	}
 
 	const maxTurns = 2
-	exec, err := googleexecutor.New[errCapRequest, errCapResponse](
-		newTestClient(t, srv.URL),
-		prompt,
+	opts := append([]googleexecutor.Option[errCapRequest, errCapResponse]{
 		googleexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
 		googleexecutor.WithMaxTurns[errCapRequest, errCapResponse](maxTurns),
-		// cacheControl=true is the default — leave it on so the synthetic-
-		// turn cache branch executes. With no system instructions or tools
-		// configured, getOrCreateCache is never called.
-	)
+	}, extraOpts...)
+	exec, err := googleexecutor.New[errCapRequest, errCapResponse](newTestClient(t, srv.URL), prompt, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -348,8 +362,13 @@ func TestExecutorRecordsUnprocessedCacheTokensAtMaxTurnsExhaustion(t *testing.T)
 
 	// CacheReadTokens on every turn must mirror the response that landed
 	// there. This request has no system instructions or tools, so it never
-	// creates a cache and CacheCreationTokens stays zero.
+	// creates a cache and CacheCreationTokens stays zero. InputTokens keep
+	// the full promptTokenCount, cached share included: agent_trace_costs.sql
+	// subtracts cache_read_tokens from Gemini input itself.
 	for i, turn := range trace.Turns {
+		if wantInput := int64(100*(i+1) + 1); turn.InputTokens != wantInput {
+			t.Errorf("trace.Turns[%d].InputTokens: got = %d, want = %d (promptTokenCount, cached tokens included)", i, turn.InputTokens, wantInput)
+		}
 		wantCacheRead := int64(10 * (i + 1))
 		if turn.CacheReadTokens != wantCacheRead {
 			t.Errorf("trace.Turns[%d].CacheReadTokens: got = %d, want = %d", i, turn.CacheReadTokens, wantCacheRead)
