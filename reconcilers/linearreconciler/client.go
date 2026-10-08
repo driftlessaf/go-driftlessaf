@@ -980,7 +980,27 @@ func (c *Client) FetchAttachmentContent(ctx context.Context, rawURL string) ([]b
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	// The initial-URL check alone would not survive a redirect: the default
+	// client follows them blindly, so an allowed host answering 302 could
+	// steer the fetch at internal services. Re-validate every hop with the
+	// same allowlist. A shallow copy shares the configured transport and
+	// timeout while leaving the client used for API calls untouched.
+	hc := *c.httpClient
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// A custom CheckRedirect replaces net/http's default policy
+		// entirely, including its 10-redirect cap; keep it, or two allowed
+		// URLs redirecting to each other would loop until the client
+		// timeout.
+		if len(via) >= 10 {
+			return errors.New("attachment fetch stopped after 10 redirects")
+		}
+		if !c.isAllowedAttachmentURL(req.URL) {
+			return fmt.Errorf("attachment fetch redirected to %q, not an allowed host (allowed: *.linear.app or the configured endpoint)", req.URL)
+		}
+		return nil
+	}
+
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching attachment: %w", err)
 	}

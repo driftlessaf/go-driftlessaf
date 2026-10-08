@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -349,6 +350,69 @@ func TestFetchAttachmentContent_RejectsUntrustedURLs(t *testing.T) {
 	}
 	if hits != 0 {
 		t.Errorf("test server received %d requests, want 0 (URLs should be rejected before fetch)", hits)
+	}
+}
+
+// TestFetchAttachmentContent_RejectsRedirectsOffAllowlist proves the
+// allowlist survives redirects: an allowed host answering 302 toward a
+// disallowed one must fail the fetch before the destination is contacted,
+// while a redirect that stays on an allowed host is followed.
+func TestFetchAttachmentContent_RejectsRedirectsOffAllowlist(t *testing.T) {
+	var evilHits int
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		evilHits++
+		w.Write([]byte("internal"))
+	}))
+	defer evil.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/offsite", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL, http.StatusFound)
+	})
+	mux.HandleFunc("/hop", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/content", http.StatusFound)
+	})
+	mux.HandleFunc("/content", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"state":"ok"}`))
+	})
+	// The allowed server is the configured endpoint, so its URLs pass the
+	// initial check; only the redirect policy stands between it and evil.
+	allowed := httptest.NewServer(mux)
+	defer allowed.Close()
+
+	c := NewClientWithAPIKey("secret-token").WithEndpoint(allowed.URL)
+
+	if _, err := c.FetchAttachmentContent(t.Context(), allowed.URL+"/offsite"); err == nil {
+		t.Error("FetchAttachmentContent following an off-allowlist redirect returned nil error, want non-nil")
+	}
+	if evilHits != 0 {
+		t.Errorf("off-allowlist redirect target received %d requests, want 0", evilHits)
+	}
+
+	got, err := c.FetchAttachmentContent(t.Context(), allowed.URL+"/hop")
+	if err != nil {
+		t.Fatalf("FetchAttachmentContent following a same-host redirect: %v", err)
+	}
+	if string(got) != `{"state":"ok"}` {
+		t.Errorf("content after same-host redirect = %q, want %q", got, `{"state":"ok"}`)
+	}
+}
+
+// TestFetchAttachmentContent_RedirectLoopCapped proves the custom redirect
+// policy keeps net/http's 10-redirect cap: an allowed host redirecting to
+// itself fails promptly instead of looping until the client timeout.
+func TestFetchAttachmentContent_RedirectLoopCapped(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClientWithAPIKey("secret-token").WithEndpoint(srv.URL)
+	_, err := c.FetchAttachmentContent(t.Context(), srv.URL+"/loop")
+	if err == nil || !strings.Contains(err.Error(), "10 redirects") {
+		t.Fatalf("got err %v, want the 10-redirect cap", err)
 	}
 }
 
