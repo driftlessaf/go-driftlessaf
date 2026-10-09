@@ -334,7 +334,7 @@ var enumerateAttrSelection = []string{"Name", "Created", "Generation", "Metagene
 
 // Enumerate implements workqueue.Interface.
 func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
-	return w.enumerate(ctx, nil)
+	return w.enumerate(ctx, nil, 0)
 }
 
 // EnumerateWithCapacity implements workqueue.CapacityAware. totalCapacity is
@@ -346,7 +346,14 @@ func (w *wq) Enumerate(ctx context.Context) ([]workqueue.ObservedInProgressKey, 
 // separately, preserving the existing ordering and metrics while avoiding a
 // full bucket listing.
 func (w *wq) EnumerateWithCapacity(ctx context.Context, totalCapacity int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
-	return w.enumerate(ctx, &totalCapacity)
+	return w.enumerate(ctx, &totalCapacity, 0)
+}
+
+// EnumerateWithOwnerCapacity implements workqueue.OwnerCapacityAware. It
+// behaves like EnumerateWithCapacity and also skips the full queued listing
+// when this queue's identity already holds ownerCapacity live keys.
+func (w *wq) EnumerateWithOwnerCapacity(ctx context.Context, totalCapacity, ownerCapacity int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
+	return w.enumerate(ctx, &totalCapacity, ownerCapacity)
 }
 
 type enumerationState struct {
@@ -362,7 +369,7 @@ type enumerationState struct {
 	maxAttempts  int
 }
 
-func (w *wq) enumerate(ctx context.Context, capacity *int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
+func (w *wq) enumerate(ctx context.Context, capacity *int, ownerCapacity int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
 	labels := w.baseLabels()
 	start := time.Now()
 	defer func() {
@@ -390,13 +397,16 @@ func (w *wq) enumerate(ctx context.Context, capacity *int) ([]workqueue.Observed
 		if err := w.enumeratePrefix(ctx, state, inProgressPrefix); err != nil {
 			return nil, nil, nil, err
 		}
-		active := 0
+		active, ownerActive := 0, 0
 		for _, key := range state.wip {
 			if !key.IsOrphaned() {
 				active++
+				if ownerCapacity > 0 && key.Owner() == w.identity {
+					ownerActive++
+				}
 			}
 		}
-		if active < *capacity {
+		if active < *capacity && (ownerCapacity <= 0 || ownerActive < ownerCapacity) {
 			readQueued = true
 			readDead = true
 			if err := w.enumeratePrefix(ctx, state, queuedPrefix); err != nil {

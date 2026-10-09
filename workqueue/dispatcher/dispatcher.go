@@ -109,13 +109,16 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	// already occupied, while still reading every in-progress key for orphan
 	// recovery and any bounded telemetry reads they need.
 	// Capacity-aware queues need the dispatcher's total capacity to decide
-	// whether queued work can affect this pass. Owner-specific limits are
-	// applied after enumeration and must not suppress a globally available slot.
+	// whether queued work can affect this pass. With an owner limit, a pass
+	// whose owner already holds its share cannot launch either, so queues that
+	// know the owner limit skip the queued listing then too.
 	totalCapacity := concurrency
 	var wip []workqueue.ObservedInProgressKey
 	var next []workqueue.QueuedKey
 	var err error
-	if bounded, ok := wq.(workqueue.CapacityAware); ok {
+	if owned, ok := wq.(workqueue.OwnerCapacityAware); ok && cfg.ownerConcurrency > 0 {
+		wip, next, _, err = owned.EnumerateWithOwnerCapacity(ctx, totalCapacity, cfg.ownerConcurrency)
+	} else if bounded, ok := wq.(workqueue.CapacityAware); ok {
 		wip, next, _, err = bounded.EnumerateWithCapacity(ctx, totalCapacity)
 	} else {
 		wip, next, _, err = wq.Enumerate(ctx)

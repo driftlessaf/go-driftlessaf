@@ -67,6 +67,17 @@ type CapacityAware interface {
 	EnumerateWithCapacity(ctx context.Context, totalCapacity int) ([]ObservedInProgressKey, []QueuedKey, []DeadLetteredKey, error)
 }
 
+// OwnerCapacityAware extends CapacityAware for dispatchers that also cap the
+// keys each owner holds. A dispatcher whose owner already holds ownerCapacity
+// keys cannot launch work, so implementations may skip the full queued listing
+// in that case too, with the same in-progress and telemetry reads as when the
+// total capacity is occupied.
+type OwnerCapacityAware interface {
+	// totalCapacity is the dispatcher's total worker capacity; ownerCapacity
+	// is the most keys the queue's identity may hold in progress.
+	EnumerateWithOwnerCapacity(ctx context.Context, totalCapacity, ownerCapacity int) ([]ObservedInProgressKey, []QueuedKey, []DeadLetteredKey, error)
+}
+
 // Options is a set of options that can be passed when queuing a key.
 type Options struct {
 	// Priority is the priority of the key.

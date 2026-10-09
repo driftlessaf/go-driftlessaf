@@ -1986,3 +1986,39 @@ func TestHandleAsync_SkipsInProgressKeysWithoutAnIdentity(t *testing.T) {
 		t.Fatalf("the in-progress key was started again (-want +got):\n%s", diff)
 	}
 }
+
+type ownerCapacityQueue struct {
+	capacityAwareQueue
+	ownerCalls     int
+	ownerCapacity  int
+	ownerTotalSeen int
+}
+
+func (m *ownerCapacityQueue) EnumerateWithOwnerCapacity(ctx context.Context, totalCapacity, ownerCapacity int) ([]workqueue.ObservedInProgressKey, []workqueue.QueuedKey, []workqueue.DeadLetteredKey, error) {
+	m.ownerCalls++
+	m.ownerTotalSeen = totalCapacity
+	m.ownerCapacity = ownerCapacity
+	return m.Enumerate(ctx)
+}
+
+func TestHandleAsync_PassesOwnerCapacityToOwnerAwareQueues(t *testing.T) {
+	noop := func(context.Context, string, workqueue.Options) error { return nil }
+
+	q := &ownerCapacityQueue{}
+	q.identity = "us-east4"
+	if err := HandleAsync(t.Context(), q, 100, 34, noop, 0, WithOwnerConcurrency(34))(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if q.ownerCalls != 1 || q.ownerTotalSeen != 100 || q.ownerCapacity != 34 {
+		t.Errorf("owner-aware enumeration: calls=%d total=%d owner=%d, want one call with 100 and 34", q.ownerCalls, q.ownerTotalSeen, q.ownerCapacity)
+	}
+
+	// Without an owner limit the queue keeps the total-capacity enumeration.
+	q = &ownerCapacityQueue{}
+	if err := HandleAsync(t.Context(), q, 100, 34, noop, 0)(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if q.ownerCalls != 0 || q.capacity != 100 {
+		t.Errorf("enumeration without an owner limit: owner calls=%d capacity=%d, want 0 and 100", q.ownerCalls, q.capacity)
+	}
+}

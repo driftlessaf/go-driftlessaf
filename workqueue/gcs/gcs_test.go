@@ -695,3 +695,70 @@ func TestEnumeratedObservedKeyMalformedAttemptsRequeues(t *testing.T) {
 		t.Error("Requeue() made no delete request")
 	}
 }
+
+func TestEnumerateWithOwnerCapacitySkipsBacklogWhenOwnerIsFull(t *testing.T) {
+	const (
+		self  = "us-east4"
+		other = "us-west1"
+	)
+	inProgress := func(owners ...string) string {
+		items := make([]string, 0, len(owners))
+		for i, owner := range owners {
+			items = append(items, fmt.Sprintf(
+				`{"name":"in-progress/key-%d","generation":"1","metageneration":"1",`+
+					`"timeCreated":"2026-01-01T00:00:00Z","metadata":{"lease-expiration":%q,%q:%q}}`,
+				i, time.Now().Add(time.Hour).UTC().Format(time.RFC3339), ownerMetadataKey, owner))
+		}
+		return `{"items":[` + strings.Join(items, ",") + `]}`
+	}
+	for _, tc := range []struct {
+		name       string
+		owners     []string
+		wantListed bool
+	}{
+		{name: "owner at its cap", owners: []string{self, self, other}, wantListed: false},
+		{name: "owner below its cap", owners: []string{self, other, other}, wantListed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeGCS{
+				handler: func(call gcsCall) (int, string) {
+					switch call.query.Get("prefix") {
+					case inProgressPrefix:
+						return http.StatusOK, inProgress(tc.owners...)
+					case queuedPrefix:
+						return http.StatusOK, listPageJSON("", "queued/waiting")
+					case deadLetterPrefix:
+						return http.StatusOK, listPageJSON("")
+					default:
+						return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+					}
+				},
+			}
+			wq := NewWorkQueue(newTestClient(t, f), 10, WithIdentity(self))
+			owned, ok := wq.(workqueue.OwnerCapacityAware)
+			if !ok {
+				t.Fatal("GCS workqueue does not implement OwnerCapacityAware")
+			}
+			// Total capacity is free; only the owner's share decides.
+			wip, next, _, err := owned.EnumerateWithOwnerCapacity(t.Context(), 10, 2)
+			if err != nil {
+				t.Fatalf("EnumerateWithOwnerCapacity() = %v", err)
+			}
+			if len(wip) != len(tc.owners) {
+				t.Fatalf("in-progress keys = %d, want %d", len(wip), len(tc.owners))
+			}
+			if got := len(next) > 0; got != tc.wantListed {
+				t.Errorf("returned queued keys = %v, want %v", got, tc.wantListed)
+			}
+			listedFull := false
+			for _, call := range f.recorded() {
+				if call.query.Get("prefix") == queuedPrefix && call.query.Get("maxResults") != "10" {
+					listedFull = true
+				}
+			}
+			if listedFull != tc.wantListed {
+				t.Errorf("full queued listing made = %v, want %v", listedFull, tc.wantListed)
+			}
+		})
+	}
+}
