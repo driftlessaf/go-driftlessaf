@@ -18,10 +18,10 @@ type sampleResult struct {
 func TestOptionsForResponseMetadata(t *testing.T) {
 	opts := OptionsForResponse[*sampleResult]()
 	if opts.PayloadFieldName != "analysis" {
-		t.Fatalf("expected payload field 'analysis', got %q", opts.PayloadFieldName)
+		t.Fatalf("payload field: got = %q, want = %q", opts.PayloadFieldName, "analysis")
 	}
 	if opts.ToolName != "submit_result" {
-		t.Fatalf("expected tool name 'submit_result', got %q", opts.ToolName)
+		t.Fatalf("tool name: got = %q, want = %q", opts.ToolName, "submit_result")
 	}
 }
 

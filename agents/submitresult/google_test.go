@@ -19,7 +19,7 @@ func TestGoogleToolHandler(t *testing.T) {
 	}
 
 	if meta.Definition.Name != "submit_result" {
-		t.Fatalf("unexpected tool name: %s", meta.Definition.Name)
+		t.Fatalf("tool name: got = %q, want = %q", meta.Definition.Name, "submit_result")
 	}
 
 	ctx := t.Context()
@@ -36,10 +36,10 @@ func TestGoogleToolHandler(t *testing.T) {
 		t.Fatalf("valid payload: got = rejected (%#v), want = accepted", outcome.ToolResult)
 	}
 	if success, _ := outcome.ToolResult["success"].(bool); !success {
-		t.Fatalf("expected success tool result: %#v", outcome.ToolResult)
+		t.Fatalf("tool result success: got = %v, want = true (%#v)", success, outcome.ToolResult)
 	}
 	if outcome.Response == nil {
-		t.Fatal("expected response to be set")
+		t.Fatal("response: got = nil, want = non-nil")
 	}
 	if got, want := outcome.Response.Summary, "all good"; got != want {
 		t.Errorf("response summary: got = %q, want = %q", got, want)
