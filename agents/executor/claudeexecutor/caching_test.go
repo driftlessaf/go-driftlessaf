@@ -33,7 +33,7 @@ import (
 // Run with -v to see the executor's "Prompt cache metrics" log lines showing
 // cache_read_tokens and cache_creation_tokens per turn.
 func TestExecutorPromptCaching(t *testing.T) {
-	ctx := t.Context()
+	ctx := liveTestContext(t, liveTestTimeout)
 	projectID := detectProjectID(ctx, t)
 
 	const (
@@ -239,7 +239,8 @@ func TestExecutorCacheTTLSurvivesLongTurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits past the 5-minute cache TTL")
 	}
-	ctx := t.Context()
+	// Each arm holds the conversation for longTurnGap on top of its calls.
+	ctx := liveTestContext(t, longTurnGap+liveTestTimeout)
 	projectID := detectProjectID(ctx, t)
 
 	const (

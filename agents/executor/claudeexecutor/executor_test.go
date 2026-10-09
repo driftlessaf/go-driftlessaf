@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/evals"
@@ -44,6 +45,23 @@ type simpleResponse struct {
 	Reasoning string      `json:"reasoning"`
 }
 
+// liveTestTimeout bounds a test that calls Claude on Vertex AI. A response
+// that stalls mid-stream holds Execute until its context ends: HTTP/2 takes
+// minutes to declare the silent connection lost, and the SDK and the executor
+// each retry it, so an unbounded test runs until go test's -timeout.
+const liveTestTimeout = 3 * time.Minute
+
+// liveTestContext returns t.Context() bounded by d. Pass it to
+// vertex.WithGoogleAuth as well as Execute: the client refreshes its token
+// with the context it was built with.
+func liveTestContext(t *testing.T, d time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), d)
+	// Cleanup, not defer: parallel subtests run after the parent returns.
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // detectProjectID tries to detect the GCP project ID from environment
 func detectProjectID(ctx context.Context, t *testing.T) string {
 	// Try various environment variables
@@ -61,10 +79,8 @@ func detectProjectID(ctx context.Context, t *testing.T) string {
 }
 
 func TestExecutorWithThinking(t *testing.T) {
-	ctx := t.Context()
-
 	// Detect project ID
-	projectID := detectProjectID(ctx, t)
+	projectID := detectProjectID(t.Context(), t)
 
 	// Define base model test configurations (Claude Haiku for fast testing)
 	tests := []struct {
@@ -97,6 +113,9 @@ func TestExecutorWithThinking(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Each model gets its own budget, so a stall fails only its subtest.
+			ctx := liveTestContext(t, liveTestTimeout)
+
 			// Create client with Vertex AI authentication
 			client := anthropic.NewClient(
 				vertex.WithGoogleAuth(ctx, tt.region, projectID, "https://www.googleapis.com/auth/cloud-platform"),
@@ -212,7 +231,7 @@ Please solve this problem and provide your answer in JSON format:
 // WithThinking to adaptive mode. A single Execute hitting the live API proves
 // the request is accepted end-to-end.
 func TestOpus47WithSamplingParamsAndThinking(t *testing.T) {
-	ctx := t.Context()
+	ctx := liveTestContext(t, liveTestTimeout)
 	projectID := detectProjectID(ctx, t)
 
 	// Opus 4.7 is served via the global Vertex endpoint.
