@@ -66,8 +66,9 @@
 WITH prices AS (
   SELECT * FROM UNNEST([
     -- USD per token = page price / 1e6
-    -- Claude. Uniform across context size. Cache creation (5m TTL) = 1.25x
-    -- input. Cache read = 0.1x input, except Fable 5.1 (0.025x) and Opus 5.5
+    -- Claude. Uniform across context size, except Sonnet 4.5 and Haiku 5.5
+    -- (Large Context rows below). Cache creation (5m TTL) = 1.25x input.
+    -- Cache read = 0.1x input, except Fable 5.1 (0.025x) and Opus 5.5
     -- (0.05x), whose rows carry the reduced rate directly.
     STRUCT(
       'claude-opus-4-7' AS pricing_model, 'Standard' AS pricing_tier,
@@ -90,6 +91,11 @@ WITH prices AS (
     STRUCT('claude-sonnet-4-5',   'Standard',      NULL, 3.0e-6, 1.5e-5,  3.0e-7, 3.75e-6),
     STRUCT('claude-sonnet-4-5',   'Large Context', NULL, 6.0e-6, 2.25e-5, 6.0e-7, 7.5e-6),
     STRUCT('claude-haiku-4-5',    'Standard',      NULL, 1.0e-6, 5.0e-6,  1.0e-7, 1.25e-6),
+    -- Haiku 5.5: $0.10 / $0.50 when the whole prompt (input + cache read +
+    -- cache write) is <= 100K tokens, $0.50 / $2.50 above. Claude input_tokens
+    -- exclude cached tokens, so the tier switch below sums all three.
+    STRUCT('claude-haiku-5-5',    'Standard',      NULL, 1.0e-7, 5.0e-7,  1.0e-8, 1.25e-7),
+    STRUCT('claude-haiku-5-5',    'Large Context', NULL, 5.0e-7, 2.5e-6,  5.0e-8, 6.25e-7),
     -- Gemini (Vertex). Cache writes are not separately billed.
     STRUCT('gemini-2.5-pro',                'Standard',      NULL, 1.25e-6, 1.0e-5, 1.25e-7, 0.0),
     STRUCT('gemini-2.5-pro',                'Large Context', NULL, 2.5e-6,  1.5e-5, 2.5e-7,  0.0),
@@ -178,6 +184,7 @@ matched AS (
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-5(@.*)?$')                       THEN 'claude-sonnet-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-sonnet-4-5(-20250929)?(@.*)?$')         THEN 'claude-sonnet-4-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-haiku-4-5(-20251001)?(@.*)?$')          THEN 'claude-haiku-4-5'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(anthropic/)?claude-haiku-5-5(@.*)?$')                      THEN 'claude-haiku-5-5'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-pro(@.*)?$')                          THEN 'gemini-2.5-pro'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-flash(@.*)?$')                        THEN 'gemini-2.5-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-2\.5-flash-lite(@.*)?$')                   THEN 'gemini-2.5-flash-lite'
@@ -230,15 +237,18 @@ priced AS (
 SELECT
   m.* EXCEPT (p_std, p_large),
   -- Per-call sums over turns[]. Each turn picks its own tier based on
-  -- that call's input_tokens against the 200K threshold. Gemini input cost
-  -- excludes cache_read_tokens (see header).
+  -- that call's input_tokens against the 200K threshold, or its whole prompt
+  -- against 100K for Haiku 5.5. Gemini input cost excludes cache_read_tokens
+  -- (see header).
   (
     SELECT SUM(
       GREATEST(COALESCE(turn.input_tokens, 0)
         - IF(STARTS_WITH(m.pricing_model, 'gemini-'), COALESCE(turn.cache_read_tokens, 0), 0), 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.input_price,
            p_std.input_price)
     )
@@ -247,9 +257,11 @@ SELECT
   (
     SELECT SUM(
       COALESCE(turn.output_tokens, 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.output_price,
            p_std.output_price)
     )
@@ -258,9 +270,11 @@ SELECT
   (
     SELECT SUM(
       COALESCE(turn.cache_read_tokens, 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_read_price,
            p_std.cache_read_price)
     )
@@ -269,9 +283,11 @@ SELECT
   (
     SELECT SUM(
       COALESCE(turn.cache_creation_tokens, 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_creation_price,
            p_std.cache_creation_price)
     )
@@ -281,27 +297,35 @@ SELECT
     SELECT SUM(
       GREATEST(COALESCE(turn.input_tokens, 0)
         - IF(STARTS_WITH(m.pricing_model, 'gemini-'), COALESCE(turn.cache_read_tokens, 0), 0), 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.input_price,
            p_std.input_price)
       + COALESCE(turn.output_tokens, 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.output_price,
            p_std.output_price)
       + COALESCE(turn.cache_read_tokens, 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_read_price,
            p_std.cache_read_price)
       + COALESCE(turn.cache_creation_tokens, 0) *
-        IF(turn.input_tokens > 200000 AND m.pricing_model IN (
+        IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
-           ),
+           ))
+           OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
+             + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_creation_price,
            p_std.cache_creation_price)
     )
