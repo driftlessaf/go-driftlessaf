@@ -68,8 +68,8 @@ WITH prices AS (
     -- USD per token = page price / 1e6
     -- Claude. Uniform across context size, except Sonnet 4.5 and Haiku 5.5
     -- (Large Context rows below). Cache creation (5m TTL) = 1.25x input.
-    -- Cache read = 0.1x input, except Fable 5.1 (0.025x) and Opus 5.5
-    -- (0.05x), whose rows carry the reduced rate directly.
+    -- Cache read = 0.1x input, except Fable 5.1 (0.025x), Opus 5.5 and
+    -- Sonnet 5.5 (0.05x), whose rows carry the reduced rate directly.
     STRUCT(
       'claude-opus-4-7' AS pricing_model, 'Standard' AS pricing_tier,
       CAST(NULL AS STRING) AS pricing_provider,  -- NULL = rate applies to any provider
@@ -86,7 +86,7 @@ WITH prices AS (
     -- Sonnet 5 / 5.5: $2 in / $10 out. Sonnet 5's introductory rate became the
     -- standard price (the scheduled 2026-09-01 increase to $3 / $15 was dropped).
     STRUCT('claude-sonnet-5',     'Standard', NULL, 2.0e-6, 1.0e-5,  2.0e-7, 2.5e-6),
-    STRUCT('claude-sonnet-5-5',   'Standard', NULL, 2.0e-6, 1.0e-5,  2.0e-7, 2.5e-6),
+    STRUCT('claude-sonnet-5-5',   'Standard', NULL, 2.0e-6, 1.0e-5,  1.0e-7, 2.5e-6),
     -- Sonnet 4.5 has a >200K Large Context tier; Sonnet 4.6 does not.
     STRUCT('claude-sonnet-4-5',   'Standard',      NULL, 3.0e-6, 1.5e-5,  3.0e-7, 3.75e-6),
     STRUCT('claude-sonnet-4-5',   'Large Context', NULL, 6.0e-6, 2.25e-5, 6.0e-7, 7.5e-6),
