@@ -1222,6 +1222,59 @@ func TestStartRecordsOwner(t *testing.T) {
 	}
 }
 
+func TestStartReturnsCopyFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		wantRace bool
+	}{{
+		name:     "destination exists: another dispatcher claimed the key",
+		status:   http.StatusPreconditionFailed,
+		wantRace: true,
+	}, {
+		name:     "source gone: the winner already removed the queued object",
+		status:   http.StatusNotFound,
+		wantRace: true,
+	}, {
+		name:     "server error is not a lost race",
+		status:   http.StatusInternalServerError,
+		wantRace: false,
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := &fakeGCS{handler: func(call gcsCall) (int, string) {
+				return test.status, errorJSON(test.status)
+			}}
+			queueName := fmt.Sprintf("start-copy-failure-%d", rand.Int64())
+			qk := &queuedKey{
+				client:    newTestClient(t, f),
+				attrs:     &keyAttrs{Name: queuedPrefix + "test-key"},
+				queueName: queueName,
+			}
+
+			oip, err := qk.Start(t.Context())
+			if err == nil {
+				t.Fatalf("Start() = %v, nil; want an error", oip)
+			}
+			if gerr, ok := errors.AsType[*googleapi.Error](err); !ok || gerr.Code != test.status {
+				t.Errorf("Start() error: got = %v, want = a googleapi.Error with code %d", err, test.status)
+			}
+			if _, ok := findCall(f.recorded(), http.MethodDelete, "/o/"); ok {
+				t.Error("delete call: got = one, want = none (the queued object belongs to the winner)")
+			}
+
+			want := 0.0
+			if test.wantRace {
+				want = 1
+			}
+			if got := testutil.ToFloat64(mLostStartRaces.With(qk.baseLabels())); got != want {
+				t.Errorf("lost start races: got = %v, want = %v", got, want)
+			}
+		})
+	}
+}
+
 func TestRequeueClearsOwner(t *testing.T) {
 	f := &fakeGCS{handler: copyAndDeleteHandler("queued/test-key", 2)}
 	client := newTestClient(t, f)

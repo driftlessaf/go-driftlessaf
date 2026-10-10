@@ -208,7 +208,13 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 func updateMetadata(ctx context.Context, client ClientInterface, key string, metadata map[string]string) error {
 	attrs, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Attrs(ctx)
 	if err != nil {
-		clog.WarnContextf(ctx, "updateMetadata: Attrs failed for key %q: %v", key, err)
+		// Every caller recovers from a vanished queued object by retrying, so
+		// that case is routine; any other failure is not.
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			clog.DebugContextf(ctx, "updateMetadata: queued object for key %q no longer exists: %v", key, err)
+		} else {
+			clog.WarnContextf(ctx, "updateMetadata: Attrs failed for key %q: %v", key, err)
+		}
 		return fmt.Errorf("Attrs() = %w", err)
 	}
 	// Inialialize the metadata map if it's nil.
@@ -260,7 +266,11 @@ func updateMetadata(ctx context.Context, client ClientInterface, key string, met
 		if _, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Update(ctx, storage.ObjectAttrsToUpdate{
 			Metadata: attrs.Metadata,
 		}); err != nil {
-			clog.WarnContextf(ctx, "updateMetadata: Update failed for key %q: %v", key, err)
+			if errors.Is(err, storage.ErrObjectNotExist) {
+				clog.DebugContextf(ctx, "updateMetadata: queued object for key %q no longer exists: %v", key, err)
+			} else {
+				clog.WarnContextf(ctx, "updateMetadata: Update failed for key %q: %v", key, err)
+			}
 			return fmt.Errorf("Update() = %w", err)
 		}
 	}
@@ -1371,7 +1381,15 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 
 	attrs, err := copier.Run(ctx)
 	if err != nil {
-		clog.WarnContextf(ctx, "Start: copy to in-progress failed for key %q: %v", key, err)
+		// A 412 means another dispatcher already holds in-progress/<key>; a 404
+		// means it also already removed queued/<key>. Either way the key was
+		// claimed by someone else and nothing is lost.
+		if lostOwnership(err) {
+			clog.DebugContextf(ctx, "Start: lost claim race for key %q: %v", key, err)
+			mLostStartRaces.With(q.baseLabels()).Add(1)
+		} else {
+			clog.WarnContextf(ctx, "Start: copy to in-progress failed for key %q: %v", key, err)
+		}
 		return nil, fmt.Errorf("Run() = %w", err)
 	}
 	logHighScheduledWait(ctx, scheduledWait, q.scheduledWaitWarningThreshold)

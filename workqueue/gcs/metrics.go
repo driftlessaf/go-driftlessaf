@@ -127,6 +127,13 @@ var (
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)
+	mLostStartRaces = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "workqueue_lost_start_races_total",
+			Help: "The number of Start calls that failed because another dispatcher claimed the key first.",
+		},
+		[]string{"service_name", "revision_name", "queue_name"},
+	)
 	mDeadLetteredKeys = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "workqueue_dead_lettered_keys",
