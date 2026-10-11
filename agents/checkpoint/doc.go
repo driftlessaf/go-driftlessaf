@@ -52,6 +52,18 @@ remain, and any park-time Deadline must not have passed; drift surfaces as
 ErrConfigDrift so callers rebuild from scratch instead of resuming against
 stale state.
 
+# Continuing an Exhausted Conversation
+
+The same Envelope shape also describes a conversation that spent its whole
+turn budget: an executor that can continue one attaches it to the
+executor.MaxTurnsError it returns, with Reason ReasonTurnsExhausted, no
+pending tool calls, and no remaining budget. Nothing is parked — the caller
+continues it in-process at a larger budget — so Envelope.Validate, which
+gates parking, does not apply. ValidateForContinue gates that pickup with
+the same drift checks and deadline as ValidateForResume, refuses a
+suspension (its pending calls need answers), and leaves the budget to the
+continuing executor.
+
 # Usage
 
 An executor suspends by returning a Suspension from its Execute loop:

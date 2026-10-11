@@ -26,6 +26,12 @@ const (
 // by a held-out ask-a-friend tool call.
 const ReasonAwaitingAnswer = "awaiting answer"
 
+// ReasonTurnsExhausted is the Envelope.Reason for the conversation an executor
+// hands back when a run spends its whole turn budget. Nothing is parked: the
+// envelope travels on the run's error, for a caller that continues the
+// conversation at a larger budget.
+const ReasonTurnsExhausted = "turn budget exhausted"
+
 // StatusAwaitingAnswer is the status value in the synthetic tool result
 // recorded for the suspend call itself (the call is intercepted, never
 // dispatched, so the transcript needs a placeholder result to stay paired).
@@ -147,6 +153,41 @@ func (e *Envelope) Validate() error {
 // resuming against stale state; an exhausted budget or expired deadline is a
 // plain error — there is nothing valid to rebuild toward.
 func ValidateForResume(env Envelope, provider, model, liveDigest string, now time.Time) error {
+	if err := validateLive(env, provider, model, liveDigest); err != nil {
+		return err
+	}
+	if env.RemainingTurns <= 0 {
+		return errors.New("checkpoint: envelope has no remaining turn budget")
+	}
+	return validateDeadline(env, now)
+}
+
+// ValidateForContinue is the fail-closed gate an executor's Continue runs
+// before picking up an exhausted conversation (ReasonTurnsExhausted): the same
+// schema version, provider, model and config digest checks as
+// ValidateForResume, each an ErrConfigDrift, and the same deadline. It refuses
+// a suspension — pending tool calls wait on answers, which only Resume pairs —
+// and a negative Turn, and leaves the turn budget to the continuing executor:
+// an exhausted envelope has none of its own.
+func ValidateForContinue(env Envelope, provider, model, liveDigest string, now time.Time) error {
+	if err := validateLive(env, provider, model, liveDigest); err != nil {
+		return err
+	}
+	if len(env.PendingToolCalls) > 0 {
+		return fmt.Errorf("checkpoint: envelope has %d pending tool calls; a suspension resumes with answers, it does not continue", len(env.PendingToolCalls))
+	}
+	// The continuing executor's budget is its MaxTurns less the Turn+1 turns
+	// already run, so a negative Turn would grant more turns than MaxTurns.
+	if env.Turn < 0 {
+		return fmt.Errorf("checkpoint: envelope turn %d is negative; no run ends before its first turn", env.Turn)
+	}
+	return validateDeadline(env, now)
+}
+
+// validateLive is the drift half of the resume and continue gates: the
+// envelope must have been captured under the live executor's schema version,
+// provider, model and config digest.
+func validateLive(env Envelope, provider, model, liveDigest string) error {
 	if env.Version != EnvelopeVersion {
 		return fmt.Errorf("%w: envelope version %d, executor speaks %d", ErrConfigDrift, env.Version, EnvelopeVersion)
 	}
@@ -162,9 +203,11 @@ func ValidateForResume(env Envelope, provider, model, liveDigest string, now tim
 	if env.ConfigDigest != liveDigest {
 		return fmt.Errorf("%w: envelope config digest %s, live config digest %s", ErrConfigDrift, env.ConfigDigest, liveDigest)
 	}
-	if env.RemainingTurns <= 0 {
-		return errors.New("checkpoint: envelope has no remaining turn budget")
-	}
+	return nil
+}
+
+// validateDeadline rejects an envelope whose Deadline has passed at now.
+func validateDeadline(env Envelope, now time.Time) error {
 	if !env.Deadline.IsZero() && now.After(env.Deadline) {
 		return fmt.Errorf("checkpoint: envelope deadline %s passed (now %s)",
 			env.Deadline.Format(time.RFC3339), now.Format(time.RFC3339))

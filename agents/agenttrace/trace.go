@@ -999,8 +999,9 @@ const (
 	// DispositionSuspended is the AttrDisposition value for a suspended trace.
 	DispositionSuspended = "suspended"
 	// AttrResumeLinkedTraceID links a resumed run's root span back to the
-	// trace that suspended, since a resume mints a fresh trace rather than
-	// continuing the suspended one.
+	// trace that suspended, and a continued run's back to the trace that ran
+	// out of turns, since both mint a fresh trace rather than extending the
+	// earlier one.
 	AttrResumeLinkedTraceID = "driftlessaf.resume.linked_trace_id"
 )
 

@@ -14,6 +14,7 @@ import (
 	"slices"
 
 	"chainguard.dev/driftlessaf/agents/checkpoint"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -118,6 +119,73 @@ func (e *executor[Request, Response]) buildSuspension(
 		}, providerState, loopStateJSON, traceID), nil
 }
 
+// maxTurnsError is the error a run that spent its turn budget returns. It
+// carries the conversation as it stood after turn, the last turn that ran, so
+// a caller can continue it at a larger budget. Every turn that does not end
+// the run closes on a user message (tool results or a nudge), so the captured
+// request is ready to send as it is. budget is the run's own budget, which the
+// error reports.
+//
+// A conversation that cannot be captured costs only the continuation: the
+// run's outcome is the exhaustion either way, so the error then carries none.
+//
+// The capture marshals the whole request and digests the config on every
+// exhaustion, whether or not the caller continues. That cost is accepted: it
+// is small next to the run that spent its budget, and a lazy capture would
+// have to keep the run's mutable state alive past its return.
+func (e *executor[Request, Response]) maxTurnsError(
+	ctx context.Context,
+	params anthropic.MessageNewParams,
+	tools map[string]claudetool.Metadata[Response],
+	turn, budget int,
+	traceID string,
+	state loopState,
+) error {
+	exhausted := &agentexecutor.MaxTurnsError{Turns: budget}
+	env, err := e.exhaustedEnvelope(params, tools, turn, traceID, state)
+	if err != nil {
+		clog.WarnContext(ctx, "the exhausted conversation could not be captured; it cannot be continued", "error", err)
+		return exhausted
+	}
+	exhausted.Continuation = env
+	return exhausted
+}
+
+// exhaustedEnvelope captures an exhausted conversation in the envelope shape
+// Resume reads: the same provider state, loop state and config digest a
+// suspension carries, with no pending call and no remaining budget.
+func (e *executor[Request, Response]) exhaustedEnvelope(
+	params anthropic.MessageNewParams,
+	tools map[string]claudetool.Metadata[Response],
+	turn int,
+	traceID string,
+	state loopState,
+) (*checkpoint.Envelope, error) {
+	providerState, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("marshal provider state: %w", err)
+	}
+	loopStateJSON, err := state.marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshal loop state: %w", err)
+	}
+	digest, err := e.configDigest(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &checkpoint.Envelope{
+		Version:       checkpoint.EnvelopeVersion,
+		Provider:      suspendProviderName,
+		Model:         e.modelName,
+		ConfigDigest:  digest,
+		Turn:          turn,
+		Reason:        checkpoint.ReasonTurnsExhausted,
+		ProviderState: providerState,
+		LoopState:     loopStateJSON,
+		TraceID:       traceID,
+	}, nil
+}
+
 // configDigest digests the turn-invariant request prefix (tools, system,
 // sampling) that a resume must match to replay safely. The prefix is built
 // without a cache TTL, so the digest does not depend on it: the TTL changes
@@ -133,8 +201,9 @@ func (e *executor[Request, Response]) configDigest(tools map[string]claudetool.M
 	return checkpoint.DigestJSON(staticParams)
 }
 
-// loopState is the executor-loop bookkeeping a suspension carries so a resumed
-// conversation continues the run's per-run bounds instead of restarting them.
+// loopState is the executor-loop bookkeeping a suspension (or an exhausted
+// run's continuation) carries so the conversation, once it runs again,
+// continues the run's per-run bounds instead of restarting them.
 // The turn index is not here: the envelope carries it as Envelope.Turn.
 type loopState struct {
 	// TruncatedToolCalls is the run's count of turns the output cap cut off

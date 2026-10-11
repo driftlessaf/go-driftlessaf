@@ -97,4 +97,14 @@ SPDX-License-Identifier: Apache-2.0
 // supports this today — the Gemini and OpenAI-compatible backends reject a
 // set SuspendToolName at construction until their executors grow suspend
 // support. See the suspend package for the park/wake orchestration around it.
+//
+// # Continuing past the turn budget
+//
+// A Claude-backed run that spends its whole MaxTurns returns an
+// *executor.MaxTurnsError whose Continuation is the conversation so far. The
+// opt-in Continuer capability (obtained via AsContinuer) picks that
+// conversation up on an agent built from the same Config with a larger
+// MaxTurns, rather than re-running it from the first turn. The larger
+// budget counts the whole conversation, so a continued run spends no more
+// turns than one run at that budget would.
 package metaagent

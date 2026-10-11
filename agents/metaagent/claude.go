@@ -245,3 +245,18 @@ func (a *claudeAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.
 	}
 	return resumer.Resume(ctx, env, answers, claudetool.Map(tools))
 }
+
+// Continue implements Continuer by delegating to the concrete Claude
+// executor's continue capability, reached by type assertion as in Resume.
+func (a *claudeAgent[Req, Resp, CB]) Continue(ctx context.Context, env checkpoint.Envelope, callbacks CB) (Resp, error) {
+	var zero Resp
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		return zero, fmt.Errorf("building tools: %w", err)
+	}
+	continuer, ok := a.executor.(claudeexecutor.Continuer[Req, Resp])
+	if !ok {
+		return zero, fmt.Errorf("claude executor does not support continuing a conversation")
+	}
+	return continuer.Continue(ctx, env, claudetool.Map(tools))
+}

@@ -53,19 +53,17 @@ var (
 )
 
 // Resume implements Resumer. It reconstructs the Anthropic request from the
-// checkpoint envelope, strips every stale message-block cache_control marker so
-// the moving tail tracker can reseed fresh markers within the API's
-// four-breakpoint limit (a verbatim replay would carry the suspend-time markers
-// AND the reseeded ones, exceeding the limit and drawing a non-retryable 400),
-// pairs the framed human answer to the persisted pending tool_use ID, and drives
-// the shared turn loop for the envelope's remaining turn budget under a new trace
-// linked back to the originating one.
+// checkpoint envelope (restoreParams), pairs the framed human answer to the
+// persisted pending tool_use ID, and drives the shared turn loop for the
+// envelope's remaining turn budget under a new trace linked back to the
+// originating one (runRestored).
 func (e *executor[Request, Response]) Resume(
 	ctx context.Context,
 	env checkpoint.Envelope,
 	answers map[string]string,
 	tools map[string]claudetool.Metadata[Response],
-) (response Response, err error) {
+) (Response, error) {
+	var zero Response
 	// Fail-closed configuration checks. A resume must reconstruct the request
 	// against the same backend, model, and turn-invariant prefix that produced
 	// the envelope; any drift means the parked state is stale and the run must be
@@ -75,56 +73,91 @@ func (e *executor[Request, Response]) Resume(
 	// any state is touched. ValidateForResume takes now as a parameter (rather
 	// than reading the clock itself) so the checkpoint package's own deadline
 	// tests can inject one; this call site supplies wall-clock time.
-	digest, derr := e.configDigest(tools)
-	if derr != nil {
-		return response, derr
+	digest, err := e.configDigest(tools)
+	if err != nil {
+		return zero, err
 	}
-	if verr := checkpoint.ValidateForResume(env, suspendProviderName, e.modelName, digest, time.Now()); verr != nil {
-		return response, verr
-	}
-
-	// Restore the provider request exactly as captured at the suspension point.
-	var params anthropic.MessageNewParams
-	if uerr := json.Unmarshal(env.ProviderState, &params); uerr != nil {
-		return response, fmt.Errorf("resume: unmarshal provider state: %w", uerr)
+	if err := checkpoint.ValidateForResume(env, suspendProviderName, e.modelName, digest, time.Now()); err != nil {
+		return zero, err
 	}
 
-	// Strip every message-block cache_control marker BEFORE the tail tracker
-	// runs. The captured transcript carries the suspend-time tail markers; left
-	// in place, tail.advance would add fresh markers on top of them and the
-	// request would exceed the four-breakpoint API limit. The static-prefix
-	// markers (tool definitions, system) are left intact — they are re-counted by
-	// newTailBreakpoints so the reseeded tail stays within budget.
-	stripMessageCacheControl(params.Messages)
-
-	// Re-stamp the static prefix from the live configuration. The digest
-	// excludes the cache TTL, so an envelope parked under one TTL validates
-	// under another, but the captured tool and system markers still carry the
-	// suspend-time TTL: left in place, a 5-minute marker would precede the
-	// live 1-hour tail markers, which the API rejects. The digest has proved
-	// the rest of the prefix identical, so the resumed request matches what
-	// Execute would build.
-	live, _, _, serr := e.buildStaticParams(tools, e.cacheTTL)
-	if serr != nil {
-		return response, fmt.Errorf("resume: build static params: %w", serr)
+	params, err := e.restoreParams(env, tools)
+	if err != nil {
+		return zero, fmt.Errorf("resume: %w", err)
 	}
-	params.Tools, params.System = live.Tools, live.System
 
 	// Pair the framed human answer to the persisted pending tool_use ID(s). This
 	// completes the tool_use/tool_result pairing the API requires: the suspend
 	// call was left unanswered in the captured transcript so the answer could
 	// take its slot on resume.
-	if aerr := appendPendingAnswers(&params, env.PendingToolCalls, answers); aerr != nil {
-		return response, aerr
+	if err := appendPendingAnswers(&params, env.PendingToolCalls, answers); err != nil {
+		return zero, err
 	}
-	state, lerr := decodeLoopState(ctx, env.LoopState)
-	if lerr != nil {
-		return response, lerr
+	state, err := decodeLoopState(ctx, env.LoopState)
+	if err != nil {
+		return zero, err
 	}
 
-	// Start a NEW trace for the resumed run, linked back to the originating trace
-	// so the two halves of a paused conversation join downstream.
-	trace, done := agenttrace.StartTrace[Response](ctx, resumeTracePrompt(env))
+	clog.InfoContext(ctx, "Resuming suspended Claude agent execution",
+		"key", env.ReconcilerKey, "run", env.RunID, "turn", env.Turn,
+		"remaining_turns", env.RemainingTurns, "linked_trace", env.TraceID)
+
+	// Cap the envelope's remaining budget at the live executor's configured
+	// maxTurns. The turn budget is loop config, not part of the request digest,
+	// so ValidateForResume cannot catch a mismatch: without the cap, an envelope
+	// parked under a larger budget (an operator lowering maxTurns between park
+	// and wake, or a tampered checkpoint) would resume with more turns than the
+	// live configuration allows.
+	return e.runRestored(ctx, env, params, tools, state, min(env.RemainingTurns, e.maxTurns), resumeTracePrompt(env))
+}
+
+// restoreParams rebuilds the Anthropic request an envelope captured, ready for
+// the turn loop to send again. It is the part Resume and Continue share.
+func (e *executor[Request, Response]) restoreParams(env checkpoint.Envelope, tools map[string]claudetool.Metadata[Response]) (anthropic.MessageNewParams, error) {
+	// Restore the provider request exactly as captured.
+	var params anthropic.MessageNewParams
+	if err := json.Unmarshal(env.ProviderState, &params); err != nil {
+		return params, fmt.Errorf("unmarshal provider state: %w", err)
+	}
+
+	// Strip every message-block cache_control marker BEFORE the tail tracker
+	// runs. The captured transcript carries the capture-time tail markers; left
+	// in place, tail.advance would add fresh markers on top of them and the
+	// request would exceed the four-breakpoint API limit (a non-retryable 400).
+	// The static-prefix markers (tool definitions, system) are left intact —
+	// they are re-counted by newTailBreakpoints so the reseeded tail stays
+	// within budget.
+	stripMessageCacheControl(params.Messages)
+
+	// Re-stamp the static prefix from the live configuration. The digest
+	// excludes the cache TTL, so an envelope captured under one TTL validates
+	// under another, but the captured tool and system markers still carry the
+	// capture-time TTL: left in place, a 5-minute marker would precede the
+	// live 1-hour tail markers, which the API rejects. The digest has proved
+	// the rest of the prefix identical, so the restored request matches what
+	// Execute would build.
+	live, _, _, err := e.buildStaticParams(tools, e.cacheTTL)
+	if err != nil {
+		return params, fmt.Errorf("build static params: %w", err)
+	}
+	params.Tools, params.System = live.Tools, live.System
+	return params, nil
+}
+
+// runRestored drives the shared turn loop over a restored request for budget
+// turns, starting after the envelope's turn. The run gets a NEW trace, linked
+// back to the one the envelope came from, so the two halves of the
+// conversation join downstream.
+func (e *executor[Request, Response]) runRestored(
+	ctx context.Context,
+	env checkpoint.Envelope,
+	params anthropic.MessageNewParams,
+	tools map[string]claudetool.Metadata[Response],
+	state loopState,
+	budget int,
+	tracePrompt string,
+) (response Response, err error) {
+	trace, done := agenttrace.StartTrace[Response](ctx, tracePrompt)
 	defer func() {
 		done(response, err)
 	}()
@@ -134,23 +167,11 @@ func (e *executor[Request, Response]) Resume(
 		}
 	}
 
-	clog.InfoContext(ctx, "Resuming suspended Claude agent execution",
-		"key", env.ReconcilerKey, "run", env.RunID, "turn", env.Turn,
-		"remaining_turns", env.RemainingTurns, "linked_trace", env.TraceID)
-
 	// A fresh tail tracker: its budget is derived from the (surviving) static
-	// prefix markers, and it reseeds markers on the growing tail as the resumed
-	// conversation continues.
+	// prefix markers, and it reseeds markers on the growing tail as the
+	// conversation goes on.
 	tail := newTailBreakpoints(params, e.cacheTTL)
-
-	// Cap the envelope's remaining budget at the live executor's configured
-	// maxTurns. The turn budget is loop config, not part of the request digest,
-	// so ValidateForResume cannot catch a mismatch: without the cap, an envelope
-	// parked under a larger budget (an operator lowering maxTurns between park
-	// and wake, or a tampered checkpoint) would resume with more turns than the
-	// live configuration allows.
-	response, err = e.runConversation(ctx, trace, params, tools, tail, env.Turn+1, min(env.RemainingTurns, e.maxTurns), nil, state)
-	return response, err
+	return e.runConversation(ctx, trace, params, tools, tail, env.Turn+1, budget, nil, state)
 }
 
 // stripMessageCacheControl clears the cache_control marker on every content
@@ -178,12 +199,9 @@ func stripMessageCacheControl(messages []anthropic.MessageParam) {
 // call with no supplied answer) is checkpoint.FramedAnswers' job; this function
 // only maps the framed answers into the Anthropic tool_result shape.
 func appendPendingAnswers(params *anthropic.MessageNewParams, pending []checkpoint.PendingToolCall, answers map[string]string) error {
-	if len(params.Messages) == 0 {
-		return errors.New("resume: provider state carries no messages")
-	}
-	last := &params.Messages[len(params.Messages)-1]
-	if last.Role != anthropic.MessageParamRoleUser {
-		return fmt.Errorf("resume: last message role %q, want user (the slot the answer pairs into)", last.Role)
+	last, err := lastUserMessage(params)
+	if err != nil {
+		return fmt.Errorf("resume: %w (the slot the answer pairs into)", err)
 	}
 	framed, err := checkpoint.FramedAnswers(pending, answers, 0)
 	if err != nil {
@@ -200,6 +218,20 @@ func appendPendingAnswers(params *anthropic.MessageNewParams, pending []checkpoi
 		})
 	}
 	return nil
+}
+
+// lastUserMessage returns the restored transcript's final message, which must
+// be a user turn: it is where a resume pairs its answers, and what a continued
+// conversation sends next.
+func lastUserMessage(params *anthropic.MessageNewParams) (*anthropic.MessageParam, error) {
+	if len(params.Messages) == 0 {
+		return nil, errors.New("provider state carries no messages")
+	}
+	last := &params.Messages[len(params.Messages)-1]
+	if last.Role != anthropic.MessageParamRoleUser {
+		return nil, fmt.Errorf("last message role %q, want user", last.Role)
+	}
+	return last, nil
 }
 
 // resumeTracePrompt is the prompt string recorded on a resumed run's trace. The

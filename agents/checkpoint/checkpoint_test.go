@@ -267,6 +267,101 @@ func TestValidateForResumeDigest(t *testing.T) {
 	}
 }
 
+func TestValidateForContinue(t *testing.T) {
+	now := time.Now()
+	// exhausted is the envelope an executor attaches to a turn exhaustion: no
+	// pending call and no remaining budget of its own.
+	exhausted := func() checkpoint.Envelope {
+		return checkpoint.Envelope{
+			Version:      checkpoint.EnvelopeVersion,
+			Provider:     checkpoint.ProviderAnthropic,
+			Model:        "m",
+			ConfigDigest: "sha256:aaa",
+			Turn:         15,
+			Reason:       checkpoint.ReasonTurnsExhausted,
+		}
+	}
+	// live is the continuing executor's side of the gate.
+	type live struct{ model, digest string }
+	matching := live{model: "m", digest: "sha256:aaa"}
+	tests := []struct {
+		name      string
+		mutate    func(*checkpoint.Envelope)
+		live      live
+		wantErr   bool
+		wantDrift bool
+	}{{
+		name: "an exhausted envelope continues without a budget of its own",
+		live: matching,
+	}, {
+		name:   "a deadline in the future is honoured",
+		mutate: func(e *checkpoint.Envelope) { e.Deadline = now.Add(time.Minute) },
+		live:   matching,
+	}, {
+		name:    "a passed deadline is refused",
+		mutate:  func(e *checkpoint.Envelope) { e.Deadline = now.Add(-time.Minute) },
+		live:    matching,
+		wantErr: true,
+	}, {
+		name: "a suspension's pending call needs an answer, not a continuation",
+		mutate: func(e *checkpoint.Envelope) {
+			e.PendingToolCalls = []checkpoint.PendingToolCall{{ID: "toolu_ask", Name: "ask"}}
+			e.RemainingTurns = 3
+		},
+		live:    matching,
+		wantErr: true,
+	}, {
+		// The continuing budget is MaxTurns-(Turn+1), so a negative Turn
+		// would grant more turns than MaxTurns.
+		name:    "a negative turn is refused",
+		mutate:  func(e *checkpoint.Envelope) { e.Turn = -5 },
+		live:    matching,
+		wantErr: true,
+	}, {
+		name:      "a drifted digest is drift",
+		live:      live{model: "m", digest: "sha256:bbb"},
+		wantErr:   true,
+		wantDrift: true,
+	}, {
+		name:      "an empty live digest fails closed as drift",
+		live:      live{model: "m"},
+		wantErr:   true,
+		wantDrift: true,
+	}, {
+		name:      "a different live model is drift",
+		live:      live{model: "other", digest: "sha256:aaa"},
+		wantErr:   true,
+		wantDrift: true,
+	}, {
+		name:      "a different schema version is drift",
+		mutate:    func(e *checkpoint.Envelope) { e.Version = checkpoint.EnvelopeVersion + 1 },
+		live:      matching,
+		wantErr:   true,
+		wantDrift: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := exhausted()
+			if tt.mutate != nil {
+				tt.mutate(&env)
+			}
+			err := checkpoint.ValidateForContinue(env, checkpoint.ProviderAnthropic, tt.live.model, tt.live.digest, now)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateForContinue: got %v, want error = %v", err, tt.wantErr)
+			}
+			if got := errors.Is(err, checkpoint.ErrConfigDrift); got != tt.wantDrift {
+				t.Errorf("ValidateForContinue: errors.Is(ErrConfigDrift) = %v, want %v (err %v)", got, tt.wantDrift, err)
+			}
+		})
+	}
+
+	// The resume gate keeps refusing the same envelope: it has no budget
+	// left to resume into, and nothing pending to answer.
+	if err := checkpoint.ValidateForResume(exhausted(), checkpoint.ProviderAnthropic, "m", "sha256:aaa", now); err == nil {
+		t.Error("ValidateForResume accepted an exhausted envelope")
+	}
+}
+
 func TestEnvelopeValidateRequiresConfigDigest(t *testing.T) {
 	env := checkpoint.Envelope{
 		Version:          checkpoint.EnvelopeVersion,
