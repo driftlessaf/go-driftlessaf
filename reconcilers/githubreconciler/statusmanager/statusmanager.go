@@ -360,6 +360,16 @@ func (s *Session[T]) ObservedState(ctx context.Context) (*Status[T], error) {
 	return s.manager.extractStatusFromOutput(run.Output)
 }
 
+// CheckRunStatus returns the status and conclusion last read or written by this
+// session, or empty strings if neither has happened. It makes no API call.
+// GitHub can complete a run without updating the state embedded in its summary.
+func (s *Session[T]) CheckRunStatus() (status, conclusion string) {
+	if live := s.getLive(); live != nil {
+		return live.status, live.conclusion
+	}
+	return "", ""
+}
+
 // ObservedStateAtSHA retrieves the status for a specific commit SHA without creating a session.
 // This is useful for gathering historical status across multiple commits.
 func (sm *StatusManager[T]) ObservedStateAtSHA(

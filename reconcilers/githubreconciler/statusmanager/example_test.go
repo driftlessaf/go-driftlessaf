@@ -27,3 +27,10 @@ func ExampleStatus() {
 		s.ObservedGeneration, s.Status, s.Conclusion, s.Details.FilesProcessed)
 	// Output: generation=abc123 status=completed conclusion=success files=5
 }
+
+func ExampleSession_CheckRunStatus() {
+	var session statusmanager.Session[struct{}]
+	status, conclusion := session.CheckRunStatus()
+	fmt.Printf("status=%q conclusion=%q\n", status, conclusion)
+	// Output: status="" conclusion=""
+}
