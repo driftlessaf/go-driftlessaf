@@ -229,7 +229,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 		if status.Code(err) == codes.ResourceExhausted {
 			// Resource exhausted - use a conservative retry delay
 			delay := jitter.Add(grpcRateLimitRetryDuration)
-			clog.WarnContext(ctx, "gRPC ResourceExhausted detected, requeueing after retry period", "retry_after", delay)
+			clog.WarnContext(ctx, "gRPC ResourceExhausted detected, requeueing after retry period", "retry_after", delay, "error", err)
 			return workqueue.RequeueAfter(delay)
 		}
 
