@@ -617,7 +617,21 @@ func (sm *StatusManager[T]) buildCheckRunOutput(status *Status[T]) (string, erro
 // can distinguish "no status embedded" from "a status was embedded but is
 // corrupt".
 func (sm *StatusManager[T]) ExtractFromSummary(summary string) (*Status[T], error) {
-	status, err := sm.templateExecutor.Extract(summary)
+	return decodeSummary(sm.templateExecutor, summary)
+}
+
+// DecodeSummary reads a producer's embedded status without environment discovery
+// or GitHub I/O. The last marker is authoritative; corrupt state is an error.
+func DecodeSummary[T any](identity, summary string) (*Status[T], error) {
+	decoder, err := internaltemplate.New[Status[T]](identity, "-status", "status")
+	if err != nil {
+		return nil, err
+	}
+	return decodeSummary(decoder, summary)
+}
+
+func decodeSummary[T any](decoder *internaltemplate.Template[Status[T]], summary string) (*Status[T], error) {
+	status, err := decoder.Extract(summary)
 	if err != nil {
 		// A present-but-corrupt marker surfaces the error; a summary with no
 		// marker at all is "no status embedded" (nil, nil). Matched on the
