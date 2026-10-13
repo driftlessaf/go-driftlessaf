@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package inmem
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -39,30 +38,30 @@ func TestWorkQueue(t *testing.T) {
 
 func Test_Get_KeyNotFound(t *testing.T) {
 	wq := NewWorkQueue(10)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	resp, err := wq.Get(ctx, "nonexistent-key")
 	if err == nil {
-		t.Fatal("Expected error for nonexistent key")
+		t.Fatalf("error: got = %v, want = non-nil", err)
 	}
 
 	st, ok := status.FromError(err)
 	if !ok {
-		t.Fatalf("Expected gRPC status error, got %T", err)
+		t.Fatalf("error type: got = %T, want = gRPC status error", err)
 	}
 
-	if st.Code() != codes.NotFound {
-		t.Errorf("Expected NotFound status code, got %v", st.Code())
+	if got, want := st.Code(), codes.NotFound; got != want {
+		t.Errorf("status code: got = %v, want = %v", got, want)
 	}
 
 	if resp != nil {
-		t.Error("Expected nil response for not found key")
+		t.Errorf("response: got = %v, want = nil", resp)
 	}
 }
 
 func Test_Get_QueuedKey(t *testing.T) {
 	wq := NewWorkQueue(10)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Queue a key
 	err := wq.Queue(ctx, "test-key", workqueue.Options{
@@ -78,23 +77,23 @@ func Test_Get_QueuedKey(t *testing.T) {
 		t.Fatalf("Get failed: %v", err)
 	}
 
-	if resp.Status != workqueue.KeyState_QUEUED {
-		t.Errorf("Expected status QUEUED, got %v", resp.Status)
+	if got, want := resp.Status, workqueue.KeyState_QUEUED; got != want {
+		t.Errorf("status: got = %v, want = %v", got, want)
 	}
-	if resp.Key != "test-key" {
-		t.Errorf("Expected key 'test-key', got %v", resp.Key)
+	if got, want := resp.Key, "test-key"; got != want {
+		t.Errorf("key: got = %v, want = %v", got, want)
 	}
-	if resp.Priority != 5 {
-		t.Errorf("Expected priority 5, got %v", resp.Priority)
+	if got, want := resp.Priority, int64(5); got != want {
+		t.Errorf("priority: got = %v, want = %v", got, want)
 	}
 	if resp.QueuedTime == 0 {
-		t.Error("Expected queued timestamp to be non-zero")
+		t.Errorf("queued time: got = %v, want = non-zero", resp.QueuedTime)
 	}
 }
 
 func Test_Get_InProgressKey(t *testing.T) {
 	wq := NewWorkQueue(10)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Queue a key
 	err := wq.Queue(ctx, "test-key", workqueue.Options{
@@ -111,7 +110,7 @@ func Test_Get_InProgressKey(t *testing.T) {
 	}
 
 	if len(qd) == 0 {
-		t.Fatal("Expected at least one queued key")
+		t.Fatalf("queued keys: got = %d, want = at least 1", len(qd))
 	}
 
 	_, err = qd[0].Start(ctx)
@@ -125,10 +124,10 @@ func Test_Get_InProgressKey(t *testing.T) {
 		t.Fatalf("Get failed: %v", err)
 	}
 
-	if resp.Status != workqueue.KeyState_IN_PROGRESS {
-		t.Errorf("Expected status IN_PROGRESS, got %v", resp.Status)
+	if got, want := resp.Status, workqueue.KeyState_IN_PROGRESS; got != want {
+		t.Errorf("status: got = %v, want = %v", got, want)
 	}
-	if resp.Key != "test-key" {
-		t.Errorf("Expected key 'test-key', got %v", resp.Key)
+	if got, want := resp.Key, "test-key"; got != want {
+		t.Errorf("key: got = %v, want = %v", got, want)
 	}
 }
