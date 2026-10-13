@@ -8,6 +8,7 @@ package claudeexecutor
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/chainguard-dev/clog"
 )
 
@@ -74,6 +76,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	telemetry            *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
+	requestOptions       []option.RequestOption              // per-request options, such as the Vertex AI billing labels header
 	provider             Provider                            // serving backend: Vertex AI or the Anthropic first-party API
 	attribution          agenttrace.Attribution              // canonical and compatibility route attribution
 
@@ -301,6 +304,19 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 	if e.suspendTool != nil {
 		if err := execshared.ValidateSuspendToolName(e.suspendTool.Name, e.submitToolName()); err != nil {
 			return nil, err
+		}
+	}
+
+	// Claude on Vertex AI forwards request labels to Cloud Billing only from
+	// the X-Vertex-AI-Labels header, as base64-encoded JSON. The attribution
+	// names the serving provider for both WithProvider and routed models.
+	if e.attribution.ProviderName == ProviderVertex.metricName() {
+		if labels := vertexBillingLabels(e.resourceLabels); len(labels) > 0 {
+			encoded, err := json.Marshal(labels)
+			if err != nil {
+				return nil, fmt.Errorf("encoding Vertex AI billing labels: %w", err)
+			}
+			e.requestOptions = append(e.requestOptions, option.WithHeader("X-Vertex-AI-Labels", base64.StdEncoding.EncodeToString(encoded)))
 		}
 	}
 
@@ -711,7 +727,7 @@ func (e *executor[Request, Response]) runConversation(
 
 		// Stream response with retry for transient errors
 		message, err := retry.RetryWithBackoff(ctx, turnCfg, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
-			stream := e.messages.NewStreaming(ctx, params)
+			stream := e.messages.NewStreaming(ctx, params, e.requestOptions...)
 			var msg anthropic.Message
 			for stream.Next() {
 				event := stream.Current()
