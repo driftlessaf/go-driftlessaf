@@ -587,6 +587,10 @@ func (e *executor[Request, Response]) Execute(
 		clog.InfoContext(ctx, "Received response from model", "candidates_count", len(response.Candidates))
 
 		if len(response.Candidates) == 0 {
+			// A blocked prompt returns no candidate; only PromptFeedback says why.
+			if fb := response.PromptFeedback; fb != nil && fb.BlockReason != "" {
+				return zero, nil, true, fmt.Errorf("no content generated - prompt blocked (%s): %q", fb.BlockReason, fb.BlockReasonMessage)
+			}
 			return zero, nil, true, errors.New("no content generated - no candidates")
 		}
 
