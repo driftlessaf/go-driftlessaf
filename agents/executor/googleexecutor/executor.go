@@ -13,6 +13,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 	"chainguard.dev/driftlessaf/agents/metrics"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
 	"chainguard.dev/driftlessaf/agents/schema"
@@ -121,6 +123,16 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	cacheMu             sync.Mutex
 	cachedContentName   string    // resource name of active CachedContent ("" = none)
 	cachedContentExpiry time.Time // when the current cache expires
+	// cacheRetryAfter holds off CachedContent creation after the provider
+	// rejected a create with a 4xx that an immediate retry would repeat.
+	// Until then requests send system instructions and tools inline. The
+	// hold lasts one cache TTL, so a rejection that persists costs one create
+	// per TTL and a temporary one (an IAM grant still propagating) recovers.
+	// Guarded by cacheMu.
+	cacheRetryAfter time.Time
+	// cacheUnsupported skips CachedContent for models that reject explicit
+	// caches. Set in New and read-only afterwards.
+	cacheUnsupported bool
 
 	// toolCallConcurrency bounds how many of a single turn's function calls run
 	// concurrently when the model emits more than one (parallel function
@@ -176,6 +188,16 @@ func New[Request promptbuilder.Bindable, Response any](
 			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
+	// The output-token limit and the thinking-budget check depend on the
+	// final model, so they are validated after all options have been applied.
+	info := model.Resolve(exec.capabilityModel)
+	if limit := cmp.Or(info.MaxOutputTokens, defaultMaxOutputTokensLimit); int64(exec.maxOutputTokens) > limit {
+		return nil, fmt.Errorf("max output tokens %d exceeds the maximum of %d for model %q", exec.maxOutputTokens, limit, exec.capabilityModel)
+	}
+	if exec.thinkingBudget != nil && info.NoThinkingBudget {
+		return nil, fmt.Errorf("model %q rejects a thinking budget: set its thinking level with WithEffort instead of WithThinking", exec.capabilityModel)
+	}
+	exec.cacheUnsupported = info.NoExplicitContextCache
 	// Effort resolution needs the final model and max_output_tokens, so it is
 	// validated after all options have been applied.
 	if exec.effortLevel != "" {
@@ -300,11 +322,14 @@ func (e *executor[Request, Response]) Execute(
 	// on GenerateContentConfig — they are already in the cache.
 	usedCache := false
 	var cacheCreationTokens int64
-	if e.cacheControl && (systemInstruction != nil || len(genaiTools) > 0) {
+	if e.cacheControl && !e.cacheUnsupported && (systemInstruction != nil || len(genaiTools) > 0) {
 		cacheName, createdTokens, err := e.getOrCreateCache(ctx, systemInstruction, genaiTools)
-		if err != nil {
+		switch {
+		case errors.Is(err, errCacheCreationHeld):
+			// A recent create was rejected and already logged; send inline.
+		case err != nil:
 			clog.WarnContext(ctx, "Failed to create cached content, falling back to non-cached mode", "error", err)
-		} else {
+		default:
 			config.CachedContent = cacheName
 			cacheCreationTokens = createdTokens
 			usedCache = true
@@ -747,9 +772,11 @@ func (e *executor[Request, Response]) Execute(
 				candidate.FinishReason, candidate.FinishMessage)
 		}
 
-		// Check for function calls or text
+		// Check for function calls or text. The answer is every text part in
+		// order: a long decode merges one part per provider request.
 		var toolCalls []*genai.FunctionCall
 		var hasText bool
+		var turnText strings.Builder
 
 		for i, part := range candidate.Content.Parts {
 			switch {
@@ -764,7 +791,7 @@ func (e *executor[Request, Response]) Execute(
 					"part_index", i,
 					"thinking_length", len(part.Text))
 			case part.Text != "":
-				responseText = part.Text
+				turnText.WriteString(part.Text)
 				hasText = true
 				clog.InfoContext(ctx, "Found text part",
 					"part_index", i,
@@ -778,6 +805,9 @@ func (e *executor[Request, Response]) Execute(
 			default:
 				clog.WarnContext(ctx, "Found part with unexpected content", "part_index", i)
 			}
+		}
+		if hasText {
+			responseText = turnText.String()
 		}
 
 		// If there are tool calls, execute them and send responses
@@ -927,6 +957,13 @@ func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentC
 		MaxOutputTokens: e.maxOutputTokens,
 		Labels:          e.resourceLabels,
 	}
+	// A long-decode model stops each request at its per-request output cap
+	// (32,768 tokens for the unary requests this executor sends, 65,536 for a
+	// stream) with a continuation token. Ask the SDK to follow it, so one
+	// call returns the whole generation up to MaxOutputTokens.
+	if model.Resolve(e.capabilityModel).LongDecode {
+		config.AutomaticContinuation = new(true)
+	}
 	// Gemini 3 models are tuned for the provider's default temperature, and
 	// low values can cause looping or degraded output, so the 0.1 executor
 	// default applies only to Gemini 2.x. An explicit WithTemperature is sent
@@ -1000,6 +1037,10 @@ func (e *executor[Request, Response]) sendWithRetry(
 	return response, nil
 }
 
+// errCacheCreationHeld reports that getOrCreateCache skipped the create
+// because the provider rejected one less than a cache TTL ago.
+var errCacheCreationHeld = errors.New("context cache creation held after a rejected create")
+
 // getOrCreateCache returns the name of a valid CachedContent and the number of
 // tokens used when this call creates it. On cache creation it records
 // cache_creation metrics so the write is visible in dashboards. It is safe
@@ -1014,6 +1055,11 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	if e.cachedContentName != "" && time.Now().Add(time.Minute).Before(e.cachedContentExpiry) {
 		return e.cachedContentName, 0, nil
 	}
+	// Checked under the lock so that callers queued behind a rejected create
+	// do not each send one.
+	if time.Now().Before(e.cacheRetryAfter) {
+		return "", 0, errCacheCreationHeld
+	}
 
 	cached, err := e.client.Caches.Create(ctx, e.model, &genai.CreateCachedContentConfig{
 		SystemInstruction: systemInstruction,
@@ -1026,6 +1072,10 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	// shows up on the rate-limit dashboard alongside chat-send 429s.
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
+		if isCacheRejection(err) {
+			e.cacheRetryAfter = time.Now().Add(e.cacheTTL)
+			clog.WarnContext(ctx, "Holding context cache creation after the provider rejected a create", "model", e.model, "hold", e.cacheTTL, "error", err)
+		}
 		return "", 0, fmt.Errorf("creating cached content: %w", err)
 	}
 

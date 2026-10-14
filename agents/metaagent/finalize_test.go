@@ -90,7 +90,7 @@ func TestRoutedFinalizeProtocolGate(t *testing.T) {
 		{protocol: modelrouter.ProtocolOpenAIChatCompletions, wantErr: true},
 	} {
 		t.Run(string(tc.protocol), func(t *testing.T) {
-			err := validateRoutedConfigForProtocol(tc.protocol, cfg)
+			err := validateRoutedConfigForProtocol(tc.protocol, "", cfg)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Errorf("validateRoutedConfigForProtocol(%s): got err = %v, want error = %v", tc.protocol, err, tc.wantErr)
 			}

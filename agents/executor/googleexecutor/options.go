@@ -105,16 +105,17 @@ func WithoutTemperature[Request promptbuilder.Bindable, Response any]() Option[R
 	}
 }
 
-// WithMaxOutputTokens sets the maximum output tokens for generation
+// defaultMaxOutputTokensLimit caps WithMaxOutputTokens for models whose
+// registry entry declares no output limit; Gemini 3.1 Pro accepts 65,536.
+const defaultMaxOutputTokensLimit int64 = 65536
+
+// WithMaxOutputTokens sets the maximum output tokens for generation. New
+// checks it against the configured model once every option is applied: up to
+// 1,048,576 for long-decode models (Gemini 4), 65,536 otherwise.
 func WithMaxOutputTokens[Request promptbuilder.Bindable, Response any](tokens int32) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if tokens <= 0 {
 			return fmt.Errorf("max output tokens must be positive, got %d", tokens)
-		}
-		// Gemini models support up to 8192 tokens by default, some support more
-		// Gemini 3.1 Pro supports up to 65536 output tokens
-		if tokens > 65536 {
-			return fmt.Errorf("max output tokens %d exceeds maximum of 65536", tokens)
 		}
 		e.maxOutputTokens = tokens
 		return nil
@@ -239,7 +240,8 @@ func WithResponseSchema[Request promptbuilder.Bindable, Response any](schema *ge
 // The budget parameter sets the maximum tokens the model can use for reasoning
 // Special value -1 enables dynamic thinking where the model adjusts based on complexity
 // See https://ai.google.dev/gemini-api/docs/thinking
-// Must be less than max_output_tokens to leave room for actual output
+// Must be less than max_output_tokens to leave room for actual output.
+// Gemini 4 rejects a thinking budget, so New refuses it there; use WithEffort.
 func WithThinking[Request promptbuilder.Bindable, Response any](budgetTokens int32) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		// Gemini models allow -1 for dynamic thinking
@@ -374,6 +376,13 @@ func WithResultValidator[Request promptbuilder.Bindable, Response any](v callbac
 // WithRetryConfig sets the retry configuration for handling transient Vertex AI errors.
 // This is particularly useful for handling 429 RESOURCE_EXHAUSTED errors that occur
 // when quota limits are hit. If not set, a default configuration is used.
+//
+// A long decode (Gemini 4 with max output tokens above one request's cap) is
+// one retried call that spans several provider requests. A retryable error on
+// a later request restarts the whole generation, and the requests that had
+// already succeeded are billed again, so size the retry budget for that cost.
+// A client built with genai.HTTPOptions.RetryOptions retries a failed request
+// in place, with the same continuation token, without restarting.
 func WithRetryConfig[Request promptbuilder.Bindable, Response any](cfg retry.RetryConfig) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if err := cfg.Validate(); err != nil {
@@ -404,6 +413,10 @@ func WithRetryRequestTimeouts[Request promptbuilder.Bindable, Response any]() Op
 //
 // You would only disable this if you have a single-turn agent with a very short
 // tool/system prompt that doesn't benefit from caching, or for debugging.
+// Models that reject explicit caches (Gemini 4) skip it without this option.
+// After the provider rejects a create with a 4xx (other than a timeout or a
+// rate limit), the executor sends requests inline for one cache TTL before it
+// tries to create a cache again.
 // See: https://cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview
 func WithoutCacheControl[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {

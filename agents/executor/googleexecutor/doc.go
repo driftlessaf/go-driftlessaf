@@ -96,6 +96,20 @@ Reasoning blocks are stored in trace.Reasoning as []agenttrace.ReasoningContent,
 where each block contains:
   - Thinking: the reasoning text
 
+# Gemini 4
+
+Gemini 4 models take a thinking level and reject a thinking budget, so New
+refuses WithThinking on them; use WithEffort. They also reject explicit context
+caches, so the executor sends system instructions and tools inline and relies on
+the provider's implicit prefix cache. A single request returns at most 32,768
+output tokens (65,536 for a stream), but a generation can continue across
+requests up to 1,048,576 tokens, input included: WithMaxOutputTokens accepts values up to that limit,
+and the SDK follows the continuation tokens and merges the parts and usage
+into one response. The extra room goes to reasoning; the model does
+not lengthen its answers to fill it. Each continuation request re-sends the
+prompt and is billed, and a retry after a failed continuation request starts
+the generation again (see WithRetryConfig).
+
 # Integration with Evaluation
 
 The executor automatically integrates with the evals package for tracing:

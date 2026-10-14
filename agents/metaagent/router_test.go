@@ -244,13 +244,43 @@ func TestNewRoutedPreservesCapabilityErrorPrecedence(t *testing.T) {
 		t.Fatalf("NewGoogleGenAIAdapterRegistry: %v", err)
 	}
 	config := routedTestConfig(t)
-	config.MaxTokens = 65537 // Also exceeds the Google protocol limit.
+	config.MaxTokens = 65537 // Also exceeds the Google limit for this model.
 	_, err = NewRouted[*testRequest](t.Context(), mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{GoogleGenAI: adapters}), selection, config)
 	if !errors.Is(err, modelrouter.ErrUnsupportedCapability) {
 		t.Fatalf("NewRouted error = %v, want capability error before protocol-limit error", err)
 	}
 	if adapterCalls != 0 {
 		t.Fatalf("adapter calls = %d, want 0", adapterCalls)
+	}
+}
+
+// TestRoutedGoogleMaxTokensLimit checks that the routed Google output cap
+// follows the logical model: 65,536 by default, and the registry's
+// long-decode limit for Gemini 4.
+func TestRoutedGoogleMaxTokensLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		model     string
+		maxTokens int64
+		wantErr   bool
+	}{
+		{name: "gemini 3.8 at the cap", model: "gemini-3.8-flash", maxTokens: 65536},
+		{name: "gemini 3.8 above the cap", model: "gemini-3.8-flash", maxTokens: 65537, wantErr: true},
+		{name: "gemini 4 long decode", model: "gemini-4-argon", maxTokens: 1048576},
+		{name: "gemini 4 above its limit", model: "gemini-4-argon", maxTokens: 1048577, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := routedTestConfig(t)
+			config.MaxTokens = tt.maxTokens
+			err := validateRoutedConfigForProtocol(modelrouter.ProtocolGoogleGenAI, tt.model, config)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("validateRoutedConfigForProtocol(%q, MaxTokens=%d): got err = %v, want error = %v", tt.model, tt.maxTokens, err, tt.wantErr)
+			}
+		})
 	}
 }
 

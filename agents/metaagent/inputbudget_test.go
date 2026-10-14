@@ -139,7 +139,7 @@ func TestRoutedInputBudgetProtocolGate(t *testing.T) {
 	} {
 		cfg := finalizeConfig(t, 0)
 		cfg.EnforceInputBudget = tc.enforce
-		err := validateRoutedConfigForProtocol(tc.protocol, cfg)
+		err := validateRoutedConfigForProtocol(tc.protocol, "", cfg)
 		if gotErr := err != nil; gotErr != tc.wantErr {
 			t.Errorf("validateRoutedConfigForProtocol(%s, enforce=%v): got err = %v, want error = %v", tc.protocol, tc.enforce, err, tc.wantErr)
 		}

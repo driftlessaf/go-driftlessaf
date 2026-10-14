@@ -77,6 +77,20 @@ type Info struct {
 	// high. A constructor that infers the protocol from the id shape must
 	// reject them rather than pick one.
 	ExplicitRouteOnly bool
+	// NoThinkingBudget reports that a thinking-level model rejects the
+	// thinkingBudget parameter with a 400 instead of mapping it to a level.
+	NoThinkingBudget bool
+	// NoExplicitContextCache reports that the provider rejects explicit
+	// context caches (Vertex AI CachedContent). Shared prompt prefixes are
+	// still cached implicitly.
+	NoExplicitContextCache bool
+	// MaxOutputTokens is the largest output-token limit a request may set.
+	// Zero means unknown: callers keep their own cap.
+	MaxOutputTokens int64
+	// LongDecode reports that the provider continues a generation past its
+	// per-request output cap across requests, linked by a continuation token,
+	// up to MaxOutputTokens.
+	LongDecode bool
 }
 
 // SupportsEffort reports whether the provider accepts the effort level
@@ -109,13 +123,15 @@ var automaticToolChoiceOnlyModels = []string{
 	"claude-sonnet-5-5",
 }
 
-// contextWindows maps Claude base ids to verified serving context windows.
-// Keys are exact base ids, not prefixes, so a new model reports an unknown
-// window until its limit is verified rather than inheriting a neighbour's.
+// contextWindows maps base ids to verified serving context windows. Keys are
+// exact base ids, not prefixes, so a new model reports an unknown window
+// until its limit is verified rather than inheriting a neighbour's.
 var contextWindows = map[string]int64{
-	"claude-opus-4-8":  1_000_000,
-	"claude-opus-5-5":  1_000_000,
-	"claude-haiku-5-5": 1_000_000,
+	"claude-opus-4-8":                 1_000_000,
+	"claude-opus-5-5":                 1_000_000,
+	"claude-haiku-5-5":                1_000_000,
+	"gemini-4-argon":                  1_048_576,
+	"gemini-4-argon-cyber-permissive": 1_048_576,
 }
 
 var samplingParamsRemovedPrefixes = []string{
@@ -225,14 +241,32 @@ func claudeInfo(id string) Info {
 	return info
 }
 
+// gemini4Prefixes lists the Gemini id prefixes with the Gemini 4 request
+// surface: thinkingBudget and explicit context caches return a 400, and a
+// generation can run to 1,048,576 output tokens through long decodes.
+// See: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
+var gemini4Prefixes = []string{"gemini-4"}
+
+// gemini4MaxOutputTokens is the Gemini 4 context window, which input,
+// thinking and output tokens share; long decodes can fill it with output.
+const gemini4MaxOutputTokens = 1_048_576
+
 // geminiInfo derives the capability surface for a Gemini model id.
 func geminiInfo(id string) Info {
-	return Info{
+	info := Info{
 		Backend:         BackendGemini,
 		Efforts:         slices.Clone(fullEfforts),
 		SamplingParams:  true,
 		ThinkingControl: geminiThinkingControl(id),
+		ContextWindow:   contextWindows[id],
 	}
+	if hasAnyPrefix(id, gemini4Prefixes) {
+		info.NoThinkingBudget = true
+		info.NoExplicitContextCache = true
+		info.MaxOutputTokens = gemini4MaxOutputTokens
+		info.LongDecode = true
+	}
+	return info
 }
 
 // geminiThinkingControl reports which generation of thinking knob the model

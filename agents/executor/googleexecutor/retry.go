@@ -8,6 +8,7 @@ package googleexecutor
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 
 	"google.golang.org/api/googleapi"
@@ -141,6 +142,16 @@ func isRetryableVertexError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isCacheRejection reports whether a Caches.Create error is a provider
+// rejection that an immediate retry would repeat: a 4xx other than a timeout,
+// a rate limit or a cancellation. Transport errors and context expiry carry
+// no 4xx code, so the next Execute tries again.
+func isCacheRejection(err error) bool {
+	code := responseCodeFromError(err)
+	return code >= http.StatusBadRequest && code < http.StatusInternalServerError &&
+		code != http.StatusRequestTimeout && !isRetryableVertexError(err)
 }
 
 // isRetryableVertexErrorWithin distinguishes an individual request timeout

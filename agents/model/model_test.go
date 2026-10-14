@@ -57,6 +57,15 @@ func TestResolve(t *testing.T) {
 		SamplingParams:  true,
 		ThinkingControl: model.ThinkingControlLevel,
 	}
+	// gemini4 is the Gemini 4 surface: thinking levels only, no explicit
+	// context cache, and long decodes up to the shared 1,048,576-token window.
+	gemini4 := geminiLevel
+	gemini4.NoThinkingBudget = true
+	gemini4.NoExplicitContextCache = true
+	gemini4.MaxOutputTokens = 1_048_576
+	gemini4.LongDecode = true
+	gemini4Argon := gemini4
+	gemini4Argon.ContextWindow = 1_048_576
 	openAICompat := model.Info{
 		Backend:        model.BackendOpenAICompat,
 		Efforts:        fullScale,
@@ -172,7 +181,11 @@ func TestResolve(t *testing.T) {
 		{"gemini-2.5-pro", geminiBudget},
 		{"gemini-3-pro-preview", geminiLevel},
 		{"gemini-3.5-flash", geminiLevel},
-		{"gemini-4-ultra", geminiLevel},
+		{"gemini-4-argon", gemini4Argon},
+		{"gemini-4-argon-cyber-permissive", gemini4Argon},
+		// An unverified Gemini 4 id takes the family surface but reports an
+		// unknown context window.
+		{"gemini-4-ultra", gemini4},
 		// Unparseable Gemini versions fall back to the budget control.
 		{"gemini-ultra", geminiBudget},
 		{"gemini-exp-1206", geminiBudget},

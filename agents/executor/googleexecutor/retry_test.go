@@ -67,6 +67,37 @@ func TestIsRetryableVertexError(t *testing.T) {
 	}
 }
 
+// TestIsCacheRejection checks that only a provider 4xx an immediate retry
+// would repeat holds cache creation; a transient code, cancellation or a
+// transport error must not, since an executor outlives any one request.
+func TestIsCacheRejection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "400 genai", err: genai.APIError{Code: http.StatusBadRequest, Message: "Model does not support explicit context caching.", Status: "INVALID_ARGUMENT"}, want: true},
+		{name: "403 googleapi", err: &googleapi.Error{Code: http.StatusForbidden, Message: "forbidden"}, want: true},
+		{name: "404 googleapi", err: &googleapi.Error{Code: http.StatusNotFound, Message: "not found"}, want: true},
+		{name: "408 googleapi", err: &googleapi.Error{Code: http.StatusRequestTimeout, Message: "request timeout"}, want: false},
+		{name: "429 genai", err: genai.APIError{Code: http.StatusTooManyRequests, Message: "Resource exhausted", Status: "RESOURCE_EXHAUSTED"}, want: false},
+		{name: "499 googleapi", err: &googleapi.Error{Code: 499, Message: "The operation was cancelled."}, want: false},
+		{name: "503 genai", err: genai.APIError{Code: http.StatusServiceUnavailable, Message: "unavailable", Status: "UNAVAILABLE"}, want: false},
+		{name: "context canceled", err: fmt.Errorf("creating cached content: %w", context.Canceled), want: false},
+		{name: "context deadline", err: fmt.Errorf("creating cached content: %w", context.DeadlineExceeded), want: false},
+		{name: "transport error", err: errors.New("read tcp 10.0.0.1:443: connection reset by peer"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isCacheRejection(tt.err); got != tt.want {
+				t.Errorf("isCacheRejection(%v): got = %v, want = %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResponseCodeFromError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

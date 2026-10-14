@@ -14,6 +14,7 @@ import (
 	"math"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -243,7 +244,7 @@ func NewRouted[Req promptbuilder.Bindable, Resp, CB any](
 	if err := plan.ValidateRequirements(requirements); err != nil {
 		return nil, err
 	}
-	if err := validateRoutedConfigForProtocol(plan.Protocol(), config); err != nil {
+	if err := validateRoutedConfigForProtocol(plan.Protocol(), plan.LogicalModel(), config); err != nil {
 		return nil, err
 	}
 	// Validate response-schema configuration before an adapter loads
@@ -345,7 +346,7 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 	return nil
 }
 
-func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol, config Config[Resp, CB]) error {
+func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol, logicalModel string, config Config[Resp, CB]) error {
 	if config.MaxToolCallsBeforeFinalize != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: MaxToolCallsBeforeFinalize is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}
@@ -354,8 +355,10 @@ func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol
 	}
 	switch protocol {
 	case modelrouter.ProtocolGoogleGenAI:
-		if config.MaxTokens > 65536 {
-			return fmt.Errorf("creating routed Google executor: max output tokens %d exceeds maximum of 65536", config.MaxTokens)
+		// Long-decode models (Gemini 4) accept more output than one request
+		// returns; the registry carries that limit.
+		if limit := cmp.Or(model.Resolve(logicalModel).MaxOutputTokens, int64(65536)); config.MaxTokens > limit {
+			return fmt.Errorf("creating routed Google executor: max output tokens %d exceeds maximum of %d for model %q", config.MaxTokens, limit, logicalModel)
 		}
 		if config.ThinkingBudget > math.MaxInt32 {
 			return fmt.Errorf("creating routed Google executor: thinking budget %d exceeds maximum integer value of %d", config.ThinkingBudget, int64(math.MaxInt32))

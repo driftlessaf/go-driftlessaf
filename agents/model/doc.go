@@ -11,7 +11,9 @@ SPDX-License-Identifier: Apache-2.0
 // the provider takes natively, whether the sampling parameters (temperature,
 // top_p, top_k) are accepted, whether the Claude extended-thinking budget
 // parameter is accepted, and which generation of Gemini thinking knob
-// applies. Jev ids ("jev-") and Hopper resolve to a backend with
+// applies. Gemini 4 ids also report the parameters that generation rejects
+// (thinkingBudget, explicit context caches) and its long-decode output
+// limit. Jev ids ("jev-") and Hopper resolve to a backend with
 // no parameter surface at all, since those models take typed questions rather
 // than a conversation.
 //
