@@ -19,6 +19,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
+	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/go-cmp/cmp"
@@ -148,5 +149,72 @@ func TestVertexBillingLabelsHeader(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestVertexBillingLabelsOnEveryRequest(t *testing.T) {
+	labels := map[string]string{"service_name": "example-service", "team": "example-team", "product": "example-product"}
+
+	var mu sync.Mutex
+	var headers []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headers = append(headers, r.Header.Get("X-Vertex-AI-Labels"))
+		n := len(headers)
+		mu.Unlock()
+
+		switch n {
+		case 1:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(529)
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+		case 2:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, sseBody(t, namedToolCallTurn(t, "msg_01", "toolu_g1", "git_grep", map[string]any{"ref": "main", "pattern": "x"})))
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, sseBody(t, submitCallTurn(t, "msg_02", "toolu_s1", submitInput("done"))))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	prompt, err := promptbuilder.NewPrompt("go")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
+	}
+	client := anthropic.NewClient(option.WithBaseURL(srv.URL), option.WithAPIKey("test"), option.WithMaxRetries(0))
+	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](client, prompt,
+		claudeexecutor.WithProvider[errCapRequest, errCapResponse](claudeexecutor.ProviderVertex),
+		claudeexecutor.WithResourceLabels[errCapRequest, errCapResponse](labels),
+		claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(2)),
+		claudeexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.ClaudeToolForResponse[errCapResponse]),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tools := map[string]claudetool.Metadata[errCapResponse]{"git_grep": gitGrepTool(nil)}
+	if _, err := exec.Execute(t.Context(), errCapRequest{}, tools); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := len(headers), 3; got != want {
+		t.Fatalf("requests: got = %d, want = %d (overloaded, tool call, submit)", got, want)
+	}
+	for i, h := range headers {
+		raw, err := base64.StdEncoding.DecodeString(h)
+		if err != nil {
+			t.Fatalf("request %d: decoding X-Vertex-AI-Labels %q: %v", i+1, h, err)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("request %d: parsing X-Vertex-AI-Labels %q: %v", i+1, raw, err)
+		}
+		for k, v := range labels {
+			if got[k] != v {
+				t.Errorf("request %d: label %q: got = %q, want = %q", i+1, k, got[k], v)
+			}
+		}
 	}
 }
