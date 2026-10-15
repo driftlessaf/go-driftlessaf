@@ -340,6 +340,7 @@ type gqlCheckRunNode struct {
 	Status     string
 	Conclusion string
 	DetailsUrl string
+	ExternalId string
 	Title      string
 	Summary    string
 	Text       string
@@ -1119,6 +1120,7 @@ func (c *checkCollector) addRuns(runs []gqlCheckRunNode) {
 				Name:       run.Name,
 				Details:    formatCheckRunDetails(run.Name, run.Status, run.Conclusion, run.Title, run.Summary, run.Text, run.DetailsUrl),
 				DetailsURL: run.DetailsUrl,
+				ExternalID: run.ExternalId,
 			})
 		case pending:
 			c.pendingChecks = append(c.pendingChecks, run.Name)

@@ -228,6 +228,7 @@ func TestCollectFindings(t *testing.T) {
 				Status:     status,
 				Conclusion: conclusion,
 				DetailsUrl: "https://ci/" + name,
+				ExternalId: "ext-" + name,
 			},
 		}
 	}
@@ -259,7 +260,7 @@ func TestCollectFindings(t *testing.T) {
 		t.Fatalf("findings: got %d, want 1 (%+v)", len(findings), findings)
 	}
 	if f := findings[0]; f.Name != "build" || f.Identifier != "1" ||
-		f.Kind != callbacks.FindingKindCICheck || f.DetailsURL != "https://ci/build" {
+		f.Kind != callbacks.FindingKindCICheck || f.DetailsURL != "https://ci/build" || f.ExternalID != "ext-build" {
 		t.Errorf("unexpected finding: %+v", f)
 	}
 

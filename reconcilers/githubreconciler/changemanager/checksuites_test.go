@@ -103,6 +103,7 @@ func TestCollectSuiteFindings(t *testing.T) {
 			Status:     status,
 			Conclusion: conclusion,
 			DetailsUrl: "https://ci/" + name,
+			ExternalId: "ext-" + name,
 		}
 	}
 	suite := func(id string, runs ...gqlCheckRunNode) gqlCheckSuiteNode {
@@ -143,6 +144,7 @@ func TestCollectSuiteFindings(t *testing.T) {
 		Name:       "build",
 		Details:    formatCheckRunDetails("build", "COMPLETED", "FAILURE", "", "", "", "https://ci/build"),
 		DetailsURL: "https://ci/build",
+		ExternalID: "ext-build",
 	}}
 	if diff := cmp.Diff(wantFindings, findings); diff != "" {
 		t.Errorf("findings (-want +got):\n%s", diff)

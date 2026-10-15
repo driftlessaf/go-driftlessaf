@@ -42,6 +42,11 @@ type Finding struct {
 	// DetailsURL is the URL to the finding's details page (e.g., GitHub Actions job URL).
 	// Used by GetLogs to fetch logs for the finding.
 	DetailsURL string `json:"details_url" xml:"details_url"`
+
+	// ExternalID is a CI check's external_id: the identity the App that
+	// created the check recorded on it, for check providers to recognize that
+	// App's checks. No agent tool takes it, so it is not rendered.
+	ExternalID string `json:"-" xml:"-"`
 }
 
 // FindingCallbacks provides callbacks for fetching finding details.
