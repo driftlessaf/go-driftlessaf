@@ -671,12 +671,6 @@ func (s *Session[T]) UpsertIssueMarkerComment(ctx context.Context, marker, body 
 	return err
 }
 
-// revisionMarker renders the hidden line that stamps a marker comment with the
-// revision of its subject (see UpsertIssueMarkerCommentForRevision).
-func revisionMarker(revision string) string {
-	return "<!--revision:" + revision + "-->"
-}
-
 // UpsertIssueMarkerCommentForRevision is UpsertIssueMarkerComment for a body
 // that varies run to run while its subject does not — an agent's prose
 // explanation of the same issue, say. revision identifies the subject (e.g. a
@@ -692,9 +686,8 @@ func (s *Session[T]) UpsertIssueMarkerCommentForRevision(ctx context.Context, ma
 	if s.resource == nil || s.resource.Type != githubreconciler.ResourceTypeIssue {
 		return false, nil
 	}
-	prefix := marker + "\n" + revisionMarker(revision) + "\n"
-	return s.upsertMarkerCommentOn(ctx, s.resource.Number, marker, prefix+body, func(existing string) bool {
-		return strings.HasPrefix(existing, prefix)
+	return s.upsertMarkerCommentOn(ctx, s.resource.Number, marker, revisionNote(marker, revision, body), func(existing string) bool {
+		return hasRevision(existing, marker, revision)
 	})
 }
 

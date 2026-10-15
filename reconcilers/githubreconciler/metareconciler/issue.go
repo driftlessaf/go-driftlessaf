@@ -103,6 +103,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	}
 
 	var usePRBranch bool
+	// revision stamps a give-up note posted by this reconcile. It is read
+	// before the agent runs, so a reply that arrives during the run is not
+	// counted as answered and gets a run of its own.
+	var revision string
 	switch {
 	case r.requiredLabel != "" && !hasLabel(issue, r.requiredLabel):
 		clog.InfoContext(ctx, "Issue missing required label, closing any outstanding PRs", "required_label", r.requiredLabel)
@@ -207,6 +211,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		return nil
 
 	case !state.HasPR():
+		var answered bool
+		revision, answered = r.giveUpRevision(ctx, changeSession, issue)
+		if answered {
+			log.Info("This bot's give-up note already answers the issue as it stands, not running again")
+			return nil
+		}
 		log.Info("No existing PR, creating from scratch")
 
 	default:
@@ -218,9 +228,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	// marker dedup keeps it to one comment across repeated no-PR reconciles (a
 	// first attempt may end in ErrNoChanges or a transient agent error).
 	//
-	// This gate is untested at this level: TestStartCommentSurface covers
-	// surface() in isolation, not reconcileIssue. Deferred deliberately; a real
-	// test needs a full GitHub-client + agent harness that doesn't exist yet.
+	// TestReconcileIssueGuardWithStartComment covers this gate through
+	// reconcileIssue with no PR; no test reconciles with a PR open, so the
+	// HasPR half is untested. TestStartCommentSurface covers surface() in
+	// isolation.
 	if !state.HasPR() {
 		r.startComment.surface(ctx, changeSession)
 	}
@@ -376,10 +387,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			default:
 				// The agent gave up before any PR existed, so there is no PR
 				// to comment on: surface the explanation on the issue, or the
-				// filer sees the start comment and then silence. A rewrite
-				// (new issue content, new give-up) is the edge to emit on;
-				// SurfaceResultOnIssue dedups the rest.
-				if r.giveUp.SurfaceResultOnIssue(ctx, changeSession, issueRevision(issue), result) {
+				// filer sees the start comment and then silence. A note
+				// posted for a new revision is the edge to emit on, and a
+				// note already posted for this one is not. A new revision is
+				// a new attempt, so a give-up after a reply, edit, re-label,
+				// or reopen emits again even when the status repeats.
+				if r.giveUp.SurfaceResultOnIssue(ctx, changeSession, revision, result) {
 					r.emitTransition(ctx, issue, "",
 						statemachine.StatusFailed, statemachine.FailureModeNoDiff, statemachine.TriggerNoDiff)
 				}
@@ -485,10 +498,30 @@ func (r *Reconciler[Req, Resp, CB]) shouldClearDraftLabel(issue *github.Issue, h
 	return r.draftLabel != "" && hasPR && !prIsDraft && hasLabel(issue, r.draftLabel)
 }
 
-// clearIssueGiveUp drops the give-up comment from the source issue. Finding it
-// means listing the issue's comments, and reconcileIssue runs on every issue
+// giveUpRevision returns the revision a give-up note posted by this reconcile
+// carries (see issueRevision), and whether this bot already left a note for
+// it, in which case the reconcile must not run the agent. Without that check
+// the bot's own note, which comes back as an issue event, and every later
+// issue event would run the same work again. It reads nothing for a bot with
+// no give-up comment. A failed read is logged and leaves the issue unanswered,
+// so the agent runs.
+func (r *Reconciler[Req, Resp, CB]) giveUpRevision(ctx context.Context, session *changemanager.Session[PRData[Req]], issue *github.Issue) (string, bool) {
+	if r.giveUp == nil || r.giveUp.Marker == "" || r.giveUp.Render == nil {
+		return "", false
+	}
+	thread, err := session.ReadIssueThread(ctx, r.giveUp.Marker)
+	if err != nil {
+		clog.WarnContext(ctx, "Failed to read the issue thread, running the agent", "error", err)
+		thread = &changemanager.IssueThread{}
+	}
+	revision := issueRevision(issue, thread, r.requiredLabel)
+	return revision, thread.HasNote(revision)
+}
+
+// clearIssueGiveUp drops the give-up notes from the source issue. Finding them
+// means reading the issue's comments, and reconcileIssue runs on every issue
 // event in the repo, most for issues this bot never touched — so skip the call
-// when the issue has no comments at all, since the comment to delete is itself
+// when the issue has no comments at all, since a note to delete is itself
 // one.
 func (r *Reconciler[Req, Resp, CB]) clearIssueGiveUp(ctx context.Context, issue *github.Issue, session *changemanager.Session[PRData[Req]]) {
 	if issue.GetComments() == 0 {
@@ -497,14 +530,37 @@ func (r *Reconciler[Req, Resp, CB]) clearIssueGiveUp(ctx context.Context, issue 
 	r.giveUp.ClearIssue(ctx, session)
 }
 
-// issueRevision identifies the issue content the agent is asked to act on — the
-// title and body that buildRequest hands it — as a hex digest. It keys the
-// issue-side give-up comment (see GiveUpComment.SurfaceResultOnIssue): the same
-// revision means the agent saw the same request, so a repeat give-up on it is
-// not news, while an edit to either field is.
-func issueRevision(issue *github.Issue) string {
-	sum := sha256.Sum256([]byte(issue.GetTitle() + "\n" + issue.GetBody()))
-	return hex.EncodeToString(sum[:])
+// issueRevision identifies what a give-up note answers, as a hex digest: the
+// issue title and body that buildRequest hands the agent, and each signal
+// that asks for another attempt at them, namely the latest reply from a
+// person, the last time the issue was given requiredLabel, and the last time
+// it was reopened. While this bot's note for the current revision is on the
+// issue, reconciles do not run the agent; any of those signals changes the
+// revision and starts another run. Comments by this bot and by other bots are
+// not signals (see changemanager.IssueThread), so the bot's own notes leave the
+// revision as it was, and two bots on one issue cannot keep each other running.
+func issueRevision(issue *github.Issue, thread *changemanager.IssueThread, requiredLabel string) string {
+	h := sha256.New()
+	for _, part := range []string{
+		issue.GetTitle(),
+		issue.GetBody(),
+		thread.LatestReplyID,
+		timestamp(thread.LabeledAt[requiredLabel]),
+		timestamp(thread.ReopenedAt),
+	} {
+		// Length-prefixed, so no two different sets of parts hash alike.
+		fmt.Fprintf(h, "%d:%s\n", len(part), part)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// timestamp renders t for issueRevision: "" for the zero time, so a signal
+// that has never happened reads the same on every pass.
+func timestamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // hasLabel checks if an issue has a specific label.

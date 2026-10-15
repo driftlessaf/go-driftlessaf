@@ -603,35 +603,72 @@ func TestPRLabelsForIssue(t *testing.T) {
 	}
 }
 
-// TestIssueRevision verifies the give-up comment key follows the request the
-// agent sees: stable for the same title and body, different when either changes.
+// TestIssueRevision pins which changes to an issue count as a request for
+// another attempt. A give-up note guards the issue only while its revision
+// matches, so a signal left out here would be silently ignored, and a signal
+// wrongly included (another label, say) would re-run the agent on every
+// event that touches it.
 func TestIssueRevision(t *testing.T) {
-	base := &github.Issue{Title: new("Add foo"), Body: new("We need foo because bar.")}
-	same := &github.Issue{Title: new("Add foo"), Body: new("We need foo because bar.")}
-	if got, want := issueRevision(base), issueRevision(same); got != want {
-		t.Errorf("issueRevision(same content): got = %q, want = %q", got, want)
+	const required = "test-bot/managed"
+	labeled := time.Date(2026, 9, 21, 15, 28, 14, 0, time.UTC)
+	base := func() (*github.Issue, *changemanager.IssueThread) {
+		return &github.Issue{Title: new("Add foo"), Body: new("We need foo because bar.")},
+			&changemanager.IssueThread{
+				LatestReplyID: "IC_reply",
+				LabeledAt:     map[string]time.Time{required: labeled},
+			}
 	}
+	issue, thread := base()
+	want := issueRevision(issue, thread, required)
+
 	tests := []struct {
-		name  string
-		issue *github.Issue
+		name        string
+		change      func(*github.Issue, *changemanager.IssueThread)
+		wantChanged bool
 	}{{
-		name:  "body edited",
-		issue: &github.Issue{Title: new("Add foo"), Body: new("We need foo because baz.")},
+		name:   "nothing changed",
+		change: func(*github.Issue, *changemanager.IssueThread) {},
 	}, {
-		name:  "title edited",
-		issue: &github.Issue{Title: new("Add foo, urgently"), Body: new("We need foo because bar.")},
+		name:        "body edited",
+		change:      func(i *github.Issue, _ *changemanager.IssueThread) { i.Body = new("We need foo because baz.") },
+		wantChanged: true,
 	}, {
-		// Text moved out of the title is a different request. The separator
-		// does not make that hold in general — title "A" + body "B\nC" hashes
-		// the same as title "A\nB" + body "C" — but GitHub issue titles are
-		// single-line, so the ambiguous input never reaches issueRevision.
-		name:  "content moved between title and body",
-		issue: &github.Issue{Title: new("Add foo\nWe need"), Body: new(" foo because bar.")},
+		name:        "title edited",
+		change:      func(i *github.Issue, _ *changemanager.IssueThread) { i.Title = new("Add foo, urgently") },
+		wantChanged: true,
+	}, {
+		// Text moved out of the title is a different request.
+		name: "content moved between title and body",
+		change: func(i *github.Issue, _ *changemanager.IssueThread) {
+			i.Title, i.Body = new("Add foo\nWe need"), new(" foo because bar.")
+		},
+		wantChanged: true,
+	}, {
+		name:        "a person replied",
+		change:      func(_ *github.Issue, th *changemanager.IssueThread) { th.LatestReplyID = "IC_later" },
+		wantChanged: true,
+	}, {
+		name: "required label re-added",
+		change: func(_ *github.Issue, th *changemanager.IssueThread) {
+			th.LabeledAt[required] = labeled.Add(time.Minute)
+		},
+		wantChanged: true,
+	}, {
+		name:        "reopened",
+		change:      func(_ *github.Issue, th *changemanager.IssueThread) { th.ReopenedAt = labeled.Add(time.Hour) },
+		wantChanged: true,
+	}, {
+		name: "another label applied",
+		change: func(_ *github.Issue, th *changemanager.IssueThread) {
+			th.LabeledAt["triage"] = labeled.Add(time.Minute)
+		},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := issueRevision(tt.issue); got == issueRevision(base) {
-				t.Errorf("issueRevision: got = %q for changed content, want a different revision", got)
+			issue, thread := base()
+			tt.change(issue, thread)
+			if got := issueRevision(issue, thread, required) != want; got != tt.wantChanged {
+				t.Errorf("revision changed: got = %t, want = %t", got, tt.wantChanged)
 			}
 		})
 	}

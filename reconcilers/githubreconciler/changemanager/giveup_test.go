@@ -25,7 +25,7 @@ type fakeMarkerCommenter struct {
 	// issueUpserted records issue-side upserts as marker -> revision + "\n" + body.
 	issueUpserted  map[string]string
 	issueDeleted   []string
-	issueChanged   bool // what UpsertIssueMarkerCommentForRevision reports
+	issueChanged   bool // what UpsertIssueNote reports
 	issueUpsertErr error
 	issueDeleteErr error
 }
@@ -34,7 +34,7 @@ func newFakeMarkerCommenter() *fakeMarkerCommenter {
 	return &fakeMarkerCommenter{upserted: map[string]string{}, issueUpserted: map[string]string{}, issueChanged: true}
 }
 
-func (c *fakeMarkerCommenter) UpsertIssueMarkerCommentForRevision(_ context.Context, marker, revision, body string) (bool, error) {
+func (c *fakeMarkerCommenter) UpsertIssueNote(_ context.Context, marker, revision, body string) (bool, error) {
 	if c.issueUpsertErr != nil {
 		return false, c.issueUpsertErr
 	}
@@ -42,7 +42,7 @@ func (c *fakeMarkerCommenter) UpsertIssueMarkerCommentForRevision(_ context.Cont
 	return c.issueChanged, nil
 }
 
-func (c *fakeMarkerCommenter) DeleteIssueMarkerComment(_ context.Context, marker string) error {
+func (c *fakeMarkerCommenter) DeleteIssueNotes(_ context.Context, marker string) error {
 	if c.issueDeleteErr != nil {
 		return c.issueDeleteErr
 	}

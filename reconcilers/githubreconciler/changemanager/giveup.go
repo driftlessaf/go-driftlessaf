@@ -34,8 +34,8 @@ type markerCommenter interface {
 // (SurfaceResultOnIssue, ClearIssue) needs, for reconciles with no PR yet to
 // carry the explanation.
 type issueMarkerCommenter interface {
-	UpsertIssueMarkerCommentForRevision(ctx context.Context, marker, revision, body string) (bool, error)
-	DeleteIssueMarkerComment(ctx context.Context, marker string) error
+	UpsertIssueNote(ctx context.Context, marker, revision, body string) (bool, error)
+	DeleteIssueNotes(ctx context.Context, marker string) error
 }
 
 // GiveUpComment surfaces an agent's deliberate no-op explanation on a PR as a
@@ -92,13 +92,12 @@ func explanationOf(result any) string {
 // SurfaceResultOnIssue is SurfaceResult for a reconcile with no PR to comment
 // on: it posts the explanation carried by result on the source issue instead,
 // so the filer learns why nothing happened without reading logs. revision
-// identifies the issue content the agent saw (see
-// Session.UpsertIssueMarkerCommentForRevision); a comment already posted for
-// the same revision is left as is, since the agent's wording varies run to run
-// while its reason does not. It reports whether a comment was posted or
-// rewritten, so a caller can treat that as the give-up edge. No label is
-// applied — the give-up label belongs to the PR. Failures are logged and
-// swallowed.
+// identifies what the agent was asked to act on (see Session.UpsertIssueNote):
+// a note already posted for the same revision is kept, since the agent's
+// wording varies run to run while its reason does not, and a note for a new
+// revision replaces the bot's earlier ones. It reports whether a note was
+// posted, so a caller can treat that as the give-up edge. No label is applied
+// — the give-up label belongs to the PR. Failures are logged and swallowed.
 func (g *GiveUpComment) SurfaceResultOnIssue(ctx context.Context, issue issueMarkerCommenter, revision string, result any) bool {
 	if g == nil || g.Render == nil {
 		return false
@@ -107,22 +106,22 @@ func (g *GiveUpComment) SurfaceResultOnIssue(ctx context.Context, issue issueMar
 	if explanation == "" {
 		return false
 	}
-	changed, err := issue.UpsertIssueMarkerCommentForRevision(ctx, g.Marker, revision, g.Render(explanation))
+	posted, err := issue.UpsertIssueNote(ctx, g.Marker, revision, g.Render(explanation))
 	if err != nil {
 		clog.WarnContext(ctx, "Failed to post give-up comment on issue", "error", err)
 		return false
 	}
-	return changed
+	return posted
 }
 
-// ClearIssue removes the give-up comment from the source issue once it no
-// longer applies (the agent went on to open a PR, or a human took the issue
-// back). Failures are logged and swallowed.
+// ClearIssue removes every give-up note this bot left on the source issue once
+// they no longer apply (the agent went on to open a PR, or a human took the
+// issue back). Failures are logged and swallowed.
 func (g *GiveUpComment) ClearIssue(ctx context.Context, issue issueMarkerCommenter) {
 	if g == nil {
 		return
 	}
-	if err := issue.DeleteIssueMarkerComment(ctx, g.Marker); err != nil {
+	if err := issue.DeleteIssueNotes(ctx, g.Marker); err != nil {
 		clog.WarnContext(ctx, "Failed to clear give-up comment on issue", "error", err)
 	}
 }

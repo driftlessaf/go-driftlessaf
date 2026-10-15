@@ -169,11 +169,14 @@ func WithCopyIssueLabels[Req promptbuilder.Bindable, Resp Result, CB any]() Opti
 // the PR recovers.
 //
 // When the agent gives up before any PR exists (a fresh run that finds nothing
-// to do), the same comment goes on the source issue instead, keyed on the issue
-// title and body so a retry on the unchanged issue rewrites nothing. The issue
-// comment is removed once the agent opens a PR or the required label is taken
-// off the issue; it stays when the issue is closed, as the record of why no PR
-// appeared. Off by default.
+// to do), the same comment goes on the source issue instead, stamped with what
+// the agent was asked (see issueRevision). While the bot's note for the issue
+// as it stands is there, issue events do not run the agent again. A reply from
+// a person, an edit to the title or body, re-adding the required label, or
+// reopening the issue starts another run, and a run that gives up again posts a
+// fresh note in place of the old one. The issue comment is removed once the
+// agent opens a PR or the required label is taken off the issue; it stays when
+// the issue is closed, as the record of why no PR appeared. Off by default.
 func WithGiveUpComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func(explanation string) string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}

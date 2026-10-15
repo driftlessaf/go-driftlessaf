@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"text/template"
 	"time"
@@ -121,6 +123,14 @@ func TestReconcileIssueRevalidatesBeforePublish(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read GraphQL request: got = %v, want = nil", err)
+					}
+					if strings.Contains(string(body), "timelineItems(") {
+						fmt.Fprint(w, `{"data":{"repository":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}},"timelineItems":{"nodes":[]}}}}}`)
+						return
+					}
 					fmt.Fprint(w, `{"data":{"repository":{"pullRequests":{"nodes":[]}}}}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123":
 					issueReads++
