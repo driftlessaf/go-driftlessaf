@@ -396,7 +396,7 @@ func (c *Client) GetViewer(ctx context.Context) (*User, error) {
 func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 	const query = `query($id: String!) {
 		issue(id: $id) {
-			id identifier title description updatedAt url
+			id identifier title description updatedAt completedAt url
 			state { name type }
 			team { id key name }
 			assignee { id name }
@@ -470,7 +470,7 @@ func (c *Client) ListTeamIssues(ctx context.Context, teamKey string, opts ListTe
 	const query = `query($filter: IssueFilter, $after: String) {
 		issues(filter: $filter, first: ` + issuesPageSize + `, after: $after, orderBy: createdAt) {
 			nodes {
-				id identifier title description updatedAt url
+				id identifier title description updatedAt completedAt url
 				state { name type }
 				team { id key name }
 				labels { nodes { name } }

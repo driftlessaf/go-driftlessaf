@@ -49,6 +49,10 @@ type Issue struct {
 	// GetIssue.
 	URL       string `json:"url"`
 	UpdatedAt string `json:"updatedAt"`
+	// CompletedAt is Linear's own completion timestamp (RFC 3339), set while
+	// the issue is in a completed-type state and cleared when it leaves one.
+	// Empty for issues that were never completed.
+	CompletedAt string `json:"completedAt"`
 
 	State struct {
 		Name string `json:"name"`
