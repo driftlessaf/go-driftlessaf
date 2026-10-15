@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chainguard-dev/clog"
@@ -99,10 +101,23 @@ func Handle(ctx context.Context, wq workqueue.Interface, concurrency, batchSize 
 // the callback for several different keys.  It returns a future that can be
 // used to block on the result.
 func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) Future {
+	future, _, _ := handleAsync(ctx, wq, concurrency, batchSize, f, maxRetry, opts...)
+	return future
+}
+
+// handleAsync is HandleAsync that also reports whether the pass stopped at its
+// batch cap with slots still open and eligible work still queued. Such a pass
+// leaves capacity idle until some later trigger starts another one, so the
+// Handler runs one more pass at its next limiter slot. The third result blocks
+// until every claim the pass launched has settled, so a following pass
+// enumerates its own in-progress keys rather than undercounting them, and
+// returns how many of them succeeded: a pass whose claims all failed changed
+// nothing, so repeating it would only repeat the failure.
+func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) (Future, bool, func() int) {
 	cfg := applyOptions(opts)
 	identity := wq.Identity()
 	if cfg.ownerConcurrency > 0 && identity == "" {
-		return func() error { return fmt.Errorf("owner concurrency requires a non-empty queue identity") }
+		return func() error { return fmt.Errorf("owner concurrency requires a non-empty queue identity") }, false, func() int { return 0 }
 	}
 	// Enumerate the state of the queue. Capacity-aware implementations can
 	// avoid a full listing of the unbounded queued set when all worker slots are
@@ -124,7 +139,7 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 		wip, next, _, err = wq.Enumerate(ctx)
 	}
 	if err != nil {
-		return func() error { return fmt.Errorf("enumerate() = %w", err) }
+		return func() error { return fmt.Errorf("enumerate() = %w", err) }, false, func() int { return 0 }
 	}
 
 	if batchSize <= 0 || batchSize > concurrency {
@@ -187,10 +202,10 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	// start to queue work without bounds.
 	nWIP := len(activeKeys)
 	if nWIP >= concurrency {
-		return eg.Wait // Should generally be a no-op.
+		return eg.Wait, false, func() int { return 0 } // Should generally be a no-op.
 	}
 	if cfg.ownerConcurrency > 0 && ownerWIP >= cfg.ownerConcurrency {
-		return eg.Wait
+		return eg.Wait, false, func() int { return 0 }
 	}
 
 	// Attempt to launch a new piece of work for each open slot we have available
@@ -206,6 +221,8 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 		next = orderCandidates(next, activeKeys, cfg.windowFactor*launchLimit, cfg.shuffle)
 	}
 
+	var claims sync.WaitGroup
+	var claimed atomic.Int64
 	idx, launched := 0, 0
 	for ; idx < len(next) && launched < launchLimit; idx++ {
 		nextKey := next[idx]
@@ -220,12 +237,17 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 		// 2. The other is where we launch it.
 		// By incrementing the counter here, we ensure we don't overlaunch keys due to a race.
 		launched++
+		claims.Add(1)
 
 		// This is done in a Go routine so that we can process keys concurrently.
 		eg.Go(func() error {
 			// Start the work, moving it to be in-progress. If we are unsuccessful starting
 			// the work, then someone beat us to it, so move on to the next key.
 			oip, err := nextKey.Start(ctx)
+			if err == nil {
+				claimed.Add(1)
+			}
+			claims.Done()
 			if err != nil {
 				clog.DebugContextf(ctx, "Failed to start key %q: %v", nextKey.Name(), err)
 				return nil
@@ -422,10 +444,26 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 
 	// Return the future to wait on outstanding work, then drain any
 	// in-flight error events so they are not lost on shutdown.
-	return func() error {
+	future := func() error {
 		err := eg.Wait()
 		cfg.errors.drain()
 		return err
+	}
+	// The batch cap, not the slots or the queue, ended the pass when slots
+	// remain beyond this batch and a candidate is left that no one is running.
+	more := launched == launchLimit && launchLimit < openSlots
+	if more {
+		more = false
+		for _, k := range next[idx:] {
+			if _, ok := activeKeys[k.Name()]; !ok {
+				more = true
+				break
+			}
+		}
+	}
+	return future, more, func() int {
+		claims.Wait()
+		return int(claimed.Load())
 	}
 }
 

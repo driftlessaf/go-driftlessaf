@@ -27,12 +27,15 @@ var (
 const (
 	triggerDispatched = "dispatched"
 	triggerShed       = "shed"
+	// triggerRepass counts passes run in addition to the admitted trigger:
+	// one after a shed trigger, or one after a pass that hit its batch cap.
+	triggerRepass = "repass"
 )
 
 var mTriggers = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "workqueue_dispatch_triggers_total",
-		Help: "The number of dispatch trigger requests by result: dispatched (admitted to initiate a pass) or shed (dropped by the dispatch rate limit).",
+		Help: "The number of dispatch trigger requests by result, plus extra passes under repass: dispatched (admitted to initiate a pass), shed (dropped by the dispatch rate limit), or repass (not a request: an extra pass run at the next limiter slot after a shed trigger or a batch-capped pass).",
 	},
 	[]string{"service_name", "revision_name", "result"},
 )

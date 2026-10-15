@@ -119,7 +119,10 @@ func WithCandidateWindowFactor(factor int) Option {
 
 // WithDispatchPeriod sets the minimum interval between dispatch passes for
 // a Handler: at most one pass is admitted per period, and triggers beyond
-// that are acknowledged and dropped. The default is one second. It has no
+// that are acknowledged, except that one shed trigger at a time waits for the
+// next admission and runs a pass then; a pass that stops at its batch cap with
+// open slots and eligible work left is likewise followed by another at the
+// next admission. The default is one second. It has no
 // effect on Handle or HandleAsync, which initiate unconditionally.
 func WithDispatchPeriod(d time.Duration) Option {
 	return func(c *config) {
