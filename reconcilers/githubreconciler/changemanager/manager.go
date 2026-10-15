@@ -927,6 +927,14 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 			clog.DebugContextf(ctx, "Skipping review body with empty body author=%s", review.Author.Login)
 			continue
 		}
+		// An approval accepts the change as it stands, so its body ("LGTM")
+		// asks for nothing. Treating it as a finding sends the fixer after
+		// work that does not exist. Comments left on lines as part of an
+		// approval still arrive as review-thread findings.
+		if review.State == "APPROVED" {
+			clog.DebugContextf(ctx, "Skipping approving review body author=%s", review.Author.Login)
+			continue
+		}
 		if !authorTrusted(review.AuthorAssociation, review.Author.Login, review.Author.Typename, trustedAuthors) {
 			logUntrustedSkip(ctx, trustedAuthors, "Skipping untrusted review body author=%s association=%s", displayReviewAuthor(review.Author.Login, review.Author.Typename), review.AuthorAssociation)
 			continue

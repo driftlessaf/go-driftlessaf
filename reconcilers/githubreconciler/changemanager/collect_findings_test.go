@@ -263,6 +263,11 @@ func reviewBody(login, typename, association, body, oid, url string) gqlReviewBo
 	return r
 }
 
+func withState(r gqlReviewBodyNode, state string) gqlReviewBodyNode {
+	r.State = state
+	return r
+}
+
 func TestCollectReviewBodyFindings(t *testing.T) {
 	const (
 		botAllow = "some-reviewer[bot]"
@@ -312,6 +317,29 @@ func TestCollectReviewBodyFindings(t *testing.T) {
 			allowlist: allowBot,
 			wantCount: 1,
 			wantName:  "@" + botAllow,
+		},
+		{
+			name:      "approving review body skipped",
+			reviews:   []gqlReviewBodyNode{withState(reviewBody("maintainer", "User", "MEMBER", "LGTM.", head, "https://gh/approved"), "APPROVED")},
+			allowlist: nil,
+			wantCount: 0,
+		},
+		{
+			name:      "changes-requested review body kept",
+			reviews:   []gqlReviewBodyNode{withState(reviewBody("maintainer", "User", "MEMBER", "drop the capabilities block", head, "https://gh/changes"), "CHANGES_REQUESTED")},
+			allowlist: nil,
+			wantCount: 1,
+			wantName:  "@maintainer",
+		},
+		{
+			name: "only the non-approving review is kept",
+			reviews: []gqlReviewBodyNode{
+				withState(reviewBody("approver", "User", "MEMBER", "LGTM.", head, "https://gh/approved"), "APPROVED"),
+				reviewBody("commenter", "User", "MEMBER", "bound the read", head, "https://gh/comment"),
+			},
+			allowlist: nil,
+			wantCount: 1,
+			wantName:  "@commenter",
 		},
 		{
 			name:      "stale commit skipped",
