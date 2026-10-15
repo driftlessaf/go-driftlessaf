@@ -156,6 +156,12 @@ type metadata struct {
 	// bodies embedded before the log existed parseable and byte-identical
 	// when no entries exist.
 	ReasoningLog []ReasoningEntry `json:"reasoning_log,omitempty"`
+
+	// Headline is the caller's PR headline, carried across body regenerations
+	// so a title can name the whole change while later commits fix up parts of
+	// it; see Session.SetHeadline. omitempty keeps bodies embedded before the
+	// field existed parseable and byte-identical when no headline is set.
+	Headline string `json:"headline,omitempty"`
 }
 
 // ReasoningEntry is one iteration's agent-reasoning record, keyed by the

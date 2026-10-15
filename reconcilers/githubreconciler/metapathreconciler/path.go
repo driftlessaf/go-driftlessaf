@@ -296,12 +296,14 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			// directly without invoking the agent. The commit contributes no
 			// reasoning entry, but the log persisted from prior iterations
 			// must still render rather than drop from the regenerated body.
-			// Leave Headline empty so analyzer-only PRs use their path-based
-			// title fallback instead of the generic analyzer commit message.
+			// The commit contributes no headline either, so analyzer-only PRs
+			// use their path-based title fallback instead of the generic
+			// analyzer commit message.
 			if allFixed {
 				msg := commitMessage(diagnostics)
 				prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
-				prData.Headline = ""
+				prData.Headline = prHeadline(session.Headline(), "", usePRBranch)
+				session.SetHeadline(prData.Headline)
 				return msg, nil
 			}
 
@@ -353,15 +355,14 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 
 			// A commit is certain: record each pass's reasoning and render the
 			// accumulated log — prior iterations' entries plus these — for the
-			// PR body. The title headline anchors to the log's first entry while
-			// that primary commit remains on the branch. A fresh-from-default
-			// force-push uses the current headline because the old primary commit
-			// and its change are no longer present.
+			// PR body, and persist the headline for the runs that stack fix-up
+			// commits on this one.
 			for _, e := range outcome.entries {
 				session.AppendReasoning(e.headline, e.summary)
 			}
 			prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
-			prData.Headline = prHeadline(session.ReasoningLog(), commitHeadline(msg), usePRBranch)
+			prData.Headline = prHeadline(session.Headline(), commitHeadline(msg), usePRBranch)
+			session.SetHeadline(prData.Headline)
 
 			return msg, nil
 		})

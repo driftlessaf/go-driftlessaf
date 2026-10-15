@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package metapathreconciler
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -59,16 +60,18 @@ func commitHeadline(msg string) string {
 // unreadable title or trip GitHub's title length limit and fail the Upsert.
 const prHeadlineMaxChars = 150
 
-// prHeadline returns the headline anchoring the PR title. When the current
-// branch still contains the primary change, the first reasoning-log entry
-// keeps the title stable while follow-up fix-up commits stack on top. When the
-// branch was rebuilt from the default branch, the old primary commit was
-// discarded by the force-push, so the current headline must replace it.
-// Headlines longer than prHeadlineMaxChars are truncated with an ellipsis.
-func prHeadline(entries []changemanager.ReasoningEntry, current string, primaryStillPresent bool) string {
+// prHeadline picks the headline anchoring the PR title. A run that stacks a
+// commit on the PR branch keeps the headline recorded by the run that built
+// the branch: that commit still carries the change, and the PR title becomes
+// the squash commit's subject on the default branch. A run that builds the
+// branch from the default branch replaces every earlier commit, so its own
+// headline names the change. With no recorded headline, the current one
+// stands. Headlines longer than prHeadlineMaxChars are truncated with an
+// ellipsis.
+func prHeadline(recorded, current string, stacksOnPRBranch bool) string {
 	headline := current
-	if primaryStillPresent && len(entries) > 0 {
-		headline = entries[0].CommitHeadline
+	if stacksOnPRBranch {
+		headline = cmp.Or(recorded, current)
 	}
 	if runes := []rune(headline); len(runes) > prHeadlineMaxChars {
 		return string(runes[:prHeadlineMaxChars-1]) + "…"

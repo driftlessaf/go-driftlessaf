@@ -429,6 +429,21 @@ func (s *Session[T]) ReasoningLog() []ReasoningEntry {
 	return s.meta.ReasoningLog
 }
 
+// SetHeadline records the caller's PR headline. The next Upsert persists it in
+// the PR body, so a later reconcile reads it back through Headline. Like
+// AppendReasoning, call it only when a commit is being created: only then
+// does Upsert regenerate the body.
+func (s *Session[T]) SetHeadline(headline string) {
+	s.meta.Headline = headline
+}
+
+// Headline returns the headline recorded by SetHeadline, recovered from the
+// PR body or set in this session. It is empty when no PR exists or no
+// headline was recorded.
+func (s *Session[T]) Headline() string {
+	return s.meta.Headline
+}
+
 // ApplyReadyForReview adds a ready-for-review label to the PR, signaling
 // that the bot has stopped iterating because CI is green and human review
 // is needed. Idempotent: re-running when the label is already present is

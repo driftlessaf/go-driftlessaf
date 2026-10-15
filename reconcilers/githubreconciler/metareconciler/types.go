@@ -60,7 +60,9 @@ type PRData[Req any] struct {
 	// WithPRRenderFromResult. It is empty when a bot does not set that option,
 	// and empty when the agent did not run, so a title template that uses it
 	// needs an {{else}} branch. IssueURL and IssueNumber name the issue that
-	// started the run. Headline names the change that the agent made. It is
+	// started the run. Headline names the change that the agent made: on a
+	// run that adds a commit to an existing PR branch, it is the headline of
+	// the run that built the branch, which the PR body records. It is
 	// excluded from JSON, so it never takes part in change detection.
 	Headline string `json:"-"`
 

@@ -139,8 +139,10 @@ func WithReplaceLabelPrefixes[Req promptbuilder.Bindable, Resp Result, CB any](p
 // WithPRRenderFromResult configures the reconciler to set the render-only
 // PRData fields Headline and VariantSummary from the agent result. The
 // reconciler applies them inside the Upsert closure, after the agent runs and
-// before the PR title and body render, so the templates see them. A zero
-// PRRender return sets nothing. Off by default: both fields stay empty.
+// before the PR title and body render, so the templates see them. A run that
+// adds a commit to an existing PR branch keeps the Headline of the run that
+// built the branch rather than taking its own. A zero PRRender return sets
+// nothing. Off by default: both fields stay empty.
 func WithPRRenderFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) PRRender) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.prRenderFromResult = fn

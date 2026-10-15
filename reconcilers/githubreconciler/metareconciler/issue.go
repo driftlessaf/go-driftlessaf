@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package metareconciler
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -327,7 +328,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			prData.ReasoningSummary = agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars)
 			if r.prRenderFromResult != nil {
 				render := r.prRenderFromResult(result)
-				prData.Headline = render.Headline
+				prData.Headline = prHeadline(changeSession.Headline(), render.Headline, usePRBranch)
 				prData.VariantSummary = render.VariantSummary
 			}
 
@@ -355,6 +356,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 				return "", errIssueInactive
 			}
 
+			// A commit is certain, so the regenerated body persists the
+			// headline for the runs that stack fix-up commits on this one.
+			changeSession.SetHeadline(prData.Headline)
 			return result.GetCommitMessage(), nil
 		})
 	})
@@ -561,6 +565,19 @@ func timestamp(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// prHeadline picks the headline for the PR title. A run that stacks a commit
+// on the PR branch keeps the headline recorded by the run that built the
+// branch: that commit still carries the change, and the PR title becomes the
+// squash commit's subject on the default branch. A run that builds the branch
+// from the default branch replaces every earlier commit, so its own headline
+// names the change. With no recorded headline, the current one stands.
+func prHeadline(recorded, current string, stacksOnPRBranch bool) string {
+	if stacksOnPRBranch {
+		return cmp.Or(recorded, current)
+	}
+	return current
 }
 
 // hasLabel checks if an issue has a specific label.
