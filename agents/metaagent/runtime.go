@@ -35,6 +35,12 @@ type TargetConfig struct {
 	Backend  string               `env:"BACKEND"`
 	// ResourceLabels are added to adapter labels without replacing provider labels.
 	ResourceLabels map[string]string
+	// MaxTokens caps each turn's output for an agent built from the target.
+	// NewWithTarget applies it when Config.MaxTokens is zero, and constructors
+	// with a fixed cap, such as judge.NewWithTarget, use it in place of that
+	// cap. Zero keeps every constructor's default. It has no env tag: a role's
+	// cap comes from code, not from the environment.
+	MaxTokens int64
 }
 
 // Runtime owns a route catalog and reusable routers for one application startup.
@@ -105,6 +111,12 @@ func (r *Runtime) Target(config TargetConfig) Target {
 	return Target{runtime: r, config: config}
 }
 
+// MaxTokens returns the target's per-turn output cap. Zero means the target
+// keeps each constructor's default.
+func (t Target) MaxTokens() int64 {
+	return t.config.MaxTokens
+}
+
 // Resolve returns the shared router and exact selection without binding an
 // adapter or loading credentials. Routers are shared by backend and serving
 // region, independent of the model. The caller must still validate its own
@@ -113,6 +125,10 @@ func (t Target) Resolve() (*Router, modelrouter.Selection, error) {
 	selection := modelrouter.Selection{Provider: t.config.Provider, LogicalModel: t.config.Model}
 	if t.runtime == nil || t.runtime.routes == nil {
 		return nil, selection, fmt.Errorf("%w: target has no runtime", ErrInvalidRouter)
+	}
+	if t.config.MaxTokens < 0 {
+		return nil, selection, fmt.Errorf("target provider %q model %q: max tokens must not be negative, got %d",
+			selection.Provider, selection.LogicalModel, t.config.MaxTokens)
 	}
 	router, err := t.runtime.resolve(t.config, selection)
 	if err != nil {
@@ -147,11 +163,13 @@ func (r *Runtime) resolve(config TargetConfig, selection modelrouter.Selection) 
 
 // NewWithTarget resolves a startup-owned target and delegates to NewRouted.
 // It preserves configuration, capability, schema, and adapter validation and
-// never falls back to a different provider or the legacy constructor.
+// never falls back to a different provider or the legacy constructor. A zero
+// config.MaxTokens takes the target's cap.
 func NewWithTarget[Req promptbuilder.Bindable, Resp, CB any](ctx context.Context, target Target, config Config[Resp, CB]) (Agent[Req, Resp, CB], error) {
 	router, selection, err := target.Resolve()
 	if err != nil {
 		return nil, err
 	}
+	config.MaxTokens = cmp.Or(config.MaxTokens, target.config.MaxTokens)
 	return NewRouted[Req](ctx, router, selection, config)
 }

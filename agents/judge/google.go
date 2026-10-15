@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package judge
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -50,9 +51,12 @@ type googleJudgeConstruction struct {
 	samplingParams  bool
 	resourceLabels  map[string]string
 	attribution     *agenttrace.Attribution
+	// maxOutputTokens caps each judgement's output. Zero selects
+	// defaultMaxTokens.
+	maxOutputTokens int32
 }
 
-func newRoutedGoogle(binding metaagent.GoogleGenAIBinding) (Interface, error) {
+func newRoutedGoogle(binding metaagent.GoogleGenAIBinding, maxOutputTokens int32) (Interface, error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
 	attribution.Serving.Location = binding.ResourceLabels()["region"]
@@ -64,6 +68,7 @@ func newRoutedGoogle(binding metaagent.GoogleGenAIBinding) (Interface, error) {
 		samplingParams:  plan.Capabilities().SamplingParameters,
 		resourceLabels:  binding.ResourceLabels(),
 		attribution:     &attribution,
+		maxOutputTokens: maxOutputTokens,
 	})
 }
 
@@ -104,7 +109,7 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 		// stable rubric in the system instruction preserves the prompt boundary
 		// while allowing Gemini's implicit prefix caching where eligible.
 		googleexecutor.WithoutCacheControl[*Request, *Judgement](),
-		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](8192),
+		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](cmp.Or(construction.maxOutputTokens, int32(defaultMaxTokens))),
 		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
 		googleexecutor.WithResponseSchema[*Request, *Judgement](responseSchema),
 	}

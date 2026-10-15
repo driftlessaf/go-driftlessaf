@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package judge
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -50,9 +51,11 @@ type claudeJudgeConstruction struct {
 	promptCaching   bool
 	resourceLabels  map[string]string
 	attribution     *agenttrace.Attribution
+	// maxTokens caps each judgement's output. Zero selects defaultMaxTokens.
+	maxTokens int64
 }
 
-func newRoutedClaude(binding metaagent.AnthropicMessagesBinding) (Interface, error) {
+func newRoutedClaude(binding metaagent.AnthropicMessagesBinding, maxTokens int64) (Interface, error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
 	attribution.Serving.Location = binding.ResourceLabels()["region"]
@@ -65,6 +68,7 @@ func newRoutedClaude(binding metaagent.AnthropicMessagesBinding) (Interface, err
 		promptCaching:   plan.Capabilities().PromptCaching,
 		resourceLabels:  binding.ResourceLabels(),
 		attribution:     &attribution,
+		maxTokens:       maxTokens,
 	})
 }
 
@@ -72,7 +76,7 @@ func newClaudeWithMessages(construction claudeJudgeConstruction, opts ...claudee
 	// Create one executor per mode using the pre-parsed templates from
 	// prompts.go; executors apply options read-only, so one slice is shared.
 	execOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
-		claudeexecutor.WithMaxTokens[*Request, *Judgement](8192),
+		claudeexecutor.WithMaxTokens[*Request, *Judgement](cmp.Or(construction.maxTokens, defaultMaxTokens)),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
 	}
 	if construction.routed {
