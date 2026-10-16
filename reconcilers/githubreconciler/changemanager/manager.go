@@ -162,6 +162,12 @@ type metadata struct {
 	// it; see Session.SetHeadline. omitempty keeps bodies embedded before the
 	// field existed parseable and byte-identical when no headline is set.
 	Headline string `json:"headline,omitempty"`
+
+	// DraftNote is the note a run that stopped early published the pull
+	// request with (see Session.PublishAsDraft). Later runs keep it in the
+	// body while the pull request stays a draft, so a draft whose change is
+	// partial goes on saying so after the bot iterates on it.
+	DraftNote string `json:"draft_note,omitempty"`
 }
 
 // ReasoningEntry is one iteration's agent-reasoning record, keyed by the

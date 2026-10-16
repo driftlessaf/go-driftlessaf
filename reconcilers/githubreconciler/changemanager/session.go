@@ -21,6 +21,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/runbudget"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v88/github"
@@ -105,6 +106,10 @@ type Session[T any] struct {
 	// still owes a response. HasUnresolvedReviews consults it so a thread the bot
 	// has already answered does not renew the commit budget.
 	reviewThreadsAwaitingReply map[string]struct{}
+
+	// draftNote, when non-empty, makes the in-flight Upsert publish as a draft
+	// and appends the note to the pull request body; see PublishAsDraft.
+	draftNote string
 
 	// threads queues the review-thread actions the agent requests during the
 	// run; Upsert applies them once the run's outcome is known (see
@@ -822,6 +827,59 @@ func (s *Session[T]) skipMarkerCommentIfForbidden(ctx context.Context, number in
 	return true, fmt.Errorf("%s: %w", op, err)
 }
 
+// PublishAsDraft asks the in-flight Upsert to publish the pushed changes as a
+// draft and to append note to the pull request body, after the body template
+// and before the standard footer. A new pull request opens as a draft; an
+// existing one that is not a draft is converted to one, since GitHub's REST
+// edit ignores the draft flag. It is meant for a run that had to stop before
+// the agent finished (its time budget ran out, or the platform ended the
+// request), so a partial change is never presented as ready for review. The
+// note is recorded in the pull request body's metadata: a later session's
+// Upsert keeps it in the body for as long as the pull request stays a draft,
+// and drops it once someone marks the pull request ready for review; Upsert
+// never marks it ready itself. Nothing else about the pull request changes,
+// so a later Upsert calls makeChanges only for the usual reasons (a rebase,
+// CI failures, review findings, changed data, or a label to add or remove).
+// A caller that wants the agent to resume the partial work must arrange that
+// itself.
+func (s *Session[T]) PublishAsDraft(note string) {
+	s.draftNote = note
+}
+
+// settleDraftNote returns the note the body carries on this Upsert and records
+// it in the metadata: this run's note when it stopped early, the recorded note
+// while the pull request is still a draft, and none once it is not, since a
+// pull request marked ready for review no longer needs to explain being a
+// draft.
+func (s *Session[T]) settleDraftNote() string {
+	switch {
+	case s.draftNote != "":
+		s.meta.DraftNote = s.draftNote
+	case !s.prDraft:
+		s.meta.DraftNote = ""
+	}
+	return s.meta.DraftNote
+}
+
+// convertToDraft converts the existing pull request to a draft through the
+// GraphQL mutation, which is the only API that can do so.
+func (s *Session[T]) convertToDraft(ctx context.Context, nodeID string) error {
+	if s.gqlClient == nil {
+		return errors.New("no GraphQL client on session")
+	}
+	if nodeID == "" {
+		return errors.New("pull request has no node id")
+	}
+	var mutation struct {
+		ConvertPullRequestToDraft struct {
+			ClientMutationId string
+		} `graphql:"convertPullRequestToDraft(input: $input)"`
+	}
+	return s.gqlClient.Mutate(ctx, "ConvertPullRequestToDraft", &mutation, githubv4.ConvertPullRequestToDraftInput{
+		PullRequestID: githubv4.ID(nodeID),
+	}, nil)
+}
+
 // StoredData returns the PRData embedded in the existing PR body, or false if
 // no PR exists or the data cannot be extracted. Callers can use this on
 // ITERATION passes to recover request metadata that was embedded during the
@@ -1069,7 +1127,9 @@ func (s *Session[T]) BeginThreadActionScope() (discard func()) {
 
 // flushThreadActions applies the review-thread replies and resolutions the
 // agent requested during the run, now that the run's outcome is known.
-// committed reports whether the run's commit reached the branch. When it did,
+// committed reports whether the run's finished change reached the branch; a
+// partial change from a run that stopped early (see PublishAsDraft) does not
+// count. When it did,
 // every reply is posted and every requested thread resolved, replies first so
 // a resolved thread carries its disposition. When nothing was committed, only
 // replies on threads the agent did not ask to resolve are posted: those are
@@ -1102,7 +1162,7 @@ func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
 			}
 		}
 		if dropped := len(replies) - len(kept); dropped > 0 || len(resolves) > 0 {
-			clog.WarnContext(ctx, "dropping review-thread actions the agent requested: the run produced no commit", "resolutions", len(resolves), "replies", dropped)
+			clog.WarnContext(ctx, "dropping review-thread actions the agent requested: the run committed no finished change", "resolutions", len(resolves), "replies", dropped)
 		}
 		replies, resolves = kept, nil
 	}
@@ -1315,6 +1375,13 @@ func (s *Session[T]) Upsert(
 	// the push, only the refutations on a no-change run, and not at all on a
 	// failed run (see flushThreadActions).
 	err = makeChanges(ctx, s.branchName)
+
+	// Publication phase: the branch is pushed (or the outcome is known), so
+	// from here on the request's cancellation must not discard it. The derived
+	// context is a no-op without a run budget (see runbudget.PublicationContext).
+	ctx, cancelPublication := runbudget.PublicationContext(ctx)
+	defer cancelPublication()
+
 	switch {
 	case errors.Is(err, ErrNoChanges) || errors.Is(err, clonemanager.ErrNothingToCommit):
 		s.flushThreadActions(ctx, false)
@@ -1323,7 +1390,17 @@ func (s *Session[T]) Upsert(
 		s.dropThreadActions(ctx)
 		return "", fmt.Errorf("making changes: %w", err)
 	}
-	s.flushThreadActions(ctx, true)
+	// A run that stopped early pushed a partial change, which cannot vouch
+	// for the findings the agent marked fixed along the way, so their
+	// resolutions are dropped and the threads stay open for the next run.
+	s.flushThreadActions(ctx, s.draftNote == "")
+
+	// A run that stopped early publishes as a draft with its note up front, so
+	// the partial change is never presented as ready for review.
+	draftNote := s.settleDraftNote()
+	if draftNote != "" {
+		draft = true
+	}
 
 	// Catch agent-revert: makeChanges pushed commits, but they net-zero against
 	// base. When closeOnEmptyDiff is false, fall through to update so the body
@@ -1351,6 +1428,9 @@ func (s *Session[T]) Upsert(
 	}
 
 	suffix := fmt.Sprintf("\n\n> **Note:** If you need to make manual changes to this PR, apply the `skip:%s` label. This gives full control of the PR to human operators: the automation will not post updates, close the PR, or delete the branch.", s.manager.identity)
+	if draftNote != "" {
+		suffix = "\n\n" + draftNote + suffix
+	}
 
 	// Append trace ID so developers can map this PR back to the agent trace.
 	if spanCtx := trace.SpanFromContext(ctx).SpanContext(); spanCtx.IsValid() {
@@ -1419,6 +1499,18 @@ func (s *Session[T]) Upsert(
 	})
 	if err != nil {
 		return "", fmt.Errorf("updating pull request: %w", err)
+	}
+
+	// The REST edit above ignores the draft flag, so a run that stopped early
+	// converts a ready pull request back to a draft here. Best-effort: the body
+	// already carries the note, and if the conversion fails a later run finds a
+	// ready pull request and drops the note as it would after a human marked it
+	// ready. Only this run's own stop converts: a recorded note never undoes a
+	// human marking the pull request ready.
+	if s.draftNote != "" && !freshPR.GetDraft() {
+		if err := s.convertToDraft(ctx, freshPR.GetNodeID()); err != nil {
+			clog.WarnContext(ctx, "Failed to convert pull request to draft", "pr", s.prNumber, "error", err)
+		}
 	}
 
 	// Only add labels missing from the PR, preserving labels set by other bots

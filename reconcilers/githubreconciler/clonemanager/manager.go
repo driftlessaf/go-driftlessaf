@@ -17,6 +17,7 @@ import (
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/commitscope"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/runbudget"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gitenv"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/gitexec/gogit"
@@ -502,6 +503,13 @@ func resolveRefName(ref string) plumbing.ReferenceName {
 // The context passed to updateFn carries the worktree (see WithWorktree), so
 // code the closure cannot thread the worktree to — result validators, tool
 // handlers — can recover it via WorktreeFromContext.
+//
+// Once updateFn returns, the commit and push run under the publication context
+// derived from ctx (see runbudget.PublicationContext): when the reconcile
+// carries a run budget that context is detached from the request's
+// cancellation and bounded by the budget, so a request that ends after the
+// update function produced its result cannot discard the result. Without a
+// budget the commit and push run under ctx.
 func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updateFn UpdateFunc) error {
 	if updateFn == nil {
 		return errors.New("update function cannot be nil")
@@ -544,6 +552,12 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 	if commitMessage == "" {
 		return errors.New("commit message cannot be empty")
 	}
+
+	// Publication phase: the result is in hand, so from here on the request's
+	// cancellation must not discard it. The derived context is a no-op without
+	// a run budget.
+	ctx, cancelPublication := runbudget.PublicationContext(ctx)
+	defer cancelPublication()
 
 	if err := l.manager.commitChanges(ctx, l.clone.repo, scope, baseTree, commitMessage); err != nil {
 		return fmt.Errorf("committing changes: %w", err)

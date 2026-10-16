@@ -183,15 +183,19 @@ func TestDropThreadActions(t *testing.T) {
 
 // TestUpsertAppliesThreadActionsByOutcome drives Upsert with a makeChanges
 // that queues a fix reply and a resolution, and checks the mutations are sent
-// only after makeChanges returns and only when it pushed a change.
+// only after makeChanges returns and only when it pushed a finished change. A
+// partial change published as a draft cannot vouch for the fix, so a thread it
+// resolved, possibly a security finding, would otherwise close unreviewed.
 func TestUpsertAppliesThreadActionsByOutcome(t *testing.T) {
 	tests := []struct {
 		name      string
+		draft     bool
 		makeErr   error
 		wantCalls []string
 		wantErrIs error
 	}{
 		{name: "pushed change applies the reply and the resolution", wantCalls: []string{"reply:PRRT_a", "resolve:PRRT_a"}},
+		{name: "partial change published as a draft drops a fix claim and its resolution", draft: true},
 		{name: "no change drops a fix claim and its resolution", makeErr: ErrNoChanges, wantErrIs: ErrNoChanges},
 		{name: "failed run drops everything", makeErr: errors.New("verification failed"), wantErrIs: errors.New("verification failed")},
 	}
@@ -225,6 +229,9 @@ func TestUpsertAppliesThreadActionsByOutcome(t *testing.T) {
 				branchName: "test-bot/pkg",
 				ref:        "main",
 				findings:   []callbacks.Finding{{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"}},
+			}
+			if tc.draft {
+				session.PublishAsDraft("The run stopped before the agent finished.")
 			}
 
 			var sentDuringChanges int
