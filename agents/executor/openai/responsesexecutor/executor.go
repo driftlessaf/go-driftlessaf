@@ -140,7 +140,11 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 	if err != nil {
 		return response, err
 	}
-	prompt, err = execshared.AppendUserPromptSuffix(prompt, e.config.UserPromptSuffix)
+	suffix, err := promptbuilder.BindSuffix(e.config.UserPromptSuffix, request)
+	if err != nil {
+		return response, err
+	}
+	prompt, err = execshared.AppendUserPromptSuffix(prompt, suffix)
 	if err != nil {
 		return response, err
 	}

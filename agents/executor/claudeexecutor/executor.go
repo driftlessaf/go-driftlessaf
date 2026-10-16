@@ -115,7 +115,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// marker and is cleared by the rotation once the conversation outgrows it.
 	cacheFirstUserBlock bool
 
-	// userPromptSuffix, when non-nil, is a static operator-authored prompt
+	// userPromptSuffix, when non-nil, is an operator-authored prompt
 	// rendered as a second text block of the initial user message, after the
 	// rendered request prompt. Splitting the initial message this way keeps a
 	// varying trailing instruction out of the shared cacheable prefix: cache
@@ -124,9 +124,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// changeset through different lenses) share the cache entry covering the
 	// tool definitions, the system prompt, and the leading payload block.
 	// Setting the option implies cacheFirstUserBlock — the breakpoint on the
-	// leading block is what ends the shareable prefix. The request is never
-	// bound into the suffix; it is built once per Execute. Set via
-	// WithUserPromptSuffix.
+	// leading block is what ends the shareable prefix. Only a
+	// promptbuilder.SuffixBindable request is bound into it; it is built once
+	// per Execute. Set via WithUserPromptSuffix.
 	userPromptSuffix *promptbuilder.Prompt
 
 	// maxToolCallsBeforeFinalize, when greater than zero, bounds the agentic loop by
@@ -347,13 +347,17 @@ func (e *executor[Request, Response]) Execute(
 		return response, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Build the operator-authored user prompt suffix once, before the trace
-	// starts, so the recorded trace prompt reflects everything the model was
-	// given. The request is not bound into the suffix — it is static across
-	// executions by design (see WithUserPromptSuffix); empty means absent.
+	// Build the user prompt suffix once, before the trace starts, so the
+	// recorded trace prompt reflects everything the model was given. Only a
+	// promptbuilder.SuffixBindable request is bound into it (see
+	// WithUserPromptSuffix); empty means absent.
 	promptSuffix := ""
 	if e.userPromptSuffix != nil {
-		promptSuffix, err = e.userPromptSuffix.Build()
+		suffix, err := promptbuilder.BindSuffix(e.userPromptSuffix, request)
+		if err != nil {
+			return response, err
+		}
+		promptSuffix, err = suffix.Build()
 		if err != nil {
 			return response, fmt.Errorf("failed to build user prompt suffix: %w", err)
 		}

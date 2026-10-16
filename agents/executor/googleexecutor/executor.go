@@ -77,9 +77,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	maxTurns           int // maximum conversation turns before aborting
 	systemInstructions *promptbuilder.Prompt
 
-	// userPromptSuffix, when non-nil, is a static operator-authored prompt
-	// appended to the built user prompt with a blank-line separator. See
-	// WithUserPromptSuffix; the request is never bound into it.
+	// userPromptSuffix, when non-nil, is an operator-authored prompt appended
+	// to the built user prompt with a blank-line separator. See
+	// WithUserPromptSuffix for which requests are bound into it.
 	userPromptSuffix *promptbuilder.Prompt
 
 	responseMIMEType string
@@ -253,11 +253,15 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Append the static user prompt suffix, when configured. Gemini has no
+	// Append the user prompt suffix, when configured. Gemini has no
 	// per-block prompt-cache semantics (context caching covers system
 	// instructions and tools via CachedContent), so plain concatenation
 	// preserves the prompt content without any block layout.
-	prompt, err = execshared.AppendUserPromptSuffix(prompt, e.userPromptSuffix)
+	suffix, err := promptbuilder.BindSuffix(e.userPromptSuffix, request)
+	if err != nil {
+		return resp, err
+	}
+	prompt, err = execshared.AppendUserPromptSuffix(prompt, suffix)
 	if err != nil {
 		return resp, err
 	}

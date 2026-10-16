@@ -384,7 +384,7 @@ func WithCacheFirstUserBlock[Request promptbuilder.Bindable, Response any]() Opt
 	}
 }
 
-// WithUserPromptSuffix renders a static, operator-authored prompt as a second
+// WithUserPromptSuffix renders an operator-authored prompt as a second
 // text block of the initial user message, after the rendered request prompt.
 //
 // This exists for fleets of executions that share one large payload but vary
@@ -399,8 +399,10 @@ func WithCacheFirstUserBlock[Request promptbuilder.Bindable, Response any]() Opt
 //
 // Setting this option implies WithCacheFirstUserBlock: the leading block gets
 // the cache breakpoint that ends the shareable prefix — without that marker
-// the split would buy nothing. The suffix must be fully bound by the caller;
-// the request is never bound into it, and it is built once per Execute.
+// the split would buy nothing. A request that implements
+// promptbuilder.SuffixBindable binds its per-execution values into the suffix
+// (BindSuffix); for any other request the suffix must be fully bound by the
+// caller. It is built once per Execute.
 // See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {

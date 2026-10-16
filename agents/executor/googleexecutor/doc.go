@@ -62,7 +62,7 @@ The executor supports various configuration options:
   - WithoutTemperature: Omit temperature when an explicit route disallows sampling parameters
   - WithMaxOutputTokens: Set maximum response length
   - WithSystemInstructions: Provide system-level instructions
-  - WithUserPromptSuffix: Append a static prompt to the built user prompt
+  - WithUserPromptSuffix: Append a prompt to the built user prompt
   - WithResponseMIMEType: Set response format (e.g., "application/json")
   - WithResponseSchema: Define structured output schema
   - WithThinking: Enable thinking mode with a token budget

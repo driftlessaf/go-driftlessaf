@@ -197,7 +197,7 @@ func WithAppendedSystemInstructions[Request promptbuilder.Bindable, Response any
 	}
 }
 
-// WithUserPromptSuffix appends a static, operator-authored prompt to the end
+// WithUserPromptSuffix appends an operator-authored prompt to the end
 // of the built user prompt, separated by a blank line. It is the Gemini
 // counterpart of the Claude executor's user-prompt-suffix option: agents that
 // share one large payload but vary a small trailing instruction (for example
@@ -205,8 +205,9 @@ func WithAppendedSystemInstructions[Request promptbuilder.Bindable, Response any
 // the payload in the main prompt and the varying instruction in the suffix.
 // Vertex AI context caching has no per-block prefix semantics — it caches
 // system instructions and tools via CachedContent — so the suffix is simply
-// concatenated and there is no cache-shaping side effect. The suffix must be
-// fully bound by the caller; the request is never bound into it.
+// concatenated and there is no cache-shaping side effect. A request that
+// implements promptbuilder.SuffixBindable binds its per-execution values into
+// the suffix; for any other request it must be fully bound by the caller.
 func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if suffix == nil {

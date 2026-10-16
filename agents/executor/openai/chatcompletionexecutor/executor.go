@@ -60,9 +60,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	systemInstructions *promptbuilder.Prompt
 	prompt             *promptbuilder.Prompt
 
-	// userPromptSuffix, when non-nil, is a static operator-authored prompt
-	// appended to the built user prompt with a blank-line separator. See
-	// WithUserPromptSuffix; the request is never bound into it.
+	// userPromptSuffix, when non-nil, is an operator-authored prompt appended
+	// to the built user prompt with a blank-line separator. See
+	// WithUserPromptSuffix for which requests are bound into it.
 	userPromptSuffix *promptbuilder.Prompt
 
 	maxTokens       int64
@@ -162,10 +162,14 @@ func (e *executor[Request, Response]) Execute(
 		return response, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Append the static user prompt suffix, when configured. The
+	// Append the user prompt suffix, when configured. The
 	// OpenAI-compatible API has no per-block prompt-cache semantics, so plain
 	// concatenation preserves the prompt content without any block layout.
-	prompt, err = execshared.AppendUserPromptSuffix(prompt, e.userPromptSuffix)
+	suffix, err := promptbuilder.BindSuffix(e.userPromptSuffix, request)
+	if err != nil {
+		return response, err
+	}
+	prompt, err = execshared.AppendUserPromptSuffix(prompt, suffix)
 	if err != nil {
 		return response, err
 	}

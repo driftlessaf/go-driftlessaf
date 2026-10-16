@@ -72,8 +72,9 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)
 //   - WithCacheTTL: Set the cache breakpoint lifetime to 5 minutes (default) or 1 hour
-//   - WithUserPromptSuffix: Render a static suffix as a second block of the
-//     initial user message, outside the shared cacheable prefix (off by default)
+//   - WithUserPromptSuffix: Render a suffix, per execution for a
+//     promptbuilder.SuffixBindable request, as a second block of the initial
+//     user message, outside the shared cacheable prefix (off by default)
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //   - WithTruncatedToolCallRetries: Bound the retries when the output-token cap
@@ -109,7 +110,8 @@ SPDX-License-Identifier: Apache-2.0
 //
 // WithUserPromptSuffix extends the shared prefix across executions: it splits
 // the initial user message into a leading payload block (the rendered prompt,
-// carrying a cache breakpoint) and a trailing static suffix block. Because
+// carrying a cache breakpoint) and a trailing suffix block, which a
+// promptbuilder.SuffixBindable request binds per execution. Because
 // cache entries are matched at breakpoint block boundaries, executions that
 // share the payload but differ only in the suffix — for example multi-pass
 // reviewers examining one changeset through different lenses — read the

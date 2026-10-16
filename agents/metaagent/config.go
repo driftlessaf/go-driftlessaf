@@ -26,14 +26,16 @@ type Config[Resp, CB any] struct {
 	// The Req type is bound to this template via its Bind method.
 	UserPrompt *promptbuilder.Prompt
 
-	// UserPromptSuffix is an optional static prompt appended as a separate
-	// trailing block of the initial user message, after the bound UserPrompt.
-	// When set, the leading block (UserPrompt with the request bound) gets a
+	// UserPromptSuffix is an optional prompt appended as a separate trailing
+	// block of the initial user message, after the bound UserPrompt. When
+	// set, the leading block (UserPrompt with the request bound) gets a
 	// cache breakpoint so executions that differ only in the suffix share its
 	// cache entry. Intended for multi-pass agents reviewing one payload
 	// through different lenses: the payload rides in UserPrompt, the per-pass
-	// lens in the suffix. The request is never bound into the suffix — it
-	// must be fully bound already. On the Gemini and OpenAI-compatible
+	// lens in the suffix. A request that implements
+	// promptbuilder.SuffixBindable binds its per-execution lens into the
+	// suffix; any other request leaves it as it is, so it must be fully bound
+	// already. On the Gemini and OpenAI-compatible
 	// backends (no per-block cache semantics) the built suffix is
 	// concatenated onto the user prompt with a blank-line separator.
 	UserPromptSuffix *promptbuilder.Prompt
