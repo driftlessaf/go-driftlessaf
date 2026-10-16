@@ -8,7 +8,9 @@ package callbacks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -23,40 +25,65 @@ import (
 // to whole lines. A line longer than this is left cut.
 const lineBound = 64 << 10
 
+const (
+	maxReadBytes       = 1 << 20
+	maxSearchFileBytes = 4 << 20
+	maxSearchMatches   = 1000
+	maxSearchOffset    = 10000
+)
+
+var errSearchFileTooLarge = errors.New("file exceeds search byte limit")
+
 // LocalWorktree returns a WorktreeCallbacks backed by r, an os.Root that
 // sandboxes all file operations within a single directory tree. Path traversal
 // outside the root is prevented by the os.Root implementation.
+// ReadFile caps a window at 1 MiB plus at most 64 KiB of line alignment on
+// either side, including when limit is negative. SearchCodebase caps pages at
+// 1000 matches, rejects offsets above 10000, and errors on files over 4 MiB;
+// narrow the path or filter when a search exceeds these limits.
 func LocalWorktree(r *os.Root) WorktreeCallbacks {
 	return WorktreeCallbacks{
-		ReadFile: func(_ context.Context, path string, offset int64, limit int) (ReadResult, error) {
+		ReadFile: func(ctx context.Context, path string, offset int64, limit int) (ReadResult, error) {
 			if err := checkOffset(offset); err != nil {
 				return ReadResult{}, err
 			}
-			data, err := r.ReadFile(path)
+			if err := ctx.Err(); err != nil {
+				return ReadResult{}, err
+			}
+			f, err := openRegularFile(r, path)
 			if err != nil {
 				return ReadResult{}, err
 			}
-			size := int64(len(data))
+			defer f.Close()
+			info, err := f.Stat()
+			if err != nil {
+				return ReadResult{}, err
+			}
+			size := info.Size()
 			if offset >= size {
 				return ReadResult{}, nil
 			}
-			start, end := offset, size
-			if limit >= 0 && offset+int64(limit) < size {
-				end = offset + int64(limit)
+			if limit < 0 || limit > maxReadBytes {
+				limit = maxReadBytes
 			}
+			start, end := offset, offset+min(int64(limit), size-offset)
 			// Align the window to whole lines so the agent never sees a
 			// first line with its indentation cut off.
 			if start > 0 {
-				if start, err = textedit.LineStart(bytes.NewReader(data), start, lineBound); err != nil {
+				if start, err = textedit.LineStart(f, start, lineBound); err != nil {
 					return ReadResult{}, err
 				}
 			}
 			if end < size {
-				if end, err = textedit.LineEnd(bytes.NewReader(data), end, size, lineBound); err != nil {
+				if end, err = textedit.LineEnd(f, end, size, lineBound); err != nil {
 					return ReadResult{}, err
 				}
 			}
-			result := ReadResult{Content: string(data[start:end]), Offset: start}
+			data := make([]byte, end-start)
+			if _, err := f.ReadAt(data, start); err != nil {
+				return ReadResult{}, err
+			}
+			result := ReadResult{Content: string(data), Offset: start}
 			if end < size {
 				result.NextOffset = &end
 				result.Remaining = size - end
@@ -194,39 +221,50 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			return ListResult{Entries: filtered}, nil
 		},
 
-		SearchCodebase: func(_ context.Context, path, pattern, filter string, offset, limit int) (SearchResult, error) {
+		SearchCodebase: func(ctx context.Context, path, pattern, filter string, offset, limit int) (SearchResult, error) {
 			if err := checkOffset(int64(offset)); err != nil {
 				return SearchResult{}, err
+			}
+			if offset > maxSearchOffset {
+				return SearchResult{}, fmt.Errorf("search offset exceeds %d; narrow the path or filter", maxSearchOffset)
+			}
+			if limit <= 0 || limit > maxSearchMatches {
+				limit = maxSearchMatches
 			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				return SearchResult{}, fmt.Errorf("invalid pattern: %w", err)
 			}
-			var allMatches []Match
-			if err := localWalkDir(r, path, filter, func(relPath string, data []byte) {
-				for _, loc := range re.FindAllIndex(data, -1) {
-					allMatches = append(allMatches, Match{
+			var result SearchResult
+			skip := offset
+			if err := localWalkDir(ctx, r, path, filter, func(relPath string, data []byte) error {
+				// One extra match distinguishes a full final page from one
+				// with a continuation, without collecting the rest of the tree.
+				for _, loc := range re.FindAllIndex(data, skip+limit-len(result.Matches)+1) {
+					if skip > 0 {
+						skip--
+						continue
+					}
+					if len(result.Matches) == limit {
+						next := offset + len(result.Matches)
+						if next > maxSearchOffset {
+							return fmt.Errorf("search continuation exceeds offset %d; narrow the path or filter", maxSearchOffset)
+						}
+						result.NextOffset = &next
+						result.HasMore = true
+						return fs.SkipAll
+					}
+					result.Matches = append(result.Matches, Match{
 						Path:   relPath,
 						Offset: int64(loc[0]),
 						Length: loc[1] - loc[0],
 					})
 				}
+				return nil
 			}); err != nil {
 				return SearchResult{}, err
 			}
-			if offset >= len(allMatches) {
-				return SearchResult{}, nil
-			}
-			allMatches = allMatches[offset:]
-			if limit > 0 && limit < len(allMatches) {
-				next := offset + limit
-				return SearchResult{
-					Matches:    allMatches[:limit],
-					NextOffset: &next,
-					HasMore:    true,
-				}, nil
-			}
-			return SearchResult{Matches: allMatches}, nil
+			return result, nil
 		},
 	}
 }
@@ -256,11 +294,14 @@ func checkOffset(offset int64) error {
 //
 // dir is cleaned first, because fs.ValidPath rejects equivalent forms such as
 // "./os", "os/" and "a/../os". An error on the walk root is returned wrapped.
-// Errors on entries below the root are skipped, so one unreadable file or
-// directory does not fail the search.
-func localWalkDir(r *os.Root, dir, filter string, fn func(relPath string, data []byte)) error {
+// Unreadable entries below the root are skipped. Oversized files fail the
+// search so incomplete coverage is not reported as a complete result.
+func localWalkDir(ctx context.Context, r *os.Root, dir, filter string, fn func(relPath string, data []byte) error) error {
 	dir = path.Clean(dir)
 	return fs.WalkDir(r.FS(), dir, func(name string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			if name == dir { // d may be nil here
 				return fmt.Errorf("search root %q: %w", dir, err)
@@ -279,11 +320,60 @@ func localWalkDir(r *os.Root, dir, filter string, fn func(relPath string, data [
 				return nil
 			}
 		}
-		data, readErr := r.ReadFile(name)
+		data, readErr := readSearchFile(r, name)
 		if readErr != nil {
+			if errors.Is(readErr, errSearchFileTooLarge) {
+				return readErr
+			}
 			return nil
 		}
-		fn(name, data)
-		return nil
+		return fn(name, data)
 	})
+}
+
+func readSearchFile(r *os.Root, name string) ([]byte, error) {
+	f, err := openRegularFile(r, name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxSearchFileBytes {
+		return nil, fmt.Errorf("%s: %w (%d bytes); narrow the path or filter", name, errSearchFileTooLarge, maxSearchFileBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxSearchFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxSearchFileBytes {
+		return nil, fmt.Errorf("%s: %w (%d bytes); narrow the path or filter", name, errSearchFileTooLarge, maxSearchFileBytes)
+	}
+	return data, nil
+}
+
+func openRegularFile(r *os.Root, name string) (*os.File, error) {
+	// Check before opening so a staged FIFO does not block waiting for a writer.
+	info, err := r.Stat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	f, err := r.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err = f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	return f, nil
 }

@@ -93,7 +93,7 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file to read (relative to repository root)", Required: true},
 				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0). The window starts at the beginning of the line containing this offset; the response's offset reports the actual start.", Required: false, Minimum: new(float64(0))},
-				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). The window extends to the end of the line it would otherwise cut, so the content may run slightly past this limit. Pass -1 to read the entire file, but avoid this if you don't know the file size as it may be very large.", Required: false},
+				{Name: "limit", Type: "integer", Description: "Maximum bytes to read (default: 20000). The window extends to the end of the line it would otherwise cut, so the content may run slightly past this limit. Pass -1 to request the entire file. The backend may cap the window; follow next_offset to continue reading.", Required: false},
 			},
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
