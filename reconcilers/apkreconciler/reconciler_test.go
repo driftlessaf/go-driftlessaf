@@ -45,7 +45,7 @@ func TestNew(t *testing.T) {
 		}
 
 		// Verify the function was set correctly by calling it
-		err := r.Reconcile(context.Background(), validKey)
+		err := r.Reconcile(t.Context(), validKey)
 		if err != nil {
 			t.Errorf("Reconcile() error = %v", err)
 		}
@@ -58,7 +58,7 @@ func TestNew(t *testing.T) {
 func TestReconcile(t *testing.T) {
 	t.Run("no reconciler configured", func(t *testing.T) {
 		r := New()
-		err := r.Reconcile(context.Background(), validKey)
+		err := r.Reconcile(t.Context(), validKey)
 		if err == nil {
 			t.Fatal("Reconcile() should error when no reconciler configured")
 		}
@@ -74,7 +74,7 @@ func TestReconcile(t *testing.T) {
 			return nil
 		}))
 
-		err := r.Reconcile(context.Background(), validKey)
+		err := r.Reconcile(t.Context(), validKey)
 		if err != nil {
 			t.Fatalf("Reconcile() error = %v", err)
 		}
@@ -107,7 +107,7 @@ func TestReconcile(t *testing.T) {
 			return nil
 		}))
 
-		err := r.Reconcile(context.Background(), key)
+		err := r.Reconcile(t.Context(), key)
 		if err != nil {
 			t.Fatalf("Reconcile() error = %v", err)
 		}
@@ -128,7 +128,7 @@ func TestReconcile(t *testing.T) {
 			return nil
 		}))
 
-		err := r.Reconcile(context.Background(), key)
+		err := r.Reconcile(t.Context(), key)
 		if err != nil {
 			t.Fatalf("Reconcile() error = %v", err)
 		}
@@ -147,7 +147,7 @@ func TestReconcile(t *testing.T) {
 			return nil
 		}))
 
-		err := r.Reconcile(context.Background(), "not-a-valid-key")
+		err := r.Reconcile(t.Context(), "not-a-valid-key")
 		if err == nil {
 			t.Fatal("Reconcile() should error for invalid key")
 		}
@@ -167,7 +167,7 @@ func TestReconcile(t *testing.T) {
 		// A well-formed legacy key lacking the required checksum suffix is
 		// completed without retrying: it can never become parseable, and the
 		// enqueuers re-offer every live APK under a pinned key.
-		err := r.Reconcile(context.Background(), "apk.cgr.dev/"+validRoot+"/x86_64/glibc-2.42-r0.apk")
+		err := r.Reconcile(t.Context(), "apk.cgr.dev/"+validRoot+"/x86_64/glibc-2.42-r0.apk")
 		if err == nil {
 			t.Fatal("Reconcile() should error for a key without a checksum pin")
 		}
@@ -190,7 +190,7 @@ func TestReconcile(t *testing.T) {
 			return expectedErr
 		}))
 
-		err := r.Reconcile(context.Background(), validKey)
+		err := r.Reconcile(t.Context(), validKey)
 		if err == nil {
 			t.Fatal("Reconcile() should propagate reconciler error")
 		}
@@ -206,7 +206,7 @@ func TestProcess(t *testing.T) {
 			return nil
 		}))
 
-		resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{
+		resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{
 			Key:      validKey,
 			Priority: 1,
 		})
@@ -228,7 +228,7 @@ func TestProcess(t *testing.T) {
 			return workqueue.RequeueAfter(requeueDuration)
 		}))
 
-		resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{
+		resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{
 			Key:      validKey,
 			Priority: 1,
 		})
@@ -249,7 +249,7 @@ func TestProcess(t *testing.T) {
 			return workqueue.NonRetriableError(errors.New("permanent failure"), "test reason")
 		}))
 
-		resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{
+		resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{
 			Key:      validKey,
 			Priority: 1,
 		})
@@ -271,7 +271,7 @@ func TestProcess(t *testing.T) {
 			return nil
 		}))
 
-		resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{
+		resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{
 			Key:      "invalid-key",
 			Priority: 1,
 		})
@@ -291,7 +291,7 @@ func TestProcess(t *testing.T) {
 			return transientErr
 		}))
 
-		resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{
+		resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{
 			Key:      validKey,
 			Priority: 1,
 		})
@@ -318,7 +318,7 @@ func TestProcess(t *testing.T) {
 			return nil
 		}))
 
-		ctx := context.WithValue(context.Background(), ctxKey{}, ctxValue)
+		ctx := context.WithValue(t.Context(), ctxKey{}, ctxValue)
 		_, err := r.Process(ctx, &workqueue.ProcessRequest{
 			Key:      validKey,
 			Priority: 1,
@@ -349,7 +349,7 @@ func TestWithReconciler(t *testing.T) {
 	}
 
 	// Call it to verify it's the right function
-	_ = r.reconcileFunc(context.Background(), &apkurl.Key{})
+	_ = r.reconcileFunc(t.Context(), &apkurl.Key{})
 	if !called {
 		t.Error("WithReconciler set wrong function")
 	}
