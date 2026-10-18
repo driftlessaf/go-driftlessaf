@@ -110,15 +110,3 @@ func ExampleGenAI_multipleModels() {
 	// Output:
 	// Multi-model metrics recorded
 }
-
-// ExampleWithOperationName records batch prediction usage under
-// gen_ai.operation.name "batch_predict" rather than "invoke_agent".
-func ExampleWithOperationName() {
-	ctx := metrics.WithOperationName(context.Background(), "batch_predict")
-	m := metrics.NewGenAI("chainguard.ai.agents")
-	m.RecordTokens(ctx, "claude-opus-5-5@default", 1200, 300)
-	fmt.Println("batch token metrics recorded")
-
-	// Output:
-	// batch token metrics recorded
-}
