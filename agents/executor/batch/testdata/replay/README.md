@@ -51,7 +51,11 @@ testdata/replay/
 
 ## Case keys
 
-Every request's key names the outcome it is meant to elicit.
+Every request's key names the outcome it is meant to elicit. Each case's
+request content (prompt, system instruction and settings) must differ from
+every other case's. The replay classifies each output line with a fresh
+collector, so two identical requests would match the same key by digest,
+and `dropped_label` is matched by digest alone.
 
 | Provider | Key | Expected result |
 |---|---|---|

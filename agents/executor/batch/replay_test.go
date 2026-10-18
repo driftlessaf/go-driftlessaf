@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -183,13 +184,14 @@ func replay(t *testing.T, dir, provider string, cases []replayCase) {
 	if diff := cmp.Diff(string(wantInput), string(gotInput)); diff != "" {
 		t.Errorf("re-encoded input differs from the recorded input (-recorded, +encoded):\n%s", diff)
 	}
-	var wantManifest, gotManifest manifest
+	var wantManifest manifest
 	readJSONFile(t, filepath.Join(dir, "manifest.json"), &wantManifest)
-	raw, _ := env.gcs.get(testPrefix + "/" + id + "/" + manifestObject)
-	if err := json.Unmarshal(raw, &gotManifest); err != nil {
+	wantManifestRaw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if diff := cmp.Diff(wantManifest, gotManifest); diff != "" {
+	gotManifestRaw, _ := env.gcs.get(testPrefix + "/" + id + "/" + manifestObject)
+	if diff := cmp.Diff(string(wantManifestRaw), string(gotManifestRaw)); diff != "" {
 		t.Errorf("re-encoded manifest differs from the recorded manifest (-recorded, +encoded):\n%s", diff)
 	}
 
@@ -285,22 +287,41 @@ var scrubRules = []struct {
 	allowed []string
 }{
 	{"project", regexp.MustCompile(`projects/([\w.-]+)`), []string{"example-project", "0"}},
-	{"project field", regexp.MustCompile(`"project(?:_?[iI]d|_?[nN]umber)?"\s*:\s*"([^"]*)"`), []string{"example-project", "0"}},
+	{"project field", regexp.MustCompile(`"project(?:_?[iI]d|_?[nN]umber)?"\s*:\s*"?([^",}\s]*)"?`), []string{"example-project", "0"}},
 	{"bucket", regexp.MustCompile(`gs://([\w.-]+)`), []string{"example-bucket"}},
 	{"bucket URL", regexp.MustCompile(`storage\.googleapis\.com/([\w.-]+)`), []string{"example-bucket"}},
 	{"bucket field", regexp.MustCompile(`"bucket"\s*:\s*"([^"]*)"`), []string{"example-bucket"}},
 	{"job", regexp.MustCompile(`batchPredictionJobs/([\w.-]+)`), []string{"0"}},
-	{"project number", regexp.MustCompile(`\b(\d{12})\b`), nil},
+	// Unlike \b this catches "_123456789012", and unlike \D it skips digit
+	// runs inside hex digests, which scrubbing must not touch.
+	{"project number", regexp.MustCompile(`(?:^|[^0-9A-Za-z])(\d{12})(?:[^0-9A-Za-z]|$)`), nil},
 	{"email", regexp.MustCompile(`([\w.%+-]+@[\w-]+(?:\.[\w-]+)+)`), nil},
 }
 
-// scrubFindings returns each identifier in data that is not a placeholder.
+// scrubEscape matches the JSON and URL escapes an identifier can hide behind.
+var scrubEscape = regexp.MustCompile(`\\/|\\u00[0-9a-fA-F]{2}|%[0-9a-fA-F]{2}`)
+
+// scrubNormalize undoes scrubEscape's escapes, so the rules see "/" and "@".
+func scrubNormalize(data string) string {
+	return scrubEscape.ReplaceAllStringFunc(data, func(e string) string {
+		if e == `\/` {
+			return "/"
+		}
+		b, _ := strconv.ParseUint(e[len(e)-2:], 16, 8)
+		return string(rune(b))
+	})
+}
+
+// scrubFindings returns each identifier in data, raw or unescaped, that is
+// not a placeholder.
 func scrubFindings(data string) []string {
 	var out []string
-	for _, r := range scrubRules {
-		for _, m := range r.pattern.FindAllStringSubmatch(data, -1) {
-			if !slices.Contains(r.allowed, m[1]) {
-				out = append(out, r.name+": "+m[0])
+	for _, d := range slices.Compact([]string{data, scrubNormalize(data)}) {
+		for _, r := range scrubRules {
+			for _, m := range r.pattern.FindAllStringSubmatch(d, -1) {
+				if f := r.name + ": " + m[1]; !slices.Contains(r.allowed, m[1]) && !slices.Contains(out, f) {
+					out = append(out, f)
+				}
 			}
 		}
 	}
@@ -319,19 +340,48 @@ func TestScrubFindings(t *testing.T) {
 	}, {
 		name: "real project and job",
 		data: `"projects/prod-skills-a1b2/locations/us/batchPredictionJobs/5528394"`,
-		want: []string{"project: projects/prod-skills-a1b2", "job: batchPredictionJobs/5528394"},
+		want: []string{"project: prod-skills-a1b2", "job: 5528394"},
 	}, {
 		name: "real bucket",
 		data: `gs://acme-batch-staging/input.jsonl https://storage.googleapis.com/acme-batch-staging/o`,
-		want: []string{"bucket: gs://acme-batch-staging", "bucket URL: storage.googleapis.com/acme-batch-staging"},
+		want: []string{"bucket: acme-batch-staging", "bucket URL: acme-batch-staging"},
 	}, {
 		name: "project number and field",
 		data: `{"projectNumber":"123456789012","project_id":"acme-prod"}`,
-		want: []string{"project field: \"projectNumber\":\"123456789012\"", "project field: \"project_id\":\"acme-prod\"", "project number: 123456789012"},
+		want: []string{"project field: 123456789012", "project field: acme-prod", "project number: 123456789012"},
 	}, {
 		name: "service account",
 		data: `"principal":"svc@acme-prod.iam.gserviceaccount.com"`,
 		want: []string{"email: svc@acme-prod.iam.gserviceaccount.com"},
+	}, {
+		name: "JSON-escaped slashes",
+		data: `{"name":"projects\/acme-prod\/locations\/us\/batchPredictionJobs\/5528394","uri":"gs:\/\/acme-batch-staging\/input.jsonl"}`,
+		want: []string{"project: acme-prod", "bucket: acme-batch-staging", "job: 5528394"},
+	}, {
+		name: "unicode-escaped at",
+		data: `{"principal":"svc\u0040acme-prod.iam.gserviceaccount.com"}`,
+		want: []string{"email: svc@acme-prod.iam.gserviceaccount.com"},
+	}, {
+		name: "percent-escaped at",
+		data: `{"url":"https://x/?sa=svc%40acme-prod.iam.gserviceaccount.com"}`,
+		want: []string{"email: svc@acme-prod.iam.gserviceaccount.com"},
+	}, {
+		name: "unquoted project number field",
+		data: `{"projectNumber":1234567890}`,
+		want: []string{"project field: 1234567890"},
+	}, {
+		name: "unquoted placeholder project number",
+		data: `{"projectNumber":0}`,
+	}, {
+		name: "project number after an underscore",
+		data: `{"x":"prediction_123456789012"}`,
+		want: []string{"project number: 123456789012"},
+	}, {
+		name: "digits inside a hex digest",
+		data: `{"input_sha256":"ab123456789012cd","ref":"0f123456789012e9"}`,
+	}, {
+		name: "longer digit runs are not project numbers",
+		data: `{"t":"1234567890123","n":12345678901}`,
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
