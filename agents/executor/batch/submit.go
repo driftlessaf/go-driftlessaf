@@ -22,9 +22,9 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 )
 
-// defaultAnthropicVersion is the anthropic_version Vertex requires on every
-// Claude request body.
-const defaultAnthropicVersion = "vertex-2023-10-16"
+// anthropicVersion is the anthropic_version Vertex requires on every Claude
+// request body.
+const anthropicVersion = "vertex-2023-10-16"
 
 // keyLabel is the Gemini request label that carries a line's reference.
 const keyLabel = "driftlessaf_batch_key"
@@ -52,24 +52,11 @@ type GeminiRequest struct {
 	Config *genai.GenerateContentConfig
 }
 
-// SubmitOption configures one submission.
+// SubmitOption configures one submission. None are defined yet; the
+// parameter keeps later options from changing the Submit signatures.
 type SubmitOption func(*submitConfig) error
 
-type submitConfig struct {
-	anthropicVersion string
-}
-
-// WithAnthropicVersion overrides the anthropic_version stamped on each
-// Claude request, which defaults to "vertex-2023-10-16".
-func WithAnthropicVersion(version string) SubmitOption {
-	return func(c *submitConfig) error {
-		if version == "" {
-			return errors.New("anthropic version must not be empty")
-		}
-		c.anthropicVersion = version
-		return nil
-	}
-}
+type submitConfig struct{}
 
 // encodedLine is one input line and the manifest entry that finds its
 // output again.
@@ -83,13 +70,12 @@ type encodedLine struct {
 // Submitting an id that already has a job returns that job without writing
 // input or creating another; a new id is needed to resubmit the same rows.
 func (c *Client) SubmitClaude(ctx context.Context, id, model string, reqs []ClaudeRequest, opts ...SubmitOption) (Job, error) {
-	cfg, err := submitOptions(opts)
-	if err != nil {
+	if err := submitOptions(opts); err != nil {
 		return Job{}, err
 	}
 	lines := make([]encodedLine, 0, len(reqs))
 	for _, r := range reqs {
-		l, err := encodeClaude(r, cfg.anthropicVersion)
+		l, err := encodeClaude(r)
 		if err != nil {
 			return Job{}, fmt.Errorf("%w: key %q: %w", ErrInvalidRequest, r.Key, err)
 		}
@@ -103,7 +89,7 @@ func (c *Client) SubmitClaude(ctx context.Context, id, model string, reqs []Clau
 // an id that already has a job returns that job without writing input or
 // creating another.
 func (c *Client) SubmitGemini(ctx context.Context, id, model string, reqs []GeminiRequest, opts ...SubmitOption) (Job, error) {
-	if _, err := submitOptions(opts); err != nil {
+	if err := submitOptions(opts); err != nil {
 		return Job{}, err
 	}
 	lines := make([]encodedLine, 0, len(reqs))
@@ -117,14 +103,14 @@ func (c *Client) SubmitGemini(ctx context.Context, id, model string, reqs []Gemi
 	return c.submit(ctx, id, providerGoogle, model, lines)
 }
 
-func submitOptions(opts []SubmitOption) (submitConfig, error) {
-	cfg := submitConfig{anthropicVersion: defaultAnthropicVersion}
+func submitOptions(opts []SubmitOption) error {
+	var cfg submitConfig
 	for _, opt := range opts {
 		if err := opt(&cfg); err != nil {
-			return submitConfig{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+			return fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 		}
 	}
-	return cfg, nil
+	return nil
 }
 
 func (c *Client) submit(ctx context.Context, id, provider, model string, lines []encodedLine) (Job, error) {
@@ -256,7 +242,7 @@ func ref(key string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func encodeClaude(r ClaudeRequest, version string) (encodedLine, error) {
+func encodeClaude(r ClaudeRequest) (encodedLine, error) {
 	if r.Key == "" {
 		return encodedLine{}, errors.New("key must not be empty")
 	}
@@ -276,11 +262,7 @@ func encodeClaude(r ClaudeRequest, version string) (encodedLine, error) {
 	}
 	delete(body, "model")
 	delete(body, "stream")
-	version, err = jsonString(version)
-	if err != nil {
-		return encodedLine{}, err
-	}
-	body["anthropic_version"] = json.RawMessage(version)
+	body["anthropic_version"] = json.RawMessage(`"` + anthropicVersion + `"`)
 	id := ref(r.Key)
 	line, err := json.Marshal(struct {
 		CustomID string                     `json:"custom_id"`
@@ -290,11 +272,6 @@ func encodeClaude(r ClaudeRequest, version string) (encodedLine, error) {
 		return encodedLine{}, fmt.Errorf("encoding line: %w", err)
 	}
 	return encodedLine{line: line, entry: manifestEntry{Key: r.Key, Ref: id}}, nil
-}
-
-func jsonString(s string) (string, error) {
-	b, err := json.Marshal(s)
-	return string(b), err
 }
 
 // geminiRequestFields are the GenerateContentConfig fields Vertex takes at
@@ -369,9 +346,8 @@ func encodeGemini(r GeminiRequest) (encodedLine, error) {
 }
 
 // requestDigest is the sha256 of a Gemini request in canonical form: decoded
-// to generic JSON and re-encoded, with the correlation label removed. Field
-// order, whitespace, and number spelling in Vertex's echo do not change it,
-// and neither does whether Vertex echoes labels at all.
+// to generic JSON and re-encoded, without labels. Field order, whitespace,
+// number spelling, and which labels Vertex echoes do not change it.
 func requestDigest(req any) (string, error) {
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -381,12 +357,7 @@ func requestDigest(req any) (string, error) {
 	if err := json.Unmarshal(raw, &generic); err != nil {
 		return "", fmt.Errorf("decoding request: %w", err)
 	}
-	if labels, ok := generic["labels"].(map[string]any); ok {
-		delete(labels, keyLabel)
-		if len(labels) == 0 {
-			delete(generic, "labels")
-		}
-	}
+	delete(generic, "labels")
 	canonical, err := json.Marshal(generic)
 	if err != nil {
 		return "", fmt.Errorf("encoding canonical request: %w", err)

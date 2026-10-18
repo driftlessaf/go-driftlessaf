@@ -277,12 +277,6 @@ func TestSubmitRejectsInvalid(t *testing.T) {
 			_, err := c.SubmitGemini(t.Context(), "id", "gemini-3.8-flash", []GeminiRequest{reserved})
 			return err
 		},
-	}, {
-		name: "empty anthropic version",
-		submit: func(c *Client) error {
-			_, err := c.SubmitClaude(t.Context(), "id", "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")}, WithAnthropicVersion(""))
-			return err
-		},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
