@@ -35,18 +35,22 @@ SPDX-License-Identifier: Apache-2.0
 // Once a job exists, the submitter records its name in job.json, also
 // create-only. Concurrent submissions of one id and the same rows may each
 // create a job, but only one record is written: every caller returns the
-// job it names and cancels the others, whatever their creation times or the
-// order the job list shows them in. [Client.Find] and later submissions
-// return the recorded job too; a record naming a job that does not exist or
-// was not created for the id fails with [ErrInvalidRequest].
+// job it names and cancels the others it lists, whatever their creation
+// times or the order the job list shows them in. The recording caller lists
+// again after its record, so a twin that created and then stopped before
+// its own record is cancelled too. Later submissions return the recorded job
+// and cancel any other listed duplicates; [Client.Find] returns the recorded
+// job and never cancels. A record naming a job that does not exist or was
+// not created for the id fails with [ErrInvalidRequest].
 //
 // A submitter that stops between create and its record leaves jobs with no
 // record. The next submission records the earliest listed job and cancels
 // the rest; until then, Find returns that same job. This recovery, and the
 // lookup before each create, rely on the job list showing a job soon after
 // it is created, which is not yet verified against Vertex: a job the list
-// misses there can be created twice, and the extra one is cancelled only
-// when a later submission lists it.
+// misses can be created twice, and a create that lands after the recording
+// caller's second listing is cancelled only when a later submission lists
+// it. Callers should still serialize submissions per id.
 //
 // # Models
 //

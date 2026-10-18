@@ -223,7 +223,8 @@ func retryable(ctx context.Context) func(error) bool {
 // whatever duplicates are listed. A recorded job that does not exist or fails
 // the checks above is also [ErrInvalidRequest]. With no record yet (a
 // submitter stopped between creating the job and recording it), Find returns
-// the earliest listed job, the one a recovering Submit records.
+// the earliest listed job, the one a recovering Submit records. Find is
+// read-only: duplicates are cancelled only by Submit.
 func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	if !idPattern.MatchString(id) {
 		return Job{}, false, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, id, idPattern)
