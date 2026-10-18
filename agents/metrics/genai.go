@@ -146,9 +146,11 @@ func (m *GenAI) RecordTokens(ctx context.Context, model string, promptTokens, co
 	m.completionTokens.Add(ctx, completionTokens, metric.WithAttributes(baseAttrs...))
 
 	// GenAI semconv: histogram with gen_ai.token.type dimension.
-	// gen_ai.operation.name is Required per spec; callers should pass gen_ai.provider.name via attrs.
+	// gen_ai.operation.name is Required per spec and comes from ctx (WithOperationName),
+	// appended after caller attrs so they cannot override it; callers should pass
+	// gen_ai.provider.name via attrs.
 	semconvBase := append(slices.Clone(baseAttrs),
-		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.operation.name", operationName(ctx)),
 	)
 	inputAttrs := append(slices.Clone(semconvBase), attribute.String("gen_ai.token.type", "input"))
 	m.semconvTokenUsage.Record(ctx, float64(promptTokens), metric.WithAttributes(inputAttrs...))
@@ -172,7 +174,7 @@ func (m *GenAI) RecordCacheTokens(ctx context.Context, model string, cacheRead, 
 	baseAttrs := recordAttrs(ctx, attrs, attribute.String("model", model))
 
 	semconvBase := append(slices.Clone(baseAttrs),
-		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.operation.name", operationName(ctx)),
 	)
 	if cacheRead > 0 {
 		readAttrs := append(slices.Clone(baseAttrs), attribute.String("gen_ai.token.type", "cache_read"))
