@@ -470,6 +470,9 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if len(offsets) == 0 {
 				result, err := editIgnoringIndentation(root, rel, f, oldString, newString)
 				if err != nil {
+					result, err = editUnescaped(root, rel, f, oldString, newString, replaceAll, err)
+				}
+				if err != nil {
 					return callbacks.EditResult{}, err
 				}
 				recordTouch(ctx, path)
@@ -895,7 +898,8 @@ const maxEditStringSize = 32 * 1024
 
 // planReplacements streams the file through a sliding window and collects byte
 // offsets of all non-overlapping occurrences of pattern. When replaceAll is
-// false, it returns an error as soon as a second match is found.
+// false, it returns an error as soon as a second match is found, together with
+// the two offsets found.
 //
 // The window uses an overlap of patLen-1 bytes between chunks so that matches
 // spanning a chunk boundary are never missed:
@@ -970,7 +974,7 @@ func planReplacements(f *os.File, pattern []byte, replaceAll bool) ([]int64, err
 			searchFrom += idx + patLen
 
 			if !replaceAll && len(offsets) > 1 {
-				return nil, fmt.Errorf("old_string appears more than once in file (at byte offsets %d and %d); include more surrounding context to make it unique, or set replace_all to true", offsets[0], offsets[1])
+				return offsets, fmt.Errorf("old_string appears more than once in file (at byte offsets %d and %d); include more surrounding context to make it unique, or set replace_all to true", offsets[0], offsets[1])
 			}
 		}
 
@@ -1012,6 +1016,63 @@ func editIgnoringIndentation(root *os.Root, rel string, f *os.File, oldString, n
 		result.Note = fmt.Sprintf("old_string matched after adjusting indentation (%s); new_string was shifted the same way", m.Shift)
 	}
 	return result, nil
+}
+
+// editUnescaped is the fallback for an EditFile whose old_string matches
+// nothing, exactly or ignoring indentation, because the agent copied the
+// escaped form text takes inside a JSON string: a backslash and "t" where the
+// file has a tab. When old_string and new_string both decode as whole JSON
+// string bodies and decoded old_string matches, it applies the decoded edit.
+// When new_string may mean its backslashes literally, if decoding
+// old_string's escape sequences finds it, editUnescaped reports where rather
+// than guess. Otherwise it returns notFound, the error the undecoded
+// old_string got.
+func editUnescaped(root *os.Root, rel string, f *os.File, oldString, newString string, replaceAll bool, notFound error) (callbacks.EditResult, error) {
+	oldDecoded, oldOK := textedit.UnescapeJSON(oldString)
+	newDecoded, newOK := textedit.UnescapeJSON(newString)
+	// An old_string that doubled the file's backslashes beside a new_string
+	// that doubled none means new_string is plain text: its \n is a
+	// backslash and an n, and decoding it would write a newline.
+	plainNew := strings.Contains(oldString, `\\`) && !strings.Contains(newString, `\\`) && newDecoded != newString
+	if oldOK && newOK && oldDecoded != oldString && !plainNew {
+		offsets, err := planReplacements(f, []byte(oldDecoded), replaceAll)
+		switch {
+		case err == nil && len(offsets) > 0:
+			if err := executeReplacements(root, rel, f, offsets, len(oldDecoded), []byte(newDecoded)); err != nil {
+				return callbacks.EditResult{}, err
+			}
+			return callbacks.EditResult{Replacements: len(offsets), Note: textedit.UnescapedNote}, nil
+		case err == nil:
+			if result, err := editIgnoringIndentation(root, rel, f, oldDecoded, newDecoded); err == nil {
+				note := textedit.UnescapedNote
+				if result.Note != "" {
+					note += "; " + result.Note
+				}
+				result.Note = note
+				return result, nil
+			}
+		}
+	}
+	if decoded := textedit.UnescapeJSONSequences(oldString); decoded != oldString {
+		if offsets := matchOffsets(f, decoded); len(offsets) > 0 {
+			return callbacks.EditResult{}, textedit.EscapedNotFound(offsets)
+		}
+	}
+	return callbacks.EditResult{}, notFound
+}
+
+// matchOffsets returns the byte offsets of the first one or two exact
+// occurrences of s in f or, failing that, of the unique region that matches
+// it ignoring indentation. It returns nil when s matches neither way.
+func matchOffsets(f *os.File, s string) []int64 {
+	// Without replaceAll the scan stops at a second match.
+	if offsets, _ := planReplacements(f, []byte(s), false); len(offsets) > 0 {
+		return offsets
+	}
+	if m, err := matchIgnoringIndentation(f, s); err == nil {
+		return []int64{m.Start}
+	}
+	return nil
 }
 
 // matchIgnoringIndentation scans the already-open, root-confined descriptor

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
+	"chainguard.dev/driftlessaf/internal/textedit"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -1853,6 +1854,148 @@ func TestEditFileIndentationShift(t *testing.T) {
 			}
 			if result.Replacements != 1 {
 				t.Errorf("replacements: got = %d, want = 1", result.Replacements)
+			}
+			if result.Note != tc.wantNote {
+				t.Errorf("note: got = %q, want = %q", result.Note, tc.wantNote)
+			}
+			if string(got) != tc.wantContent {
+				t.Errorf("content: got = %q, want = %q", got, tc.wantContent)
+			}
+		})
+	}
+}
+
+// TestEditFileJSONEscaped covers an agent that copies text out of a JSON tool
+// result in its escaped form, a backslash and "t" where the file has a tab.
+func TestEditFileJSONEscaped(t *testing.T) {
+	ctx := t.Context()
+	amp := `\` + "u0026" // how encoding/json escapes "&"
+
+	tests := []struct {
+		name             string
+		content          string
+		oldString        string
+		newString        string
+		replaceAll       bool
+		wantContent      string
+		wantReplacements int
+		wantNote         string
+		wantErr          []string
+		wantErrAbsent    string
+	}{{
+		name:             "tab, newline and quote escapes are decoded",
+		content:          "func f() {\n\tif s == \"\" {\n\t\treturn\n\t}\n}\n",
+		oldString:        `\tif s == \"\" {\n\t\treturn`,
+		newString:        `\tif s == \"\" {\n\t\treturn nil`,
+		wantContent:      "func f() {\n\tif s == \"\" {\n\t\treturn nil\n\t}\n}\n",
+		wantReplacements: 1,
+		wantNote:         textedit.UnescapedNote,
+	}, {
+		name:             "an escaped backslash becomes the file's single backslash",
+		content:          "  COALESCE(STRING_AGG(row, '\\n' ORDER BY id), '')\n",
+		oldString:        `STRING_AGG(row, '\\n' ORDER BY id)`,
+		newString:        `STRING_AGG(TO_HEX(SHA256(row)), '\\n' ORDER BY id)`,
+		wantContent:      "  COALESCE(STRING_AGG(TO_HEX(SHA256(row)), '\\n' ORDER BY id), '')\n",
+		wantReplacements: 1,
+		wantNote:         textedit.UnescapedNote,
+	}, {
+		name:             "HTML escapes are decoded",
+		content:          "if a && b {\n",
+		oldString:        "if a " + amp + amp + " b {",
+		newString:        "if a " + amp + amp + " c {",
+		wantContent:      "if a && c {\n",
+		wantReplacements: 1,
+		wantNote:         textedit.UnescapedNote,
+	}, {
+		name:             "replace_all replaces every decoded match",
+		content:          "a\tb\nc\na\tb\n",
+		oldString:        `a\tb`,
+		newString:        `x`,
+		replaceAll:       true,
+		wantContent:      "x\nc\nx\n",
+		wantReplacements: 2,
+		wantNote:         textedit.UnescapedNote,
+	}, {
+		name:             "decoded old_string with an indentation shift",
+		content:          indentFixture,
+		oldString:        `if a {\n\tb()\n\n\tc()\n}`,
+		newString:        `if a {\n\tb2()\n\n\tc2()\n}`,
+		wantContent:      "func f() {\n\tif a {\n\t\tb2()\n\n\t\tc2()\n\t}\n}\n",
+		wantReplacements: 1,
+		wantNote:         textedit.UnescapedNote + "; old_string matched after adjusting indentation (added 1 tab); new_string was shifted the same way",
+	}, {
+		name:             "escapes the file has literally match exactly",
+		content:          "s := 'a\\nb'\n",
+		oldString:        `'a\nb'`,
+		newString:        `'a\nc'`,
+		wantContent:      "s := 'a\\nc'\n",
+		wantReplacements: 1,
+	}, {
+		name:      "raw newline beside escaped quotes reports the decoded offset",
+		content:   "x := 1\nvars:\n  v: \"21\"\n",
+		oldString: "vars:\n  v: " + `\"21\"`,
+		newString: "vars:\n  v: " + `\"22\"`,
+		wantErr:   []string{"old_string not found in file", "JSON escape sequences", "byte offset 7"},
+	}, {
+		name:      "a new_string that does not decode is not guessed at",
+		content:   "\tb()\n",
+		oldString: `\tb()`,
+		newString: "\tb(\"x\")",
+		wantErr:   []string{"old_string not found in file", "JSON escape sequences", "byte offset 0"},
+	}, {
+		name:      "a decoded old_string that occurs twice is not applied",
+		content:   "\tb()\n\tb()\n",
+		oldString: `\tb()`,
+		newString: `\tc()`,
+		wantErr:   []string{"old_string not found in file", "JSON escape sequences", "byte offsets 0 and 5", "unique"},
+	}, {
+		name:      "a new_string that doubled none of old_string's backslashes is not decoded",
+		content:   "  STRING_AGG(row, '\\n' ORDER BY id)\n",
+		oldString: `STRING_AGG(row, '\\n' ORDER BY id)`,
+		newString: `STRING_AGG(h(row), '\n' ORDER BY id)`,
+		wantErr:   []string{"old_string not found in file", "JSON escape sequences", "byte offset 2;"},
+	}, {
+		name:          "escapes that decode to absent text keep the original error",
+		content:       "abc\n",
+		oldString:     `zz\nzz`,
+		newString:     `y`,
+		wantErr:       []string{"old_string not found in file", "does not occur anywhere"},
+		wantErrAbsent: "JSON escape",
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wt, root := initWorktree(t)
+			writeTestFile(t, root, "escaped.txt", tc.content, 0o644)
+			cb := WorktreeCallbacks(wt)
+
+			result, err := cb.EditFile(ctx, "escaped.txt", tc.oldString, tc.newString, tc.replaceAll)
+			got, readErr := os.ReadFile(filepath.Join(root, "escaped.txt"))
+			if readErr != nil {
+				t.Fatalf("read back: %v", readErr)
+			}
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("EditFile: got error = nil, want non-nil")
+				}
+				for _, w := range tc.wantErr {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("error: got = %q, want it to contain %q", err, w)
+					}
+				}
+				if tc.wantErrAbsent != "" && strings.Contains(err.Error(), tc.wantErrAbsent) {
+					t.Errorf("error: got = %q, want it not to contain %q", err, tc.wantErrAbsent)
+				}
+				if string(got) != tc.content {
+					t.Errorf("content after failed edit: got = %q, want unchanged %q", got, tc.content)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EditFile: %v", err)
+			}
+			if result.Replacements != tc.wantReplacements {
+				t.Errorf("replacements: got = %d, want = %d", result.Replacements, tc.wantReplacements)
 			}
 			if result.Note != tc.wantNote {
 				t.Errorf("note: got = %q, want = %q", result.Note, tc.wantNote)
