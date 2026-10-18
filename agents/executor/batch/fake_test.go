@@ -287,6 +287,21 @@ func (f *fakeVertex) finish(t *testing.T, gcs *fakeGCS, name string, state genai
 	}
 }
 
+// outputDir returns the output directory Vertex reports for the job named name.
+func (f *fakeVertex) outputDir(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.job("/v1beta1/" + name).OutputInfo["gcsOutputDirectory"]
+}
+
+// setOutputDir overrides the output directory Vertex reports for the job
+// named name.
+func (f *fakeVertex) setOutputDir(name, dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.job("/v1beta1/" + name).OutputInfo["gcsOutputDirectory"] = dir
+}
+
 func (f *fakeVertex) createCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

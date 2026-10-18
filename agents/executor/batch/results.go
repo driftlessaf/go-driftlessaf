@@ -59,20 +59,16 @@ type Usage struct {
 // Refusal is the provider's reason for refusing a request.
 type Refusal struct {
 	// Category is Claude's stop_details category, Gemini's prompt
-	// blockReason, or Gemini's blocking finishReason.
+	// blockReason, or any Gemini finishReason other than STOP or MAX_TOKENS.
 	Category string
 	// Detail is Claude's explanation, Gemini's blockReasonMessage, or
 	// Gemini's finishMessage.
 	Detail string
 }
 
-// geminiBlockingFinishReasons are the finish reasons that mean the response
-// was withheld rather than finished.
-var geminiBlockingFinishReasons = []genai.FinishReason{
-	genai.FinishReasonSafety, genai.FinishReasonRecitation, genai.FinishReasonBlocklist,
-	genai.FinishReasonProhibitedContent, genai.FinishReasonSPII, genai.FinishReasonImageSafety,
-	genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation,
-}
+// unblocked are the prompt blockReasons that mean nothing was blocked. Vertex
+// and the Gemini API spell the unspecified value differently.
+var unblocked = []genai.BlockedReason{"", genai.BlockedReasonUnspecified, "BLOCK_REASON_UNSPECIFIED"}
 
 // outputLine is the envelope of one prediction line. Both Vertex's
 // request/response/status shape and Anthropic's custom_id/result shape are
@@ -94,7 +90,8 @@ type outputLine struct {
 // keyed by the caller's key; once the job is terminal, every key with no
 // line then yields [ErrMissing], in submission order. Before the job is
 // terminal it yields only the lines already written. A non-nil error ends
-// the sequence: the job or its output could not be read.
+// the sequence: the job id is invalid, or the job or its output could not
+// be read.
 //
 // Lines that match no submitted key are skipped and logged, so they surface
 // as [ErrMissing]. With [WithMetrics], usage is recorded as each result is
@@ -102,6 +99,10 @@ type outputLine struct {
 func (c *Client) Results(ctx context.Context, job Job) iter.Seq2[Result, error] {
 	return func(yield func(Result, error) bool) {
 		ctx := metrics.WithOperationName(ctx, operationName)
+		if !idPattern.MatchString(job.ID) {
+			yield(Result{}, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, job.ID, idPattern))
+			return
+		}
 		m, err := c.manifestFor(ctx, job)
 		if err != nil {
 			yield(Result{}, err)
@@ -154,12 +155,10 @@ func (c *Client) outputObjects(ctx context.Context, job Job, bj *genai.BatchJob)
 	if err != nil {
 		return nil, err
 	}
-	want, err := c.objectFromURI(job.OutputPrefix)
-	if err != nil {
-		return nil, err
-	}
-	if !strings.HasPrefix(dir, want) {
-		return nil, fmt.Errorf("output directory %q is outside the job's output prefix %q", bj.OutputInfo.GCSOutputDirectory, job.OutputPrefix)
+	// Anchored on the id, not job.OutputPrefix: a persisted Job is caller
+	// data and must not widen what Results reads.
+	if want := c.objectName(job.ID, outputDir) + "/"; !strings.HasPrefix(dir, want) {
+		return nil, fmt.Errorf("output directory %q is outside %q", bj.OutputInfo.GCSOutputDirectory, c.gsURI(want))
 	}
 	return retry.RetryWithBackoff(ctx, c.retry, "batch.list", retryable(ctx), func() ([]string, error) {
 		var names []string
@@ -385,8 +384,19 @@ func claudeResult(key string, line outputLine) Result {
 		res.Err = ErrRefused
 	case anthropic.StopReasonMaxTokens:
 		res.Err = ErrTruncated
+	default:
+		if res.Text == "" {
+			res.Err = errEmptyText()
+		}
 	}
 	return res
+}
+
+// errEmptyText is the error for a finished response with no text. Batch
+// output cannot be inspected before it is used, so an empty answer is
+// reported as transient for the caller to resubmit.
+func errEmptyText() error {
+	return &lineError{code: -1, message: "response has no text", transient: true}
 }
 
 func geminiResult(key string, line outputLine) Result {
@@ -407,14 +417,14 @@ func geminiResult(key string, line outputLine) Result {
 			CacheRead: int64(u.CachedContentTokenCount),
 		}
 	}
-	if len(resp.Candidates) == 0 {
-		if fb := resp.PromptFeedback; fb != nil && fb.BlockReason != "" {
-			res.Stop = string(fb.BlockReason)
-			res.Refusal = &Refusal{Category: string(fb.BlockReason), Detail: fb.BlockReasonMessage}
-			res.Err = ErrRefused
-			return res
-		}
-		// The online executor retries an empty turn as transient.
+	if fb := resp.PromptFeedback; fb != nil && !slices.Contains(unblocked, fb.BlockReason) {
+		res.Stop = string(fb.BlockReason)
+		res.Refusal = &Refusal{Category: string(fb.BlockReason), Detail: fb.BlockReasonMessage}
+		res.Err = ErrRefused
+		return res
+	}
+	if len(resp.Candidates) == 0 || resp.Candidates[0] == nil {
+		// Nothing was refused, so the request is worth sending again.
 		res.Err = &lineError{code: -1, message: "response has no candidates", transient: true}
 		return res
 	}
@@ -429,12 +439,27 @@ func geminiResult(key string, line outputLine) Result {
 		}
 		res.Text = text.String()
 	}
+	// Fail closed like the online client: any reason other than STOP or
+	// MAX_TOKENS, on any candidate, is a refusal, including reasons added
+	// after this was written.
+	for _, c := range resp.Candidates {
+		if c == nil {
+			continue
+		}
+		switch c.FinishReason {
+		case "", genai.FinishReasonStop, genai.FinishReasonMaxTokens:
+		default:
+			res.Stop = string(c.FinishReason)
+			res.Refusal = &Refusal{Category: string(c.FinishReason), Detail: c.FinishMessage}
+			res.Err = ErrRefused
+			return res
+		}
+	}
 	switch {
-	case slices.Contains(geminiBlockingFinishReasons, cand.FinishReason):
-		res.Refusal = &Refusal{Category: string(cand.FinishReason), Detail: cand.FinishMessage}
-		res.Err = ErrRefused
 	case cand.FinishReason == genai.FinishReasonMaxTokens:
 		res.Err = ErrTruncated
+	case res.Text == "":
+		res.Err = errEmptyText()
 	}
 	return res
 }

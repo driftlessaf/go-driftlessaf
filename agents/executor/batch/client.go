@@ -276,14 +276,11 @@ func (c *Client) readManifest(ctx context.Context, object string) (manifest, err
 	return m, nil
 }
 
-// manifestFor reads the manifest that sits next to the job's input.
+// manifestFor reads the manifest under the job's id. The id was validated
+// by Results, and the persisted URIs are not trusted to locate it.
 func (c *Client) manifestFor(ctx context.Context, job Job) (manifest, error) {
-	input, err := c.objectFromURI(job.InputURI)
-	if err != nil {
-		return manifest{}, err
-	}
 	return retry.RetryWithBackoff(ctx, c.retry, "batch.manifest", retryable(ctx), func() (manifest, error) {
-		return c.readManifest(ctx, path.Join(path.Dir(input), manifestObject))
+		return c.readManifest(ctx, c.objectName(job.ID, manifestObject))
 	})
 }
 

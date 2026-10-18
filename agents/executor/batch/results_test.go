@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
@@ -127,6 +128,14 @@ func TestResultsClaude(t *testing.T) {
 		want:    Result{Text: "partial", Stop: "max_tokens", Usage: usage},
 		wantErr: ErrTruncated,
 	}, {
+		name: "end turn with no text",
+		line: func(ref string, _ map[string]any) string {
+			return fmt.Sprintf(`{"custom_id":%q,"response":{"id":"m","type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":0}}}`, ref)
+		},
+		want:          Result{Stop: "end_turn", Usage: Usage{In: 10}},
+		wantLineErr:   true,
+		wantRetryable: true,
+	}, {
 		name: "overloaded line error",
 		line: func(ref string, _ map[string]any) string {
 			return fmt.Sprintf(`{"custom_id":%q,"result":{"type":"errored","error":{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}}}`, ref)
@@ -184,26 +193,27 @@ func geminiResponse(parts, finish, extra string) string {
 	return fmt.Sprintf(`{"candidates":[{"content":{"role":"model","parts":[%s]},"finishReason":%q%s}],"usageMetadata":{"promptTokenCount":50,"toolUsePromptTokenCount":5,"candidatesTokenCount":10,"thoughtsTokenCount":4,"cachedContentTokenCount":30,"totalTokenCount":69}}`, parts, finish, extra)
 }
 
+// echoLabels selects which labels Vertex echoes on a request.
+type echoLabels int
+
+const (
+	echoAllLabels echoLabels = iota
+	echoCallerLabels
+	echoNoLabels
+)
+
 // echo renders a request as Vertex might echo it: field order, spacing, and
-// the presence of the correlation label may all differ from what was sent.
-func echo(t *testing.T, in map[string]any, keepLabel bool) string {
+// which labels come back may all differ from what was sent.
+func echo(t *testing.T, in map[string]any, labels echoLabels) string {
 	t.Helper()
-	req, _ := in["request"].(map[string]any)
-	if !keepLabel {
-		cp := map[string]any{}
-		for k, v := range req {
-			if k != "labels" {
-				cp[k] = v
-			}
-		}
-		labels := map[string]any{}
-		for k, v := range req["labels"].(map[string]any) {
-			if k != keyLabel {
-				labels[k] = v
-			}
-		}
-		cp["labels"] = labels
-		req = cp
+	req := maps.Clone(in["request"].(map[string]any))
+	switch labels {
+	case echoCallerLabels:
+		caller := maps.Clone(req["labels"].(map[string]any))
+		delete(caller, keyLabel)
+		req["labels"] = caller
+	case echoNoLabels:
+		delete(req, "labels")
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -219,47 +229,104 @@ func TestResultsGemini(t *testing.T) {
 	cases := []resultCase{{
 		name: "label echoed",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"status":"","processed_time":"2026-10-18T01:00:00Z","request":%s,"response":%s}`, echo(t, in, true), ok)
+			return fmt.Sprintf(`{"status":"","processed_time":"2026-10-18T01:00:00Z","request":%s,"response":%s}`, echo(t, in, echoAllLabels), ok)
 		},
 		want: Result{Text: "verdict: ok", Stop: "STOP", Usage: usage},
 	}, {
 		name: "label dropped, matched by digest",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, false), ok)
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoCallerLabels), ok)
 		},
 		want: Result{Text: "verdict: ok", Stop: "STOP", Usage: usage},
 	}, {
+		name: "no labels echoed, matched by digest",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoNoLabels), ok)
+		},
+		want: Result{Text: "verdict: ok", Stop: "STOP", Usage: usage},
+	}, {
+		name: "unspecified block reason is not a block",
+		line: func(_ string, in map[string]any) string {
+			resp := strings.Replace(ok, `{"candidates"`, `{"promptFeedback":{"blockReason":"BLOCK_REASON_UNSPECIFIED"},"candidates"`, 1)
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), resp)
+		},
+		want: Result{Text: "verdict: ok", Stop: "STOP", Usage: usage},
+	}, {
+		name: "unspecified block reason with no candidates",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"},"usageMetadata":{"promptTokenCount":50}}}`, echo(t, in, echoAllLabels))
+		},
+		want:          Result{Usage: Usage{In: 50}},
+		wantLineErr:   true,
+		wantRetryable: true,
+	}, {
 		name: "prompt blocked",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"request":%s,"response":{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT","blockReasonMessage":"blocked by policy"},"usageMetadata":{"promptTokenCount":50}}}`, echo(t, in, true))
+			return fmt.Sprintf(`{"request":%s,"response":{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT","blockReasonMessage":"blocked by policy"},"usageMetadata":{"promptTokenCount":50}}}`, echo(t, in, echoAllLabels))
 		},
 		want:    Result{Stop: "PROHIBITED_CONTENT", Usage: Usage{In: 50}, Refusal: &Refusal{Category: "PROHIBITED_CONTENT", Detail: "blocked by policy"}},
 		wantErr: ErrRefused,
 	}, {
 		name: "safety finish",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, true), geminiResponse(`{"text":"par"}`, "SAFETY", `,"finishMessage":"unsafe content"`))
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"par"}`, "SAFETY", `,"finishMessage":"unsafe content"`))
 		},
 		want:    Result{Text: "par", Stop: "SAFETY", Usage: usage, Refusal: &Refusal{Category: "SAFETY", Detail: "unsafe content"}},
 		wantErr: ErrRefused,
 	}, {
+		name: "other finish fails closed",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "OTHER", ""))
+		},
+		want:    Result{Text: "partial", Stop: "OTHER", Usage: usage, Refusal: &Refusal{Category: "OTHER"}},
+		wantErr: ErrRefused,
+	}, {
+		name: "malformed function call fails closed",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "MALFORMED_FUNCTION_CALL", ""))
+		},
+		want:    Result{Text: "partial", Stop: "MALFORMED_FUNCTION_CALL", Usage: usage, Refusal: &Refusal{Category: "MALFORMED_FUNCTION_CALL"}},
+		wantErr: ErrRefused,
+	}, {
+		name: "unspecified finish fails closed",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "FINISH_REASON_UNSPECIFIED", ""))
+		},
+		want:    Result{Text: "partial", Stop: "FINISH_REASON_UNSPECIFIED", Usage: usage, Refusal: &Refusal{Category: "FINISH_REASON_UNSPECIFIED"}},
+		wantErr: ErrRefused,
+	}, {
+		name: "unknown finish fails closed",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "SOME_FUTURE_REASON", `,"finishMessage":"new"`))
+		},
+		want:    Result{Text: "partial", Stop: "SOME_FUTURE_REASON", Usage: usage, Refusal: &Refusal{Category: "SOME_FUTURE_REASON", Detail: "new"}},
+		wantErr: ErrRefused,
+	}, {
+		name: "stop with no text",
+		line: func(_ string, in map[string]any) string {
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(``, "STOP", ""))
+		},
+		want:          Result{Stop: "STOP", Usage: usage},
+		wantLineErr:   true,
+		wantRetryable: true,
+	}, {
 		name: "max tokens",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, true), geminiResponse(`{"text":"half"}`, "MAX_TOKENS", ""))
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"half"}`, "MAX_TOKENS", ""))
 		},
 		want:    Result{Text: "half", Stop: "MAX_TOKENS", Usage: usage},
 		wantErr: ErrTruncated,
 	}, {
 		name: "quota line error",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"status":"RESOURCE_EXHAUSTED: quota exceeded for model","request":%s}`, echo(t, in, true))
+			return fmt.Sprintf(`{"status":"RESOURCE_EXHAUSTED: quota exceeded for model","request":%s}`, echo(t, in, echoAllLabels))
 		},
 		wantLineErr:   true,
 		wantRetryable: true,
 	}, {
 		name: "no candidates",
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"request":%s,"response":{"candidates":[],"usageMetadata":{"promptTokenCount":50}}}`, echo(t, in, true))
+			return fmt.Sprintf(`{"request":%s,"response":{"candidates":[],"usageMetadata":{"promptTokenCount":50}}}`, echo(t, in, echoAllLabels))
 		},
 		want:          Result{Usage: Usage{In: 50}},
 		wantLineErr:   true,
@@ -268,7 +335,7 @@ func TestResultsGemini(t *testing.T) {
 		name:        "invalid argument line error",
 		wantLineErr: true,
 		line: func(_ string, in map[string]any) string {
-			return fmt.Sprintf(`{"status":{"code":400,"message":"INVALID_ARGUMENT"},"request":%s}`, echo(t, in, true))
+			return fmt.Sprintf(`{"status":{"code":400,"message":"INVALID_ARGUMENT"},"request":%s}`, echo(t, in, echoAllLabels))
 		},
 	}, {
 		name:    "no line",
@@ -312,8 +379,8 @@ func TestResultsGeminiIdenticalRequests(t *testing.T) {
 	inputs := jsonLines(t, data)
 	resp := geminiResponse(`{"text":"same answer"}`, "STOP", "")
 	env.vertex.finish(t, env.gcs, job.Name, genai.JobStateSucceeded,
-		fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, inputs[0], false), resp),
-		fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, inputs[1], false), resp))
+		fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, inputs[0], echoCallerLabels), resp),
+		fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, inputs[1], echoCallerLabels), resp))
 	got := collect(t, env.client, job)
 	for _, k := range keys {
 		if res := got[k]; res.Err != nil || res.Text != "same answer" {
@@ -358,23 +425,57 @@ func TestResultsRetriesReadsWithoutRepeats(t *testing.T) {
 
 func TestResultsRejectsForeignOutputDirectory(t *testing.T) {
 	t.Parallel()
-	env := newTestEnv(t)
-	job, err := env.client.SubmitClaude(t.Context(), uuid.NewString(), "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")})
-	if err != nil {
-		t.Fatalf("SubmitClaude: %v", err)
-	}
-	env.vertex.finish(t, env.gcs, job.Name, genai.JobStateSucceeded)
-	env.vertex.mu.Lock()
-	env.vertex.jobs[0].OutputInfo["gcsOutputDirectory"] = "gs://" + testBucket + "/elsewhere/prediction-model-x"
-	env.vertex.mu.Unlock()
-	var errs int
-	for _, err := range env.client.Results(t.Context(), job) {
-		if err != nil {
-			errs++
-		}
-	}
-	if errs != 1 {
-		t.Errorf("errors: got = %d, want = 1", errs)
+	tests := []struct {
+		name string
+		// tamper points the job's Vertex output elsewhere or edits the
+		// caller-held Job; other is a finished job with output of its own.
+		tamper func(env *testEnv, job, other *Job)
+	}{{
+		name: "output outside the job's directory",
+		tamper: func(env *testEnv, job, _ *Job) {
+			env.vertex.setOutputDir(job.Name, "gs://"+testBucket+"/elsewhere/prediction-model-x")
+		},
+	}, {
+		name: "another job's output with a widened output prefix",
+		tamper: func(env *testEnv, job, other *Job) {
+			env.vertex.setOutputDir(job.Name, env.vertex.outputDir(other.Name))
+			job.OutputPrefix = "gs://" + testBucket + "/"
+		},
+	}, {
+		name: "id escaping the prefix",
+		tamper: func(_ *testEnv, job, other *Job) {
+			job.ID = "../" + other.ID
+		},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			key := uuid.NewString()
+			job, err := env.client.SubmitClaude(t.Context(), uuid.NewString(), "claude-opus-5-5@default", []ClaudeRequest{claudeReq(key, "p")})
+			if err != nil {
+				t.Fatalf("SubmitClaude: %v", err)
+			}
+			other, err := env.client.SubmitClaude(t.Context(), uuid.NewString(), "claude-opus-5-5@default", []ClaudeRequest{claudeReq(key, "p")})
+			if err != nil {
+				t.Fatalf("SubmitClaude: %v", err)
+			}
+			env.vertex.finish(t, env.gcs, job.Name, genai.JobStateSucceeded)
+			env.vertex.finish(t, env.gcs, other.Name, genai.JobStateSucceeded,
+				fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref(key), claudeMessage("from the other job", "end_turn", "")))
+			tt.tamper(env, &job, &other)
+			var errs int
+			for res, err := range env.client.Results(t.Context(), job) {
+				if err != nil {
+					errs++
+					continue
+				}
+				t.Errorf("result: got = %+v, want none", res)
+			}
+			if errs != 1 {
+				t.Errorf("errors: got = %d, want = 1", errs)
+			}
+		})
 	}
 }
 

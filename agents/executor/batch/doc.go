@@ -12,7 +12,8 @@ SPDX-License-Identifier: Apache-2.0
 // Nothing in the package waits. [Client.SubmitClaude] and
 // [Client.SubmitGemini] stage the input in Cloud Storage and create the job;
 // [Client.Status] reports progress; [Client.Results] streams the outcomes
-// once the job is terminal; the caller decides when to check again.
+// written so far, and once the job is terminal also reports the keys that
+// have none; the caller decides when to check again.
 //
 // # Submission identity
 //
@@ -39,12 +40,16 @@ SPDX-License-Identifier: Apache-2.0
 //
 // # Outcomes
 //
-// A Claude stop_reason of "refusal", a Gemini prompt blockReason, or a
-// Gemini blocking finishReason yields [ErrRefused] with the provider's
-// category and detail in [Result.Refusal]; the package does not interpret
-// the category. A max-tokens stop yields [ErrTruncated]. Per-line provider
-// failures are returned as [Result.Err], and [IsRetryable] tells transient
-// ones apart. The package never resubmits on its own.
+// Classification matches the online clients and fails closed. A Claude
+// stop_reason of "refusal", a Gemini prompt blockReason, or any Gemini
+// finishReason other than STOP or MAX_TOKENS (including reasons this
+// package does not know) yields [ErrRefused] with the provider's category
+// and detail in [Result.Refusal]; the package does not interpret the
+// category. A max-tokens stop yields [ErrTruncated]. A finished response
+// with no text, and a Gemini response with no candidates, are transient
+// per-line errors. Per-line provider failures are returned as [Result.Err],
+// and [IsRetryable] tells transient ones apart. The package never resubmits
+// on its own.
 //
 // # Telemetry
 //
