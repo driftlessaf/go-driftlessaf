@@ -8,6 +8,8 @@ package batch
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +17,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func claudeReq(key, prompt string) ClaudeRequest {
@@ -570,6 +575,46 @@ func TestSubmitResumesStagedID(t *testing.T) {
 			}
 			if got, _ := env.gcs.get(inputObject); !bytes.Equal(got, input) {
 				t.Errorf("input:\n got = %s\nwant = %s", got, input)
+			}
+		})
+	}
+}
+
+// TestPreconditionFailed covers both storage transports: a BucketHandle from
+// storage.NewGRPCClient reports a failed create-only write as a gRPC status.
+func TestPreconditionFailed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{{
+		name: "json 412",
+		err:  &googleapi.Error{Code: http.StatusPreconditionFailed},
+		want: true,
+	}, {
+		name: "grpc failed precondition",
+		err:  status.Error(codes.FailedPrecondition, "conditionNotMet"),
+		want: true,
+	}, {
+		name: "wrapped grpc failed precondition",
+		err:  fmt.Errorf("writing %q: %w", "manifest.json", status.Error(codes.FailedPrecondition, "conditionNotMet")),
+		want: true,
+	}, {
+		name: "json 503",
+		err:  &googleapi.Error{Code: http.StatusServiceUnavailable},
+	}, {
+		name: "grpc unavailable",
+		err:  status.Error(codes.Unavailable, "try again"),
+	}, {
+		name: "plain error",
+		err:  errors.New("boom"),
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := preconditionFailed(tt.err); got != tt.want {
+				t.Errorf("preconditionFailed(%v): got = %v, want = %v", tt.err, got, tt.want)
 			}
 		})
 	}

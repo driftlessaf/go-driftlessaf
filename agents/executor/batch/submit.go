@@ -23,6 +23,8 @@ import (
 	"github.com/chainguard-dev/clog"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
 )
@@ -309,10 +311,13 @@ func (c *Client) stage(ctx context.Context, id string, lines []encodedLine, m ma
 	return nil
 }
 
-// preconditionFailed reports a write refused because the object exists.
+// preconditionFailed reports a write refused because the object exists,
+// over either the JSON or the gRPC storage API.
 func preconditionFailed(err error) bool {
-	e, ok := errors.AsType[*googleapi.Error](err)
-	return ok && e.Code == http.StatusPreconditionFailed
+	if e, ok := errors.AsType[*googleapi.Error](err); ok && e.Code == http.StatusPreconditionFailed {
+		return true
+	}
+	return status.Code(err) == codes.FailedPrecondition
 }
 
 // ref derives a line reference from a caller key. It is 32 lowercase hex
