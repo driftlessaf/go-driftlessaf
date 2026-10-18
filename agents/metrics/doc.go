@@ -39,6 +39,14 @@ Contextual attributes (reconciler_type, repository, turn, etc.) are automaticall
 extracted from the execution context propagated via context.Context using
 agenttrace.GetExecutionContext. No manual enricher setup is needed.
 
+# Operation Name
+
+The gen_ai.operation.name attribute on gen_ai.client.token.usage defaults to
+"invoke_agent". A caller that is not invoking an agent, such as a batch
+prediction client, sets it on the context:
+
+	ctx = metrics.WithOperationName(ctx, "batch_predict")
+
 # Graceful Degradation
 
 The package handles metric creation failures gracefully. If a counter cannot be created,
