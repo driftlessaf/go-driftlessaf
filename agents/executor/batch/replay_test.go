@@ -285,23 +285,27 @@ var scrubRules = []struct {
 	name    string
 	pattern *regexp.Regexp
 	allowed []string
+	// isolated rejects a match that touches a letter or digit, so digit runs
+	// inside hex digests and longer numbers are skipped.
+	isolated bool
 }{
-	{"project", regexp.MustCompile(`projects/([\w.-]+)`), []string{"example-project", "0"}},
-	{"project field", regexp.MustCompile(`"project(?:_?[iI]d|_?[nN]umber)?"\s*:\s*"?([^",}\s]*)"?`), []string{"example-project", "0"}},
-	{"bucket", regexp.MustCompile(`gs://([\w.-]+)`), []string{"example-bucket"}},
-	{"bucket URL", regexp.MustCompile(`storage\.googleapis\.com/([\w.-]+)`), []string{"example-bucket"}},
-	{"bucket field", regexp.MustCompile(`"bucket"\s*:\s*"([^"]*)"`), []string{"example-bucket"}},
-	{"job", regexp.MustCompile(`batchPredictionJobs/([\w.-]+)`), []string{"0"}},
-	// Unlike \b this catches "_123456789012", and unlike \D it skips digit
-	// runs inside hex digests, which scrubbing must not touch.
-	{"project number", regexp.MustCompile(`(?:^|[^0-9A-Za-z])(\d{12})(?:[^0-9A-Za-z]|$)`), nil},
-	{"email", regexp.MustCompile(`([\w.%+-]+@[\w-]+(?:\.[\w-]+)+)`), nil},
+	{name: "project", pattern: regexp.MustCompile(`projects/([\w.-]+)`), allowed: []string{"example-project", "0"}},
+	{name: "project field", pattern: regexp.MustCompile(`"project(?:_?[iI]d|_?[nN]umber)?"\s*:\s*"?([^",}\s]*)"?`), allowed: []string{"example-project", "0"}},
+	{name: "bucket", pattern: regexp.MustCompile(`gs://([\w.-]+)`), allowed: []string{"example-bucket"}},
+	{name: "bucket URL", pattern: regexp.MustCompile(`storage\.googleapis\.com/([\w.-]+)`), allowed: []string{"example-bucket"}},
+	{name: "bucket field", pattern: regexp.MustCompile(`"bucket"\s*:\s*"([^"]*)"`), allowed: []string{"example-bucket"}},
+	{name: "job", pattern: regexp.MustCompile(`batchPredictionJobs/([\w.-]+)`), allowed: []string{"0"}},
+	// Bounds are checked outside the pattern so a separator is not consumed
+	// and adjacent numbers are both found; \b would miss "_123456789012".
+	{name: "project number", pattern: regexp.MustCompile(`(\d{12})`), isolated: true},
+	{name: "email", pattern: regexp.MustCompile(`([\w.%+-]+@[\w-]+(?:\.[\w-]+)+)`)},
 }
 
 // scrubEscape matches the JSON and URL escapes an identifier can hide behind.
 var scrubEscape = regexp.MustCompile(`\\/|\\u00[0-9a-fA-F]{2}|%[0-9a-fA-F]{2}`)
 
-// scrubNormalize undoes scrubEscape's escapes, so the rules see "/" and "@".
+// scrubNormalize undoes one layer of scrubEscape's escapes, so the rules see
+// "/" and "@".
 func scrubNormalize(data string) string {
 	return scrubEscape.ReplaceAllStringFunc(data, func(e string) string {
 		if e == `\/` {
@@ -312,14 +316,28 @@ func scrubNormalize(data string) string {
 	})
 }
 
-// scrubFindings returns each identifier in data, raw or unescaped, that is
-// not a placeholder.
+// scrubAlnum reports whether the byte at i is a letter or digit.
+func scrubAlnum(d string, i int) bool {
+	if i < 0 || i >= len(d) {
+		return false
+	}
+	c := d[i]
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// scrubFindings returns each identifier in data that is not a placeholder,
+// checking data and every layer of unescaping until none is left; each layer
+// shortens the text, so the loop ends.
 func scrubFindings(data string) []string {
 	var out []string
-	for _, d := range slices.Compact([]string{data, scrubNormalize(data)}) {
+	for d, prev := data, ""; d != prev; d, prev = scrubNormalize(d), d {
 		for _, r := range scrubRules {
-			for _, m := range r.pattern.FindAllStringSubmatch(d, -1) {
-				if f := r.name + ": " + m[1]; !slices.Contains(r.allowed, m[1]) && !slices.Contains(out, f) {
+			for _, m := range r.pattern.FindAllStringSubmatchIndex(d, -1) {
+				if r.isolated && (scrubAlnum(d, m[0]-1) || scrubAlnum(d, m[1])) {
+					continue
+				}
+				v := d[m[2]:m[3]]
+				if f := r.name + ": " + v; !slices.Contains(r.allowed, v) && !slices.Contains(out, f) {
 					out = append(out, f)
 				}
 			}
@@ -382,6 +400,22 @@ func TestScrubFindings(t *testing.T) {
 	}, {
 		name: "longer digit runs are not project numbers",
 		data: `{"t":"1234567890123","n":12345678901}`,
+	}, {
+		name: "adjacent project numbers",
+		data: `{"ids":[123456789012,210987654321],"x":"111111111111 222222222222"}`,
+		want: []string{"project number: 123456789012", "project number: 210987654321", "project number: 111111111111", "project number: 222222222222"},
+	}, {
+		name: "double percent-escaped at",
+		data: `{"u":"https://x/?sa=svc%2540acme-prod.iam.gserviceaccount.com"}`,
+		want: []string{"email: svc@acme-prod.iam.gserviceaccount.com"},
+	}, {
+		name: "double unicode-escaped slashes",
+		data: `{"u":"gs:\\u002f\\u002facme-bucket"}`,
+		want: []string{"bucket: acme-bucket"},
+	}, {
+		name: "double JSON-escaped slash",
+		data: `{"m":"projects\\\/acme-prod"}`,
+		want: []string{"project: acme-prod"},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
