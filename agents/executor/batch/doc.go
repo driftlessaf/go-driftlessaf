@@ -21,8 +21,11 @@ SPDX-License-Identifier: Apache-2.0
 // otherwise submit the rows twice. Every submission names a caller-chosen
 // id, used as the job's display name and its storage directory. Before each
 // create attempt the client calls [Client.Find], so resubmitting an id, or
-// retrying after a lost response, returns the existing job. A caller that
-// means to run the same rows again uses a new id.
+// retrying after a lost response, returns the existing job. A job is adopted
+// only when its display name, input URI, and output destination all match;
+// one that reads the id's input but writes elsewhere fails the submission
+// with [ErrInvalidRequest]. A caller that means to run the same rows again
+// uses a new id.
 //
 // # Models
 //

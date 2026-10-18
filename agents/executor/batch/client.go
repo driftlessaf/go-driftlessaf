@@ -201,7 +201,10 @@ func retryable(ctx context.Context) func(error) bool {
 // Find returns the job submitted under id, if any. It filters the job list
 // on the display name and re-checks the name and input URI on each job, so a
 // filter Vertex ignores, or a job with the same name from another client,
-// cannot produce a false match. When several jobs match, the newest wins.
+// cannot produce a false match. A job with this id's name and input but
+// another output destination, or none, was not created by this client: Find
+// returns an error wrapping [ErrInvalidRequest] rather than adopt it. When
+// several jobs match, the newest wins.
 func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	if !idPattern.MatchString(id) {
 		return Job{}, false, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, id, idPattern)
@@ -222,6 +225,7 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 
 func (c *Client) find(ctx context.Context, id string) (Job, bool, error) {
 	inputURI := c.gsURI(c.objectName(id, inputObject))
+	outputURI := c.gsURI(c.objectName(id, outputDir))
 	page, err := c.genai.Batches.List(ctx, &genai.ListBatchJobsConfig{
 		Filter: fmt.Sprintf("display_name=%q", id),
 	})
@@ -230,6 +234,16 @@ func (c *Client) find(ctx context.Context, id string) (Job, bool, error) {
 		for _, bj := range page.Items {
 			if bj.DisplayName != id || bj.Src == nil || !slices.Contains(bj.Src.GCSURI, inputURI) {
 				continue
+			}
+			// Our input is already in that job, so neither adopting it nor
+			// creating a second job is safe.
+			if bj.Dest == nil || strings.TrimSuffix(bj.Dest.GCSURI, "/") != outputURI {
+				var dest string
+				if bj.Dest != nil {
+					dest = bj.Dest.GCSURI
+				}
+				return Job{}, false, fmt.Errorf("%w: job %q reads this id's input but writes to %q, not %q",
+					ErrInvalidRequest, bj.Name, dest, outputURI+"/")
 			}
 			if match == nil || bj.CreateTime.After(match.CreateTime) {
 				match = bj

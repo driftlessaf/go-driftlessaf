@@ -145,20 +145,23 @@ func (f *fakeGCS) download(w http.ResponseWriter, r *http.Request) {
 
 // vertexJob is a BatchPredictionJob in the Vertex REST shape.
 type vertexJob struct {
-	Name         string `json:"name"`
-	DisplayName  string `json:"displayName"`
-	Model        string `json:"model"`
-	State        string `json:"state"`
-	CreateTime   string `json:"createTime"`
-	InputConfig  any    `json:"inputConfig"`
-	OutputConfig struct {
-		PredictionsFormat string `json:"predictionsFormat"`
-		GCSDestination    struct {
-			OutputURIPrefix string `json:"outputUriPrefix"`
-		} `json:"gcsDestination"`
-	} `json:"outputConfig"`
-	OutputInfo      map[string]string `json:"outputInfo,omitempty"`
-	CompletionStats map[string]string `json:"completionStats,omitempty"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	Model       string `json:"model"`
+	State       string `json:"state"`
+	CreateTime  string `json:"createTime"`
+	InputConfig any    `json:"inputConfig"`
+	// OutputConfig is nil for a job listed without one.
+	OutputConfig    *vertexOutputConfig `json:"outputConfig,omitempty"`
+	OutputInfo      map[string]string   `json:"outputInfo,omitempty"`
+	CompletionStats map[string]string   `json:"completionStats,omitempty"`
+}
+
+type vertexOutputConfig struct {
+	PredictionsFormat string `json:"predictionsFormat"`
+	GCSDestination    struct {
+		OutputURIPrefix string `json:"outputUriPrefix"`
+	} `json:"gcsDestination"`
 }
 
 // fakeVertex is an in-memory Vertex batchPredictionJobs API.
@@ -172,6 +175,11 @@ type fakeVertex struct {
 	dropCreateResponses int
 	// ignoreFilter lists every job whatever the filter says.
 	ignoreFilter bool
+	// raceJob joins the job list once raceAfterLists lists have been
+	// answered, as a job someone else created between two of the client's
+	// lookups.
+	raceJob        *vertexJob
+	raceAfterLists int
 }
 
 const jobsPath = "/v1beta1/projects/" + testProject + "/locations/" + testLocation + "/batchPredictionJobs"
@@ -251,6 +259,10 @@ func (f *fakeVertex) create(w http.ResponseWriter, r *http.Request) {
 func (f *fakeVertex) list(w http.ResponseWriter, r *http.Request) {
 	filter := r.URL.Query().Get("filter")
 	f.filters = append(f.filters, filter)
+	if f.raceJob != nil && len(f.filters) > f.raceAfterLists {
+		f.jobs = append(f.jobs, f.raceJob)
+		f.raceJob = nil
+	}
 	var matched []*vertexJob
 	for _, j := range f.jobs {
 		if f.ignoreFilter || filter == fmt.Sprintf("display_name=%q", j.DisplayName) {

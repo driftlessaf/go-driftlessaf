@@ -55,6 +55,7 @@ func TestIsRetryable(t *testing.T) {
 		{"canceled", context.Canceled, false},
 		{"deadline", context.DeadlineExceeded, false},
 		{"sentinel", ErrMissing, false},
+		{"invalid request quoting a status keyword", fmt.Errorf("%w: writes to %q", ErrInvalidRequest, "gs://x/UNAVAILABLE/"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

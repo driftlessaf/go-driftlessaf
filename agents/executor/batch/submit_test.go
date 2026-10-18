@@ -310,3 +310,101 @@ func TestSubmitRejectsReusedIDForOtherModel(t *testing.T) {
 		t.Errorf("creates: got = %d, want = 1", n)
 	}
 }
+
+// TestSubmitRejectsDestinationCollision covers a job someone else created
+// with this submission's display name and input but its own destination:
+// adopting it, or creating a second job beside it, would hide that the staged
+// input was handed to a job this client did not create.
+func TestSubmitRejectsDestinationCollision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// dest is the colliding job's output prefix; empty omits outputConfig.
+		dest string
+		// raced adds the job between Submit's first lookup and its create.
+		raced bool
+	}{{
+		name: "foreign bucket",
+		dest: "gs://other-bucket/UNAVAILABLE/",
+	}, {
+		name:  "foreign bucket, raced after staging",
+		dest:  "gs://other-bucket/UNAVAILABLE/",
+		raced: true,
+	}, {
+		name: "another id's directory in this bucket",
+		dest: "gs://" + testBucket + "/" + testPrefix + "/other-id/output/",
+	}, {
+		name: "no output config",
+		dest: "",
+	}, {
+		name:  "no output config, raced after staging",
+		dest:  "",
+		raced: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			foreign := &vertexJob{
+				Name:        "projects/" + testProject + "/locations/" + testLocation + "/batchPredictionJobs/666",
+				DisplayName: id,
+				State:       string(genai.JobStatePending),
+				CreateTime:  "2026-10-18T00:00:00Z",
+				InputConfig: map[string]any{"instancesFormat": "jsonl", "gcsSource": map[string]any{
+					"uris": []string{"gs://" + testBucket + "/" + testPrefix + "/" + id + "/input.jsonl"},
+				}},
+			}
+			if tt.dest != "" {
+				foreign.OutputConfig = &vertexOutputConfig{PredictionsFormat: "jsonl"}
+				foreign.OutputConfig.GCSDestination.OutputURIPrefix = tt.dest
+			}
+			if tt.raced {
+				env.vertex.raceJob, env.vertex.raceAfterLists = foreign, 1
+			} else {
+				env.vertex.jobs = append(env.vertex.jobs, foreign)
+			}
+
+			_, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")})
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("SubmitClaude: got = %v, want = %v", err, ErrInvalidRequest)
+			}
+			if !strings.Contains(err.Error(), foreign.Name) {
+				t.Errorf("SubmitClaude: got = %v, want the colliding job named", err)
+			}
+			if IsRetryable(err) {
+				t.Errorf("IsRetryable(%v): got = true, want = false", err)
+			}
+			if n := env.vertex.createCount(); n != 0 {
+				t.Errorf("creates: got = %d, want = 0", n)
+			}
+			if _, ok, err := env.client.Find(t.Context(), id); ok || !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("Find: ok = %v, err = %v, want = %v", ok, err, ErrInvalidRequest)
+			}
+		})
+	}
+}
+
+// TestFindNormalizesDestinationSlash adopts a job whose reported output
+// prefix differs from the submitted one only by its trailing slash.
+func TestFindNormalizesDestinationSlash(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	id := uuid.NewString()
+	job, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")})
+	if err != nil {
+		t.Fatalf("SubmitClaude: %v", err)
+	}
+	env.vertex.mu.Lock()
+	j := env.vertex.job("/v1beta1/" + job.Name)
+	j.OutputConfig.GCSDestination.OutputURIPrefix = strings.TrimSuffix(j.OutputConfig.GCSDestination.OutputURIPrefix, "/")
+	env.vertex.mu.Unlock()
+
+	found, ok, err := env.client.Find(t.Context(), id)
+	if err != nil || !ok {
+		t.Fatalf("Find: ok = %v, err = %v", ok, err)
+	}
+	if diff := cmp.Diff(job, found); diff != "" {
+		t.Errorf("Find (-submit, +find):\n%s", diff)
+	}
+}

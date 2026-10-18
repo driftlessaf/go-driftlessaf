@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	// ErrInvalidRequest identifies a submission rejected before anything was
-	// written or sent.
+	// ErrInvalidRequest identifies a request the client rejects: invalid
+	// input, or an id whose existing job does not match this client.
 	ErrInvalidRequest = errors.New("invalid batch request")
 	// ErrRefused marks a result the provider's safety system declined to
 	// answer. [Result.Refusal] carries the provider's category and detail.
@@ -61,9 +61,11 @@ func (e *lineError) Error() string {
 // attempt: a per-line provider error or an API error with a rate-limit,
 // overload, timeout, or server status, or a network timeout. [ErrMissing]
 // is not covered; a caller decides separately whether to resubmit a key
-// with no output.
+// with no output. [ErrInvalidRequest] never is.
 func IsRetryable(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) {
+	// An invalid request's text can quote a foreign job, whose URIs must
+	// not match the status keywords below.
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidRequest) {
 		return false
 	}
 	if e, ok := errors.AsType[*lineError](err); ok && e.transient {
