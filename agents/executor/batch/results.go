@@ -35,7 +35,8 @@ type Result struct {
 	// Key is the request's key as submitted.
 	Key string
 	// Text is the response text: Claude's text blocks, or the non-thought
-	// text parts of Gemini's first candidate, concatenated in order.
+	// text parts of Gemini's first candidate, concatenated in order. It is
+	// empty when Err is [ErrRefused]; a truncated response keeps its partial text.
 	Text string
 	// Usage is the token accounting for the request.
 	Usage Usage
@@ -381,6 +382,7 @@ func claudeResult(key string, line outputLine) Result {
 	switch msg.StopReason {
 	case anthropic.StopReasonRefusal:
 		res.Refusal = &Refusal{Category: string(msg.StopDetails.Category), Detail: msg.StopDetails.Explanation}
+		res.Text = ""
 		res.Err = ErrRefused
 	case anthropic.StopReasonMaxTokens:
 		res.Err = ErrTruncated
@@ -451,6 +453,7 @@ func geminiResult(key string, line outputLine) Result {
 		default:
 			res.Stop = string(c.FinishReason)
 			res.Refusal = &Refusal{Category: string(c.FinishReason), Detail: c.FinishMessage}
+			res.Text = ""
 			res.Err = ErrRefused
 			return res
 		}

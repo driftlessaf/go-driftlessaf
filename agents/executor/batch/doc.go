@@ -45,7 +45,9 @@ SPDX-License-Identifier: Apache-2.0
 // finishReason other than STOP or MAX_TOKENS (including reasons this
 // package does not know) yields [ErrRefused] with the provider's category
 // and detail in [Result.Refusal]; the package does not interpret the
-// category. A max-tokens stop yields [ErrTruncated]. A finished response
+// category. A refused result carries no text, matching the online clients,
+// which never accept partial content. A max-tokens stop yields
+// [ErrTruncated] and keeps the partial text. A finished response
 // with no text, and a Gemini response with no candidates, are transient
 // per-line errors. Per-line provider failures are returned as [Result.Err],
 // and [IsRetryable] tells transient ones apart. The package never resubmits

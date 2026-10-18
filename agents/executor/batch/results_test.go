@@ -63,6 +63,9 @@ func checkResults(t *testing.T, cases []resultCase, keys []string, got map[strin
 			if !errors.Is(res.Err, tc.wantErr) {
 				t.Errorf("%s: err: got = %v, want = %v", tc.name, res.Err, tc.wantErr)
 			}
+			if errors.Is(res.Err, ErrRefused) && res.Text != "" {
+				t.Errorf("%s: refused result text: got = %q, want empty", tc.name, res.Text)
+			}
 		case tc.wantLineErr:
 			if res.Err == nil || errors.Is(res.Err, ErrRefused) || errors.Is(res.Err, ErrTruncated) || errors.Is(res.Err, ErrMissing) {
 				t.Errorf("%s: err: got = %v, want a line error", tc.name, res.Err)
@@ -108,7 +111,7 @@ func TestResultsClaude(t *testing.T) {
 	}, {
 		name: "refusal keeps category and explanation",
 		line: func(ref string, _ map[string]any) string {
-			return fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref, claudeMessage("", "refusal",
+			return fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref, claudeMessage("partial", "refusal",
 				`{"type":"refusal","category":"reasoning_extraction","explanation":"asks for hidden reasoning"}`))
 		},
 		want:    Result{Stop: "refusal", Usage: usage, Refusal: &Refusal{Category: "reasoning_extraction", Detail: "asks for hidden reasoning"}},
@@ -116,7 +119,7 @@ func TestResultsClaude(t *testing.T) {
 	}, {
 		name: "refusal with null category",
 		line: func(ref string, _ map[string]any) string {
-			return fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref, claudeMessage("", "refusal", `{"type":"refusal","category":null,"explanation":null}`))
+			return fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref, claudeMessage("partial", "refusal", `{"type":"refusal","category":null,"explanation":null}`))
 		},
 		want:    Result{Stop: "refusal", Usage: usage, Refusal: &Refusal{}},
 		wantErr: ErrRefused,
@@ -267,39 +270,47 @@ func TestResultsGemini(t *testing.T) {
 		want:    Result{Stop: "PROHIBITED_CONTENT", Usage: Usage{In: 50}, Refusal: &Refusal{Category: "PROHIBITED_CONTENT", Detail: "blocked by policy"}},
 		wantErr: ErrRefused,
 	}, {
+		name: "prompt blocked with candidate text",
+		line: func(_ string, in map[string]any) string {
+			resp := strings.Replace(geminiResponse(`{"text":"partial"}`, "STOP", ""), `{"candidates"`, `{"promptFeedback":{"blockReason":"SAFETY"},"candidates"`, 1)
+			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), resp)
+		},
+		want:    Result{Stop: "SAFETY", Usage: usage, Refusal: &Refusal{Category: "SAFETY"}},
+		wantErr: ErrRefused,
+	}, {
 		name: "safety finish",
 		line: func(_ string, in map[string]any) string {
 			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"par"}`, "SAFETY", `,"finishMessage":"unsafe content"`))
 		},
-		want:    Result{Text: "par", Stop: "SAFETY", Usage: usage, Refusal: &Refusal{Category: "SAFETY", Detail: "unsafe content"}},
+		want:    Result{Stop: "SAFETY", Usage: usage, Refusal: &Refusal{Category: "SAFETY", Detail: "unsafe content"}},
 		wantErr: ErrRefused,
 	}, {
 		name: "other finish fails closed",
 		line: func(_ string, in map[string]any) string {
 			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "OTHER", ""))
 		},
-		want:    Result{Text: "partial", Stop: "OTHER", Usage: usage, Refusal: &Refusal{Category: "OTHER"}},
+		want:    Result{Stop: "OTHER", Usage: usage, Refusal: &Refusal{Category: "OTHER"}},
 		wantErr: ErrRefused,
 	}, {
 		name: "malformed function call fails closed",
 		line: func(_ string, in map[string]any) string {
 			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "MALFORMED_FUNCTION_CALL", ""))
 		},
-		want:    Result{Text: "partial", Stop: "MALFORMED_FUNCTION_CALL", Usage: usage, Refusal: &Refusal{Category: "MALFORMED_FUNCTION_CALL"}},
+		want:    Result{Stop: "MALFORMED_FUNCTION_CALL", Usage: usage, Refusal: &Refusal{Category: "MALFORMED_FUNCTION_CALL"}},
 		wantErr: ErrRefused,
 	}, {
 		name: "unspecified finish fails closed",
 		line: func(_ string, in map[string]any) string {
 			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "FINISH_REASON_UNSPECIFIED", ""))
 		},
-		want:    Result{Text: "partial", Stop: "FINISH_REASON_UNSPECIFIED", Usage: usage, Refusal: &Refusal{Category: "FINISH_REASON_UNSPECIFIED"}},
+		want:    Result{Stop: "FINISH_REASON_UNSPECIFIED", Usage: usage, Refusal: &Refusal{Category: "FINISH_REASON_UNSPECIFIED"}},
 		wantErr: ErrRefused,
 	}, {
 		name: "unknown finish fails closed",
 		line: func(_ string, in map[string]any) string {
 			return fmt.Sprintf(`{"request":%s,"response":%s}`, echo(t, in, echoAllLabels), geminiResponse(`{"text":"partial"}`, "SOME_FUTURE_REASON", `,"finishMessage":"new"`))
 		},
-		want:    Result{Text: "partial", Stop: "SOME_FUTURE_REASON", Usage: usage, Refusal: &Refusal{Category: "SOME_FUTURE_REASON", Detail: "new"}},
+		want:    Result{Stop: "SOME_FUTURE_REASON", Usage: usage, Refusal: &Refusal{Category: "SOME_FUTURE_REASON", Detail: "new"}},
 		wantErr: ErrRefused,
 	}, {
 		name: "stop with no text",
