@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package batch
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -158,6 +159,9 @@ type manifest struct {
 	Provider string          `json:"provider"`
 	Model    string          `json:"model"`
 	Keys     []manifestEntry `json:"keys"`
+	// InputSHA256 is the digest of the input object, which tells a retry of
+	// the same rows from another submission under the id.
+	InputSHA256 string `json:"input_sha256"`
 }
 
 type manifestEntry struct {
@@ -203,8 +207,11 @@ func retryable(ctx context.Context) func(error) bool {
 // filter Vertex ignores, or a job with the same name from another client,
 // cannot produce a false match. A job with this id's name and input but
 // another output destination, or none, was not created by this client: Find
-// returns an error wrapping [ErrInvalidRequest] rather than adopt it. When
-// several jobs match, the newest wins.
+// returns an error wrapping [ErrInvalidRequest] rather than adopt it.
+//
+// When concurrent submissions left several jobs, Find returns the earliest
+// created, ties broken by name, whatever its state: that is the job every
+// Submit of the id converges on.
 func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	if !idPattern.MatchString(id) {
 		return Job{}, false, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, id, idPattern)
@@ -214,8 +221,15 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 		ok  bool
 	}
 	f, err := retry.RetryWithBackoff(ctx, c.retry, "batch.find", retryable(ctx), func() (found, error) {
-		job, ok, err := c.find(ctx, id)
-		return found{job, ok}, err
+		bjs, err := c.matches(ctx, id)
+		if err != nil || len(bjs) == 0 {
+			return found{}, err
+		}
+		m, err := c.readManifest(ctx, c.objectName(id, manifestObject))
+		if err != nil {
+			return found{}, err
+		}
+		return found{c.jobFor(id, bjs[0].Name, m), true}, nil
 	})
 	if err != nil {
 		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
@@ -223,13 +237,14 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	return f.job, f.ok, nil
 }
 
-func (c *Client) find(ctx context.Context, id string) (Job, bool, error) {
+// matches lists the jobs this client created under id, earliest first.
+func (c *Client) matches(ctx context.Context, id string) ([]*genai.BatchJob, error) {
 	inputURI := c.gsURI(c.objectName(id, inputObject))
 	outputURI := c.gsURI(c.objectName(id, outputDir))
 	page, err := c.genai.Batches.List(ctx, &genai.ListBatchJobsConfig{
 		Filter: fmt.Sprintf("display_name=%q", id),
 	})
-	var match *genai.BatchJob
+	var out []*genai.BatchJob
 	for ; err == nil; page, err = page.Next(ctx) {
 		for _, bj := range page.Items {
 			if bj.DisplayName != id || bj.Src == nil || !slices.Contains(bj.Src.GCSURI, inputURI) {
@@ -242,25 +257,19 @@ func (c *Client) find(ctx context.Context, id string) (Job, bool, error) {
 				if bj.Dest != nil {
 					dest = bj.Dest.GCSURI
 				}
-				return Job{}, false, fmt.Errorf("%w: job %q reads this id's input but writes to %q, not %q",
+				return nil, fmt.Errorf("%w: job %q reads this id's input but writes to %q, not %q",
 					ErrInvalidRequest, bj.Name, dest, outputURI+"/")
 			}
-			if match == nil || bj.CreateTime.After(match.CreateTime) {
-				match = bj
-			}
+			out = append(out, bj)
 		}
 	}
 	if !errors.Is(err, genai.ErrPageDone) {
-		return Job{}, false, err
+		return nil, err
 	}
-	if match == nil {
-		return Job{}, false, nil
-	}
-	m, err := c.readManifest(ctx, c.objectName(id, manifestObject))
-	if err != nil {
-		return Job{}, false, err
-	}
-	return c.jobFor(id, match.Name, m), true, nil
+	slices.SortFunc(out, func(a, b *genai.BatchJob) int {
+		return cmp.Or(a.CreateTime.Compare(b.CreateTime), strings.Compare(a.Name, b.Name))
+	})
+	return out, nil
 }
 
 // jobFor assembles the Job for a submission id from its Vertex name and
@@ -290,11 +299,11 @@ func (c *Client) readManifest(ctx context.Context, object string) (manifest, err
 	return m, nil
 }
 
-// manifestFor reads the manifest under the job's id. The id was validated
-// by Results, and the persisted URIs are not trusted to locate it.
-func (c *Client) manifestFor(ctx context.Context, job Job) (manifest, error) {
+// manifestFor reads the manifest under a validated id; a persisted Job's
+// URIs are not trusted to locate it.
+func (c *Client) manifestFor(ctx context.Context, id string) (manifest, error) {
 	return retry.RetryWithBackoff(ctx, c.retry, "batch.manifest", retryable(ctx), func() (manifest, error) {
-		return c.readManifest(ctx, c.objectName(job.ID, manifestObject))
+		return c.readManifest(ctx, c.objectName(id, manifestObject))
 	})
 }
 

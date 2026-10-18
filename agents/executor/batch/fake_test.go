@@ -99,7 +99,23 @@ func (f *fakeGCS) upload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	f.put(name, data)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// ifGenerationMatch=0 is the create-only precondition; the fake keeps no
+	// generations, so any other value is unsupported rather than ignored.
+	if match, ok := r.URL.Query()["ifGenerationMatch"]; ok {
+		if match[0] != "0" {
+			w.WriteHeader(http.StatusNotImplemented)
+			fmt.Fprintf(w, `{"error":{"code":501,"message":"fake GCS: unsupported ifGenerationMatch=%s"}}`, match[0])
+			return
+		}
+		if _, exists := f.objects[name]; exists {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			fmt.Fprint(w, `{"error":{"code":412,"message":"At least one of the pre-conditions you specified did not hold.","errors":[{"reason":"conditionNotMet"}]}}`)
+			return
+		}
+	}
+	f.objects[name] = data
 	fmt.Fprintf(w, `{"name":%q,"bucket":%q,"size":"%d"}`, name, testBucket, len(data))
 }
 
@@ -180,12 +196,22 @@ type fakeVertex struct {
 	// lookups.
 	raceJob        *vertexJob
 	raceAfterLists int
+	// rejectCreates makes the next n creates fail with 400 and create
+	// nothing, leaving the staged input behind as a crash would.
+	rejectCreates int
+	// pairedLists holds that many List requests in pairs: each waits for a
+	// second to arrive, so two callers' lookups answer before either acts.
+	pairedLists int
+	waiting     chan struct{}
 }
 
 const jobsPath = "/v1beta1/projects/" + testProject + "/locations/" + testLocation + "/batchPredictionJobs"
 
 func (f *fakeVertex) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodGet && r.URL.Path == jobsPath {
+		f.pair(r)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
@@ -209,6 +235,30 @@ func (f *fakeVertex) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 		fmt.Fprintf(w, `{"error":{"code":501,"message":"fake Vertex: unsupported %s %s"}}`, r.Method, r.URL.Path)
+	}
+}
+
+// pair blocks a List request until another arrives, while pairedLists
+// lasts.
+func (f *fakeVertex) pair(r *http.Request) {
+	f.mu.Lock()
+	if f.pairedLists == 0 {
+		f.mu.Unlock()
+		return
+	}
+	f.pairedLists--
+	if partner := f.waiting; partner != nil {
+		f.waiting = nil
+		f.mu.Unlock()
+		close(partner)
+		return
+	}
+	ch := make(chan struct{})
+	f.waiting = ch
+	f.mu.Unlock()
+	select {
+	case <-ch:
+	case <-r.Context().Done():
 	}
 }
 
@@ -236,6 +286,12 @@ func (f *fakeVertex) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.creates = append(f.creates, body)
+	if f.rejectCreates > 0 {
+		f.rejectCreates--
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"code":400,"message":"scripted rejection","status":"INVALID_ARGUMENT"}}`)
+		return
+	}
 	raw, _ := json.Marshal(body)
 	j := &vertexJob{}
 	if err := json.Unmarshal(raw, j); err != nil {
@@ -312,6 +368,17 @@ func (f *fakeVertex) setOutputDir(name, dir string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.job("/v1beta1/" + name).OutputInfo["gcsOutputDirectory"] = dir
+}
+
+// states returns each job's state by name.
+func (f *fakeVertex) states() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.jobs))
+	for _, j := range f.jobs {
+		out[j.Name] = j.State
+	}
+	return out
 }
 
 func (f *fakeVertex) createCount() int {

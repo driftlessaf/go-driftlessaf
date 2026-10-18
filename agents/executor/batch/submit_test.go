@@ -6,8 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 package batch
 
 import (
+	"bytes"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -406,5 +408,169 @@ func TestFindNormalizesDestinationSlash(t *testing.T) {
 	}
 	if diff := cmp.Diff(job, found); diff != "" {
 		t.Errorf("Find (-submit, +find):\n%s", diff)
+	}
+}
+
+// TestSubmitConcurrentConverges races two Submits of one id past their final
+// lookup, so both create a job: they must settle on the earlier one and
+// cancel the other before it runs.
+func TestSubmitConcurrentConverges(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	id := uuid.NewString()
+	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+	// Each caller lists once in Find and once before Create.
+	env.vertex.pairedLists = 4
+	var (
+		wg   sync.WaitGroup
+		jobs [2]Job
+		errs [2]error
+	)
+	for i := range 2 {
+		wg.Go(func() {
+			jobs[i], errs[i] = env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if got := env.vertex.createCount(); got != 2 {
+		t.Fatalf("creates: got = %d, want = 2 (the race did not happen)", got)
+	}
+	if jobs[0].Name != jobs[1].Name {
+		t.Errorf("callers disagree: got = %q and %q", jobs[0].Name, jobs[1].Name)
+	}
+	var live []string
+	for name, state := range env.vertex.states() {
+		switch genai.JobState(state) {
+		case genai.JobStateCancelling, genai.JobStateCancelled:
+		default:
+			live = append(live, name)
+		}
+	}
+	if len(live) != 1 || live[0] != jobs[0].Name {
+		t.Errorf("live jobs: got = %v, want only %q", live, jobs[0].Name)
+	}
+	found, ok, err := env.client.Find(t.Context(), id)
+	if err != nil || !ok || found.Name != jobs[0].Name {
+		t.Errorf("Find: got = %q, %v, %v, want = %q", found.Name, ok, err, jobs[0].Name)
+	}
+}
+
+// TestSubmitRejectsDifferentRowsForStagedID stages an id whose job was never
+// created, then submits other rows under it: the staged objects must not be
+// overwritten, or a concurrent first caller would create its job over them.
+func TestSubmitRejectsDifferentRowsForStagedID(t *testing.T) {
+	t.Parallel()
+	key := uuid.NewString()
+	tests := []struct {
+		name   string
+		submit func(c *Client, id string) error
+	}{{
+		name: "different prompt",
+		submit: func(c *Client, id string) error {
+			_, err := c.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq(key, "other")})
+			return err
+		},
+	}, {
+		name: "different key",
+		submit: func(c *Client, id string) error {
+			_, err := c.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq(uuid.NewString(), "p")})
+			return err
+		},
+	}, {
+		name: "extra row",
+		submit: func(c *Client, id string) error {
+			_, err := c.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq(key, "p"), claudeReq(uuid.NewString(), "q")})
+			return err
+		},
+	}, {
+		name: "different model",
+		submit: func(c *Client, id string) error {
+			_, err := c.SubmitClaude(t.Context(), id, "claude-sonnet-5-5@default", []ClaudeRequest{claudeReq(key, "p")})
+			return err
+		},
+	}, {
+		name: "different provider",
+		submit: func(c *Client, id string) error {
+			_, err := c.SubmitGemini(t.Context(), id, "claude-opus-5-5@default", []GeminiRequest{geminiReq(key, "p")})
+			return err
+		},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			env.vertex.rejectCreates = 1
+			if _, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq(key, "p")}); err == nil {
+				t.Fatal("first submit: got = nil, want the scripted rejection")
+			}
+			input, _ := env.gcs.get(testPrefix + "/" + id + "/input.jsonl")
+			man, _ := env.gcs.get(testPrefix + "/" + id + "/manifest.json")
+
+			err := tt.submit(env.client, id)
+			if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), id) {
+				t.Errorf("second submit: got = %v, want %v naming %q", err, ErrInvalidRequest, id)
+			}
+			if got, _ := env.gcs.get(testPrefix + "/" + id + "/input.jsonl"); !bytes.Equal(got, input) {
+				t.Errorf("input changed:\n got = %s\nwant = %s", got, input)
+			}
+			if got, _ := env.gcs.get(testPrefix + "/" + id + "/manifest.json"); !bytes.Equal(got, man) {
+				t.Errorf("manifest changed:\n got = %s\nwant = %s", got, man)
+			}
+			if n := env.vertex.createCount(); n != 1 {
+				t.Errorf("creates: got = %d, want = 1", n)
+			}
+		})
+	}
+}
+
+// TestSubmitResumesStagedID re-submits the same rows after a crash that
+// left staged objects but no job.
+func TestSubmitResumesStagedID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// dropInput removes the input, as a crash between the two writes.
+		dropInput bool
+	}{{
+		name:      "manifest written, input not",
+		dropInput: true,
+	}, {
+		name: "manifest and input written",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+			env.vertex.rejectCreates = 1
+			if _, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs); err == nil {
+				t.Fatal("first submit: got = nil, want the scripted rejection")
+			}
+			inputObject := testPrefix + "/" + id + "/input.jsonl"
+			input, _ := env.gcs.get(inputObject)
+			if tt.dropInput {
+				env.gcs.mu.Lock()
+				delete(env.gcs.objects, inputObject)
+				env.gcs.mu.Unlock()
+			}
+
+			job, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+			if err != nil {
+				t.Fatalf("re-submit: %v", err)
+			}
+			if states := env.vertex.states(); len(states) != 1 || states[job.Name] == "" {
+				t.Errorf("jobs: got = %v, want only %q", states, job.Name)
+			}
+			if got, _ := env.gcs.get(inputObject); !bytes.Equal(got, input) {
+				t.Errorf("input:\n got = %s\nwant = %s", got, input)
+			}
+		})
 	}
 }

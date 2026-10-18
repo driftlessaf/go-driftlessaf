@@ -14,9 +14,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
+	"slices"
 	"strings"
 
+	"cloud.google.com/go/storage"
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/chainguard-dev/clog"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -69,6 +74,10 @@ type encodedLine struct {
 // "claude-opus-5-5@default") as one batch job under the submission id.
 // Submitting an id that already has a job returns that job without writing
 // input or creating another; a new id is needed to resubmit the same rows.
+// Different rows under an id with no job yet are rejected with
+// [ErrInvalidRequest]. Concurrent calls with the same id and rows return the
+// same job, though a duplicate may be created and then cancelled; see the
+// package documentation.
 func (c *Client) SubmitClaude(ctx context.Context, id, model string, reqs []ClaudeRequest, opts ...SubmitOption) (Job, error) {
 	if err := submitOptions(opts); err != nil {
 		return Job{}, err
@@ -85,9 +94,8 @@ func (c *Client) SubmitClaude(ctx context.Context, id, model string, reqs []Clau
 }
 
 // SubmitGemini submits reqs to model (a bare Vertex model ID such as
-// "gemini-3.8-flash") as one batch job under the submission id. Submitting
-// an id that already has a job returns that job without writing input or
-// creating another.
+// "gemini-3.8-flash") as one batch job under the submission id. It shares
+// [Client.SubmitClaude]'s submission identity contract.
 func (c *Client) SubmitGemini(ctx context.Context, id, model string, reqs []GeminiRequest, opts ...SubmitOption) (Job, error) {
 	if err := submitOptions(opts); err != nil {
 		return Job{}, err
@@ -126,6 +134,7 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 	m := manifest{Provider: provider, Model: model, Keys: make([]manifestEntry, 0, len(lines))}
 	keys := make(map[string]struct{}, len(lines))
 	refs := make(map[string]struct{}, len(lines))
+	digest := sha256.New()
 	for _, l := range lines {
 		if _, dup := keys[l.entry.Key]; dup {
 			return Job{}, fmt.Errorf("%w: duplicate key %q", ErrInvalidRequest, l.entry.Key)
@@ -135,45 +144,88 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 		}
 		keys[l.entry.Key], refs[l.entry.Ref] = struct{}{}, struct{}{}
 		m.Keys = append(m.Keys, l.entry)
+		digest.Write(l.line)
+		digest.Write([]byte{'\n'})
 	}
+	m.InputSHA256 = hex.EncodeToString(digest.Sum(nil))
 
-	job, ok, err := c.Find(ctx, id)
+	bjs, err := c.lookup(ctx, id)
 	if err != nil {
 		return Job{}, err
 	}
-	if ok {
-		return existing(job, provider, model)
-	}
-	if err := c.writeInput(ctx, id, lines, m); err != nil {
-		return Job{}, err
-	}
-
-	// Create carries no request id, so every attempt looks for the job
-	// first: a retry after a lost response finds the job instead of making
-	// a second one.
-	job, err = retry.RetryWithBackoff(ctx, c.retry, "batch.create", retryable(ctx), func() (Job, error) {
-		job, ok, err := c.find(ctx, id)
-		if err != nil || ok {
-			return job, err
+	var job Job
+	if len(bjs) == 0 {
+		if err := c.stage(ctx, id, lines, m); err != nil {
+			return Job{}, err
 		}
-		bj, err := c.genai.Batches.Create(ctx, genaiModel(provider, model),
-			&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{c.gsURI(c.objectName(id, inputObject))}},
-			&genai.CreateBatchJobConfig{
-				DisplayName: id,
-				Dest: &genai.BatchJobDestination{
-					Format: "jsonl",
-					GCSURI: c.gsURI(c.objectName(id, outputDir)) + "/",
-				},
-			})
+		// Create carries no request id, so every attempt looks for the job
+		// first: a retry after a lost response finds the job instead of
+		// making a second one.
+		job, err = retry.RetryWithBackoff(ctx, c.retry, "batch.create", retryable(ctx), func() (Job, error) {
+			bjs, err := c.matches(ctx, id)
+			if err != nil {
+				return Job{}, err
+			}
+			if len(bjs) > 0 {
+				return c.jobFor(id, bjs[0].Name, m), nil
+			}
+			bj, err := c.genai.Batches.Create(ctx, genaiModel(provider, model),
+				&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{c.gsURI(c.objectName(id, inputObject))}},
+				&genai.CreateBatchJobConfig{
+					DisplayName: id,
+					Dest: &genai.BatchJobDestination{
+						Format: "jsonl",
+						GCSURI: c.gsURI(c.objectName(id, outputDir)) + "/",
+					},
+				})
+			if err != nil {
+				return Job{}, err
+			}
+			return c.jobFor(id, bj.Name, m), nil
+		})
+		if err != nil {
+			return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
+		}
+		// A concurrent Submit of this id may have created a job too; listing
+		// again lets every caller settle on the same one.
+		if bjs, err = c.lookup(ctx, id); err != nil {
+			return Job{}, err
+		}
+	}
+	if len(bjs) > 0 {
+		c.cancelDuplicates(ctx, bjs[1:])
+		stored, err := c.manifestFor(ctx, id)
 		if err != nil {
 			return Job{}, err
 		}
-		return c.jobFor(id, bj.Name, m), nil
-	})
-	if err != nil {
-		return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
+		job = c.jobFor(id, bjs[0].Name, stored)
 	}
 	return existing(job, provider, model)
+}
+
+// lookup lists the jobs under id, earliest first, with retries.
+func (c *Client) lookup(ctx context.Context, id string) ([]*genai.BatchJob, error) {
+	bjs, err := retry.RetryWithBackoff(ctx, c.retry, "batch.find", retryable(ctx), func() ([]*genai.BatchJob, error) {
+		return c.matches(ctx, id)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("finding batch job %q: %w", id, err)
+	}
+	return bjs, nil
+}
+
+// cancelDuplicates cancels the jobs that lost to an earlier one, before
+// they bill for the same rows. Failures are logged: the survivor is unchanged.
+func (c *Client) cancelDuplicates(ctx context.Context, dups []*genai.BatchJob) {
+	for _, bj := range dups {
+		if bj.State == genai.JobStateCancelling || statusOf(bj).Terminal {
+			continue
+		}
+		clog.WarnContext(ctx, "Cancelling duplicate batch job", "id", bj.DisplayName, "job", bj.Name)
+		if err := c.Cancel(ctx, Job{Name: bj.Name}); err != nil {
+			clog.ErrorContext(ctx, "Failed to cancel duplicate batch job", "id", bj.DisplayName, "job", bj.Name, "error", err)
+		}
+	}
 }
 
 // existing rejects reuse of a submission id for a different provider or
@@ -194,14 +246,19 @@ func genaiModel(provider, model string) string {
 	return model
 }
 
-// writeInput writes the JSONL input, then the manifest, overwriting any left
-// by an earlier attempt that never created a job.
-func (c *Client) writeInput(ctx context.Context, id string, lines []encodedLine, m manifest) error {
-	write := func(object, contentType string, encode func(*bufio.Writer) error) error {
+// stage writes the manifest create-only, then the input. The manifest claims
+// the id for these rows: a different submission is rejected, and the same
+// rows (a retry, or a concurrent twin) go on to the same input.
+func (c *Client) stage(ctx context.Context, id string, lines []encodedLine, m manifest) error {
+	write := func(object, contentType string, ifAbsent bool, encode func(*bufio.Writer) error) error {
 		_, err := retry.RetryWithBackoff(ctx, c.retry, "batch.write", retryable(ctx), func() (struct{}, error) {
 			wctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			w := c.bucket.Object(object).NewWriter(wctx)
+			obj := c.bucket.Object(object)
+			if ifAbsent {
+				obj = obj.If(storage.Conditions{DoesNotExist: true})
+			}
+			w := obj.NewWriter(wctx)
 			w.ContentType = contentType
 			bw := bufio.NewWriter(w)
 			if err := errors.Join(encode(bw), bw.Flush()); err != nil {
@@ -216,7 +273,26 @@ func (c *Client) writeInput(ctx context.Context, id string, lines []encodedLine,
 		}
 		return nil
 	}
-	if err := write(c.objectName(id, inputObject), "application/jsonl", func(w *bufio.Writer) error {
+	manifestName := c.objectName(id, manifestObject)
+	err := write(manifestName, "application/json", true, func(w *bufio.Writer) error {
+		return json.NewEncoder(w).Encode(m)
+	})
+	claimed := err == nil
+	if !claimed {
+		if !preconditionFailed(err) {
+			return err
+		}
+		stored, err := c.manifestFor(ctx, id)
+		if err != nil {
+			return err
+		}
+		if stored.Provider != m.Provider || stored.Model != m.Model || stored.InputSHA256 != m.InputSHA256 || !slices.Equal(stored.Keys, m.Keys) {
+			return fmt.Errorf("%w: id %q is already staged with different requests", ErrInvalidRequest, id)
+		}
+	}
+	// Only the manifest's writer may replace the input: a job created by
+	// another caller may already be reading it.
+	err = write(c.objectName(id, inputObject), "application/jsonl", !claimed, func(w *bufio.Writer) error {
 		for _, l := range lines {
 			if _, err := w.Write(l.line); err != nil {
 				return err
@@ -226,12 +302,17 @@ func (c *Client) writeInput(ctx context.Context, id string, lines []encodedLine,
 			}
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil && (claimed || !preconditionFailed(err)) {
 		return err
 	}
-	return write(c.objectName(id, manifestObject), "application/json", func(w *bufio.Writer) error {
-		return json.NewEncoder(w).Encode(m)
-	})
+	return nil
+}
+
+// preconditionFailed reports a write refused because the object exists.
+func preconditionFailed(err error) bool {
+	e, ok := errors.AsType[*googleapi.Error](err)
+	return ok && e.Code == http.StatusPreconditionFailed
 }
 
 // ref derives a line reference from a caller key. It is 32 lowercase hex

@@ -104,7 +104,7 @@ func (c *Client) Results(ctx context.Context, job Job) iter.Seq2[Result, error] 
 			yield(Result{}, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, job.ID, idPattern))
 			return
 		}
-		m, err := c.manifestFor(ctx, job)
+		m, err := c.manifestFor(ctx, job.ID)
 		if err != nil {
 			yield(Result{}, err)
 			return

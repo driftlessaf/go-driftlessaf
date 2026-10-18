@@ -27,6 +27,16 @@ SPDX-License-Identifier: Apache-2.0
 // with [ErrInvalidRequest]. A caller that means to run the same rows again
 // uses a new id.
 //
+// The manifest is written create-only, so it claims the id for one set of
+// rows: staging different rows under an id that has no job yet fails with
+// [ErrInvalidRequest] and leaves the staged objects alone, while the same
+// rows (a retry, or recovery after a crash before create) carry on.
+// Concurrent submissions of one id and the same rows converge on one job:
+// both may create, but each then lists again, keeps the earliest job, and
+// cancels the rest. Convergence relies on the job list showing both jobs,
+// which is not yet verified against Vertex, so callers should still
+// serialize submissions per id.
+//
 // # Models
 //
 // Callers pass bare Vertex model IDs ("claude-opus-5-5@default",
