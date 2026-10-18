@@ -7,6 +7,7 @@ package batch
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -417,14 +418,14 @@ func TestFindNormalizesDestinationSlash(t *testing.T) {
 }
 
 // TestSubmitConcurrentConverges races two Submits of one id past their final
-// lookup, so both create a job: they must settle on the earlier one and
+// lookup, so both create a job: they must settle on the recorded one and
 // cancel the other before it runs.
 func TestSubmitConcurrentConverges(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	id := uuid.NewString()
 	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
-	// Each caller lists once in Find and once before Create.
+	// Each caller lists once in its first lookup and once before Create.
 	env.vertex.pairedLists = 4
 	var (
 		wg   sync.WaitGroup
@@ -459,9 +460,288 @@ func TestSubmitConcurrentConverges(t *testing.T) {
 	if len(live) != 1 || live[0] != jobs[0].Name {
 		t.Errorf("live jobs: got = %v, want only %q", live, jobs[0].Name)
 	}
+	if got := recordedName(t, env, id); got != jobs[0].Name {
+		t.Errorf("job.json: got = %q, want = %q", got, jobs[0].Name)
+	}
 	found, ok, err := env.client.Find(t.Context(), id)
 	if err != nil || !ok || found.Name != jobs[0].Name {
 		t.Errorf("Find: got = %q, %v, %v, want = %q", found.Name, ok, err, jobs[0].Name)
+	}
+}
+
+// recordPath is the object the id's job.json is written to.
+func recordPath(id string) string {
+	return testPrefix + "/" + id + "/job.json"
+}
+
+// recordedName returns the job name the id's job.json holds, or "".
+func recordedName(t *testing.T, env *testEnv, id string) string {
+	t.Helper()
+	data, ok := env.gcs.get(recordPath(id))
+	if !ok {
+		return ""
+	}
+	var r struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatalf("job.json %q: %v", data, err)
+	}
+	return r.Name
+}
+
+// liveJobs returns the jobs that are not cancelling or cancelled.
+func liveJobs(env *testEnv) []string {
+	var live []string
+	for name, state := range env.vertex.states() {
+		switch genai.JobState(state) {
+		case genai.JobStateCancelling, genai.JobStateCancelled:
+		default:
+			live = append(live, name)
+		}
+	}
+	return live
+}
+
+// TestSubmitConvergesWhenCreateTimeLeadsVisibility holds one caller's create
+// after Vertex stamps its CreateTime and before it is listed, while a second
+// caller creates and returns. The held job is earlier by CreateTime, so a rule
+// that keeps the earliest listed job would cancel the job the second caller
+// already holds.
+func TestSubmitConvergesWhenCreateTimeLeadsVisibility(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	id := uuid.NewString()
+	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+	hold := &createHold{arrived: make(chan struct{}), release: make(chan struct{})}
+	env.vertex.holdCreate = hold
+	var (
+		wg      sync.WaitGroup
+		held    Job
+		heldErr error
+	)
+	wg.Go(func() {
+		held, heldErr = env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	})
+	<-hold.arrived
+	first, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	close(hold.release)
+	wg.Wait()
+	if err != nil || heldErr != nil {
+		t.Fatalf("SubmitClaude: first = %v, held = %v", err, heldErr)
+	}
+	if got := env.vertex.createCount(); got != 2 {
+		t.Fatalf("creates: got = %d, want = 2 (the race did not happen)", got)
+	}
+	if first.Name != held.Name {
+		t.Errorf("callers disagree: first = %q, held = %q", first.Name, held.Name)
+	}
+	if live := liveJobs(env); len(live) != 1 || live[0] != first.Name {
+		t.Errorf("live jobs: got = %v, want only %q", live, first.Name)
+	}
+	found, ok, err := env.client.Find(t.Context(), id)
+	if err != nil || !ok || found.Name != first.Name {
+		t.Errorf("Find: got = %q, %v, %v, want = %q", found.Name, ok, err, first.Name)
+	}
+}
+
+// TestSubmitCancelsDuplicatesOnLookup lists two jobs for an id on Submit's
+// first lookup, as two submitters that both created would leave: Submit
+// creates nothing, keeps the recorded job (the earliest with no record), and
+// cancels the other.
+func TestSubmitCancelsDuplicatesOnLookup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// record is "first", "second", or "" for no job.json.
+		record string
+	}{{
+		name: "no record",
+	}, {
+		name:   "record names the earlier job",
+		record: "first",
+	}, {
+		name:   "record names the later job",
+		record: "second",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+			first, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+			if err != nil {
+				t.Fatalf("first submit: %v", err)
+			}
+			second := env.vertex.duplicate(t, first.Name, 2000, "2026-10-18T01:00:00Z")
+			names := map[string]string{"first": first.Name, "second": second}
+			env.gcs.mu.Lock()
+			delete(env.gcs.objects, recordPath(id))
+			env.gcs.mu.Unlock()
+			if tt.record != "" {
+				env.gcs.put(recordPath(id), []byte(`{"name":"`+names[tt.record]+`"}`))
+			}
+			want, other := first.Name, second
+			if tt.record == "second" {
+				want, other = second, first.Name
+			}
+
+			got, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+			if err != nil {
+				t.Fatalf("SubmitClaude: %v", err)
+			}
+			if got.Name != want {
+				t.Errorf("job: got = %q, want = %q", got.Name, want)
+			}
+			if n := env.vertex.createCount(); n != 1 {
+				t.Errorf("creates: got = %d, want = 1", n)
+			}
+			if state := env.vertex.states()[other]; state != string(genai.JobStateCancelling) {
+				t.Errorf("duplicate %q state: got = %s, want = %s", other, state, genai.JobStateCancelling)
+			}
+			if got := recordedName(t, env, id); got != want {
+				t.Errorf("job.json: got = %q, want = %q", got, want)
+			}
+		})
+	}
+}
+
+// TestSubmitRecoversWithoutRecord covers a submitter that stopped after
+// creating jobs but before writing job.json: the next Submit records the
+// earliest listed job, so a later change in list order cannot move the id to
+// another job.
+func TestSubmitRecoversWithoutRecord(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	id := uuid.NewString()
+	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+	first, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	env.gcs.mu.Lock()
+	delete(env.gcs.objects, recordPath(id))
+	env.gcs.mu.Unlock()
+	second := env.vertex.duplicate(t, first.Name, 2000, "2026-10-18T01:00:00Z")
+
+	got, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	if err != nil {
+		t.Fatalf("recovering submit: %v", err)
+	}
+	if got.Name != first.Name {
+		t.Errorf("job: got = %q, want = %q", got.Name, first.Name)
+	}
+	if rec := recordedName(t, env, id); rec != first.Name {
+		t.Errorf("job.json: got = %q, want = %q", rec, first.Name)
+	}
+
+	// The cancelled duplicate now sorts first; the record still decides.
+	env.vertex.setCreateTime(second, "2026-10-17T00:00:00Z")
+	found, ok, err := env.client.Find(t.Context(), id)
+	if err != nil || !ok || found.Name != first.Name {
+		t.Errorf("Find: got = %q, %v, %v, want = %q", found.Name, ok, err, first.Name)
+	}
+	again, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	if err != nil || again.Name != first.Name {
+		t.Errorf("re-submit: got = %q, %v, want = %q", again.Name, err, first.Name)
+	}
+	if n := env.vertex.createCount(); n != 1 {
+		t.Errorf("creates: got = %d, want = 1", n)
+	}
+}
+
+// TestSubmitRecordResponseLost loses the response to the job.json write: the
+// retry finds the record already there, naming this caller's own job, which
+// must be returned rather than cancelled as a duplicate.
+func TestSubmitRecordResponseLost(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	id := uuid.NewString()
+	env.gcs.loseWrite = recordPath(id)
+	job, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq(uuid.NewString(), "p")})
+	if err != nil {
+		t.Fatalf("SubmitClaude: %v", err)
+	}
+	env.gcs.mu.Lock()
+	lost := env.gcs.loseWrite == ""
+	env.gcs.mu.Unlock()
+	if !lost {
+		t.Fatal("job.json response was not lost (the scenario did not happen)")
+	}
+	if n := env.vertex.createCount(); n != 1 {
+		t.Errorf("creates: got = %d, want = 1", n)
+	}
+	if live := liveJobs(env); len(live) != 1 || live[0] != job.Name {
+		t.Errorf("live jobs: got = %v, want only %q", live, job.Name)
+	}
+	if got := recordedName(t, env, id); got != job.Name {
+		t.Errorf("job.json: got = %q, want = %q", got, job.Name)
+	}
+}
+
+// TestSubmitRejectsForeignRecord covers a job.json naming a job that does not
+// exist or was not created for the id. Adopting it would hand back another
+// job's output, and creating beside it would bill the rows again, so Submit
+// and Find fail closed and cancel nothing.
+func TestSubmitRejectsForeignRecord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// submitFirst creates the id's own job before the record is replaced.
+		submitFirst bool
+		// record returns the job.json body, given another id's job.
+		record func(other string) string
+	}{{
+		name: "job does not exist",
+		record: func(string) string {
+			return `{"name":"projects/` + testProject + `/locations/` + testLocation + `/batchPredictionJobs/404"}`
+		},
+	}, {
+		name:   "another id's job",
+		record: func(other string) string { return `{"name":"` + other + `"}` },
+	}, {
+		name:        "another id's job beside the id's own",
+		submitFirst: true,
+		record:      func(other string) string { return `{"name":"` + other + `"}` },
+	}, {
+		name:   "no name",
+		record: func(string) string { return `{}` },
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+			other, err := env.client.SubmitClaude(t.Context(), uuid.NewString(), "claude-opus-5-5@default", reqs)
+			if err != nil {
+				t.Fatalf("other submit: %v", err)
+			}
+			if tt.submitFirst {
+				if _, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs); err != nil {
+					t.Fatalf("first submit: %v", err)
+				}
+			}
+			creates := env.vertex.createCount()
+			env.gcs.put(recordPath(id), []byte(tt.record(other.Name)))
+
+			_, err = env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("SubmitClaude: got = %v, want = %v", err, ErrInvalidRequest)
+			}
+			if n := env.vertex.createCount(); n != creates {
+				t.Errorf("creates: got = %d, want = %d", n, creates)
+			}
+			if _, ok, err := env.client.Find(t.Context(), id); ok || !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("Find: ok = %v, err = %v, want = %v", ok, err, ErrInvalidRequest)
+			}
+			for name, state := range env.vertex.states() {
+				if state == string(genai.JobStateCancelling) {
+					t.Errorf("job %q cancelled, want every job left alone", name)
+				}
+			}
+		})
 	}
 }
 

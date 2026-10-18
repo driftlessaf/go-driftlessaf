@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"regexp"
 	"slices"
@@ -36,11 +37,14 @@ const (
 
 	inputObject    = "input.jsonl"
 	manifestObject = "manifest.json"
+	jobObject      = "job.json"
 	outputDir      = "output/"
 
 	// maxManifestBytes bounds the manifest read; 200,000 keys (the Vertex
 	// per-job limit) fit well under it.
 	maxManifestBytes = 256 << 20
+	// maxRecordBytes bounds the job.json read, which holds one resource name.
+	maxRecordBytes = 64 << 10
 )
 
 // idPattern keeps a submission id safe as a Vertex display name, a list
@@ -164,6 +168,12 @@ type manifest struct {
 	InputSHA256 string `json:"input_sha256"`
 }
 
+// jobRecord is written create-only once a job exists and names the job
+// every submission of the id settles on.
+type jobRecord struct {
+	Name string `json:"name"`
+}
+
 type manifestEntry struct {
 	// Key is the caller's key.
 	Key string `json:"key"`
@@ -209,58 +219,51 @@ func retryable(ctx context.Context) func(error) bool {
 // another output destination, or none, was not created by this client: Find
 // returns an error wrapping [ErrInvalidRequest] rather than adopt it.
 //
-// When concurrent submissions left several jobs, Find returns the earliest
-// created, ties broken by name, whatever its state: that is the job every
-// Submit of the id converges on.
+// Find returns the job Submit recorded for the id, whatever its state and
+// whatever duplicates are listed. A recorded job that does not exist or fails
+// the checks above is also [ErrInvalidRequest]. With no record yet (a
+// submitter stopped between creating the job and recording it), Find returns
+// the earliest listed job, the one a recovering Submit records.
 func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	if !idPattern.MatchString(id) {
 		return Job{}, false, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, id, idPattern)
 	}
-	type found struct {
-		job Job
-		ok  bool
+	bjs, err := c.lookup(ctx, id)
+	if err != nil {
+		return Job{}, false, err
 	}
-	f, err := retry.RetryWithBackoff(ctx, c.retry, "batch.find", retryable(ctx), func() (found, error) {
-		bjs, err := c.matches(ctx, id)
-		if err != nil || len(bjs) == 0 {
-			return found{}, err
-		}
-		m, err := c.readManifest(ctx, c.objectName(id, manifestObject))
-		if err != nil {
-			return found{}, err
-		}
-		return found{c.jobFor(id, bjs[0].Name, m), true}, nil
-	})
+	chosen, err := c.recorded(ctx, id, bjs)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
 	}
-	return f.job, f.ok, nil
+	if chosen == nil {
+		if len(bjs) == 0 {
+			return Job{}, false, nil
+		}
+		chosen = bjs[0]
+	}
+	m, err := c.manifestFor(ctx, id)
+	if err != nil {
+		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
+	}
+	return c.jobFor(id, chosen.Name, m), true, nil
 }
 
 // matches lists the jobs this client created under id, earliest first.
 func (c *Client) matches(ctx context.Context, id string) ([]*genai.BatchJob, error) {
-	inputURI := c.gsURI(c.objectName(id, inputObject))
-	outputURI := c.gsURI(c.objectName(id, outputDir))
 	page, err := c.genai.Batches.List(ctx, &genai.ListBatchJobsConfig{
 		Filter: fmt.Sprintf("display_name=%q", id),
 	})
 	var out []*genai.BatchJob
 	for ; err == nil; page, err = page.Next(ctx) {
 		for _, bj := range page.Items {
-			if bj.DisplayName != id || bj.Src == nil || !slices.Contains(bj.Src.GCSURI, inputURI) {
-				continue
+			ok, err := c.owns(id, bj)
+			if err != nil {
+				return nil, err
 			}
-			// Our input is already in that job, so neither adopting it nor
-			// creating a second job is safe.
-			if bj.Dest == nil || strings.TrimSuffix(bj.Dest.GCSURI, "/") != outputURI {
-				var dest string
-				if bj.Dest != nil {
-					dest = bj.Dest.GCSURI
-				}
-				return nil, fmt.Errorf("%w: job %q reads this id's input but writes to %q, not %q",
-					ErrInvalidRequest, bj.Name, dest, outputURI+"/")
+			if ok {
+				out = append(out, bj)
 			}
-			out = append(out, bj)
 		}
 	}
 	if !errors.Is(err, genai.ErrPageDone) {
@@ -270,6 +273,73 @@ func (c *Client) matches(ctx context.Context, id string) ([]*genai.BatchJob, err
 		return cmp.Or(a.CreateTime.Compare(b.CreateTime), strings.Compare(a.Name, b.Name))
 	})
 	return out, nil
+}
+
+// owns reports whether bj is a job this client created under id.
+func (c *Client) owns(id string, bj *genai.BatchJob) (bool, error) {
+	inputURI := c.gsURI(c.objectName(id, inputObject))
+	outputURI := c.gsURI(c.objectName(id, outputDir))
+	if bj.DisplayName != id || bj.Src == nil || !slices.Contains(bj.Src.GCSURI, inputURI) {
+		return false, nil
+	}
+	// Our input is already in that job, so neither adopting it nor creating
+	// a second job is safe.
+	if bj.Dest == nil || strings.TrimSuffix(bj.Dest.GCSURI, "/") != outputURI {
+		var dest string
+		if bj.Dest != nil {
+			dest = bj.Dest.GCSURI
+		}
+		return false, fmt.Errorf("%w: job %q reads this id's input but writes to %q, not %q",
+			ErrInvalidRequest, bj.Name, dest, outputURI+"/")
+	}
+	return true, nil
+}
+
+// recorded returns the job the id's job.json names, or nil when there is no
+// record yet. The record is trusted like the manifest, but the job it names
+// must still pass [Client.owns]; anything else is a collision.
+func (c *Client) recorded(ctx context.Context, id string, bjs []*genai.BatchJob) (*genai.BatchJob, error) {
+	object := c.objectName(id, jobObject)
+	r, err := retry.RetryWithBackoff(ctx, c.retry, "batch.record", retryable(ctx), func() (*jobRecord, error) {
+		rd, err := c.bucket.Object(object).NewReader(ctx)
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer rd.Close()
+		var r jobRecord
+		if err := json.NewDecoder(io.LimitReader(rd, maxRecordBytes)).Decode(&r); err != nil {
+			return nil, fmt.Errorf("decoding %q: %w", object, err)
+		}
+		return &r, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading %q: %w", object, err)
+	}
+	if r == nil {
+		return nil, nil
+	}
+	if i := slices.IndexFunc(bjs, func(bj *genai.BatchJob) bool { return bj.Name == r.Name }); i >= 0 {
+		return bjs[i], nil
+	}
+	// The list may not show the recorded job yet, so look it up by name.
+	bj, err := c.get(ctx, Job{Name: r.Name})
+	if responseCode(err) == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %q names job %q, which does not exist", ErrInvalidRequest, object, r.Name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	ok, err := c.owns(id, bj)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: %q names job %q, which was not created for id %q", ErrInvalidRequest, object, r.Name, id)
+	}
+	return bj, nil
 }
 
 // jobFor assembles the Job for a submission id from its Vertex name and

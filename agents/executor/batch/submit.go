@@ -78,8 +78,8 @@ type encodedLine struct {
 // input or creating another; a new id is needed to resubmit the same rows.
 // Different rows under an id with no job yet are rejected with
 // [ErrInvalidRequest]. Concurrent calls with the same id and rows return the
-// same job, though a duplicate may be created and then cancelled; see the
-// package documentation.
+// job recorded first, though a duplicate may be created and then cancelled;
+// see the package documentation.
 func (c *Client) SubmitClaude(ctx context.Context, id, model string, reqs []ClaudeRequest, opts ...SubmitOption) (Job, error) {
 	if err := submitOptions(opts); err != nil {
 		return Job{}, err
@@ -155,54 +155,71 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 	if err != nil {
 		return Job{}, err
 	}
-	var job Job
-	if len(bjs) == 0 {
-		if err := c.stage(ctx, id, lines, m); err != nil {
-			return Job{}, err
+	chosen, err := c.recorded(ctx, id, bjs)
+	if err != nil {
+		return Job{}, err
+	}
+	var own *genai.BatchJob
+	if chosen == nil {
+		if len(bjs) > 0 {
+			// A submitter stopped between create and its record; the next
+			// one records the earliest listed job.
+			own = bjs[0]
+		} else {
+			if err := c.stage(ctx, id, lines, m); err != nil {
+				return Job{}, err
+			}
+			// Create carries no request id, so every attempt looks for the
+			// job first: a retry after a lost response finds the job instead
+			// of making a second one.
+			own, err = retry.RetryWithBackoff(ctx, c.retry, "batch.create", retryable(ctx), func() (*genai.BatchJob, error) {
+				bjs, err := c.matches(ctx, id)
+				if err != nil {
+					return nil, err
+				}
+				if len(bjs) > 0 {
+					return bjs[0], nil
+				}
+				return c.genai.Batches.Create(ctx, genaiModel(provider, model),
+					&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{c.gsURI(c.objectName(id, inputObject))}},
+					&genai.CreateBatchJobConfig{
+						DisplayName: id,
+						Dest: &genai.BatchJobDestination{
+							Format: "jsonl",
+							GCSURI: c.gsURI(c.objectName(id, outputDir)) + "/",
+						},
+					})
+			})
+			if err != nil {
+				return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
+			}
 		}
-		// Create carries no request id, so every attempt looks for the job
-		// first: a retry after a lost response finds the job instead of
-		// making a second one.
-		job, err = retry.RetryWithBackoff(ctx, c.retry, "batch.create", retryable(ctx), func() (Job, error) {
-			bjs, err := c.matches(ctx, id)
-			if err != nil {
-				return Job{}, err
-			}
-			if len(bjs) > 0 {
-				return c.jobFor(id, bjs[0].Name, m), nil
-			}
-			bj, err := c.genai.Batches.Create(ctx, genaiModel(provider, model),
-				&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{c.gsURI(c.objectName(id, inputObject))}},
-				&genai.CreateBatchJobConfig{
-					DisplayName: id,
-					Dest: &genai.BatchJobDestination{
-						Format: "jsonl",
-						GCSURI: c.gsURI(c.objectName(id, outputDir)) + "/",
-					},
-				})
-			if err != nil {
-				return Job{}, err
-			}
-			return c.jobFor(id, bj.Name, m), nil
+		// The record is create-only, so concurrent submitters settle on
+		// whichever recorded first. After a lost response it names own.
+		record := c.objectName(id, jobObject)
+		err = c.write(ctx, record, "application/json", true, func(w *bufio.Writer) error {
+			return json.NewEncoder(w).Encode(jobRecord{Name: own.Name})
 		})
-		if err != nil {
-			return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
-		}
-		// A concurrent Submit of this id may have created a job too; listing
-		// again lets every caller settle on the same one.
-		if bjs, err = c.lookup(ctx, id); err != nil {
+		switch {
+		case err == nil:
+			chosen = own
+		case preconditionFailed(err):
+			if chosen, err = c.recorded(ctx, id, slices.Concat(bjs, []*genai.BatchJob{own})); err != nil {
+				return Job{}, err
+			}
+			if chosen == nil {
+				return Job{}, fmt.Errorf("%q exists but could not be read", record)
+			}
+		default:
 			return Job{}, err
 		}
 	}
-	if len(bjs) > 0 {
-		c.cancelDuplicates(ctx, bjs[1:])
-		stored, err := c.manifestFor(ctx, id)
-		if err != nil {
-			return Job{}, err
-		}
-		job = c.jobFor(id, bjs[0].Name, stored)
+	c.cancelDuplicates(ctx, chosen.Name, slices.Concat(bjs, []*genai.BatchJob{own}))
+	stored, err := c.manifestFor(ctx, id)
+	if err != nil {
+		return Job{}, err
 	}
-	return existing(job, provider, model)
+	return existing(c.jobFor(id, chosen.Name, stored), provider, model)
 }
 
 // lookup lists the jobs under id, earliest first, with retries.
@@ -216,14 +233,23 @@ func (c *Client) lookup(ctx context.Context, id string) ([]*genai.BatchJob, erro
 	return bjs, nil
 }
 
-// cancelDuplicates cancels the jobs that lost to an earlier one, before
-// they bill for the same rows. Failures are logged: the survivor is unchanged.
-func (c *Client) cancelDuplicates(ctx context.Context, dups []*genai.BatchJob) {
-	for _, bj := range dups {
+// cancelDuplicates cancels every job in bjs other than keep, so they stop
+// before billing for the same rows where Vertex allows. Failures are logged:
+// the survivor is unchanged.
+func (c *Client) cancelDuplicates(ctx context.Context, keep string, bjs []*genai.BatchJob) {
+	seen := map[string]struct{}{keep: {}}
+	for _, bj := range bjs {
+		if bj == nil {
+			continue
+		}
+		if _, dup := seen[bj.Name]; dup {
+			continue
+		}
+		seen[bj.Name] = struct{}{}
 		if bj.State == genai.JobStateCancelling || statusOf(bj).Terminal {
 			continue
 		}
-		clog.WarnContext(ctx, "Cancelling duplicate batch job", "id", bj.DisplayName, "job", bj.Name)
+		clog.WarnContext(ctx, "Cancelling duplicate batch job", "id", bj.DisplayName, "job", bj.Name, "kept", keep)
 		if err := c.Cancel(ctx, Job{Name: bj.Name}); err != nil {
 			clog.ErrorContext(ctx, "Failed to cancel duplicate batch job", "id", bj.DisplayName, "job", bj.Name, "error", err)
 		}
@@ -252,31 +278,8 @@ func genaiModel(provider, model string) string {
 // the id for these rows: a different submission is rejected, and the same
 // rows (a retry, or a concurrent twin) go on to the same input.
 func (c *Client) stage(ctx context.Context, id string, lines []encodedLine, m manifest) error {
-	write := func(object, contentType string, ifAbsent bool, encode func(*bufio.Writer) error) error {
-		_, err := retry.RetryWithBackoff(ctx, c.retry, "batch.write", retryable(ctx), func() (struct{}, error) {
-			wctx, cancel := context.WithCancel(ctx)
-			defer cancel()
-			obj := c.bucket.Object(object)
-			if ifAbsent {
-				obj = obj.If(storage.Conditions{DoesNotExist: true})
-			}
-			w := obj.NewWriter(wctx)
-			w.ContentType = contentType
-			bw := bufio.NewWriter(w)
-			if err := errors.Join(encode(bw), bw.Flush()); err != nil {
-				// Cancelling before Close aborts the upload.
-				cancel()
-				return struct{}{}, errors.Join(err, w.Close())
-			}
-			return struct{}{}, w.Close()
-		})
-		if err != nil {
-			return fmt.Errorf("writing %q: %w", object, err)
-		}
-		return nil
-	}
 	manifestName := c.objectName(id, manifestObject)
-	err := write(manifestName, "application/json", true, func(w *bufio.Writer) error {
+	err := c.write(ctx, manifestName, "application/json", true, func(w *bufio.Writer) error {
 		return json.NewEncoder(w).Encode(m)
 	})
 	claimed := err == nil
@@ -292,9 +295,9 @@ func (c *Client) stage(ctx context.Context, id string, lines []encodedLine, m ma
 			return fmt.Errorf("%w: id %q is already staged with different requests", ErrInvalidRequest, id)
 		}
 	}
-	// Only the manifest's writer may replace the input: a job created by
-	// another caller may already be reading it.
-	err = write(c.objectName(id, inputObject), "application/jsonl", !claimed, func(w *bufio.Writer) error {
+	// The digest check above is what keeps another caller's input intact, as
+	// a twin writes the same bytes; create-only here is defense in depth.
+	err = c.write(ctx, c.objectName(id, inputObject), "application/jsonl", !claimed, func(w *bufio.Writer) error {
 		for _, l := range lines {
 			if _, err := w.Write(l.line); err != nil {
 				return err
@@ -307,6 +310,31 @@ func (c *Client) stage(ctx context.Context, id string, lines []encodedLine, m ma
 	})
 	if err != nil && (claimed || !preconditionFailed(err)) {
 		return err
+	}
+	return nil
+}
+
+// write uploads one object, create-only when ifAbsent, with retries.
+func (c *Client) write(ctx context.Context, object, contentType string, ifAbsent bool, encode func(*bufio.Writer) error) error {
+	_, err := retry.RetryWithBackoff(ctx, c.retry, "batch.write", retryable(ctx), func() (struct{}, error) {
+		wctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		obj := c.bucket.Object(object)
+		if ifAbsent {
+			obj = obj.If(storage.Conditions{DoesNotExist: true})
+		}
+		w := obj.NewWriter(wctx)
+		w.ContentType = contentType
+		bw := bufio.NewWriter(w)
+		if err := errors.Join(encode(bw), bw.Flush()); err != nil {
+			// Cancelling before Close aborts the upload.
+			cancel()
+			return struct{}{}, errors.Join(err, w.Close())
+		}
+		return struct{}{}, w.Close()
+	})
+	if err != nil {
+		return fmt.Errorf("writing %q: %w", object, err)
 	}
 	return nil
 }

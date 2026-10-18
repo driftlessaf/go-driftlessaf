@@ -52,6 +52,9 @@ type fakeGCS struct {
 	// with 503: the read errors with some lines already consumed.
 	breakAt    int
 	failResume bool
+	// loseWrite names an object whose next upload is stored but answered
+	// 503, as when the response is lost.
+	loseWrite string
 }
 
 func (f *fakeGCS) put(name string, data []byte) {
@@ -121,6 +124,12 @@ func (f *fakeGCS) upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.objects[name] = data
+	if name == f.loseWrite {
+		f.loseWrite = ""
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"code":503,"message":"scripted lost response"}}`)
+		return
+	}
 	fmt.Fprintf(w, `{"name":%q,"bucket":%q,"size":"%d"}`, name, testBucket, len(data))
 }
 
@@ -236,6 +245,15 @@ type fakeVertex struct {
 	// second to arrive, so two callers' lookups answer before either acts.
 	pairedLists int
 	waiting     chan struct{}
+	// holdCreate holds the next create after its CreateTime is stamped and
+	// before the job is listed.
+	holdCreate *createHold
+}
+
+// createHold pauses one create: arrived closes once its CreateTime is
+// stamped, and the job is committed when release closes.
+type createHold struct {
+	arrived, release chan struct{}
 }
 
 const jobsPath = "/v1beta1/projects/" + testProject + "/locations/" + testLocation + "/batchPredictionJobs"
@@ -245,11 +263,13 @@ func (f *fakeVertex) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == jobsPath {
 		f.pair(r)
 	}
+	if r.Method == http.MethodPost && r.URL.Path == jobsPath {
+		f.create(w, r)
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
-	case r.Method == http.MethodPost && r.URL.Path == jobsPath:
-		f.create(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == jobsPath:
 		f.list(w, r)
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":cancel"):
@@ -318,7 +338,24 @@ func (f *fakeVertex) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	f.mu.Lock()
 	f.creates = append(f.creates, body)
+	// Vertex stamps CreateTime on receipt, which can precede the job being
+	// listed.
+	created := time.Date(2026, 10, 18, 0, 0, len(f.creates), 0, time.UTC)
+	hold := f.holdCreate
+	f.holdCreate = nil
+	f.mu.Unlock()
+	if hold != nil {
+		close(hold.arrived)
+		select {
+		case <-hold.release:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.rejectCreates > 0 {
 		f.rejectCreates--
 		w.WriteHeader(http.StatusBadRequest)
@@ -333,7 +370,7 @@ func (f *fakeVertex) create(w http.ResponseWriter, r *http.Request) {
 	}
 	j.Name = fmt.Sprintf("projects/%s/locations/%s/batchPredictionJobs/%d", testProject, testLocation, 1000+len(f.jobs))
 	j.State = string(genai.JobStatePending)
-	j.CreateTime = time.Date(2026, 10, 18, 0, 0, len(f.jobs), 0, time.UTC).Format(time.RFC3339)
+	j.CreateTime = created.Format(time.RFC3339)
 	f.jobs = append(f.jobs, j)
 	if f.dropCreateResponses > 0 {
 		f.dropCreateResponses--
@@ -412,6 +449,31 @@ func (f *fakeVertex) states() map[string]string {
 		out[j.Name] = j.State
 	}
 	return out
+}
+
+// duplicate lists a copy of the job named name under a new name and
+// CreateTime, as a second submitter's create would leave, and returns the
+// new name.
+func (f *fakeVertex) duplicate(t *testing.T, name string, n int, createTime string) string {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j := f.job("/v1beta1/" + name)
+	if j == nil {
+		t.Fatalf("no job %q", name)
+	}
+	dup := *j
+	dup.Name = fmt.Sprintf("projects/%s/locations/%s/batchPredictionJobs/%d", testProject, testLocation, n)
+	dup.CreateTime = createTime
+	f.jobs = append(f.jobs, &dup)
+	return dup.Name
+}
+
+// setCreateTime overrides the CreateTime of the job named name.
+func (f *fakeVertex) setCreateTime(name, createTime string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.job("/v1beta1/" + name).CreateTime = createTime
 }
 
 func (f *fakeVertex) createCount() int {

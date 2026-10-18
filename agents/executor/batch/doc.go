@@ -20,7 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 // Vertex job creation carries no request id, so a lost response would
 // otherwise submit the rows twice. Every submission names a caller-chosen
 // id, used as the job's display name and its storage directory. Before each
-// create attempt the client calls [Client.Find], so resubmitting an id, or
+// create attempt the client lists the id's jobs, so resubmitting an id, or
 // retrying after a lost response, returns the existing job. A job is adopted
 // only when its display name, input URI, and output destination all match;
 // one that reads the id's input but writes elsewhere fails the submission
@@ -31,11 +31,22 @@ SPDX-License-Identifier: Apache-2.0
 // rows: staging different rows under an id that has no job yet fails with
 // [ErrInvalidRequest] and leaves the staged objects alone, while the same
 // rows (a retry, or recovery after a crash before create) carry on.
-// Concurrent submissions of one id and the same rows converge on one job:
-// both may create, but each then lists again, keeps the earliest job, and
-// cancels the rest. Convergence relies on the job list showing both jobs,
-// which is not yet verified against Vertex, so callers should still
-// serialize submissions per id.
+//
+// Once a job exists, the submitter records its name in job.json, also
+// create-only. Concurrent submissions of one id and the same rows may each
+// create a job, but only one record is written: every caller returns the
+// job it names and cancels the others, whatever their creation times or the
+// order the job list shows them in. [Client.Find] and later submissions
+// return the recorded job too; a record naming a job that does not exist or
+// was not created for the id fails with [ErrInvalidRequest].
+//
+// A submitter that stops between create and its record leaves jobs with no
+// record. The next submission records the earliest listed job and cancels
+// the rest; until then, Find returns that same job. This recovery, and the
+// lookup before each create, rely on the job list showing a job soon after
+// it is created, which is not yet verified against Vertex: a job the list
+// misses there can be created twice, and the extra one is cancelled only
+// when a later submission lists it.
 //
 // # Models
 //
