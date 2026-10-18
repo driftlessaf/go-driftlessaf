@@ -45,6 +45,9 @@ const statusClientClosed = 499
 type lineError struct {
 	code    int
 	message string
+	// transient marks a line that carries no status but is worth resending,
+	// such as a request that never ran.
+	transient bool
 }
 
 func (e *lineError) Error() string {
@@ -62,6 +65,9 @@ func (e *lineError) Error() string {
 func IsRetryable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
+	}
+	if e, ok := errors.AsType[*lineError](err); ok && e.transient {
+		return true
 	}
 	switch responseCode(err) {
 	case http.StatusRequestTimeout, http.StatusTooManyRequests, statusClientClosed,

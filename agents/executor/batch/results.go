@@ -283,19 +283,19 @@ func (col *collector) key(line outputLine) (string, bool) {
 	return "", false
 }
 
-// record emits metrics for a yielded result. A missing result made no
-// request, so it records nothing.
+// record emits metrics for a yielded result. A refusal or truncation is a
+// completed request; any usage a failed line reports was still billed.
 func (col *collector) record(ctx context.Context, res Result) {
 	if col.rec == nil {
 		return
 	}
+	var reqErr error
 	if _, ok := errors.AsType[*lineError](res.Err); ok {
-		col.rec.RecordAPIRequest(ctx, res.Err)
-		return
+		reqErr = res.Err
 	}
-	col.rec.RecordAPIRequest(ctx, nil)
-	col.rec.RecordTokens(ctx, res.Usage.In, res.Usage.Out)
-	if res.Usage.CacheRead > 0 || res.Usage.CacheWrite > 0 {
+	col.rec.RecordAPIRequest(ctx, reqErr)
+	if res.Usage != (Usage{}) {
+		col.rec.RecordTokens(ctx, res.Usage.In, res.Usage.Out)
 		col.rec.RecordCacheTokens(ctx, res.Usage.CacheRead, res.Usage.CacheWrite)
 	}
 }
@@ -350,7 +350,7 @@ func claudeResult(key string, line outputLine) Result {
 			res.Err = lineFailure(r.Error)
 		default:
 			// expired or canceled: the request never ran.
-			res.Err = &lineError{code: -1, message: "request " + r.Type}
+			res.Err = &lineError{code: -1, message: "request " + r.Type, transient: true}
 		}
 	}
 	if res.Err != nil {
@@ -415,7 +415,7 @@ func geminiResult(key string, line outputLine) Result {
 			return res
 		}
 		// The online executor retries an empty turn as transient.
-		res.Err = &lineError{code: statusOverloaded, message: "response has no candidates"}
+		res.Err = &lineError{code: -1, message: "response has no candidates", transient: true}
 		return res
 	}
 	cand := resp.Candidates[0]
