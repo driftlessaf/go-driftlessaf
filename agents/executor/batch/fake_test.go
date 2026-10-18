@@ -47,6 +47,11 @@ type fakeGCS struct {
 	objects map[string][]byte
 	// failReads makes the next n media downloads fail with 503.
 	failReads int
+	// breakAt, when positive, makes the next output download stop after
+	// that many bytes, and failResume then fails the client's ranged resume
+	// with 503: the read errors with some lines already consumed.
+	breakAt    int
+	failResume bool
 }
 
 func (f *fakeGCS) put(name string, data []byte) {
@@ -140,11 +145,21 @@ func (f *fakeGCS) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	fail := f.failReads > 0
+	resumed := r.Header.Get("Range") != ""
+	fail := f.failReads > 0 || (resumed && f.failResume)
 	if fail {
-		f.failReads--
+		if resumed && f.failResume {
+			f.failResume = false
+		} else {
+			f.failReads--
+		}
 	}
 	data, ok := f.objects[name]
+	broken := ok && !fail && !resumed && f.breakAt > 0 && strings.Contains(name, "/"+outputDir)
+	at := f.breakAt
+	if broken {
+		f.breakAt, f.failResume = 0, true
+	}
 	f.mu.Unlock()
 	switch {
 	case fail:
@@ -153,6 +168,24 @@ func (f *fakeGCS) download(w http.ResponseWriter, r *http.Request) {
 	case !ok:
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprintf(w, `{"error":{"code":404,"message":"No such object: %s"}}`, name)
+	case resumed:
+		// The client resumes a broken read from the bytes it has seen.
+		start, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.Header.Get("Range"), "bytes="), "-"))
+		if err != nil || start > len(data) {
+			w.WriteHeader(http.StatusNotImplemented)
+			fmt.Fprintf(w, `{"error":{"code":501,"message":"fake GCS: unsupported Range %q"}}`, r.Header.Get("Range"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(data)-1, len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start:])
+	case broken:
+		// Declaring the full length and sending less makes the client's
+		// read fail with io.ErrUnexpectedEOF.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		_, _ = w.Write(data[:at])
 	default:
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(data)

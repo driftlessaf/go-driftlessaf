@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -187,5 +188,79 @@ func checkAttr(t *testing.T, metric string, set attribute.Set, key, want string)
 	t.Helper()
 	if got, _ := set.Value(attribute.Key(key)); got.AsString() != want {
 		t.Errorf("%s %s: got = %q, want = %q", metric, key, got.AsString(), want)
+	}
+}
+
+// TestResultsResumesBrokenRead breaks an output read after its first line and
+// fails the storage client's own resume, so Results re-reads the object. Two
+// identical Gemini requests whose labels are not echoed share one digest, so
+// re-reading the first line would hand it to the second key.
+// It swaps the global meter provider, so it must not run in parallel.
+func TestResultsResumesBrokenRead(t *testing.T) {
+	tests := []struct {
+		name string
+		// past is how many bytes of the second line the broken read sends.
+		past int
+	}{{
+		name: "at a line boundary",
+	}, {
+		name: "mid-line",
+		past: 10,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			previous := otel.GetMeterProvider()
+			otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+			t.Cleanup(func() { otel.SetMeterProvider(previous) })
+
+			env := newTestEnv(t, WithMetrics(metrics.NewGenAI(t.Name())))
+			keys := []string{uuid.NewString(), uuid.NewString()}
+			job, err := env.client.SubmitGemini(t.Context(), uuid.NewString(), "gemini-3.8-flash",
+				[]GeminiRequest{geminiReq(keys[0], "same"), geminiReq(keys[1], "same")})
+			if err != nil {
+				t.Fatalf("SubmitGemini: %v", err)
+			}
+			data, _ := env.gcs.get(testPrefix + "/" + job.ID + "/input.jsonl")
+			inputs := jsonLines(t, data)
+			response := func(text string, in int) string {
+				return fmt.Sprintf(`{"request":%s,"response":{"candidates":[{"content":{"role":"model","parts":[{"text":%q}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":%d,"candidatesTokenCount":1}}}`,
+					echo(t, inputs[0], echoNoLabels), text, in)
+			}
+			first := response("first", 100)
+			env.vertex.finish(t, env.gcs, job.Name, genai.JobStateSucceeded, first, response("second", 20))
+			env.gcs.mu.Lock()
+			env.gcs.breakAt = len(first) + 1 + tt.past
+			env.gcs.mu.Unlock()
+
+			got := collect(t, env.client, job)
+			want := map[string]Result{
+				keys[0]: {Key: keys[0], Text: "first", Stop: "STOP", Usage: Usage{In: 100, Out: 1}},
+				keys[1]: {Key: keys[1], Text: "second", Stop: "STOP", Usage: Usage{In: 20, Out: 1}},
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("results (-want, +got):\n%s", diff)
+			}
+
+			var md metricdata.ResourceMetrics
+			if err := reader.Collect(t.Context(), &md); err != nil {
+				t.Fatal(err)
+			}
+			var prompt int64
+			for _, scope := range md.ScopeMetrics {
+				for _, m := range scope.Metrics {
+					if d, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == "genai.token.prompt" {
+						for _, p := range d.DataPoints {
+							if _, cached := p.Attributes.Value("gen_ai.token.type"); !cached {
+								prompt += p.Value
+							}
+						}
+					}
+				}
+			}
+			if prompt != 120 {
+				t.Errorf("genai.token.prompt: got = %d, want = 120", prompt)
+			}
+		})
 	}
 }

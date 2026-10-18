@@ -7,10 +7,12 @@ package batch
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"slices"
 	"strings"
@@ -177,27 +179,55 @@ func (c *Client) outputObjects(ctx context.Context, job Job, bj *genai.BatchJob)
 	})
 }
 
-// readOutput yields the results in one output object. A retried read skips
-// keys an earlier attempt already yielded.
+// readOutput yields the results in one output object. A retried read
+// re-reads the object from the start and skips the lines an earlier attempt
+// handled: digest matching assigns keys in line order, so a line handled
+// twice would take the next identical request's key.
 func (c *Client) readOutput(ctx context.Context, object string, col *collector, yield func(Result, error) bool) error {
 	r, err := c.bucket.Object(object).NewReader(ctx)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	sc := bufio.NewScanner(r)
+	src := &errReader{r: r}
+	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
-	for sc.Scan() {
-		res, ok := col.parse(ctx, object, sc.Bytes())
-		if !ok {
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		// An unterminated line before a read error is cut short; leave it
+		// for the retry.
+		if atEOF && src.err != nil && !bytes.Contains(data, []byte{'\n'}) {
+			return 0, nil, nil
+		}
+		return bufio.ScanLines(data, atEOF)
+	})
+	for n := 0; sc.Scan(); n++ {
+		if n < col.handled[object] {
 			continue
 		}
-		col.record(ctx, res)
-		if !yield(res, nil) {
-			return errStopped
+		res, ok := col.parse(ctx, object, sc.Bytes())
+		if ok {
+			col.record(ctx, res)
+			if !yield(res, nil) {
+				return errStopped
+			}
 		}
+		col.handled[object] = n + 1
 	}
 	return sc.Err()
+}
+
+// errReader remembers a read error other than io.EOF.
+type errReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		e.err = err
+	}
+	return n, err
 }
 
 // collector correlates output lines with manifest keys.
@@ -208,7 +238,10 @@ type collector struct {
 	// interchangeable, so they are assigned in submission order.
 	byDigest map[string][]string
 	seen     map[string]struct{}
-	rec      *telemetry.Recorder
+	// handled counts the lines of each object already handled, so a
+	// retried read resumes after them.
+	handled map[string]int
+	rec     *telemetry.Recorder
 }
 
 func newCollector(m manifest, rec *telemetry.Recorder) *collector {
@@ -217,6 +250,7 @@ func newCollector(m manifest, rec *telemetry.Recorder) *collector {
 		byRef:    make(map[string]string, len(m.Keys)),
 		byDigest: make(map[string][]string, len(m.Keys)),
 		seen:     make(map[string]struct{}, len(m.Keys)),
+		handled:  make(map[string]int),
 		rec:      rec,
 	}
 	for _, e := range m.Keys {
