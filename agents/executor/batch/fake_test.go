@@ -245,6 +245,9 @@ type fakeVertex struct {
 	// snapshot, then waits for a second, so neither caller sees the other act.
 	pairedLists int
 	waiting     chan struct{}
+	// unlisted names a job List omits while Get still serves it, as when the
+	// list lags behind a create.
+	unlisted string
 	// holdCreate holds the next create after its CreateTime is stamped and
 	// before the job is listed.
 	holdCreate *createHold
@@ -395,6 +398,9 @@ func (f *fakeVertex) list(w io.Writer, r *http.Request) {
 	}
 	var matched []*vertexJob
 	for _, j := range f.jobs {
+		if j.Name == f.unlisted {
+			continue
+		}
 		if f.ignoreFilter || filter == fmt.Sprintf("display_name=%q", j.DisplayName) {
 			matched = append(matched, j)
 		}

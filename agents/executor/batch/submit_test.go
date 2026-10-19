@@ -795,6 +795,38 @@ func TestSubmitRejectsForeignRecord(t *testing.T) {
 	}
 }
 
+// TestFindRecordedJobMissingFromList hides the job job.json names from List
+// while Get still serves it: Find and Submit must look it up by name and
+// return it, not create or cancel anything.
+func TestFindRecordedJobMissingFromList(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	id := uuid.NewString()
+	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+	job, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	env.vertex.mu.Lock()
+	env.vertex.unlisted = job.Name
+	env.vertex.mu.Unlock()
+
+	found, ok, err := env.client.Find(t.Context(), id)
+	if err != nil || !ok || found.Name != job.Name {
+		t.Errorf("Find: got = %q, %v, %v, want = %q", found.Name, ok, err, job.Name)
+	}
+	again, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+	if err != nil || again.Name != job.Name {
+		t.Errorf("re-submit: got = %q, %v, want = %q", again.Name, err, job.Name)
+	}
+	if n := env.vertex.createCount(); n != 1 {
+		t.Errorf("creates: got = %d, want = 1", n)
+	}
+	if live := liveJobs(env); len(live) != 1 || live[0] != job.Name {
+		t.Errorf("live jobs: got = %v, want only %q", live, job.Name)
+	}
+}
+
 // TestSubmitRejectsDifferentRowsForStagedID stages an id whose job was never
 // created, then submits other rows under it: the staged objects must not be
 // overwritten, or a concurrent first caller would create its job over them.
