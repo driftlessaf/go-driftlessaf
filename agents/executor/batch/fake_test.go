@@ -241,8 +241,8 @@ type fakeVertex struct {
 	// rejectCreates makes the next n creates fail with 400 and create
 	// nothing, leaving the staged input behind as a crash would.
 	rejectCreates int
-	// pairedLists holds that many List requests in pairs: each waits for a
-	// second to arrive, so two callers' lookups answer before either acts.
+	// pairedLists holds that many List responses in pairs: each takes its
+	// snapshot, then waits for a second, so neither caller sees the other act.
 	pairedLists int
 	waiting     chan struct{}
 	// holdCreate holds the next create after its CreateTime is stamped and
@@ -261,7 +261,13 @@ const jobsPath = "/v1beta1/projects/" + testProject + "/locations/" + testLocati
 func (f *fakeVertex) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == http.MethodGet && r.URL.Path == jobsPath {
+		var buf bytes.Buffer
+		f.mu.Lock()
+		f.list(&buf, r)
+		f.mu.Unlock()
 		f.pair(r)
+		_, _ = w.Write(buf.Bytes())
+		return
 	}
 	if r.Method == http.MethodPost && r.URL.Path == jobsPath {
 		f.create(w, r)
@@ -270,8 +276,6 @@ func (f *fakeVertex) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
-	case r.Method == http.MethodGet && r.URL.Path == jobsPath:
-		f.list(w, r)
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, ":cancel"):
 		if j := f.job(strings.TrimSuffix(r.URL.Path, ":cancel")); j != nil {
 			j.State = string(genai.JobStateCancelling)
@@ -291,8 +295,8 @@ func (f *fakeVertex) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// pair blocks a List request until another arrives, while pairedLists
-// lasts.
+// pair holds a List response until another List has taken its snapshot,
+// while pairedLists lasts.
 func (f *fakeVertex) pair(r *http.Request) {
 	f.mu.Lock()
 	if f.pairedLists == 0 {
@@ -382,7 +386,7 @@ func (f *fakeVertex) create(w http.ResponseWriter, r *http.Request) {
 }
 
 // list answers one job per page so callers must follow page tokens.
-func (f *fakeVertex) list(w http.ResponseWriter, r *http.Request) {
+func (f *fakeVertex) list(w io.Writer, r *http.Request) {
 	filter := r.URL.Query().Get("filter")
 	f.filters = append(f.filters, filter)
 	if f.raceJob != nil && len(f.filters) > f.raceAfterLists {
