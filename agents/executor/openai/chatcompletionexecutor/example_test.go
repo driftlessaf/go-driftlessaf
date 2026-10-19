@@ -59,7 +59,7 @@ func ExampleWithModel() {
 	)
 
 	exec, err := chatcompletionexecutor.New[myRequest, myResponse](client, prompt,
-		chatcompletionexecutor.WithModel[myRequest, myResponse]("deepseek-ai/deepseek-v3.2-maas"),
+		chatcompletionexecutor.WithModel[myRequest, myResponse]("google/gemini-3.5-flash"),
 	)
 	if err != nil {
 		clog.FatalContextf(ctx, "%v", err)

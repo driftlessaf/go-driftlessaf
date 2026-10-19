@@ -27,7 +27,7 @@ SPDX-License-Identifier: Apache-2.0
 //	prompt := promptbuilder.MustParse("Analyze {{.Input}}")
 //
 //	exec, err := chatcompletionexecutor.New[MyRequest, MyResponse](client, prompt,
-//		chatcompletionexecutor.WithModel[MyRequest, MyResponse]("deepseek-ai/deepseek-v3.2-maas"),
+//		chatcompletionexecutor.WithModel[MyRequest, MyResponse]("google/gemini-3.5-flash"),
 //		chatcompletionexecutor.WithMaxTokens[MyRequest, MyResponse](32768),
 //		chatcompletionexecutor.WithTemperature[MyRequest, MyResponse](0.2),
 //	)
