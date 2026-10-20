@@ -22,10 +22,11 @@ SPDX-License-Identifier: Apache-2.0
 // id, used as the job's display name and its storage directory. Before each
 // create attempt the client lists the id's jobs, so resubmitting an id, or
 // retrying after a lost response, returns the existing job. A job is adopted
-// only when its display name, input URI, and output destination all match;
-// one that reads the id's input but writes elsewhere fails the submission
-// with [ErrInvalidRequest]. A caller that means to run the same rows again
-// uses a new id.
+// only when its display name, input URI, output destination, and model all
+// match; one that reads the id's input but writes elsewhere or runs another
+// model fails the submission with [ErrInvalidRequest]. Models match on
+// publisher and base name, ignoring any @version suffix. A caller that means
+// to run the same rows again uses a new id.
 //
 // The manifest is written create-only, so it claims the id for one set of
 // rows: staging different rows under an id that has no job yet fails with

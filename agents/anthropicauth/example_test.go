@@ -90,8 +90,8 @@ func ExampleConfigFromProfile() {
 // first-party API form by stripping the "@version" suffix.
 func ExampleModelID() {
 	fmt.Println(anthropicauth.ModelID("claude-sonnet-4-6@default"))
-	fmt.Println(anthropicauth.ModelID("claude-haiku-4-5"))
+	fmt.Println(anthropicauth.ModelID("claude-haiku-5-5"))
 	// Output:
 	// claude-sonnet-4-6
-	// claude-haiku-4-5
+	// claude-haiku-5-5
 }

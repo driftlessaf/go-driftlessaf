@@ -116,6 +116,15 @@ func (c *Client) Results(ctx context.Context, job Job) iter.Seq2[Result, error] 
 			yield(Result{}, err)
 			return
 		}
+		// A persisted Job is caller data: its Name must still be the id's job.
+		ok, err := c.owns(job.ID, publisherModel(m.Provider, m.Model), bj)
+		if err == nil && !ok {
+			err = fmt.Errorf("%w: job %q was not created for id %q", ErrInvalidRequest, job.Name, job.ID)
+		}
+		if err != nil {
+			yield(Result{}, err)
+			return
+		}
 		objects, err := c.outputObjects(ctx, job, bj)
 		if err != nil {
 			yield(Result{}, err)
