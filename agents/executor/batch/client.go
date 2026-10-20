@@ -216,9 +216,8 @@ func retryable(ctx context.Context) func(error) bool {
 // on the display name and re-checks the name and input URI on each job, so a
 // filter Vertex ignores, or a job with the same name from another client,
 // cannot produce a false match. A job with this id's name and input but
-// another output destination, or none, or another model than the id was
-// submitted for, was not created by this client: Find returns an error
-// wrapping [ErrInvalidRequest] rather than adopt it.
+// another output destination, or none, was not created by this client: Find
+// returns an error wrapping [ErrInvalidRequest] rather than adopt it.
 //
 // Find returns the job Submit recorded for the id, whatever its state and
 // whatever duplicates are listed. A recorded job that does not exist or fails
@@ -230,22 +229,11 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	if !idPattern.MatchString(id) {
 		return Job{}, false, fmt.Errorf("%w: id %q must match %s", ErrInvalidRequest, id, idPattern)
 	}
-	m, err := c.manifestFor(ctx, id)
-	staged := !errors.Is(err, storage.ErrObjectNotExist)
-	if staged && err != nil {
-		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
-	}
-	// With no manifest, model stays empty and [Client.owns] rejects any job
-	// reading the id's input.
-	var model string
-	if staged {
-		model = publisherModel(m.Provider, m.Model)
-	}
-	bjs, err := c.lookup(ctx, id, model)
+	bjs, err := c.lookup(ctx, id)
 	if err != nil {
 		return Job{}, false, err
 	}
-	chosen, err := c.recorded(ctx, id, model, bjs)
+	chosen, err := c.recorded(ctx, id, bjs)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
 	}
@@ -255,19 +243,22 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 		}
 		chosen = bjs[0]
 	}
+	m, err := c.manifestFor(ctx, id)
+	if err != nil {
+		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
+	}
 	return c.jobFor(id, chosen.Name, m), true, nil
 }
 
-// matches lists the jobs this client created under id for model, earliest
-// first.
-func (c *Client) matches(ctx context.Context, id, model string) ([]*genai.BatchJob, error) {
+// matches lists the jobs this client created under id, earliest first.
+func (c *Client) matches(ctx context.Context, id string) ([]*genai.BatchJob, error) {
 	page, err := c.genai.Batches.List(ctx, &genai.ListBatchJobsConfig{
 		Filter: fmt.Sprintf("display_name=%q", id),
 	})
 	var out []*genai.BatchJob
 	for ; err == nil; page, err = page.Next(ctx) {
 		for _, bj := range page.Items {
-			ok, err := c.owns(id, model, bj)
+			ok, err := c.owns(id, bj)
 			if err != nil {
 				return nil, err
 			}
@@ -285,18 +276,12 @@ func (c *Client) matches(ctx context.Context, id, model string) ([]*genai.BatchJ
 	return out, nil
 }
 
-// owns reports whether bj is a job this client created under id for model,
-// a [publisherModel] path.
-func (c *Client) owns(id, model string, bj *genai.BatchJob) (bool, error) {
+// owns reports whether bj is a job this client created under id.
+func (c *Client) owns(id string, bj *genai.BatchJob) (bool, error) {
 	inputURI := c.gsURI(c.objectName(id, inputObject))
 	outputURI := c.gsURI(c.objectName(id, outputDir))
 	if bj.DisplayName != id || bj.Src == nil || !slices.Contains(bj.Src.GCSURI, inputURI) {
 		return false, nil
-	}
-	// Submit stages the manifest before any create, so with none no job
-	// reading the id's input is ours.
-	if model == "" {
-		return false, fmt.Errorf("%w: job %q claims id %q, which has no manifest", ErrInvalidRequest, bj.Name, id)
 	}
 	// Our input is already in that job, so neither adopting it nor creating
 	// a second job is safe.
@@ -308,36 +293,13 @@ func (c *Client) owns(id, model string, bj *genai.BatchJob) (bool, error) {
 		return false, fmt.Errorf("%w: job %q reads this id's input but writes to %q, not %q",
 			ErrInvalidRequest, bj.Name, dest, outputURI+"/")
 	}
-	// Like a foreign destination: the job reads our input, so skipping it
-	// would leave its output from another model beside a second job.
-	if modelFamily(bj.Model) != modelFamily(model) {
-		return false, fmt.Errorf("%w: job %q reads this id's input but runs model %q, not %q",
-			ErrInvalidRequest, bj.Name, bj.Model, model)
-	}
 	return true, nil
-}
-
-// publisherModel is the Vertex publisher model path genai creates a job with
-// from [genaiModel].
-func publisherModel(provider, model string) string {
-	return "publishers/" + provider + "/models/" + model
-}
-
-// modelFamily is a publisher model path without the projects/*/locations/*
-// prefix or @version suffix Vertex may report it with, as an alias may
-// resolve to a dated version of the same model.
-func modelFamily(model string) string {
-	if parts := strings.SplitN(model, "/", 5); len(parts) == 5 && parts[0] == "projects" && parts[2] == "locations" {
-		model = parts[4]
-	}
-	family, _, _ := strings.Cut(model, "@")
-	return family
 }
 
 // recorded returns the job the id's job.json names, or nil when there is no
 // record yet. The record is trusted like the manifest, but the job it names
 // must still pass [Client.owns]; anything else is a collision.
-func (c *Client) recorded(ctx context.Context, id, model string, bjs []*genai.BatchJob) (*genai.BatchJob, error) {
+func (c *Client) recorded(ctx context.Context, id string, bjs []*genai.BatchJob) (*genai.BatchJob, error) {
 	object := c.objectName(id, jobObject)
 	r, err := retry.RetryWithBackoff(ctx, c.retry, "batch.record", retryable(ctx), func() (*jobRecord, error) {
 		rd, err := c.bucket.Object(object).NewReader(ctx)
@@ -371,7 +333,7 @@ func (c *Client) recorded(ctx context.Context, id, model string, bjs []*genai.Ba
 	if err != nil {
 		return nil, err
 	}
-	ok, err := c.owns(id, model, bj)
+	ok, err := c.owns(id, bj)
 	if err != nil {
 		return nil, err
 	}
