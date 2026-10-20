@@ -235,8 +235,8 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 	if staged && err != nil {
 		return Job{}, false, fmt.Errorf("finding batch job %q: %w", id, err)
 	}
-	// Submit stages the manifest before any create, so with none the id has
-	// no model and every job claiming its input is a collision.
+	// With no manifest, model stays empty and [Client.owns] rejects any job
+	// reading the id's input.
 	var model string
 	if staged {
 		model = publisherModel(m.Provider, m.Model)
@@ -254,9 +254,6 @@ func (c *Client) Find(ctx context.Context, id string) (Job, bool, error) {
 			return Job{}, false, nil
 		}
 		chosen = bjs[0]
-	}
-	if !staged {
-		return Job{}, false, fmt.Errorf("%w: job %q claims id %q, which has no manifest", ErrInvalidRequest, chosen.Name, id)
 	}
 	return c.jobFor(id, chosen.Name, m), true, nil
 }
@@ -296,6 +293,11 @@ func (c *Client) owns(id, model string, bj *genai.BatchJob) (bool, error) {
 	if bj.DisplayName != id || bj.Src == nil || !slices.Contains(bj.Src.GCSURI, inputURI) {
 		return false, nil
 	}
+	// Submit stages the manifest before any create, so with none no job
+	// reading the id's input is ours.
+	if model == "" {
+		return false, fmt.Errorf("%w: job %q claims id %q, which has no manifest", ErrInvalidRequest, bj.Name, id)
+	}
 	// Our input is already in that job, so neither adopting it nor creating
 	// a second job is safe.
 	if bj.Dest == nil || strings.TrimSuffix(bj.Dest.GCSURI, "/") != outputURI {
@@ -308,7 +310,7 @@ func (c *Client) owns(id, model string, bj *genai.BatchJob) (bool, error) {
 	}
 	// Like a foreign destination: the job reads our input, so skipping it
 	// would leave its output from another model beside a second job.
-	if got := resourceModel(bj.Model); got != model {
+	if modelFamily(bj.Model) != modelFamily(model) {
 		return false, fmt.Errorf("%w: job %q reads this id's input but runs model %q, not %q",
 			ErrInvalidRequest, bj.Name, bj.Model, model)
 	}
@@ -321,13 +323,15 @@ func publisherModel(provider, model string) string {
 	return "publishers/" + provider + "/models/" + model
 }
 
-// resourceModel strips the projects/*/locations/* prefix Vertex may report a
-// publisher model under.
-func resourceModel(model string) string {
+// modelFamily is a publisher model path without the projects/*/locations/*
+// prefix or @version suffix Vertex may report it with, as an alias may
+// resolve to a dated version of the same model.
+func modelFamily(model string) string {
 	if parts := strings.SplitN(model, "/", 5); len(parts) == 5 && parts[0] == "projects" && parts[2] == "locations" {
-		return parts[4]
+		model = parts[4]
 	}
-	return model
+	family, _, _ := strings.Cut(model, "@")
+	return family
 }
 
 // recorded returns the job the id's job.json names, or nil when there is no

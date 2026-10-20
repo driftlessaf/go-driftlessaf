@@ -1149,3 +1149,142 @@ func TestPreconditionFailed(t *testing.T) {
 		})
 	}
 }
+
+// TestSubmitChecksCreatedModel covers the model Vertex reports for the job
+// it just created. Another version of the same model is still ours; another
+// model or publisher fails Submit, and the unusable job is cancelled.
+func TestSubmitChecksCreatedModel(t *testing.T) {
+	t.Parallel()
+	const model = "claude-opus-5-5@default"
+	tests := []struct {
+		name    string
+		created func(string) string
+		wantErr bool
+	}{{
+		name:    "alias resolved to a dated version",
+		created: func(m string) string { return strings.Replace(m, "@default", "@20261001", 1) },
+	}, {
+		name: "full resource name of a dated version",
+		created: func(string) string {
+			return "projects/" + testProject + "/locations/" + testLocation + "/publishers/anthropic/models/claude-opus-5-5@20261001"
+		},
+	}, {
+		name:    "another base model",
+		created: func(string) string { return "publishers/anthropic/models/claude-haiku-5@default" },
+		wantErr: true,
+	}, {
+		name:    "another publisher",
+		created: func(string) string { return "publishers/google/models/claude-opus-5-5@default" },
+		wantErr: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			env.vertex.createdModel = tt.created
+			id := uuid.NewString()
+			key := uuid.NewString()
+			reqs := []ClaudeRequest{claudeReq(key, "p")}
+
+			job, err := env.client.SubmitClaude(t.Context(), id, model, reqs)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidRequest) {
+					t.Fatalf("SubmitClaude: got = %+v, %v, want = %v", job, err, ErrInvalidRequest)
+				}
+				if rec := recordedName(t, env, id); rec != "" {
+					t.Errorf("job.json: got = %q, want none", rec)
+				}
+				states := env.vertex.states()
+				if len(states) != 1 {
+					t.Fatalf("jobs: got = %v, want one", states)
+				}
+				for name, state := range states {
+					if state != string(genai.JobStateCancelling) {
+						t.Errorf("created job %q state: got = %s, want = %s", name, state, genai.JobStateCancelling)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SubmitClaude: %v", err)
+			}
+			if rec := recordedName(t, env, id); rec != job.Name {
+				t.Errorf("job.json: got = %q, want = %q", rec, job.Name)
+			}
+			env.vertex.finish(t, env.gcs, job.Name, genai.JobStateSucceeded,
+				fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref(key), claudeMessage("answer", "end_turn", "")))
+			if res := collect(t, env.client, job)[key]; res.Err != nil || res.Text != "answer" {
+				t.Errorf("Results: got = %+v, want text %q", res, "answer")
+			}
+			found, ok, err := env.client.Find(t.Context(), id)
+			if err != nil || !ok {
+				t.Fatalf("Find: ok = %v, err = %v", ok, err)
+			}
+			if diff := cmp.Diff(job, found); diff != "" {
+				t.Errorf("Find (-submit, +find):\n%s", diff)
+			}
+			again, err := env.client.SubmitClaude(t.Context(), id, model, reqs)
+			if err != nil || again.Name != job.Name {
+				t.Errorf("re-submit: got = %q, %v, want = %q", again.Name, err, job.Name)
+			}
+			if n := env.vertex.createCount(); n != 1 {
+				t.Errorf("creates: got = %d, want = 1", n)
+			}
+		})
+	}
+}
+
+// TestFindWithoutManifest covers an id whose jobs outlived its manifest,
+// which Submit always writes first, so no listed job can be the id's own.
+func TestFindWithoutManifest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		submit     bool
+		keepRecord bool
+		wantErr    bool
+	}{{
+		name:       "job with its record",
+		submit:     true,
+		keepRecord: true,
+		wantErr:    true,
+	}, {
+		name:    "job without a record",
+		submit:  true,
+		wantErr: true,
+	}, {
+		name: "no jobs",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			if tt.submit {
+				if _, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")}); err != nil {
+					t.Fatalf("SubmitClaude: %v", err)
+				}
+				env.gcs.mu.Lock()
+				delete(env.gcs.objects, env.client.objectName(id, manifestObject))
+				if !tt.keepRecord {
+					delete(env.gcs.objects, recordPath(id))
+				}
+				env.gcs.mu.Unlock()
+			}
+
+			got, ok, err := env.client.Find(t.Context(), id)
+			if ok {
+				t.Errorf("Find: got = %+v, want not found", got)
+			}
+			if !tt.wantErr {
+				if err != nil {
+					t.Errorf("Find: got = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "no manifest") {
+				t.Errorf("Find: got = %v, want %v naming the missing manifest", err, ErrInvalidRequest)
+			}
+		})
+	}
+}

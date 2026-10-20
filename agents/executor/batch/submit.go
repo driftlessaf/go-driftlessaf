@@ -194,6 +194,19 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 			if err != nil {
 				return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
 			}
+			// Check the job before recording it, so Submit never records one
+			// that Results and Find would then reject.
+			ok, err := c.owns(id, want, own)
+			if err == nil && !ok {
+				err = fmt.Errorf("%w: created job %q is not one for id %q", ErrInvalidRequest, own.Name, id)
+			}
+			if err != nil {
+				clog.ErrorContext(ctx, "Cancelling created batch job that fails its own checks", "id", id, "job", own.Name, "error", err)
+				if cerr := c.Cancel(ctx, Job{Name: own.Name}); cerr != nil {
+					clog.ErrorContext(ctx, "Failed to cancel created batch job", "id", id, "job", own.Name, "error", cerr)
+				}
+				return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
+			}
 		}
 		// The record is create-only, so concurrent submitters settle on
 		// whichever recorded first. After a lost response it names own.
