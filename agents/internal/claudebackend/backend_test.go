@@ -57,7 +57,7 @@ func TestResolveWithConfig(t *testing.T) {
 		},
 		{
 			name:  "Anthropic direct preserves first-party model ID",
-			model: "claude-haiku-5-5",
+			model: "claude-haiku-4-5",
 			config: config{
 				backend: backendAnthropic,
 				anthropic: anthropicauth.Config{
@@ -65,7 +65,7 @@ func TestResolveWithConfig(t *testing.T) {
 					OrganizationID:   "87654321-4321-4321-4321-210987654321",
 				},
 			},
-			wantModel:    "claude-haiku-5-5",
+			wantModel:    "claude-haiku-4-5",
 			wantProvider: claudeexecutor.ProviderAnthropic,
 		},
 	}

@@ -82,10 +82,6 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 	}
 
 	payloadRaw, err := params.Extract[map[string]any](args, opts.PayloadFieldName)
-	embedded := -1
-	if args[opts.PayloadFieldName] == nil {
-		embedded = jsonMemberOffset(reasoning, opts.PayloadFieldName)
-	}
 	switch {
 	case err == nil:
 	case args[opts.PayloadFieldName] == nil && strings.Contains(reasoning, parameterOpener(opts.PayloadFieldName)):
@@ -101,20 +97,6 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], tra
 		clog.WarnContext(ctx, "Recovered submit payload nested in reasoning",
 			"tool", name,
 			"field", opts.PayloadFieldName,
-		)
-		payloadRaw, reasoning = nested, prose
-	case embedded >= 0:
-		prose, nested, why := embeddedPayload(reasoning, embedded)
-		if why != "" {
-			cause := fmt.Errorf("%w: the %s was found inside reasoning at offset %d as a JSON %q member, and it could not be recovered from there because %s; pass the %s as the top-level %s parameter, not inside reasoning",
-				err, opts.PayloadFieldName, embedded, opts.PayloadFieldName, why, opts.PayloadFieldName, opts.PayloadFieldName)
-			trace.RejectedToolCall(id, name, args, fmt.Errorf("%w: %w", ErrParameter, cause))
-			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", cause)}
-		}
-		clog.WarnContext(ctx, "Recovered submit payload embedded as JSON in reasoning",
-			"tool", name,
-			"field", opts.PayloadFieldName,
-			"offset", embedded,
 		)
 		payloadRaw, reasoning = nested, prose
 	default:
@@ -284,49 +266,6 @@ func trimArgumentClose(s string) string {
 		}
 		s = rest
 	}
-}
-
-// jsonMemberOffset reports the byte offset in reasoning of the first JSON
-// object member named field, such as `"result": {`, or -1 when there is none.
-// A model that writes the whole argument object as text puts the payload
-// there: the reasoning string runs on past its own closing quote into
-// `",\n"result": {...}}`, so the payload parameter never arrives. Only a
-// member whose value opens an object counts, so prose that quotes the field
-// name does not.
-func jsonMemberOffset(reasoning, field string) int {
-	key := `"` + field + `":`
-	for from := 0; ; {
-		i := strings.Index(reasoning[from:], key)
-		if i < 0 {
-			return -1
-		}
-		i += from
-		if strings.HasPrefix(strings.TrimLeft(reasoning[i+len(key):], " \t\r\n"), "{") {
-			return i
-		}
-		from = i + len(key)
-	}
-}
-
-// embeddedPayload recovers the payload object whose member starts at offset
-// in reasoning. It accepts one JSON object trailed by nothing but closing
-// tokens, the rule nestedPayload applies. Anything else after the object
-// declines it: the common case is a payload field the model closed outside
-// the object, which recovering would silently drop. why names the reason it
-// declined, and is empty on success. prose is the text before the member
-// without the quote and comma that ended the reasoning value.
-func embeddedPayload(reasoning string, offset int) (prose string, payload map[string]any, why string) {
-	_, value, _ := strings.Cut(reasoning[offset:], ":")
-	dec := json.NewDecoder(strings.NewReader(value))
-	if err := dec.Decode(&payload); err != nil {
-		return "", nil, "it is not a complete JSON object"
-	}
-	if !onlyClosingTokens(value[dec.InputOffset():]) {
-		return "", nil, "content other than closing brackets follows its closing brace, so part of it may have been written outside it"
-	}
-	prose = strings.TrimRight(reasoning[:offset], " \t\r\n")
-	prose = strings.TrimRight(strings.TrimSuffix(prose, ","), " \t\r\n")
-	return strings.TrimSuffix(prose, `"`), payload, ""
 }
 
 // parsePayload converts a raw payload object (as received from the model) into

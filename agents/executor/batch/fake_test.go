@@ -251,9 +251,6 @@ type fakeVertex struct {
 	// holdCreate holds the next create after its CreateTime is stamped and
 	// before the job is listed.
 	holdCreate *createHold
-	// createdModel rewrites the model a created job reports, as when Vertex
-	// resolves an alias to a dated version.
-	createdModel func(string) string
 }
 
 // createHold pauses one create: arrived closes once its CreateTime is
@@ -377,9 +374,6 @@ func (f *fakeVertex) create(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(raw, j); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	if f.createdModel != nil {
-		j.Model = f.createdModel(j.Model)
 	}
 	j.Name = fmt.Sprintf("projects/%s/locations/%s/batchPredictionJobs/%d", testProject, testLocation, 1000+len(f.jobs))
 	j.State = string(genai.JobStatePending)

@@ -78,7 +78,7 @@ func TestAccumulateWithNormalize(t *testing.T) {
 		{
 			name: "tool_use with empty input accumulates without error",
 			events: []string{
-				`{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-haiku-5-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+				`{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-haiku-4-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
 				`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"read_file","input":{}}}`,
 				`{"type":"content_block_stop","index":0}`,
 				`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":15}}`,
@@ -92,7 +92,7 @@ func TestAccumulateWithNormalize(t *testing.T) {
 		{
 			name: "tool_use with real input is preserved byte-for-byte",
 			events: []string{
-				`{"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","content":[],"model":"claude-haiku-5-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+				`{"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","content":[],"model":"claude-haiku-4-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
 				`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_02","name":"read_file","input":{}}}`,
 				`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/etc/passwd\","}}`,
 				`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"limit\":100}"}}`,
@@ -108,7 +108,7 @@ func TestAccumulateWithNormalize(t *testing.T) {
 		{
 			name: "mixed content: text then tool_use with empty input",
 			events: []string{
-				`{"type":"message_start","message":{"id":"msg_03","type":"message","role":"assistant","content":[],"model":"claude-haiku-5-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+				`{"type":"message_start","message":{"id":"msg_03","type":"message","role":"assistant","content":[],"model":"claude-haiku-4-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
 				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"analyzing"}}`,
 				`{"type":"content_block_stop","index":0}`,
@@ -125,7 +125,7 @@ func TestAccumulateWithNormalize(t *testing.T) {
 		{
 			name: "multiple tool_use blocks: one empty one with real input",
 			events: []string{
-				`{"type":"message_start","message":{"id":"msg_04","type":"message","role":"assistant","content":[],"model":"claude-haiku-5-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
+				`{"type":"message_start","message":{"id":"msg_04","type":"message","role":"assistant","content":[],"model":"claude-haiku-4-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`,
 				`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_04a","name":"get_status","input":{}}}`,
 				`{"type":"content_block_stop","index":0}`,
 				`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_04b","name":"read_file","input":{}}}`,
