@@ -417,6 +417,148 @@ func TestFindNormalizesDestinationSlash(t *testing.T) {
 	}
 }
 
+// TestSubmitRejectsModelCollision covers a job someone else created with
+// this submission's display name, input, and destination but another model.
+// Adopting it would return the wrong model's output, and with no job.json
+// would record it and cancel the id's own job.
+func TestSubmitRejectsModelCollision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		model string
+		// raced adds the job between Submit's first lookup and its create;
+		// otherwise it is listed beside the id's own job, which has no record.
+		raced bool
+	}{{
+		name:  "another claude model",
+		model: "publishers/anthropic/models/claude-haiku-5@default",
+	}, {
+		name:  "another claude model, raced after staging",
+		model: "publishers/anthropic/models/claude-haiku-5@default",
+		raced: true,
+	}, {
+		name:  "same model id under another publisher",
+		model: "publishers/google/models/claude-opus-5-5@default",
+	}, {
+		name:  "same model id under another publisher, raced after staging",
+		model: "publishers/google/models/claude-opus-5-5@default",
+		raced: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+			spoofed := &vertexJob{
+				Name:        "projects/" + testProject + "/locations/" + testLocation + "/batchPredictionJobs/666",
+				DisplayName: id,
+				Model:       tt.model,
+				State:       string(genai.JobStatePending),
+				CreateTime:  "2026-10-18T00:00:00Z",
+				InputConfig: map[string]any{"instancesFormat": "jsonl", "gcsSource": map[string]any{
+					"uris": []string{"gs://" + testBucket + "/" + testPrefix + "/" + id + "/input.jsonl"},
+				}},
+				OutputConfig: &vertexOutputConfig{PredictionsFormat: "jsonl"},
+			}
+			spoofed.OutputConfig.GCSDestination.OutputURIPrefix = "gs://" + testBucket + "/" + testPrefix + "/" + id + "/output/"
+			var own string
+			if tt.raced {
+				env.vertex.raceJob, env.vertex.raceAfterLists = spoofed, 1
+			} else {
+				// The id's own job, from a submitter that stopped before its
+				// record; the spoofed job sorts ahead of it.
+				first, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+				if err != nil {
+					t.Fatalf("first submit: %v", err)
+				}
+				own = first.Name
+				env.gcs.mu.Lock()
+				delete(env.gcs.objects, recordPath(id))
+				env.gcs.mu.Unlock()
+				env.vertex.mu.Lock()
+				env.vertex.jobs = append(env.vertex.jobs, spoofed)
+				env.vertex.mu.Unlock()
+			}
+			creates := env.vertex.createCount()
+
+			got, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", reqs)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("SubmitClaude: got = %+v, %v, want = %v", got, err, ErrInvalidRequest)
+			}
+			if !strings.Contains(err.Error(), spoofed.Name) {
+				t.Errorf("SubmitClaude: got = %v, want the colliding job named", err)
+			}
+			if n := env.vertex.createCount(); n != creates {
+				t.Errorf("creates: got = %d, want = %d", n, creates)
+			}
+			if rec := recordedName(t, env, id); rec != "" {
+				t.Errorf("job.json: got = %q, want none", rec)
+			}
+			for name, state := range env.vertex.states() {
+				if state == string(genai.JobStateCancelling) {
+					t.Errorf("job %q cancelled, want every job left alone", name)
+				}
+			}
+			if _, ok, err := env.client.Find(t.Context(), id); ok || !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("Find: ok = %v, err = %v, want = %v", ok, err, ErrInvalidRequest)
+			}
+			for res, err := range env.client.Results(t.Context(), Job{ID: id, Name: spoofed.Name}) {
+				if !errors.Is(err, ErrInvalidRequest) {
+					t.Errorf("Results: got = %+v, %v, want = %v", res, err, ErrInvalidRequest)
+				}
+			}
+			if own != "" {
+				if state := env.vertex.states()[own]; state != string(genai.JobStatePending) {
+					t.Errorf("own job %q state: got = %s, want = %s", own, state, genai.JobStatePending)
+				}
+			}
+		})
+	}
+}
+
+// TestFindAcceptsModelForms adopts a job whose model Vertex reports in the
+// full resource form rather than the publisher path it was created with.
+func TestFindAcceptsModelForms(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		model string
+	}{{
+		name:  "publisher path",
+		model: "publishers/anthropic/models/claude-opus-5-5@default",
+	}, {
+		name:  "full resource name",
+		model: "projects/" + testProject + "/locations/" + testLocation + "/publishers/anthropic/models/claude-opus-5-5@default",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			job, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")})
+			if err != nil {
+				t.Fatalf("SubmitClaude: %v", err)
+			}
+			env.vertex.mu.Lock()
+			env.vertex.job("/v1beta1/" + job.Name).Model = tt.model
+			env.vertex.mu.Unlock()
+
+			found, ok, err := env.client.Find(t.Context(), id)
+			if err != nil || !ok {
+				t.Fatalf("Find: ok = %v, err = %v", ok, err)
+			}
+			if diff := cmp.Diff(job, found); diff != "" {
+				t.Errorf("Find (-submit, +find):\n%s", diff)
+			}
+			again, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")})
+			if err != nil || again.Name != job.Name {
+				t.Errorf("re-submit: got = %q, %v, want = %q", again.Name, err, job.Name)
+			}
+		})
+	}
+}
+
 // TestSubmitConcurrentConverges races two Submits of one id past their final
 // lookup, so both create a job: they must settle on the recorded one and
 // cancel the other before it runs.
@@ -548,50 +690,76 @@ func TestSubmitConvergesWhenCreateTimeLeadsVisibility(t *testing.T) {
 // TestSubmitCancelsTwinThatStoppedBeforeRecord holds the recording caller's
 // create while a twin creates the same job and stops before writing job.json,
 // as a crash would. The recording caller's earlier lookup missed the twin, so
-// only listing again after the record cancels it.
+// only listing again after the record cancels it, whether the record write is
+// answered or its response is lost and the retry reads the record back.
 func TestSubmitCancelsTwinThatStoppedBeforeRecord(t *testing.T) {
 	t.Parallel()
-	env := newTestEnv(t)
-	id := uuid.NewString()
-	model := "claude-opus-5-5@default"
-	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
-	hold := &createHold{arrived: make(chan struct{}), release: make(chan struct{})}
-	env.vertex.holdCreate = hold
-	var (
-		wg     sync.WaitGroup
-		got    Job
-		gotErr error
-	)
-	wg.Go(func() {
-		got, gotErr = env.client.SubmitClaude(t.Context(), id, model, reqs)
-	})
-	<-hold.arrived
-	// The twin's create, without the record that would follow it.
-	twin, err := env.client.genai.Batches.Create(t.Context(), genaiModel(providerAnthropic, model),
-		&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{env.client.gsURI(env.client.objectName(id, inputObject))}},
-		&genai.CreateBatchJobConfig{
-			DisplayName: id,
-			Dest: &genai.BatchJobDestination{
-				Format: "jsonl",
-				GCSURI: env.client.gsURI(env.client.objectName(id, outputDir)) + "/",
-			},
+	tests := []struct {
+		name       string
+		loseRecord bool
+	}{{
+		name: "record write answered",
+	}, {
+		name:       "record write response lost",
+		loseRecord: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			if tt.loseRecord {
+				env.gcs.loseWrite = recordPath(id)
+			}
+			model := "claude-opus-5-5@default"
+			reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+			hold := &createHold{arrived: make(chan struct{}), release: make(chan struct{})}
+			env.vertex.holdCreate = hold
+			var (
+				wg     sync.WaitGroup
+				got    Job
+				gotErr error
+			)
+			wg.Go(func() {
+				got, gotErr = env.client.SubmitClaude(t.Context(), id, model, reqs)
+			})
+			<-hold.arrived
+			// The twin's create, without the record that would follow it.
+			twin, err := env.client.genai.Batches.Create(t.Context(), genaiModel(providerAnthropic, model),
+				&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{env.client.gsURI(env.client.objectName(id, inputObject))}},
+				&genai.CreateBatchJobConfig{
+					DisplayName: id,
+					Dest: &genai.BatchJobDestination{
+						Format: "jsonl",
+						GCSURI: env.client.gsURI(env.client.objectName(id, outputDir)) + "/",
+					},
+				})
+			if err != nil {
+				t.Fatalf("twin create: %v", err)
+			}
+			close(hold.release)
+			wg.Wait()
+			if gotErr != nil {
+				t.Fatalf("SubmitClaude: %v", gotErr)
+			}
+			if tt.loseRecord {
+				env.gcs.mu.Lock()
+				lost := env.gcs.loseWrite == ""
+				env.gcs.mu.Unlock()
+				if !lost {
+					t.Fatal("job.json response was not lost (the scenario did not happen)")
+				}
+			}
+			if got.Name == twin.Name {
+				t.Fatalf("SubmitClaude returned the twin %q, want its own job", twin.Name)
+			}
+			if rec := recordedName(t, env, id); rec != got.Name {
+				t.Errorf("job.json: got = %q, want = %q", rec, got.Name)
+			}
+			if live := liveJobs(env); len(live) != 1 || live[0] != got.Name {
+				t.Errorf("live jobs: got = %v, want only %q", live, got.Name)
+			}
 		})
-	if err != nil {
-		t.Fatalf("twin create: %v", err)
-	}
-	close(hold.release)
-	wg.Wait()
-	if gotErr != nil {
-		t.Fatalf("SubmitClaude: %v", gotErr)
-	}
-	if got.Name == twin.Name {
-		t.Fatalf("SubmitClaude returned the twin %q, want its own job", twin.Name)
-	}
-	if rec := recordedName(t, env, id); rec != got.Name {
-		t.Errorf("job.json: got = %q, want = %q", rec, got.Name)
-	}
-	if live := liveJobs(env); len(live) != 1 || live[0] != got.Name {
-		t.Errorf("live jobs: got = %v, want only %q", live, got.Name)
 	}
 }
 
@@ -977,6 +1145,145 @@ func TestPreconditionFailed(t *testing.T) {
 			t.Parallel()
 			if got := preconditionFailed(tt.err); got != tt.want {
 				t.Errorf("preconditionFailed(%v): got = %v, want = %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSubmitChecksCreatedModel covers the model Vertex reports for the job
+// it just created. Another version of the same model is still ours; another
+// model or publisher fails Submit, and the unusable job is cancelled.
+func TestSubmitChecksCreatedModel(t *testing.T) {
+	t.Parallel()
+	const model = "claude-opus-5-5@default"
+	tests := []struct {
+		name    string
+		created func(string) string
+		wantErr bool
+	}{{
+		name:    "alias resolved to a dated version",
+		created: func(m string) string { return strings.Replace(m, "@default", "@20261001", 1) },
+	}, {
+		name: "full resource name of a dated version",
+		created: func(string) string {
+			return "projects/" + testProject + "/locations/" + testLocation + "/publishers/anthropic/models/claude-opus-5-5@20261001"
+		},
+	}, {
+		name:    "another base model",
+		created: func(string) string { return "publishers/anthropic/models/claude-haiku-5@default" },
+		wantErr: true,
+	}, {
+		name:    "another publisher",
+		created: func(string) string { return "publishers/google/models/claude-opus-5-5@default" },
+		wantErr: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			env.vertex.createdModel = tt.created
+			id := uuid.NewString()
+			key := uuid.NewString()
+			reqs := []ClaudeRequest{claudeReq(key, "p")}
+
+			job, err := env.client.SubmitClaude(t.Context(), id, model, reqs)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidRequest) {
+					t.Fatalf("SubmitClaude: got = %+v, %v, want = %v", job, err, ErrInvalidRequest)
+				}
+				if rec := recordedName(t, env, id); rec != "" {
+					t.Errorf("job.json: got = %q, want none", rec)
+				}
+				states := env.vertex.states()
+				if len(states) != 1 {
+					t.Fatalf("jobs: got = %v, want one", states)
+				}
+				for name, state := range states {
+					if state != string(genai.JobStateCancelling) {
+						t.Errorf("created job %q state: got = %s, want = %s", name, state, genai.JobStateCancelling)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SubmitClaude: %v", err)
+			}
+			if rec := recordedName(t, env, id); rec != job.Name {
+				t.Errorf("job.json: got = %q, want = %q", rec, job.Name)
+			}
+			env.vertex.finish(t, env.gcs, job.Name, genai.JobStateSucceeded,
+				fmt.Sprintf(`{"custom_id":%q,"response":%s}`, ref(key), claudeMessage("answer", "end_turn", "")))
+			if res := collect(t, env.client, job)[key]; res.Err != nil || res.Text != "answer" {
+				t.Errorf("Results: got = %+v, want text %q", res, "answer")
+			}
+			found, ok, err := env.client.Find(t.Context(), id)
+			if err != nil || !ok {
+				t.Fatalf("Find: ok = %v, err = %v", ok, err)
+			}
+			if diff := cmp.Diff(job, found); diff != "" {
+				t.Errorf("Find (-submit, +find):\n%s", diff)
+			}
+			again, err := env.client.SubmitClaude(t.Context(), id, model, reqs)
+			if err != nil || again.Name != job.Name {
+				t.Errorf("re-submit: got = %q, %v, want = %q", again.Name, err, job.Name)
+			}
+			if n := env.vertex.createCount(); n != 1 {
+				t.Errorf("creates: got = %d, want = 1", n)
+			}
+		})
+	}
+}
+
+// TestFindWithoutManifest covers an id whose jobs outlived its manifest,
+// which Submit always writes first, so no listed job can be the id's own.
+func TestFindWithoutManifest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		submit     bool
+		keepRecord bool
+		wantErr    bool
+	}{{
+		name:       "job with its record",
+		submit:     true,
+		keepRecord: true,
+		wantErr:    true,
+	}, {
+		name:    "job without a record",
+		submit:  true,
+		wantErr: true,
+	}, {
+		name: "no jobs",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			if tt.submit {
+				if _, err := env.client.SubmitClaude(t.Context(), id, "claude-opus-5-5@default", []ClaudeRequest{claudeReq("k", "p")}); err != nil {
+					t.Fatalf("SubmitClaude: %v", err)
+				}
+				env.gcs.mu.Lock()
+				delete(env.gcs.objects, env.client.objectName(id, manifestObject))
+				if !tt.keepRecord {
+					delete(env.gcs.objects, recordPath(id))
+				}
+				env.gcs.mu.Unlock()
+			}
+
+			got, ok, err := env.client.Find(t.Context(), id)
+			if ok {
+				t.Errorf("Find: got = %+v, want not found", got)
+			}
+			if !tt.wantErr {
+				if err != nil {
+					t.Errorf("Find: got = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "no manifest") {
+				t.Errorf("Find: got = %v, want %v naming the missing manifest", err, ErrInvalidRequest)
 			}
 		})
 	}

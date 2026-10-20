@@ -151,11 +151,12 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 	}
 	m.InputSHA256 = hex.EncodeToString(digest.Sum(nil))
 
-	bjs, err := c.lookup(ctx, id)
+	want := publisherModel(provider, model)
+	bjs, err := c.lookup(ctx, id, want)
 	if err != nil {
 		return Job{}, err
 	}
-	chosen, err := c.recorded(ctx, id, bjs)
+	chosen, err := c.recorded(ctx, id, want, bjs)
 	if err != nil {
 		return Job{}, err
 	}
@@ -173,7 +174,7 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 			// job first: a retry after a lost response finds the job instead
 			// of making a second one.
 			own, err = retry.RetryWithBackoff(ctx, c.retry, "batch.create", retryable(ctx), func() (*genai.BatchJob, error) {
-				bjs, err := c.matches(ctx, id)
+				bjs, err := c.matches(ctx, id, want)
 				if err != nil {
 					return nil, err
 				}
@@ -193,6 +194,19 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 			if err != nil {
 				return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
 			}
+			// Check the job before recording it, so Submit never records one
+			// that Results and Find would then reject.
+			ok, err := c.owns(id, want, own)
+			if err == nil && !ok {
+				err = fmt.Errorf("%w: created job %q is not one for id %q", ErrInvalidRequest, own.Name, id)
+			}
+			if err != nil {
+				clog.ErrorContext(ctx, "Cancelling created batch job that fails its own checks", "id", id, "job", own.Name, "error", err)
+				if cerr := c.Cancel(ctx, Job{Name: own.Name}); cerr != nil {
+					clog.ErrorContext(ctx, "Failed to cancel created batch job", "id", id, "job", own.Name, "error", cerr)
+				}
+				return Job{}, fmt.Errorf("creating batch job %q: %w", id, err)
+			}
 		}
 		// The record is create-only, so concurrent submitters settle on
 		// whichever recorded first. After a lost response it names own.
@@ -203,15 +217,8 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 		switch {
 		case err == nil:
 			chosen = own
-			// List again: a twin that created after our lookup and stopped
-			// before its record would otherwise leave a live duplicate.
-			if relisted, err := c.lookup(ctx, id); err != nil {
-				clog.WarnContext(ctx, "Failed to list batch jobs for duplicates", "id", id, "error", err)
-			} else {
-				bjs = relisted
-			}
 		case preconditionFailed(err):
-			if chosen, err = c.recorded(ctx, id, slices.Concat(bjs, []*genai.BatchJob{own})); err != nil {
+			if chosen, err = c.recorded(ctx, id, want, slices.Concat(bjs, []*genai.BatchJob{own})); err != nil {
 				return Job{}, err
 			}
 			if chosen == nil {
@@ -219,6 +226,13 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 			}
 		default:
 			return Job{}, err
+		}
+		// List again on both paths: a twin that created after our lookup and
+		// stopped before its record would otherwise leave a live duplicate.
+		if relisted, err := c.lookup(ctx, id, want); err != nil {
+			clog.WarnContext(ctx, "Failed to list batch jobs for duplicates", "id", id, "error", err)
+		} else {
+			bjs = relisted
 		}
 	}
 	c.cancelDuplicates(ctx, chosen.Name, slices.Concat(bjs, []*genai.BatchJob{own}))
@@ -229,10 +243,10 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 	return existing(c.jobFor(id, chosen.Name, stored), provider, model)
 }
 
-// lookup lists the jobs under id, earliest first, with retries.
-func (c *Client) lookup(ctx context.Context, id string) ([]*genai.BatchJob, error) {
+// lookup lists the jobs under id for model, earliest first, with retries.
+func (c *Client) lookup(ctx context.Context, id, model string) ([]*genai.BatchJob, error) {
 	bjs, err := retry.RetryWithBackoff(ctx, c.retry, "batch.find", retryable(ctx), func() ([]*genai.BatchJob, error) {
-		return c.matches(ctx, id)
+		return c.matches(ctx, id, model)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finding batch job %q: %w", id, err)
