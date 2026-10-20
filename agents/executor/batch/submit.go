@@ -203,13 +203,6 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 		switch {
 		case err == nil:
 			chosen = own
-			// List again: a twin that created after our lookup and stopped
-			// before its record would otherwise leave a live duplicate.
-			if relisted, err := c.lookup(ctx, id); err != nil {
-				clog.WarnContext(ctx, "Failed to list batch jobs for duplicates", "id", id, "error", err)
-			} else {
-				bjs = relisted
-			}
 		case preconditionFailed(err):
 			if chosen, err = c.recorded(ctx, id, slices.Concat(bjs, []*genai.BatchJob{own})); err != nil {
 				return Job{}, err
@@ -219,6 +212,13 @@ func (c *Client) submit(ctx context.Context, id, provider, model string, lines [
 			}
 		default:
 			return Job{}, err
+		}
+		// List again on both paths: a twin that created after our lookup and
+		// stopped before its record would otherwise leave a live duplicate.
+		if relisted, err := c.lookup(ctx, id); err != nil {
+			clog.WarnContext(ctx, "Failed to list batch jobs for duplicates", "id", id, "error", err)
+		} else {
+			bjs = relisted
 		}
 	}
 	c.cancelDuplicates(ctx, chosen.Name, slices.Concat(bjs, []*genai.BatchJob{own}))
