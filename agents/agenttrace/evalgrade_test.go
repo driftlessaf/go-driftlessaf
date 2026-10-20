@@ -360,7 +360,7 @@ func TestDefaultAgentNameFromContext(t *testing.T) {
 	ctx = WithDefaultNameFn(ctx, func(ec ExecutionContext) string { return "autofix: " + ec.ReconcilerKey })
 
 	trace, done := StartTrace[map[string]any](ctx, "prompt")
-	turn := trace.BeginTurn(0, "anthropic", "claude-haiku-4-5")
+	turn := trace.BeginTurn(0, "anthropic", "claude-haiku-5-5")
 	turn.End()
 	done(map[string]any{}, nil)
 
@@ -368,7 +368,7 @@ func TestDefaultAgentNameFromContext(t *testing.T) {
 	// time a turn is opened — that follows OTel GenAI semconv "{operation}
 	// {model}" without forcing every caller to pass a model up front.
 	spans := sr.Ended()
-	root := findSpan(spans, "invoke_agent claude-haiku-4-5")
+	root := findSpan(spans, "invoke_agent claude-haiku-5-5")
 	if root == nil {
 		t.Fatalf("root invoke_agent span not found; got %d spans", len(spans))
 	}
