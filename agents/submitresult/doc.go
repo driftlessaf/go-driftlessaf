@@ -31,16 +31,23 @@ SPDX-License-Identifier: Apache-2.0
 // is absent because the model wrote it inside the reasoning string, after a
 // `<parameter name="...">` opener for the payload field, the same rule
 // recovers it from there and the reasoning keeps only the prose before the
-// opener; a nested payload that rule declines is rejected with a hint naming
-// where the payload went.
+// opener. The same rule recovers a payload the model wrote as a
+// `"<payload>": {...}` JSON member inside the reasoning string (it wrote the
+// whole argument object as text), and the reasoning keeps only the text
+// before that member. A present payload parameter is never overridden. A
+// nested payload that the rule declines in either form is rejected with a
+// hint naming where the payload went; for a JSON member, the hint gives its
+// byte offset in reasoning and asks for the payload as the top-level
+// parameter.
 //
 // A rejection records ErrParameter wrapping the cause — the same corrective
 // hint the model receives, naming the parameter at fault — so the trace an
 // engineer reads says which of the four causes fired (arguments that did not
 // decode, an absent or mistyped parameter, a stringified payload coercion
-// declined, or a nested payload recovery declined) rather than collapsing them
-// into one string. A declined stringified payload also records its length and a
-// bounded, quoted opening prefix, which is what distinguishes a wrapped object
-// from a YAML document from a truncated write. Consumers that gate on the class
-// match ErrParameter with errors.Is, never the message.
+// declined, or a nested payload recovery declined, after an opener or from a
+// JSON member) rather than collapsing them into one string. A declined
+// stringified payload also records its length and a bounded, quoted opening
+// prefix, which is what distinguishes a wrapped object from a YAML document
+// from a truncated write. Consumers that gate on the class match ErrParameter
+// with errors.Is, never the message.
 package submitresult
