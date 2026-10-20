@@ -548,50 +548,76 @@ func TestSubmitConvergesWhenCreateTimeLeadsVisibility(t *testing.T) {
 // TestSubmitCancelsTwinThatStoppedBeforeRecord holds the recording caller's
 // create while a twin creates the same job and stops before writing job.json,
 // as a crash would. The recording caller's earlier lookup missed the twin, so
-// only listing again after the record cancels it.
+// only listing again after the record cancels it, whether the record write is
+// answered or its response is lost and the retry reads the record back.
 func TestSubmitCancelsTwinThatStoppedBeforeRecord(t *testing.T) {
 	t.Parallel()
-	env := newTestEnv(t)
-	id := uuid.NewString()
-	model := "claude-opus-5-5@default"
-	reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
-	hold := &createHold{arrived: make(chan struct{}), release: make(chan struct{})}
-	env.vertex.holdCreate = hold
-	var (
-		wg     sync.WaitGroup
-		got    Job
-		gotErr error
-	)
-	wg.Go(func() {
-		got, gotErr = env.client.SubmitClaude(t.Context(), id, model, reqs)
-	})
-	<-hold.arrived
-	// The twin's create, without the record that would follow it.
-	twin, err := env.client.genai.Batches.Create(t.Context(), genaiModel(providerAnthropic, model),
-		&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{env.client.gsURI(env.client.objectName(id, inputObject))}},
-		&genai.CreateBatchJobConfig{
-			DisplayName: id,
-			Dest: &genai.BatchJobDestination{
-				Format: "jsonl",
-				GCSURI: env.client.gsURI(env.client.objectName(id, outputDir)) + "/",
-			},
+	tests := []struct {
+		name       string
+		loseRecord bool
+	}{{
+		name: "record write answered",
+	}, {
+		name:       "record write response lost",
+		loseRecord: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := newTestEnv(t)
+			id := uuid.NewString()
+			if tt.loseRecord {
+				env.gcs.loseWrite = recordPath(id)
+			}
+			model := "claude-opus-5-5@default"
+			reqs := []ClaudeRequest{claudeReq(uuid.NewString(), "p")}
+			hold := &createHold{arrived: make(chan struct{}), release: make(chan struct{})}
+			env.vertex.holdCreate = hold
+			var (
+				wg     sync.WaitGroup
+				got    Job
+				gotErr error
+			)
+			wg.Go(func() {
+				got, gotErr = env.client.SubmitClaude(t.Context(), id, model, reqs)
+			})
+			<-hold.arrived
+			// The twin's create, without the record that would follow it.
+			twin, err := env.client.genai.Batches.Create(t.Context(), genaiModel(providerAnthropic, model),
+				&genai.BatchJobSource{Format: "jsonl", GCSURI: []string{env.client.gsURI(env.client.objectName(id, inputObject))}},
+				&genai.CreateBatchJobConfig{
+					DisplayName: id,
+					Dest: &genai.BatchJobDestination{
+						Format: "jsonl",
+						GCSURI: env.client.gsURI(env.client.objectName(id, outputDir)) + "/",
+					},
+				})
+			if err != nil {
+				t.Fatalf("twin create: %v", err)
+			}
+			close(hold.release)
+			wg.Wait()
+			if gotErr != nil {
+				t.Fatalf("SubmitClaude: %v", gotErr)
+			}
+			if tt.loseRecord {
+				env.gcs.mu.Lock()
+				lost := env.gcs.loseWrite == ""
+				env.gcs.mu.Unlock()
+				if !lost {
+					t.Fatal("job.json response was not lost (the scenario did not happen)")
+				}
+			}
+			if got.Name == twin.Name {
+				t.Fatalf("SubmitClaude returned the twin %q, want its own job", twin.Name)
+			}
+			if rec := recordedName(t, env, id); rec != got.Name {
+				t.Errorf("job.json: got = %q, want = %q", rec, got.Name)
+			}
+			if live := liveJobs(env); len(live) != 1 || live[0] != got.Name {
+				t.Errorf("live jobs: got = %v, want only %q", live, got.Name)
+			}
 		})
-	if err != nil {
-		t.Fatalf("twin create: %v", err)
-	}
-	close(hold.release)
-	wg.Wait()
-	if gotErr != nil {
-		t.Fatalf("SubmitClaude: %v", gotErr)
-	}
-	if got.Name == twin.Name {
-		t.Fatalf("SubmitClaude returned the twin %q, want its own job", twin.Name)
-	}
-	if rec := recordedName(t, env, id); rec != got.Name {
-		t.Errorf("job.json: got = %q, want = %q", rec, got.Name)
-	}
-	if live := liveJobs(env); len(live) != 1 || live[0] != got.Name {
-		t.Errorf("live jobs: got = %v, want only %q", live, got.Name)
 	}
 }
 
