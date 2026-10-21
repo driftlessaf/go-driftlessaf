@@ -5,13 +5,13 @@ go 1.27.0
 require (
 	chainguard.dev/driftlessaf v0.7.1
 	cloud.google.com/go/compute/metadata v0.10.0
-	cloud.google.com/go/storage v1.67.0
+	cloud.google.com/go/storage v1.69.0
 	github.com/chainguard-dev/clog v1.8.1
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/google/go-github/v88 v88.0.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sethvargo/go-envconfig v1.4.3
-	golang.org/x/tools v0.50.0
+	golang.org/x/tools v0.52.0
 )
 
 require (
@@ -250,16 +250,16 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
-	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518 // indirect
-	golang.org/x/term v0.46.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/telemetry v0.0.0-20261009151841-97e8ea77aa2a // indirect
+	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/api v0.300.0 // indirect
