@@ -43,9 +43,9 @@ func TestNormalizeLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeLabel(tt.label)
+			got := NormalizeLabel(tt.label)
 			if got != tt.want {
-				t.Errorf("normalizeLabel(%q): got = %q, want = %q", tt.label, got, tt.want)
+				t.Errorf("NormalizeLabel(%q): got = %q, want = %q", tt.label, got, tt.want)
 			}
 			if utf8.RuneCountInString(got) > maxGitHubLabelLength {
 				t.Errorf("normalized label length: got = %d, want <= %d", utf8.RuneCountInString(got), maxGitHubLabelLength)

@@ -172,7 +172,7 @@ func (s *Session[T]) IssueHasSkipLabel(issue *github.Issue) bool {
 
 // HasLabel returns true if the PR has the specified label.
 func (s *Session[T]) HasLabel(labelName string) bool {
-	return s.prNumber != 0 && slices.Contains(s.prLabels, normalizeLabel(labelName))
+	return s.prNumber != 0 && slices.Contains(s.prLabels, NormalizeLabel(labelName))
 }
 
 // State returns the composite state of the PR as a bit-field.
@@ -276,15 +276,15 @@ const (
 )
 
 func (s *Session[T]) turnLimitLabel() string {
-	return normalizeLabel(s.manager.identity + turnLimitLabelSuffix)
+	return NormalizeLabel(s.manager.identity + turnLimitLabelSuffix)
 }
 
 func (s *Session[T]) readyForReviewLabel() string {
-	return normalizeLabel(s.manager.identity + readyForReviewLabelSuffix)
+	return NormalizeLabel(s.manager.identity + readyForReviewLabelSuffix)
 }
 
 func (s *Session[T]) gaveUpLabel() string {
-	return normalizeLabel(s.manager.identity + gaveUpLabelSuffix)
+	return NormalizeLabel(s.manager.identity + gaveUpLabelSuffix)
 }
 
 // HasTurnLimitLabel reports whether the PR carries this identity's

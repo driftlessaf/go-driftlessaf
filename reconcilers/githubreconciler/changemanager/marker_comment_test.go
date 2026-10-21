@@ -724,7 +724,7 @@ func TestStateLabelWritersNormalizeLongIdentity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wantLabel := normalizeLabel(identity + tt.suffix)
+			wantLabel := NormalizeLabel(identity + tt.suffix)
 			var gotMethod, gotLabel string
 
 			mux := http.NewServeMux()
