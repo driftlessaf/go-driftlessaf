@@ -56,7 +56,20 @@
       {"name": "end_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
       {"name": "error", "type": "STRING", "mode": "NULLABLE"},
       {"name": "errors", "type": "STRING", "mode": "REPEATED"},
-      {"name": "failed", "type": "BOOLEAN", "mode": "NULLABLE"}
+      {"name": "failed", "type": "BOOLEAN", "mode": "NULLABLE"},
+      {
+        "name": "latency",
+        "type": "RECORD",
+        "mode": "NULLABLE",
+        "fields": [
+          {"name": "request_start_time", "type": "TIMESTAMP", "mode": "NULLABLE"},
+          {"name": "connect_ms", "type": "INTEGER", "mode": "NULLABLE"},
+          {"name": "tls_ms", "type": "INTEGER", "mode": "NULLABLE"},
+          {"name": "conn_reused", "type": "BOOLEAN", "mode": "NULLABLE"},
+          {"name": "first_byte_ms", "type": "INTEGER", "mode": "NULLABLE"},
+          {"name": "first_token_ms", "type": "INTEGER", "mode": "NULLABLE"}
+        ]
+      }
     ]
   },
   {
@@ -80,5 +93,6 @@
   {"name": "input_tokens", "type": "INTEGER", "mode": "NULLABLE"},
   {"name": "output_tokens", "type": "INTEGER", "mode": "NULLABLE"},
   {"name": "cache_read_tokens", "type": "INTEGER", "mode": "NULLABLE"},
-  {"name": "cache_creation_tokens", "type": "INTEGER", "mode": "NULLABLE"}
+  {"name": "cache_creation_tokens", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "client_region", "type": "STRING", "mode": "NULLABLE"}
 ]

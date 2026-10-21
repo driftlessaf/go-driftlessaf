@@ -213,6 +213,152 @@ func TestServingContextValidate(t *testing.T) {
 	}
 }
 
+func TestTurnLatencyValidate(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	for _, tc := range []struct {
+		name      string
+		latency   TurnLatency
+		wantError string
+	}{
+		{name: "unrecorded", latency: TurnLatency{}},
+		{name: "new connection", latency: TurnLatency{
+			RequestStartTime: start,
+			ConnectMS:        new(int64(0)),
+			TLSMS:            new(int64(30)),
+			ConnReused:       new(false),
+			FirstByteMS:      new(int64(400)),
+			FirstTokenMS:     new(int64(400)),
+		}},
+		{name: "reused connection", latency: TurnLatency{
+			RequestStartTime: start,
+			ConnReused:       new(true),
+			FirstByteMS:      new(int64(400)),
+		}},
+		{name: "negative connect", latency: TurnLatency{RequestStartTime: start, ConnectMS: new(int64(-1))}, wantError: "connect ms cannot be negative"},
+		{name: "negative TLS", latency: TurnLatency{RequestStartTime: start, TLSMS: new(int64(-1))}, wantError: "TLS ms cannot be negative"},
+		{name: "negative first byte", latency: TurnLatency{RequestStartTime: start, FirstByteMS: new(int64(-1))}, wantError: "first byte ms cannot be negative"},
+		{name: "negative first token", latency: TurnLatency{RequestStartTime: start, FirstTokenMS: new(int64(-1))}, wantError: "first token ms cannot be negative"},
+		{name: "timing without start", latency: TurnLatency{FirstByteMS: new(int64(400))}, wantError: "request start time is required"},
+		{name: "reused flag without start", latency: TurnLatency{ConnReused: new(false)}, wantError: "request start time is required"},
+		{name: "reused connection with connect", latency: TurnLatency{
+			RequestStartTime: start,
+			ConnReused:       new(true),
+			ConnectMS:        new(int64(5)),
+		}, wantError: "reused connection"},
+		{name: "reused connection with TLS", latency: TurnLatency{
+			RequestStartTime: start,
+			ConnReused:       new(true),
+			TLSMS:            new(int64(5)),
+		}, wantError: "reused connection"},
+		{name: "first token before first byte", latency: TurnLatency{
+			RequestStartTime: start,
+			FirstByteMS:      new(int64(400)),
+			FirstTokenMS:     new(int64(399)),
+		}, wantError: "first token ms cannot be less than first byte ms"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.latency.Validate()
+			if tc.wantError == "" && err != nil {
+				t.Errorf("Validate(): got = %v, want = nil", err)
+			}
+			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Errorf("Validate(): got = %v, want containing %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestRecordLatency(t *testing.T) {
+	t.Parallel()
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+	turn := trace.BeginTurn(0, "fixture-provider", "fixture-model")
+	start := time.Now()
+	firstByte := rand.Int63n(10_000)
+	recorded := TurnLatency{
+		RequestStartTime: start,
+		ConnReused:       new(true),
+		FirstByteMS:      new(firstByte),
+	}
+	if err := turn.RecordLatency(recorded); err != nil {
+		t.Fatalf("RecordLatency: %v", err)
+	}
+	// The turn keeps its own copy: later writes through the caller's
+	// pointers must not reach the record.
+	*recorded.FirstByteMS = firstByte + 1
+	*recorded.ConnReused = false
+
+	// A rejected value leaves the earlier record in place.
+	if err := turn.RecordLatency(TurnLatency{RequestStartTime: start, ConnectMS: new(int64(-1))}); err == nil {
+		t.Error("RecordLatency(negative connect): got = nil, want error")
+	}
+	turn.End()
+
+	want := &TurnLatency{
+		RequestStartTime: start,
+		ConnReused:       new(true),
+		FirstByteMS:      new(firstByte),
+	}
+	if diff := cmp.Diff(want, trace.Turns[0].Latency); diff != "" {
+		t.Errorf("latency mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRecordLatencyZeroClears(t *testing.T) {
+	t.Parallel()
+	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+	trace := tracer.NewTrace(t.Context(), randomString())
+	turn := trace.BeginTurn(0, "fixture-provider", "fixture-model")
+	if err := turn.RecordLatency(TurnLatency{RequestStartTime: time.Now(), FirstByteMS: new(int64(1))}); err != nil {
+		t.Fatalf("RecordLatency: %v", err)
+	}
+	// A zero time that carries a location is still the zero time.
+	if err := turn.RecordLatency(TurnLatency{RequestStartTime: time.Time{}.In(time.FixedZone("fixture", 3600))}); err != nil {
+		t.Fatalf("RecordLatency(zero): %v", err)
+	}
+	turn.End()
+	if got := trace.Turns[0].Latency; got != nil {
+		t.Errorf("latency: got = %+v, want = nil", got)
+	}
+}
+
+func TestRecordClientRegion(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		region    string
+		want      string
+		wantError string
+	}{
+		{name: "GCP region", region: "us-central1", want: "us-central1"},
+		{name: "AWS region", region: "us-east-2", want: "us-east-2"},
+		{name: "unknown", region: ""},
+		{name: "uppercase", region: "US-CENTRAL1", wantError: "invalid character"},
+		{name: "metadata path", region: "projects/123/regions/us-central1", wantError: "invalid character"},
+		{name: "whitespace", region: "us-central1 ", wantError: "invalid character"},
+		{name: "control character", region: "us-central1\n", wantError: "invalid character"},
+		{name: "too long", region: strings.Repeat("a", maxRegionLength+1), wantError: "cannot be longer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), randomString())
+			err := trace.RecordClientRegion(tc.region)
+			if tc.wantError == "" && err != nil {
+				t.Errorf("RecordClientRegion(%q): got = %v, want = nil", tc.region, err)
+			}
+			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Errorf("RecordClientRegion(%q): got = %v, want containing %q", tc.region, err, tc.wantError)
+			}
+			if trace.ClientRegion != tc.want {
+				t.Errorf("ClientRegion: got = %q, want = %q", trace.ClientRegion, tc.want)
+			}
+		})
+	}
+}
+
 func TestTraceStartToolCall(t *testing.T) {
 	tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
 	ctx := t.Context()

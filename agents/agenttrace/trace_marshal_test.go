@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -313,6 +314,118 @@ func TestTraceMarshalJSON(t *testing.T) {
 					"output_tokens": float64(75),
 					"errors":        []any{"retries exhausted: upstream 503"},
 					"failed":        true,
+				},
+			},
+		},
+	}, {
+		// The recorders load with ignore_unknown_values = false, so a process
+		// built from this package must not emit a latency or client_region key
+		// until something records one. The full turn map pins the key set.
+		name: "no latency or client region adds no keys",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), "prompt")
+			turn := trace.BeginTurn(0, "anthropic", "model-a")
+			turn.RecordTokens(10, 5)
+			turn.End()
+			trace.complete("done", nil)
+			return trace
+		},
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"tool_calls":   []any{},
+			"exec_context": map[string]any{},
+			"model":        "model-a",
+			"turns": []any{
+				map[string]any{
+					"index":         float64(0),
+					"model":         "model-a",
+					"system":        "anthropic",
+					"input_tokens":  float64(10),
+					"output_tokens": float64(5),
+					"failed":        false,
+				},
+			},
+		},
+		absent: []string{"client_region"},
+	}, {
+		name: "zero latency and empty client region add no keys",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), "prompt")
+			if err := trace.RecordClientRegion(""); err != nil {
+				t.Fatalf("RecordClientRegion: %v", err)
+			}
+			turn := trace.BeginTurn(0, "anthropic", "model-a")
+			if err := turn.RecordLatency(TurnLatency{}); err != nil {
+				t.Fatalf("RecordLatency: %v", err)
+			}
+			turn.End()
+			trace.complete("done", nil)
+			return trace
+		},
+		want: map[string]any{
+			"input_prompt": "prompt",
+			"result":       "done",
+			"tool_calls":   []any{},
+			"exec_context": map[string]any{},
+			"model":        "model-a",
+			"turns": []any{
+				map[string]any{
+					"index":  float64(0),
+					"model":  "model-a",
+					"system": "anthropic",
+					"failed": false,
+				},
+			},
+		},
+		absent: []string{"client_region"},
+	}, {
+		// An observed zero (connect_ms) and false (conn_reused) serialize, so
+		// BigQuery keeps them distinct from NULL; an unobserved phase
+		// (first_token_ms on a non-streaming call) is omitted.
+		name: "latency and client region round-trip",
+		setup: func(t *testing.T) *Trace[string] {
+			tracer := &mockTracer[string]{traces: &[]*Trace[string]{}}
+			trace := tracer.NewTrace(t.Context(), "prompt")
+			if err := trace.RecordClientRegion("us-central1"); err != nil {
+				t.Fatalf("RecordClientRegion: %v", err)
+			}
+			turn := trace.BeginTurn(0, "anthropic", "model-a")
+			if err := turn.RecordLatency(TurnLatency{
+				RequestStartTime: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+				ConnectMS:        new(int64(0)),
+				TLSMS:            new(int64(31)),
+				ConnReused:       new(false),
+				FirstByteMS:      new(int64(420)),
+			}); err != nil {
+				t.Fatalf("RecordLatency: %v", err)
+			}
+			turn.End()
+			trace.complete("done", nil)
+			return trace
+		},
+		want: map[string]any{
+			"input_prompt":  "prompt",
+			"result":        "done",
+			"tool_calls":    []any{},
+			"exec_context":  map[string]any{},
+			"model":         "model-a",
+			"client_region": "us-central1",
+			"turns": []any{
+				map[string]any{
+					"index":  float64(0),
+					"model":  "model-a",
+					"system": "anthropic",
+					"failed": false,
+					"latency": map[string]any{
+						"request_start_time": "2026-10-20T12:00:00Z",
+						"connect_ms":         float64(0),
+						"tls_ms":             float64(31),
+						"conn_reused":        false,
+						"first_byte_ms":      float64(420),
+					},
 				},
 			},
 		},

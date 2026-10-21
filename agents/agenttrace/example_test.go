@@ -8,6 +8,7 @@ package agenttrace_test
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 )
@@ -54,6 +55,30 @@ func ExampleLLMTurn_RecordServingContext() {
 	turn.End()
 	done("done", nil)
 	// Output: us-east-1
+}
+
+func ExampleLLMTurn_RecordLatency() {
+	tracer := agenttrace.ByCode[string](func(trace *agenttrace.Trace[string]) {
+		latency := trace.Turns[0].Latency
+		fmt.Printf("region=%s reused=%t first_byte_ms=%d first_token_ms=%v\n",
+			trace.ClientRegion, *latency.ConnReused, *latency.FirstByteMS, latency.FirstTokenMS)
+	})
+	ctx := agenttrace.WithTracer[string](context.Background(), tracer)
+	trace, done := agenttrace.StartTrace[string](ctx, "synthetic fixture")
+	if err := trace.RecordClientRegion("us-central1"); err != nil {
+		panic(err)
+	}
+	turn := trace.BeginTurn(0, "fixture-provider", "fixture-model")
+	if err := turn.RecordLatency(agenttrace.TurnLatency{
+		RequestStartTime: time.Now(),
+		ConnReused:       new(true),
+		FirstByteMS:      new(int64(420)),
+	}); err != nil {
+		panic(err)
+	}
+	turn.End()
+	done("done", nil)
+	// Output: region=us-central1 reused=true first_byte_ms=420 first_token_ms=<nil>
 }
 
 func ExampleServingContext_Validate() {

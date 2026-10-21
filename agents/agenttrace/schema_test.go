@@ -70,8 +70,8 @@ func TestAgentTraceSchemaMatchesStruct(t *testing.T) {
 		t.Fatalf("parse schema: %v", err)
 	}
 
-	fieldsOf := func(name string) []bqColumn {
-		for _, c := range cols {
+	fieldsOf := func(parent []bqColumn, name string) []bqColumn {
+		for _, c := range parent {
 			if c.Name == name {
 				return c.Fields
 			}
@@ -92,19 +92,23 @@ func TestAgentTraceSchemaMatchesStruct(t *testing.T) {
 	}, {
 		name: "tool_calls",
 		tags: append(jsonTags(reflect.TypeFor[ToolCall[string]]()), "error"),
-		cols: fieldsOf("tool_calls"),
+		cols: fieldsOf(cols, "tool_calls"),
 	}, {
 		name: "turns",
 		tags: jsonTags(reflect.TypeFor[RecordedTurn]()),
-		cols: fieldsOf("turns"),
+		cols: fieldsOf(cols, "turns"),
+	}, {
+		name: "turns.latency",
+		tags: jsonTags(reflect.TypeFor[TurnLatency]()),
+		cols: fieldsOf(fieldsOf(cols, "turns"), "latency"),
 	}, {
 		name: "reasoning",
 		tags: jsonTags(reflect.TypeFor[ReasoningContent]()),
-		cols: fieldsOf("reasoning"),
+		cols: fieldsOf(cols, "reasoning"),
 	}, {
 		name: "exec_context",
 		tags: jsonTags(reflect.TypeFor[ExecutionContext]()),
-		cols: fieldsOf("exec_context"),
+		cols: fieldsOf(cols, "exec_context"),
 	}}
 
 	for _, tt := range tests {

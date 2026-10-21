@@ -176,6 +176,10 @@ type RecordedTurn struct {
 	CacheCreationTokens int64     `json:"cache_creation_tokens,omitempty"`
 	StartTime           time.Time `json:"start_time"`
 	EndTime             time.Time `json:"end_time"`
+	// Latency is the network timing of the HTTP attempt that returned this
+	// turn's response. Nil when the executor recorded none. Populated via
+	// LLMTurn.RecordLatency.
+	Latency *TurnLatency `json:"latency,omitempty"`
 	// Errors is the chronological list of errors the turn encountered, including
 	// transients that the turn recovered from. A non-empty list does NOT mean
 	// the turn failed — see Failed for the terminal outcome. Populated via
@@ -223,6 +227,89 @@ func (c ServingContext) Validate() error {
 	return nil
 }
 
+// TurnLatency is the network timing of the one HTTP attempt that returned a
+// turn's response; attempts that failed and were retried are not included.
+// Durations are whole milliseconds. A nil duration means the phase was not
+// observed, which is not the same as a phase that took under a millisecond:
+// ConnectMS and TLSMS are nil when the attempt reused an open connection, and
+// FirstTokenMS is nil for a call that does not stream.
+type TurnLatency struct {
+	// RequestStartTime is when the answering attempt began, after any retry
+	// backoff.
+	RequestStartTime time.Time `json:"request_start_time,omitzero"`
+	// ConnectMS is the TCP connect duration. DNS resolution is excluded.
+	ConnectMS *int64 `json:"connect_ms,omitempty"`
+	// TLSMS is the TLS handshake duration.
+	TLSMS *int64 `json:"tls_ms,omitempty"`
+	// ConnReused reports whether the attempt reused an open connection.
+	ConnReused *bool `json:"conn_reused,omitempty"`
+	// FirstByteMS runs from the request being fully written to the first
+	// response byte.
+	FirstByteMS *int64 `json:"first_byte_ms,omitempty"`
+	// FirstTokenMS runs from the request being fully written to the first
+	// streamed output token.
+	FirstTokenMS *int64 `json:"first_token_ms,omitempty"`
+}
+
+// Validate rejects timings that a single HTTP attempt cannot produce.
+func (l TurnLatency) Validate() error {
+	for _, d := range []struct {
+		name  string
+		value *int64
+	}{
+		{name: "connect ms", value: l.ConnectMS},
+		{name: "TLS ms", value: l.TLSMS},
+		{name: "first byte ms", value: l.FirstByteMS},
+		{name: "first token ms", value: l.FirstTokenMS},
+	} {
+		if d.value != nil && *d.value < 0 {
+			return fmt.Errorf("%s cannot be negative: %d", d.name, *d.value)
+		}
+	}
+	if l.RequestStartTime.IsZero() && l.hasTimings() {
+		return errors.New("request start time is required when any timing is recorded")
+	}
+	if l.ConnReused != nil && *l.ConnReused && (l.ConnectMS != nil || l.TLSMS != nil) {
+		return errors.New("a reused connection has no connect or TLS timing")
+	}
+	if l.FirstByteMS != nil && l.FirstTokenMS != nil && *l.FirstTokenMS < *l.FirstByteMS {
+		return errors.New("first token ms cannot be less than first byte ms")
+	}
+	return nil
+}
+
+// hasTimings reports whether l carries any duration or the reuse flag.
+func (l TurnLatency) hasTimings() bool {
+	return l.ConnectMS != nil || l.TLSMS != nil || l.ConnReused != nil || l.FirstByteMS != nil || l.FirstTokenMS != nil
+}
+
+// copyOf returns a pointer to a copy of *p, or nil when p is nil, so a
+// recorded value cannot be changed through the caller's pointer.
+func copyOf[V any](p *V) *V {
+	if p == nil {
+		return nil
+	}
+	return new(*p)
+}
+
+// maxRegionLength bounds a recorded client region. Cloud Region names are far
+// shorter; the cap keeps a malformed value from bloating every trace row.
+const maxRegionLength = 64
+
+// validateRegion accepts an empty region (unknown) or a cloud Region name:
+// lowercase ASCII letters, digits, and hyphens, such as "us-central1".
+func validateRegion(region string) error {
+	if len(region) > maxRegionLength {
+		return fmt.Errorf("cannot be longer than %d bytes", maxRegionLength)
+	}
+	for _, r := range region {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return fmt.Errorf("invalid character %q: want lowercase letters, digits, and hyphens", r)
+		}
+	}
+	return nil
+}
+
 // Trace represents a complete agent interaction from prompt to result.
 //
 // Trace implements json.Marshaler so it can be serialized directly.
@@ -253,6 +340,12 @@ type Trace[T any] struct {
 	// reconciler's OCTO_IDENTITY). Duplicated into the payload so BigQuery
 	// can query by service — the recorder records only event.Data().
 	Source string `json:"source,omitempty"`
+
+	// ClientRegion is the cloud Region the calling process runs in (e.g.
+	// "us-central1"), so per-turn latency can be grouped by where requests
+	// leave from. Empty when the Region is unknown, such as off GCP. Set by
+	// RecordClientRegion.
+	ClientRegion string `json:"client_region,omitempty"`
 
 	// Model identifies the LLM the executor drove this trace against
 	// (e.g. "claude-sonnet-4-6", "gemini-3.1-pro-preview"). Populated lazily by
@@ -438,6 +531,19 @@ func (t *Trace[T]) Context() context.Context {
 	return t.ctx
 }
 
+// RecordClientRegion records the cloud Region the calling process runs in,
+// such as "us-central1". An empty region marks it unknown. Safe for
+// concurrent use; call before the trace completes.
+func (t *Trace[T]) RecordClientRegion(region string) error {
+	if err := validateRegion(region); err != nil {
+		return fmt.Errorf("record client region: %w", err)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ClientRegion = region
+	return nil
+}
+
 // BeginTurn starts a new LLM turn span as a child of the trace span.
 // The trace context is updated so subsequent tool call spans are nested under
 // this turn span. Call End() on the returned LLMTurn when the turn completes.
@@ -594,6 +700,28 @@ func (lt *LLMTurn[T]) RecordServingContext(c ServingContext) error {
 		lt.record.CacheTTLSeconds = &ttl
 	} else {
 		lt.record.CacheTTLSeconds = nil
+	}
+	return nil
+}
+
+// RecordLatency records the network timing of the HTTP attempt that returned
+// this turn's response, replacing any earlier value. A zero TurnLatency clears
+// it, so the turn carries no latency record. Call before End.
+func (lt *LLMTurn[T]) RecordLatency(l TurnLatency) error {
+	if err := l.Validate(); err != nil {
+		return fmt.Errorf("record latency: %w", err)
+	}
+	if l.RequestStartTime.IsZero() && !l.hasTimings() {
+		lt.record.Latency = nil
+		return nil
+	}
+	lt.record.Latency = &TurnLatency{
+		RequestStartTime: l.RequestStartTime,
+		ConnectMS:        copyOf(l.ConnectMS),
+		TLSMS:            copyOf(l.TLSMS),
+		ConnReused:       copyOf(l.ConnReused),
+		FirstByteMS:      copyOf(l.FirstByteMS),
+		FirstTokenMS:     copyOf(l.FirstTokenMS),
 	}
 	return nil
 }
