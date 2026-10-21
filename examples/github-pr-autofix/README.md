@@ -36,7 +36,7 @@ integration, and error handling.
 **Switching to Claude Sonnet:**
 
 ```bash
-AGENT_MODEL=claude-sonnet-4-5@20250929
+AGENT_MODEL=claude-sonnet-5-5
 ```
 
 ## Agent tools

@@ -17,7 +17,7 @@ SPDX-License-Identifier: Apache-2.0
 // The agent is configured via the AGENT_MODEL env var, supporting both Gemini and
 // Claude models through Vertex AI:
 //   - gemini-3.8-flash (default)
-//   - claude-sonnet-4-5@20250929
+//   - claude-sonnet-5-5
 //
 // # Tool Pattern
 //
