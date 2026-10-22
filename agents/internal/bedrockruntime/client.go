@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/awsauth"
-	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	smithy "github.com/aws/smithy-go"
@@ -160,7 +159,7 @@ func (c *client) Do(request *http.Request) (*http.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, safeError("request", err)
 	}
-	signed := request.Clone(timingContext(ctx))
+	signed := request.Clone(ctx)
 	signed.Header = cleanHeaders(request.Header)
 	for _, key := range []string{"Host", "Content-Length", "Transfer-Encoding", "Trailer"} {
 		signed.Header.Del(key)
@@ -218,19 +217,6 @@ func cleanHeaders(headers http.Header) http.Header {
 // Suppress header-bearing httptrace callbacks without losing deadlines or other
 // context values. WithClientTrace would compose callbacks rather than hide them.
 type privateTraceContext struct{ context.Context }
-
-// timingContext returns the context for the signed request. It hides the
-// caller's httptrace callbacks, as privateTraceContext does, and re-attaches
-// only the hooks of a calltiming.Timer the caller carries. A Timer's hooks
-// read timestamps, the dial address, the reuse flag, and whether each phase
-// failed; they never read headers, bodies, the connection, or TLS state, so
-// latency can be measured without exposing credentials.
-func timingContext(ctx privateTraceContext) context.Context {
-	if timer := calltiming.FromContext(ctx); timer != nil {
-		return timer.Context(ctx)
-	}
-	return ctx
-}
 
 func (c privateTraceContext) Value(key any) any {
 	value := c.Context.Value(key)

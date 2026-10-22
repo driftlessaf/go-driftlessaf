@@ -291,7 +291,7 @@ func TestValidatingGenerateContentServerAcceptsPairedTranscript(t *testing.T) {
 			OutputTokens:    1,
 		},
 	}
-	if diff := cmp.Diff(wantTurns, tracer.traces[0].Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime", "Latency")); diff != "" {
+	if diff := cmp.Diff(wantTurns, tracer.traces[0].Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime")); diff != "" {
 		t.Errorf("trace turns (-want +got):\n%s", diff)
 	}
 }

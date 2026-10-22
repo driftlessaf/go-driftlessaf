@@ -22,7 +22,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
-	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -730,20 +729,12 @@ func (e *executor[Request, Response]) runConversation(
 			clog.WarnContext(ctx, "failed to record llm prompt payload", "error", err)
 		}
 
-		// Stream response with retry for transient errors. Each attempt gets a
-		// fresh timer, so the latency recorded below is the answering attempt's.
-		var timer *calltiming.Timer
+		// Stream response with retry for transient errors
 		message, err := retry.RetryWithBackoff(ctx, turnCfg, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
-			timer = new(calltiming.Timer)
-			stream := e.messages.NewStreaming(timer.Context(ctx), params, e.requestOptions...)
+			stream := e.messages.NewStreaming(ctx, params, e.requestOptions...)
 			var msg anthropic.Message
 			for stream.Next() {
 				event := stream.Current()
-				// The first delta of any kind (text, thinking, tool input) is
-				// the first output token.
-				if event.Type == "content_block_delta" {
-					timer.MarkFirstToken()
-				}
 				if err := msg.Accumulate(event); err != nil {
 					// The SDK re-marshals accumulated content on content_block_stop
 					// and message_stop to refresh its JSON cache. A tool_use block
@@ -798,7 +789,6 @@ func (e *executor[Request, Response]) runConversation(
 			}
 			return response, true, fmt.Errorf("failed to stream Claude response: %w", err)
 		}
-		execshared.RecordCallLatency(ctx, trace, llmTurn, timer.Latency())
 
 		// Record token usage in metrics and on the per-turn span. Trace-level
 		// token totals are derived from turns[] in downstream consumers — see

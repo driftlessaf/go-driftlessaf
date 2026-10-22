@@ -18,7 +18,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
-	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/result"
@@ -366,13 +365,8 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "failed to record llm prompt payload", "error", err)
 		}
 
-		// Each attempt gets a fresh timer, so the latency recorded below is the
-		// answering attempt's. The call does not stream, so it has no first
-		// token time.
-		var timer *calltiming.Timer
 		completion, err := retry.RetryWithBackoff(ctx, turnCfg, "chat_completion", isRetryableOpenAIError, func() (*openai.ChatCompletion, error) {
-			timer = new(calltiming.Timer)
-			return e.client.Chat.Completions.New(timer.Context(ctx), reqParams)
+			return e.client.Chat.Completions.New(ctx, reqParams)
 		})
 		if err != nil {
 			if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableOpenAIError, "OpenAI-compatible API"); requeueErr != nil {
@@ -380,7 +374,6 @@ func (e *executor[Request, Response]) Execute(
 			}
 			return response, true, fmt.Errorf("failed to get completion (turn %d): %w", turn, err)
 		}
-		execshared.RecordCallLatency(ctx, trace, llmTurn, timer.Latency())
 
 		if completion.Usage.PromptTokens > 0 || completion.Usage.CompletionTokens > 0 {
 			e.telemetry.RecordTokens(ctx, completion.Usage.PromptTokens, completion.Usage.CompletionTokens)
