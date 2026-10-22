@@ -23,6 +23,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -547,7 +548,7 @@ func (e *executor[Request, Response]) Execute(
 
 	// Send final message to get response with retry for transient errors
 	clog.InfoContext(ctx, "Sending final message")
-	response, err := e.sendWithRetry(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", "failed to send final message", func() (*genai.GenerateContentResponse, error) {
+	response, err := e.sendWithRetry(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", "failed to send final message", func(ctx context.Context) (*genai.GenerateContentResponse, error) {
 		return send(ctx, history[len(history)-1].Parts...)
 	})
 	if err != nil {
@@ -565,7 +566,7 @@ func (e *executor[Request, Response]) Execute(
 	// executeTurn for why that is retried rather than treated as terminal.
 	emptyTurns := 0
 
-	executeTurn := func(turn int, response *genai.GenerateContentResponse) (_ Response, _ *genai.GenerateContentResponse, _ bool, err error) {
+	executeTurn := func(turn int, response *timedResponse) (_ Response, _ *timedResponse, _ bool, err error) {
 		var zero Response
 		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.servingAttribution(usedCache))
 		defer func() {
@@ -585,17 +586,22 @@ func (e *executor[Request, Response]) Execute(
 		turnCfg.OnAttemptError = llmTurn.RecordError
 		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
 
-		// Record tokens for the response being processed in this turn.
-		// Unlike claude/openai executors (which record tokens right after
-		// each API call), the Google SDK loop processes the *previous*
+		// Record tokens and latency for the response being processed in this
+		// turn. Unlike claude/openai executors (which record tokens right
+		// after each API call), the Google SDK loop processes the *previous*
 		// iteration's response at the top of the next turn — so for turn 0
 		// this captures the initial API call, and for later turns it captures
-		// the response from the preceding tool/redirect call.
+		// the response from the preceding tool/redirect call. The latency
+		// travels with the response, so it stays on the same turn as the
+		// tokens wherever the turn boundaries fall.
 		var cacheReadTokens int64
 		if response != nil && response.UsageMetadata != nil {
 			inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
 			llmTurn.RecordTokens(inputTokens, outputTokens)
 			cacheReadTokens = int64(response.UsageMetadata.CachedContentTokenCount)
+		}
+		if response != nil {
+			execshared.RecordCallLatency(ctx, trace, llmTurn, response.latency)
 		}
 
 		// Cache creation prepares the context for the first model request, so
@@ -666,7 +672,7 @@ func (e *executor[Request, Response]) Execute(
 
 			// Ask the model to provide a more concise version
 			retryMsg := genai.Part{Text: "Your response exceeded the maximum output token limit. Please provide a more concise response that focuses on the most critical information while still completing the task."}
-			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_max_tokens_retry", "failed to send retry message after hitting max tokens", func() (*genai.GenerateContentResponse, error) {
+			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_max_tokens_retry", "failed to send retry message after hitting max tokens", func(ctx context.Context) (*genai.GenerateContentResponse, error) {
 				return send(ctx, &retryMsg)
 			})
 			if err != nil {
@@ -696,7 +702,7 @@ func (e *executor[Request, Response]) Execute(
 			if err != nil {
 				return zero, nil, true, err
 			}
-			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_malformed_retry", "failed to send retry message after malformed function call", func() (*genai.GenerateContentResponse, error) {
+			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_malformed_retry", "failed to send retry message after malformed function call", func(ctx context.Context) (*genai.GenerateContentResponse, error) {
 				return send(ctx, retryParts...)
 			})
 			if err != nil {
@@ -719,7 +725,7 @@ func (e *executor[Request, Response]) Execute(
 		// Only unset/STOP finish reasons are retried. An explicit blocking reason
 		// (safety, recitation) is a decision, not noise, and must keep failing
 		// immediately rather than burning three more calls to say the same thing.
-		retryDegenerateTurn := func(what string) (*genai.GenerateContentResponse, bool, error) {
+		retryDegenerateTurn := func(what string) (*timedResponse, bool, error) {
 			switch candidate.FinishReason {
 			case "", genai.FinishReasonStop:
 			default:
@@ -739,7 +745,7 @@ func (e *executor[Request, Response]) Execute(
 			if err != nil {
 				return nil, true, err
 			}
-			resp, err := e.sendWithRetry(ctx, turnCfg, "send_empty_response_retry", "failed to send retry message after an empty response", func() (*genai.GenerateContentResponse, error) {
+			resp, err := e.sendWithRetry(ctx, turnCfg, "send_empty_response_retry", "failed to send retry message after an empty response", func(ctx context.Context) (*genai.GenerateContentResponse, error) {
 				return send(ctx, retryParts...)
 			})
 			if err != nil {
@@ -860,7 +866,7 @@ func (e *executor[Request, Response]) Execute(
 			}
 
 			// Send tool responses back to the chat with retry for transient errors
-			nextResponse, err := e.sendWithRetry(ctx, turnCfg, "send_tool_responses", "failed to send tool responses", func() (*genai.GenerateContentResponse, error) {
+			nextResponse, err := e.sendWithRetry(ctx, turnCfg, "send_tool_responses", "failed to send tool responses", func(ctx context.Context) (*genai.GenerateContentResponse, error) {
 				return send(ctx, toolResponseParts...)
 			})
 			if err != nil {
@@ -876,7 +882,7 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
-			redirectResp, err := e.sendWithRetry(ctx, turnCfg, "send_submit_redirect", "failed to send submit_result redirect", func() (*genai.GenerateContentResponse, error) {
+			redirectResp, err := e.sendWithRetry(ctx, turnCfg, "send_submit_redirect", "failed to send submit_result redirect", func(ctx context.Context) (*genai.GenerateContentResponse, error) {
 				return send(ctx, &genai.Part{
 					Text: fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName),
 				})
@@ -940,6 +946,7 @@ func (e *executor[Request, Response]) Execute(
 		if response.UsageMetadata.CachedContentTokenCount > 0 {
 			llmTurn.RecordCacheTokens(int64(response.UsageMetadata.CachedContentTokenCount), 0)
 		}
+		execshared.RecordCallLatency(ctx, trace, llmTurn, response.latency)
 		llmTurn.End()
 	}
 	return resp, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.maxTurns)
@@ -1007,24 +1014,39 @@ func (e *executor[Request, Response]) evaluateSubmission(
 		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
 }
 
+// timedResponse is a model response with the timing of the HTTP attempt that
+// returned it.
+type timedResponse struct {
+	*genai.GenerateContentResponse
+	latency agenttrace.TurnLatency
+}
+
 // sendWithRetry runs a single chat send under RetryWithBackoff, counts the
 // final attempt on the API-request counter, and applies the shared error
 // policy: errors from RequeueIfRetryable propagate unwrapped (the workqueue
 // requeue path depends on the error type), any other failure is wrapped with
-// errContext. On success it records the response's usage metadata as OTel
-// token metrics; per-turn token attribution onto the trace happens separately,
-// at the top of the next executeTurn iteration.
+// errContext. send must make its request with the context it is given, which
+// times that attempt. On success it records the response's usage metadata as
+// OTel token metrics and returns the response with the answering attempt's
+// timing; per-turn token and latency attribution onto the trace happens
+// separately, at the top of the next executeTurn iteration. The response is
+// nil when the SDK returned none.
+//
+// With automatic continuation one send can make several requests; the timing
+// is the last one's.
 func (e *executor[Request, Response]) sendWithRetry(
 	ctx context.Context,
 	cfg retry.RetryConfig,
 	operation, errContext string,
-	send func() (*genai.GenerateContentResponse, error),
-) (*genai.GenerateContentResponse, error) {
+	send func(context.Context) (*genai.GenerateContentResponse, error),
+) (*timedResponse, error) {
 	isRetryable := func(err error) bool {
 		return isRetryableVertexErrorWithin(ctx, err, e.retryRequestTimeouts)
 	}
+	var timer *calltiming.Timer
 	response, err := retry.RetryWithBackoff(ctx, cfg, operation, isRetryable, func() (*genai.GenerateContentResponse, error) {
-		response, err := send()
+		timer = new(calltiming.Timer)
+		response, err := send(timer.Context(ctx))
 		return response, markRequestTimeout(ctx, err, e.retryRequestTimeouts)
 	})
 	e.telemetry.RecordAPIRequest(ctx, err)
@@ -1035,10 +1057,13 @@ func (e *executor[Request, Response]) sendWithRetry(
 		return nil, fmt.Errorf("%s: %w", errContext, err)
 	}
 
-	if response != nil && response.UsageMetadata != nil {
+	if response == nil {
+		return nil, nil
+	}
+	if response.UsageMetadata != nil {
 		e.recordTokenMetrics(ctx, response.UsageMetadata)
 	}
-	return response, nil
+	return &timedResponse{GenerateContentResponse: response, latency: timer.Latency()}, nil
 }
 
 // errCacheCreationHeld reports that getOrCreateCache skipped the create
