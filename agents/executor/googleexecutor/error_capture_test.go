@@ -272,7 +272,7 @@ func TestExecutorRecordsUnprocessedResponseAtMaxTurnsExhaustion(t *testing.T) {
 		{Index: 1, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 224, OutputTokens: 226},
 		{Index: 2, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 334, OutputTokens: 336},
 	}
-	if diff := cmp.Diff(want, trace.Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime")); diff != "" {
+	if diff := cmp.Diff(want, trace.Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime", "Latency")); diff != "" {
 		t.Errorf("trace turns (-want +got):\n%s", diff)
 	}
 }
