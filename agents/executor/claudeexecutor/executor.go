@@ -130,15 +130,16 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// per Execute. Set via WithUserPromptSuffix.
 	userPromptSuffix *promptbuilder.Prompt
 
-	// maxToolCallsBeforeFinalize, when greater than zero, bounds the agentic loop by
-	// nudging the model to finish once it has made this many tool calls. After the
-	// live tool-call count reaches the threshold, a single instruction is injected
-	// asking the model to call its terminal (submit) tool now. Zero disables the
-	// nudge entirely. This is a soft cap distinct from maxTurns: it steers the model
-	// toward emitting a result rather than aborting the run. It is only meaningful
-	// when a submit tool is configured (the terminal tool to call); without one it
-	// has no effect.
+	// maxToolCallsBeforeFinalize, when greater than zero, asks the model once to
+	// call its submit tool after this many investigative tool calls, unless an
+	// earlier finalize nudge was sent. A soft cap that steers toward a result
+	// where maxTurns would abort; zero disables it.
 	maxToolCallsBeforeFinalize int
+
+	// promptTokensBeforeFinalize, when greater than zero, asks the model to
+	// submit on every tool turn whose next request, before its tool results,
+	// reaches this many tokens. Zero disables it.
+	promptTokensBeforeFinalize int64
 
 	// forceSubmitToolChoice, when true, forces the model to call its terminal
 	// submit tool via tool_choice rather than leaving the choice to the model.
@@ -489,8 +490,9 @@ func (e *executor[Request, Response]) runConversation(
 	// (maxToolCallsBeforeFinalize). The terminal submit tool is excluded so
 	// the nudge measures investigation effort, not the act of finishing.
 	liveToolCalls := 0
-	// finalizeNudged records whether the early-finalize instruction has
-	// already been injected, so it fires at most once per execution.
+	// finalizeNudged records whether any early-finalize instruction has been
+	// injected: only the first forces the submit tool, and once it is set the
+	// tool-call cap sends nothing.
 	finalizeNudged := false
 	// refusalRetries counts turns retried after a safety-classifier refusal,
 	// bounded by refusalNudgeMaxRetries (see WithRefusalNudge). Zero when the
@@ -1089,25 +1091,28 @@ func (e *executor[Request, Response]) runConversation(
 				return response, true, cutErr
 			}
 
-			// Optional early-finalize nudge. When the investigative tool-call
-			// count reaches the configured threshold and a terminal tool is
-			// configured, inject a single instruction asking the model to emit
-			// its result now and force that tool where supported. This bounds
-			// runaway investigation by steering toward a result rather than
-			// aborting at maxTurns. Off when maxToolCallsBeforeFinalize is zero.
-			if shouldNudgeFinalize(e.maxToolCallsBeforeFinalize, liveToolCalls, finalizeNudged, submitToolName) {
+			// Optional early-finalize nudges toward a result from the evidence so
+			// far, before maxTurns or the context window ends the run. A prompt
+			// over budget wins a tie, since it is the hard limit.
+			promptTokens := nextPromptTokens(message.Usage)
+			switch {
+			case overPromptBudget(e.promptTokensBeforeFinalize, promptTokens, submitToolName):
+				// Repeats on every tool turn over budget, so a rejected submission
+				// is corrected with few tool calls. Only the run's first nudge
+				// forces the submit tool.
+				clog.InfoContext(ctx, "prompt-token threshold reached, nudging model to emit result",
+					"prompt_tokens", promptTokens,
+					"threshold", e.promptTokensBeforeFinalize)
+				e.nudgeFinalize(ctx, &params, "prompt_budget_finalize_nudge", submitToolName, !finalizeNudged,
+					fmt.Sprintf("This conversation is close to the model's context limit and cannot grow much further. Call the %s tool now to return your result based on what you have found so far; if it is rejected, fix it with as few tool calls as possible.", submitToolName))
 				finalizeNudged = true
-				e.telemetry.RecordToolCall(ctx, "early_finalize_nudge")
+			case shouldNudgeFinalize(e.maxToolCallsBeforeFinalize, liveToolCalls, finalizeNudged, submitToolName):
 				clog.InfoContext(ctx, "early-finalize threshold reached, nudging model to emit result",
 					"live_tool_calls", liveToolCalls,
 					"threshold", e.maxToolCallsBeforeFinalize)
-				params.Messages = append(params.Messages, anthropic.MessageParam{
-					Role: anthropic.MessageParamRoleUser,
-					Content: []anthropic.ContentBlockParamUnion{
-						anthropic.NewTextBlock(fmt.Sprintf("You have gathered enough evidence. Call the %s tool now to return your result based on what you have found so far.", submitToolName)),
-					},
-				})
-				params.ToolChoice = submitToolChoice(e.capabilityModelName, submitToolName)
+				e.nudgeFinalize(ctx, &params, "early_finalize_nudge", submitToolName, true,
+					fmt.Sprintf("You have gathered enough evidence. Call the %s tool now to return your result based on what you have found so far.", submitToolName))
+				finalizeNudged = true
 			}
 
 			// Force the submit tool on the next turn once the deferral gate tool
@@ -1511,6 +1516,33 @@ func shouldNudgeFinalize(threshold, liveToolCalls int, alreadyNudged bool, submi
 		return false
 	}
 	return liveToolCalls >= threshold
+}
+
+// nextPromptTokens is at most the size of the next request before this turn's
+// tool results: the prompt this turn was sent, whose cached parts input_tokens
+// leaves out, plus this turn's output.
+func nextPromptTokens(u anthropic.Usage) int64 {
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens
+}
+
+// overPromptBudget reports whether a turn's prompt reached a positive
+// threshold with a submit tool to steer toward.
+func overPromptBudget(threshold, promptTokens int64, submitToolName string) bool {
+	return threshold > 0 && submitToolName != "" && promptTokens >= threshold
+}
+
+// nudgeFinalize asks the model to call its submit tool now, and forces that
+// tool on the next turn when force is set and the model allows it.
+func (e *executor[Request, Response]) nudgeFinalize(ctx context.Context, params *anthropic.MessageNewParams, metric, submitToolName string, force bool, text string) {
+	e.telemetry.RecordToolCall(ctx, metric)
+	params.Messages = append(params.Messages, anthropic.MessageParam{
+		Role:    anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(text)},
+	})
+	// The API refuses a forced choice while thinking is on; the text still goes.
+	if force && e.thinkingBudgetTokens == nil {
+		params.ToolChoice = submitToolChoice(e.capabilityModelName, submitToolName)
+	}
 }
 
 // tracePrompt returns the full effective prompt for trace recording: the

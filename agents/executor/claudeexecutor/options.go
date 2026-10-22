@@ -417,29 +417,32 @@ func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *
 	}
 }
 
-// WithMaxToolCallsBeforeFinalize bounds the agentic loop with a soft cap: once
-// the model has made n investigative (non-terminal) tool calls, the executor
-// injects a single instruction asking it to call its terminal submit tool now
-// and forces that tool on the next turn where supported. Auto-only models
-// retain automatic selection and receive the same instruction.
-//
-// This is distinct from WithMaxTurns, which aborts the run when exceeded. The
-// soft cap instead steers the model toward emitting a result based on the
-// evidence gathered so far, which is preferable for workflows that should
-// always return a verdict rather than fail. A value of zero (the default)
-// disables the nudge entirely. The nudge only takes effect when a terminal
-// tool is configured via WithSubmitResultProvider; without one there is no
-// tool to steer toward, so the option is a no-op.
-//
-// Not compatible with WithThinking; the API requires tool_choice auto/none
-// while thinking is active, and the forced tool_choice this option uses on
-// the finalize turn returns a 400.
+// WithMaxToolCallsBeforeFinalize soft-caps the agentic loop: after n
+// investigative tool calls it asks the model, once, to call its submit tool,
+// and forces that tool on the next turn unless the model allows only automatic
+// choice or thinking is on. It steers toward a verdict where WithMaxTurns would
+// fail the run. Zero, or no submit tool, disables it.
 func WithMaxToolCallsBeforeFinalize[Request promptbuilder.Bindable, Response any](n int) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if n < 0 {
 			return fmt.Errorf("max tool calls before finalize must be non-negative, got %d", n)
 		}
 		e.maxToolCallsBeforeFinalize = n
+		return nil
+	}
+}
+
+// WithPromptTokensBeforeFinalize asks the model to submit on every tool turn
+// whose next request, before its tool results, is at least n tokens. The run's
+// first finalize nudge forces the submit tool unless the model or thinking
+// forbids it; after any nudge, WithMaxToolCallsBeforeFinalize sends nothing.
+// Zero, or no submit tool, disables it. Leave room below the window for results.
+func WithPromptTokensBeforeFinalize[Request promptbuilder.Bindable, Response any](n int64) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if n < 0 {
+			return fmt.Errorf("prompt tokens before finalize must be non-negative, got %d", n)
+		}
+		e.promptTokensBeforeFinalize = n
 		return nil
 	}
 }

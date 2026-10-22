@@ -132,19 +132,19 @@ type Config[Resp, CB any] struct {
 	// route supports refusal recovery. See claudeexecutor.WithRefusalNudge.
 	RefusalNudgeMaxRetries int
 
-	// MaxToolCallsBeforeFinalize, when positive, soft-caps the agentic loop:
-	// once the model has made this many investigative (non-terminal) tool
-	// calls, the executor injects one instruction to call the terminal submit
-	// tool now and forces that tool on the next turn where the model allows
-	// it. A run that would otherwise exhaust MaxTurns and fail instead
-	// returns a result built from the evidence gathered so far, still subject
-	// to ResultValidators. Zero (the default) disables it.
-	//
-	// Claude backend only: the Gemini and OpenAI-compatible backends reject a
-	// non-zero value at construction rather than silently running uncapped.
-	// Incompatible with ThinkingBudget, whose explicit thinking forbids the
-	// forced tool_choice. See claudeexecutor.WithMaxToolCallsBeforeFinalize.
+	// MaxToolCallsBeforeFinalize, when positive, asks the model once to call its
+	// submit tool after this many investigative tool calls, forcing it where the
+	// model allows, unless an earlier finalize nudge was sent; a run that would
+	// exhaust MaxTurns returns a result instead. Claude only, not with
+	// ThinkingBudget; see claudeexecutor.WithMaxToolCallsBeforeFinalize.
 	MaxToolCallsBeforeFinalize int
+
+	// PromptTokensBeforeFinalize, when positive, asks the model to submit on every
+	// tool turn whose next request, before its tool results, reaches this many
+	// tokens. On models that accept only automatic tool choice the instruction is
+	// the whole guard; nothing is forced. Same limits as MaxToolCallsBeforeFinalize;
+	// see claudeexecutor.WithPromptTokensBeforeFinalize.
+	PromptTokensBeforeFinalize int64
 
 	// EnforceInputBudget, when true, checks each request's input tokens
 	// before the model call and, when the input does not fit the serving

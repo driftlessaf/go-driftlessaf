@@ -335,6 +335,9 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 	if config.MaxToolCallsBeforeFinalize < 0 {
 		return fmt.Errorf("creating routed meta-agent: max tool calls before finalize must not be negative, got %d", config.MaxToolCallsBeforeFinalize)
 	}
+	if config.PromptTokensBeforeFinalize < 0 {
+		return fmt.Errorf("creating routed meta-agent: prompt tokens before finalize must not be negative, got %d", config.PromptTokensBeforeFinalize)
+	}
 	if config.InputContextWindow < 0 {
 		return fmt.Errorf("creating routed meta-agent: input context window must not be negative, got %d", config.InputContextWindow)
 	}
@@ -349,6 +352,9 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol, logicalModel string, config Config[Resp, CB]) error {
 	if config.MaxToolCallsBeforeFinalize != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: MaxToolCallsBeforeFinalize is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
+	if config.PromptTokensBeforeFinalize != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: PromptTokensBeforeFinalize is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}
 	if config.EnforceInputBudget && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: EnforceInputBudget is supported only on the Anthropic Messages protocol, not %s", protocol)

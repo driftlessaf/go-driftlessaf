@@ -270,6 +270,9 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	if config.MaxToolCallsBeforeFinalize != 0 {
 		return fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the OpenAI-compatible backend", config.MaxToolCallsBeforeFinalize)
 	}
+	if config.PromptTokensBeforeFinalize != 0 {
+		return fmt.Errorf("PromptTokensBeforeFinalize (%d) is not supported on the OpenAI-compatible backend", config.PromptTokensBeforeFinalize)
+	}
 	if config.EnforceInputBudget {
 		return errors.New("EnforceInputBudget is not supported on the OpenAI-compatible backend")
 	}

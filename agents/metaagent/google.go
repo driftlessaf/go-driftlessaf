@@ -45,6 +45,9 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 		return nil, fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the Gemini backend", config.MaxToolCallsBeforeFinalize)
 	}
 
+	if config.PromptTokensBeforeFinalize != 0 {
+		return nil, fmt.Errorf("PromptTokensBeforeFinalize (%d) is not supported on the Gemini backend", config.PromptTokensBeforeFinalize)
+	}
 	if config.EnforceInputBudget {
 		return nil, errors.New("EnforceInputBudget is not supported on the Gemini backend")
 	}
