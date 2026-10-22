@@ -36,8 +36,9 @@ func (f *fakeBackend) listComments(_ context.Context, _, _ string, _ int) ([]*gi
 func (f *fakeBackend) createComment(_ context.Context, _, _ string, _ int, body string) error {
 	f.nextID++
 	f.comments = append(f.comments, &github.IssueComment{
-		ID:                github.Ptr(f.nextID),
-		Body:              github.Ptr(body),
+		ID:   github.Ptr(f.nextID),
+		Body: github.Ptr(body),
+		//nolint:staticcheck // SA1019 is about Events API payloads; the issue-comments REST endpoint this store reads still returns author_association.
 		AuthorAssociation: github.Ptr("NONE"),
 		User:              &github.User{Type: github.Ptr("Bot")},
 		CreatedAt:         &github.Timestamp{Time: time.Date(2026, 7, 20, 0, 0, int(f.nextID), 0, time.UTC)},
@@ -59,8 +60,9 @@ func (f *fakeBackend) editComment(_ context.Context, _, _ string, commentID int6
 func (f *fakeBackend) reply(body, association string) {
 	f.nextID++
 	f.comments = append(f.comments, &github.IssueComment{
-		ID:                github.Ptr(f.nextID),
-		Body:              github.Ptr(body),
+		ID:   github.Ptr(f.nextID),
+		Body: github.Ptr(body),
+		//nolint:staticcheck // SA1019 is about Events API payloads; the issue-comments REST endpoint this store reads still returns author_association.
 		AuthorAssociation: github.Ptr(association),
 		User:              &github.User{Type: github.Ptr("User")},
 		CreatedAt:         &github.Timestamp{Time: time.Date(2026, 7, 20, 0, 0, int(f.nextID), 0, time.UTC)},

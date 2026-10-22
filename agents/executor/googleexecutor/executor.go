@@ -23,6 +23,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
+	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -545,13 +546,13 @@ func (e *executor[Request, Response]) Execute(
 		return append(slices.Clone(lastInputParts), &nudge), nil
 	}
 
-	// Send final message to get response with retry for transient errors
+	// The first turn sends the last history entry: the prompt, or the last
+	// seed tool response.
 	clog.InfoContext(ctx, "Sending final message")
-	response, err := e.sendWithRetry(ctx, e.telemetry.WithAPIRequestCounter(ctx, e.retryConfig), "send_initial_message", "failed to send final message", func() (*genai.GenerateContentResponse, error) {
-		return send(ctx, history[len(history)-1].Parts...)
-	})
-	if err != nil {
-		return resp, err
+	req := &modelRequest{
+		parts:      history[len(history)-1].Parts,
+		operation:  "send_initial_message",
+		errContext: "failed to send final message",
 	}
 
 	// Handle the conversation loop with bounded turns to prevent runaway executions.
@@ -565,38 +566,35 @@ func (e *executor[Request, Response]) Execute(
 	// executeTurn for why that is retried rather than treated as terminal.
 	emptyTurns := 0
 
-	executeTurn := func(turn int, response *genai.GenerateContentResponse) (_ Response, _ *genai.GenerateContentResponse, _ bool, err error) {
-		var zero Response
-		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.servingAttribution(usedCache))
-		defer func() {
-			if err != nil {
-				llmTurn.Fail(err)
-			}
-			llmTurn.End()
-		}()
-
+	// callModel sends req as llmTurn's model call, so the turn's span covers
+	// the call, and records the response's token counts and the answering
+	// attempt's latency on the turn.
+	callModel := func(turn int, llmTurn *agenttrace.LLMTurn[Response], req *modelRequest) (*genai.GenerateContentResponse, error) {
 		// Per-turn retry config wires transient API errors that the retry
 		// recovers from into the turn's Errors list. Without this, retries
 		// that eventually succeed leave no trace of the transients in BQ.
-		// Used by all in-turn sendWithRetry call sites below.
 		// Also count every retried attempt in genai.api.requests; the final
 		// attempt is counted by sendWithRetry after RetryWithBackoff.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
 		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
+		response, latency, err := e.sendWithRetry(ctx, turnCfg, req.operation, req.errContext, func(ctx context.Context) (*genai.GenerateContentResponse, error) {
+			return send(ctx, req.parts...)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if response == nil {
+			return nil, fmt.Errorf("%s: model returned a nil response", req.errContext)
+		}
 
-		// Record tokens for the response being processed in this turn.
-		// Unlike claude/openai executors (which record tokens right after
-		// each API call), the Google SDK loop processes the *previous*
-		// iteration's response at the top of the next turn — so for turn 0
-		// this captures the initial API call, and for later turns it captures
-		// the response from the preceding tool/redirect call.
 		var cacheReadTokens int64
-		if response != nil && response.UsageMetadata != nil {
+		if response.UsageMetadata != nil {
 			inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
 			llmTurn.RecordTokens(inputTokens, outputTokens)
 			cacheReadTokens = int64(response.UsageMetadata.CachedContentTokenCount)
 		}
+		execshared.RecordCallLatency(ctx, trace, llmTurn, latency)
 
 		// Cache creation prepares the context for the first model request, so
 		// its token count belongs to that request's turn. The cost view prices
@@ -611,6 +609,25 @@ func (e *executor[Request, Response]) Execute(
 		}
 		if cacheReadTokens > 0 || createdTokens > 0 {
 			llmTurn.RecordCacheTokens(cacheReadTokens, createdTokens)
+		}
+		return response, nil
+	}
+
+	// executeTurn sends req, then processes the response it gets back: it
+	// runs the requested tools, or returns the request the next turn sends.
+	executeTurn := func(turn int, req *modelRequest) (_ Response, _ *modelRequest, _ bool, err error) {
+		var zero Response
+		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.servingAttribution(usedCache))
+		defer func() {
+			if err != nil {
+				llmTurn.Fail(err)
+			}
+			llmTurn.End()
+		}()
+
+		response, err := callModel(turn, llmTurn, req)
+		if err != nil {
+			return zero, nil, true, err
 		}
 
 		clog.InfoContext(ctx, "Received response from model", "candidates_count", len(response.Candidates))
@@ -666,15 +683,11 @@ func (e *executor[Request, Response]) Execute(
 
 			// Ask the model to provide a more concise version
 			retryMsg := genai.Part{Text: "Your response exceeded the maximum output token limit. Please provide a more concise response that focuses on the most critical information while still completing the task."}
-			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_max_tokens_retry", "failed to send retry message after hitting max tokens", func() (*genai.GenerateContentResponse, error) {
-				return send(ctx, &retryMsg)
-			})
-			if err != nil {
-				return zero, nil, true, err
-			}
-
-			// Continue with the new response
-			return zero, retryResp, false, nil
+			return zero, &modelRequest{
+				parts:      []*genai.Part{&retryMsg},
+				operation:  "send_max_tokens_retry",
+				errContext: "failed to send retry message after hitting max tokens",
+			}, false, nil
 		}
 
 		// Check for malformed function call
@@ -696,15 +709,11 @@ func (e *executor[Request, Response]) Execute(
 			if err != nil {
 				return zero, nil, true, err
 			}
-			retryResp, err := e.sendWithRetry(ctx, turnCfg, "send_malformed_retry", "failed to send retry message after malformed function call", func() (*genai.GenerateContentResponse, error) {
-				return send(ctx, retryParts...)
-			})
-			if err != nil {
-				return zero, nil, true, err
-			}
-
-			// Continue with the new response
-			return zero, retryResp, false, nil
+			return zero, &modelRequest{
+				parts:      retryParts,
+				operation:  "send_malformed_retry",
+				errContext: "failed to send retry message after malformed function call",
+			}, false, nil
 		}
 
 		// retryDegenerateTurn nudges the model after a turn that produced nothing
@@ -719,7 +728,7 @@ func (e *executor[Request, Response]) Execute(
 		// Only unset/STOP finish reasons are retried. An explicit blocking reason
 		// (safety, recitation) is a decision, not noise, and must keep failing
 		// immediately rather than burning three more calls to say the same thing.
-		retryDegenerateTurn := func(what string) (*genai.GenerateContentResponse, bool, error) {
+		retryDegenerateTurn := func(what string) (*modelRequest, bool, error) {
 			switch candidate.FinishReason {
 			case "", genai.FinishReasonStop:
 			default:
@@ -739,21 +748,19 @@ func (e *executor[Request, Response]) Execute(
 			if err != nil {
 				return nil, true, err
 			}
-			resp, err := e.sendWithRetry(ctx, turnCfg, "send_empty_response_retry", "failed to send retry message after an empty response", func() (*genai.GenerateContentResponse, error) {
-				return send(ctx, retryParts...)
-			})
-			if err != nil {
-				return nil, true, err
-			}
-			return resp, true, nil
+			return &modelRequest{
+				parts:      retryParts,
+				operation:  "send_empty_response_retry",
+				errContext: "failed to send retry message after an empty response",
+			}, true, nil
 		}
 
 		if candidate.Content == nil {
-			if resp, handled, err := retryDegenerateTurn("candidate content is nil"); handled {
+			if next, handled, err := retryDegenerateTurn("candidate content is nil"); handled {
 				if err != nil {
 					return zero, nil, true, err
 				}
-				return zero, resp, false, nil
+				return zero, next, false, nil
 			}
 			clog.ErrorContext(ctx, "Gemini returned nil content",
 				"finish_reason", candidate.FinishReason,
@@ -763,11 +770,11 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		if len(candidate.Content.Parts) == 0 {
-			if resp, handled, err := retryDegenerateTurn("no parts in candidate"); handled {
+			if next, handled, err := retryDegenerateTurn("no parts in candidate"); handled {
 				if err != nil {
 					return zero, nil, true, err
 				}
-				return zero, resp, false, nil
+				return zero, next, false, nil
 			}
 			clog.ErrorContext(ctx, "Gemini returned empty parts",
 				"finish_reason", candidate.FinishReason,
@@ -859,14 +866,12 @@ func (e *executor[Request, Response]) Execute(
 				toolResponseParts = append(toolResponseParts, parts[i])
 			}
 
-			// Send tool responses back to the chat with retry for transient errors
-			nextResponse, err := e.sendWithRetry(ctx, turnCfg, "send_tool_responses", "failed to send tool responses", func() (*genai.GenerateContentResponse, error) {
-				return send(ctx, toolResponseParts...)
-			})
-			if err != nil {
-				return zero, nil, true, err
-			}
-			return zero, nextResponse, false, nil
+			// The next turn sends the tool responses back to the chat.
+			return zero, &modelRequest{
+				parts:      toolResponseParts,
+				operation:  "send_tool_responses",
+				errContext: "failed to send tool responses",
+			}, false, nil
 		}
 
 		// When submit_result is configured, it is the only valid exit path.
@@ -876,16 +881,13 @@ func (e *executor[Request, Response]) Execute(
 			clog.WarnContext(ctx, "Model responded with text instead of calling submit_result, redirecting")
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
-			redirectResp, err := e.sendWithRetry(ctx, turnCfg, "send_submit_redirect", "failed to send submit_result redirect", func() (*genai.GenerateContentResponse, error) {
-				return send(ctx, &genai.Part{
+			return zero, &modelRequest{
+				parts: []*genai.Part{{
 					Text: fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName),
-				})
-			})
-			if err != nil {
-				return zero, nil, true, err
-			}
-
-			return zero, redirectResp, false, nil
+				}},
+				operation:  "send_submit_redirect",
+				errContext: "failed to send submit_result redirect",
+			}, false, nil
 		}
 
 		// Fallback: parse text response as JSON when submit_result is not configured
@@ -903,46 +905,51 @@ func (e *executor[Request, Response]) Execute(
 		}
 
 		// Neither text nor a tool call: same degenerate turn, same handling.
-		if resp, handled, err := retryDegenerateTurn("no text and no tool calls"); handled {
+		if next, handled, err := retryDegenerateTurn("no text and no tool calls"); handled {
 			if err != nil {
 				return zero, nil, true, err
 			}
-			return zero, resp, false, nil
+			return zero, next, false, nil
 		}
 		clog.ErrorContext(ctx, "Unexpected response format - no text and no tool calls")
 		return zero, nil, true, errors.New("unexpected response format from model")
 	}
 
 	for turn := range e.maxTurns {
-		result, nextResp, done, err := executeTurn(turn, response)
+		result, next, done, err := executeTurn(turn, req)
 		// done=true on all terminal paths (including errors); || err != nil is a
 		// safety net in case a future path sets err without setting done.
 		if done || err != nil {
 			return result, err
 		}
-		if nextResp == nil {
-			return resp, errors.New("retry returned nil response")
-		}
-		response = nextResp
+		req = next
 	}
+
+	// The last turn returned a request that no turn has sent. A synthetic
+	// turn sends it and records the response's tokens without processing the
+	// response. Those tokens are billable, and turns[] is the source of truth
+	// for cost analysis (DEV-1140), so leaving them off would undercount
+	// maxTurns-exhausted runs.
+	llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.servingAttribution(usedCache))
+	if _, err := callModel(e.maxTurns, llmTurn, req); err != nil {
+		llmTurn.Fail(err)
+		llmTurn.End()
+		return resp, err
+	}
+	llmTurn.End()
 
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
 	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
-	// The final unprocessed response carries real billable tokens (the
-	// model already generated them). Without this synthetic turn the
-	// loop would exit and only OTel metrics would see them — turns[]
-	// is the source of truth for cost analysis (DEV-1140), so leaving
-	// them off would silently undercount maxTurns-exhausted runs.
-	if response != nil && response.UsageMetadata != nil {
-		llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.servingAttribution(usedCache))
-		inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
-		llmTurn.RecordTokens(inputTokens, outputTokens)
-		if response.UsageMetadata.CachedContentTokenCount > 0 {
-			llmTurn.RecordCacheTokens(int64(response.UsageMetadata.CachedContentTokenCount), 0)
-		}
-		llmTurn.End()
-	}
 	return resp, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.maxTurns)
+}
+
+// modelRequest is the request a turn sends to the model: the parts, and the
+// operation name and error context that sendWithRetry logs and wraps
+// failures with.
+type modelRequest struct {
+	parts      []*genai.Part
+	operation  string
+	errContext string
 }
 
 // servingAttribution records cache TTL only when this execution attached
@@ -1011,34 +1018,41 @@ func (e *executor[Request, Response]) evaluateSubmission(
 // final attempt on the API-request counter, and applies the shared error
 // policy: errors from RequeueIfRetryable propagate unwrapped (the workqueue
 // requeue path depends on the error type), any other failure is wrapped with
-// errContext. On success it records the response's usage metadata as OTel
-// token metrics; per-turn token attribution onto the trace happens separately,
-// at the top of the next executeTurn iteration.
+// errContext. send must make its request with the context it is given, which
+// times that attempt. On success it records the response's usage metadata as
+// OTel token metrics and returns the answering attempt's timing; per-turn
+// token and latency attribution onto the trace happens in the caller, on the
+// turn that wraps the call.
+//
+// With automatic continuation one send can make several requests; the timing
+// is the last one's.
 func (e *executor[Request, Response]) sendWithRetry(
 	ctx context.Context,
 	cfg retry.RetryConfig,
 	operation, errContext string,
-	send func() (*genai.GenerateContentResponse, error),
-) (*genai.GenerateContentResponse, error) {
+	send func(context.Context) (*genai.GenerateContentResponse, error),
+) (*genai.GenerateContentResponse, agenttrace.TurnLatency, error) {
 	isRetryable := func(err error) bool {
 		return isRetryableVertexErrorWithin(ctx, err, e.retryRequestTimeouts)
 	}
+	var timer *calltiming.Timer
 	response, err := retry.RetryWithBackoff(ctx, cfg, operation, isRetryable, func() (*genai.GenerateContentResponse, error) {
-		response, err := send()
+		timer = new(calltiming.Timer)
+		response, err := send(timer.Context(ctx))
 		return response, markRequestTimeout(ctx, err, e.retryRequestTimeouts)
 	})
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
 		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryable, "Vertex AI"); requeueErr != nil {
-			return nil, requeueErr
+			return nil, agenttrace.TurnLatency{}, requeueErr
 		}
-		return nil, fmt.Errorf("%s: %w", errContext, err)
+		return nil, agenttrace.TurnLatency{}, fmt.Errorf("%s: %w", errContext, err)
 	}
 
 	if response != nil && response.UsageMetadata != nil {
 		e.recordTokenMetrics(ctx, response.UsageMetadata)
 	}
-	return response, nil
+	return response, timer.Latency(), nil
 }
 
 // errCacheCreationHeld reports that getOrCreateCache skipped the create
@@ -1104,17 +1118,10 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	return cached.Name, int64(totalTokenCount), nil
 }
 
-// ptr is a helper function to create a pointer to a value
-//
-//go:fix inline
-func ptr[T any](v T) *T {
-	return new(v)
-}
-
 // recordTokenMetrics unpacks the genai usage-metadata shape into the shared
 // recorder. When the response includes cached tokens, from explicit or
 // implicit caching, OTel cache metrics are also recorded. Per-turn cache token
-// attribution onto the trace happens in executeTurn
+// attribution onto the trace happens in Execute's callModel
 // (LLMTurn.RecordCacheTokens) — this path only emits the OTel metrics counter.
 func (e *executor[Request, Response]) recordTokenMetrics(ctx context.Context, usage *genai.GenerateContentResponseUsageMetadata) {
 	if usage == nil {

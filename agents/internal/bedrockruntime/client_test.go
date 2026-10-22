@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/awsauth"
+	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	smithy "github.com/aws/smithy-go"
 	"github.com/google/go-cmp/cmp"
@@ -136,6 +137,49 @@ func TestSignedRequestIsolation(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("calls: got = %d, want 1", got)
+	}
+}
+
+// A calltiming.Timer is the one trace that reaches the signed request. Its
+// hooks record the timing; the caller's hooks, composed on the same context,
+// still never run inside the boundary.
+func TestSignedRequestRunsOnlyTimerHooks(t *testing.T) {
+	t.Parallel()
+	client := testClient(t, testCredentials(), roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		trace := httptrace.ContextClientTrace(r.Context())
+		if trace == nil {
+			return nil, errors.New("signed request: got no trace, want the timer's hooks")
+		}
+		if trace.WroteHeaderField != nil || trace.WroteHeaders != nil || trace.Got1xxResponse != nil {
+			t.Error("signed request: got a header hook, want only timing hooks")
+		}
+		// Call the hooks as the transport would.
+		trace.GetConn(r.URL.Host)
+		trace.GotConn(httptrace.GotConnInfo{Reused: true})
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+		trace.GotFirstResponseByte()
+		return okResponse(r), nil
+	}))
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		GetConn:          func(string) { t.Error("caller GetConn hook ran inside the signing boundary") },
+		WroteHeaderField: func(string, []string) { t.Error("caller header hook ran inside the signing boundary") },
+	})
+	timer := new(calltiming.Timer)
+	response, err := client.Do(testRequest(t, timer.Context(ctx), client.Endpoint(), "{}"))
+	if err != nil {
+		t.Fatalf("Do: got = %v, want nil", err)
+	}
+	response.Body.Close()
+
+	got := timer.Latency()
+	if got.RequestStartTime.IsZero() {
+		t.Error("timer RequestStartTime: got zero, want the signed request's start")
+	}
+	if got.ConnReused == nil || !*got.ConnReused {
+		t.Errorf("timer ConnReused: got = %v, want true", got.ConnReused)
+	}
+	if got.FirstByteMS == nil {
+		t.Error("timer FirstByteMS: got nil, want the signed request's first byte")
 	}
 }
 
