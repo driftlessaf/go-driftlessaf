@@ -177,6 +177,22 @@ func TestTimerLatency(t *testing.T) {
 			ConnReused:       new(true),
 		},
 	}, {
+		// roundTrip can hand back the response before the write loop reports
+		// the write at all, and Latency can be read in that window.
+		name: "first byte before the write is reported",
+		steps: []step{
+			at(0, getConn),
+			at(0, gotConn(true)),
+			at(3*time.Millisecond, firstByte),
+		},
+		want: agenttrace.TurnLatency{
+			RequestStartTime: base,
+			ConnReused:       new(true),
+			FirstByteMS:      new(int64(0)),
+		},
+	}, {
+		// Also the order Linux can report a fast reply in: the read loop sees
+		// the first byte before the write loop reports the write.
 		name: "response before the request was fully written",
 		steps: []step{
 			at(0, getConn),
@@ -187,6 +203,7 @@ func TestTimerLatency(t *testing.T) {
 		want: agenttrace.TurnLatency{
 			RequestStartTime: base,
 			ConnReused:       new(true),
+			FirstByteMS:      new(int64(0)),
 		},
 	}}
 	for _, tt := range tests {

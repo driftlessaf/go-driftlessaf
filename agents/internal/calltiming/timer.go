@@ -55,6 +55,9 @@ type request struct {
 	wrote      time.Time
 	firstByte  time.Time
 	firstToken time.Time
+	// writeFailed is set when WroteRequest reported an error. A request whose
+	// write failed has no write-to-response duration.
+	writeFailed bool
 }
 
 // timerKey is the context key under which Context stores the Timer.
@@ -110,9 +113,17 @@ func (t *Timer) Latency() agenttrace.TurnLatency {
 			l.TLSMS = millis(r.tls)
 		}
 	}
-	if !r.wrote.IsZero() {
+	switch {
+	case !r.wrote.IsZero():
 		l.FirstByteMS = elapsed(r.wrote, r.firstByte)
 		l.FirstTokenMS = elapsed(r.wrote, r.firstToken)
+	case !r.writeFailed:
+		// net/http's roundTrip returns once the read loop has the response,
+		// without waiting for the write loop, so WroteRequest may not have
+		// fired yet. A response that already started had no wait after the
+		// write.
+		l.FirstByteMS = observedZero(r.firstByte)
+		l.FirstTokenMS = observedZero(r.firstToken)
 	}
 	return l
 }
@@ -188,6 +199,8 @@ func (t *Timer) wroteRequest(info httptrace.WroteRequestInfo) {
 	defer t.mu.Unlock()
 	if info.Err == nil {
 		t.req.wrote = now
+	} else {
+		t.req.writeFailed = true
 	}
 }
 
@@ -200,6 +213,14 @@ func (t *Timer) gotFirstResponseByte() {
 	}
 }
 
+// observedZero returns 0 when at was observed and nil otherwise.
+func observedZero(at time.Time) *int64 {
+	if at.IsZero() {
+		return nil
+	}
+	return new(int64(0))
+}
+
 // millis converts an observed duration to whole milliseconds.
 func millis(d *time.Duration) *int64 {
 	if d == nil {
@@ -209,11 +230,13 @@ func millis(d *time.Duration) *int64 {
 }
 
 // elapsed returns the whole milliseconds from wrote to at, or nil when at was
-// not observed or came first. A server can answer before the request is fully
-// written; that response has no write-to-response duration.
+// not observed. An at before wrote counts as 0: the response started with no
+// wait after the write. That happens when a server answers before the request
+// is fully written, and when the transport's read loop reports the first byte
+// before its write loop reports the write, as it can on Linux for a fast reply.
 func elapsed(wrote, at time.Time) *int64 {
-	if at.IsZero() || at.Before(wrote) {
+	if at.IsZero() {
 		return nil
 	}
-	return new(at.Sub(wrote).Milliseconds())
+	return new(max(at.Sub(wrote), 0).Milliseconds())
 }
