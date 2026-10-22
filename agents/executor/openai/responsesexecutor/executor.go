@@ -18,6 +18,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -287,7 +288,7 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 		}
 	}
 	limitExceeded = true
-	return response, errors.New("responses exceeded maximum turns without an accepted submission")
+	return response, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.config.MaxTurns)
 }
 
 func (e *executor[Request, Response]) definitions(tools map[string]toolcall.Tool[Response]) ([]responses.ToolUnionParam, error) {

@@ -20,6 +20,7 @@ import (
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/effort"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -650,6 +651,33 @@ func TestTurnMetricsOnLoopExit(t *testing.T) {
 				t.Errorf("turn metrics: got = (%d, %d, %d), want = (1, %d, %d)", count, turns, limit, tt.wantTurns, tt.wantLimit)
 			}
 		})
+	}
+}
+
+// TestMaxTurnsWrapsSentinel pins that a run whose every turn is usable but
+// never submits ends with ErrMaxTurns: callers branch on it with errors.Is.
+func TestMaxTurnsWrapsSentinel(t *testing.T) {
+	t.Parallel()
+	const maxTurns = 2
+	var requests atomic.Int32
+	cfg := config(t)
+	cfg.MaxTurns = maxTurns
+	e := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		n := requests.Add(1)
+		emit(w, call(fmt.Sprint("work_", n), "work", `{"reasoning":"keep digging"}`))
+	}, cfg)
+	tools := map[string]toolcall.Tool[answer]{"work": {Def: toolcall.Definition{Name: "work"}, Handler: func(context.Context, toolcall.ToolCall, *agenttrace.Trace[answer], *answer) map[string]any {
+		return map[string]any{"ok": true}
+	}}}
+	_, err := e.Execute(t.Context(), request{}, tools)
+	if !errors.Is(err, agentexecutor.ErrMaxTurns) {
+		t.Fatalf("error: got = %v, want one wrapping ErrMaxTurns", err)
+	}
+	if got, want := err.Error(), fmt.Sprintf("agent exceeded maximum conversation turns (%d)", maxTurns); got != want {
+		t.Errorf("error text: got = %q, want = %q", got, want)
+	}
+	if got := requests.Load(); got != maxTurns {
+		t.Errorf("provider requests: got = %d, want = %d", got, maxTurns)
 	}
 }
 
