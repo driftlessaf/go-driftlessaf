@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -375,6 +376,9 @@ func WorktreeCallbacks(wt *gogit.Worktree) callbacks.WorktreeCallbacks {
 			if err != nil {
 				return callbacks.ListResult{}, err
 			}
+			// File.ReadDir returns directory order, which differs by filesystem
+			// (ext4 hashes names); sort so offset and limit page a stable listing.
+			slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 
 			// Filter entries.
 			filtered := make([]os.DirEntry, 0, len(entries))

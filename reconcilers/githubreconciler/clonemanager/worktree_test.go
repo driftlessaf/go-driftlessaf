@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -829,6 +830,49 @@ func TestChmod(t *testing.T) {
 	}
 
 	assertUnstagedChange(t, wt, "hello.txt")
+}
+
+// TestListDirectoryPagesInNameOrder checks that ListDirectory returns entries
+// sorted by name and that offset and limit page through that same order. The
+// fixture names are chosen so a filesystem that returns directory order (ext4
+// hashes names) would fail without the sort.
+func TestListDirectoryPagesInNameOrder(t *testing.T) {
+	wt, _ := initWorktree(t)
+	cb := WorktreeCallbacks(wt)
+	ctx := t.Context()
+
+	full, err := cb.ListDirectory(ctx, ".", "", 0, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	want := make([]string, 0, len(full.Entries))
+	for _, e := range full.Entries {
+		want = append(want, e.Name)
+	}
+	if !slices.IsSorted(want) {
+		t.Fatalf("entries: got = %v, wanted them sorted by name", want)
+	}
+	if len(want) < 3 {
+		t.Fatalf("entries: got = %v, wanted at least 3 to page through", want)
+	}
+
+	var paged []string
+	for offset := 0; ; {
+		page, err := cb.ListDirectory(ctx, ".", "", offset, 2)
+		if err != nil {
+			t.Fatalf("list at offset %d: %v", offset, err)
+		}
+		for _, e := range page.Entries {
+			paged = append(paged, e.Name)
+		}
+		if page.NextOffset == nil {
+			break
+		}
+		offset = *page.NextOffset
+	}
+	if !slices.Equal(paged, want) {
+		t.Errorf("paged entries: got = %v, wanted = %v", paged, want)
+	}
 }
 
 func TestListDirectory(t *testing.T) {
