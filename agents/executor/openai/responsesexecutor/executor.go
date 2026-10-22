@@ -21,7 +21,6 @@ import (
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
-	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"chainguard.dev/driftlessaf/agents/metrics"
 	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
@@ -207,12 +206,8 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 				return false, false, err
 			}
 			rc := retry.RetryConfig{MaxRetries: 2, BaseBackoff: time.Second, MaxBackoff: 4 * time.Second, OnAttemptError: turn.RecordError}
-			// Each attempt gets a fresh timer, so the latency recorded below is
-			// the answering attempt's.
-			var timer *calltiming.Timer
 			out, err := retry.RetryWithBackoff(ctx, rc, "responses request", retryable, func() (*responses.Response, error) {
-				timer = new(calltiming.Timer)
-				out, err := e.stream(ctx, params, timer)
+				out, err := e.stream(ctx, params)
 				e.recorder.RecordAPIRequest(ctx, err)
 				return out, err
 			})
@@ -220,7 +215,6 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 				turn.Fail(err)
 				return false, false, err
 			}
-			execshared.RecordCallLatency(ctx, trace, turn, timer.Latency())
 			turn.RecordTokens(out.Usage.InputTokens, out.Usage.OutputTokens)
 			turn.RecordCacheTokens(out.Usage.InputTokensDetails.CachedTokens, 0)
 			turn.RecordReasoningTokens(out.Usage.OutputTokensDetails.ReasoningTokens)

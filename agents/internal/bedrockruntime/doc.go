@@ -16,10 +16,6 @@ SPDX-License-Identifier: Apache-2.0
 //
 // Signed headers stay on a private request. Caller HTTP trace hooks are not run
 // inside this boundary because they can observe credential-bearing headers.
-// The one exception is a calltiming.Timer the caller attached: its hooks read
-// only timestamps, the dial address, the reuse flag, and whether each phase
-// failed, and they run on the signed request so Bedrock calls report latency
-// like any other route.
 // Returned transport errors do not wrap SDK or network errors that may expose
 // credentials. Cancellation, deadlines, and network timeout classification are
 // preserved. Response payloads are not redacted; protocol consumers must not log

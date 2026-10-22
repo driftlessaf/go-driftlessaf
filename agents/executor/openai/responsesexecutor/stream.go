@@ -13,7 +13,6 @@ import (
 	"net/http"
 
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
-	"chainguard.dev/driftlessaf/agents/internal/calltiming"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
@@ -83,9 +82,7 @@ func boundWire(req *http.Request, next option.MiddlewareNext) (*http.Response, e
 	return resp, nil
 }
 
-// stream sends one Responses request and returns the completed response.
-// timer measures the request and marks the first streamed delta.
-func (e *executor[Request, Response]) stream(ctx context.Context, params responses.ResponseNewParams, timer *calltiming.Timer) (*responses.Response, error) {
+func (e *executor[Request, Response]) stream(ctx context.Context, params responses.ResponseNewParams) (*responses.Response, error) {
 	if e.config.RequestTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, e.config.RequestTimeout)
@@ -94,7 +91,7 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 	// Retry ownership belongs to the executor. Never replay a partially
 	// consumed stream: neither usage nor the remote completion is known.
 	var httpResponse *http.Response
-	stream := e.client.NewStreaming(timer.Context(ctx), params, option.WithMaxRetries(0), option.WithMiddleware(boundWire), option.WithResponseInto(&httpResponse))
+	stream := e.client.NewStreaming(ctx, params, option.WithMaxRetries(0), option.WithMiddleware(boundWire), option.WithResponseInto(&httpResponse))
 	defer stream.Close()
 	events := 0
 	responseID := ""
@@ -116,14 +113,10 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 			return &event.Response, nil
 		case "response.failed", "response.incomplete", "error":
 			return nil, safeStreamFailure(event, httpResponse, responseID)
-		case "response.output_text.delta", "response.function_call_arguments.delta", "response.refusal.delta", "response.reasoning_summary_text.delta":
-			// The first delta of any kind is the first output token. Like the
-			// other incremental events, deltas are consumed but not executed.
-			timer.MarkFirstToken()
 		case "response.created", "response.in_progress", "response.output_item.added", "response.output_item.done",
-			"response.content_part.added", "response.content_part.done", "response.output_text.done",
-			"response.function_call_arguments.done", "response.refusal.done",
-			"response.reasoning_summary_part.added", "response.reasoning_summary_part.done", "response.reasoning_summary_text.done":
+			"response.content_part.added", "response.content_part.done", "response.output_text.delta", "response.output_text.done",
+			"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.refusal.delta", "response.refusal.done",
+			"response.reasoning_summary_part.added", "response.reasoning_summary_part.done", "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done":
 			// Consume incremental events, but execute only the authoritative
 			// completed response. No tool sees an incomplete argument string.
 		default:
