@@ -46,6 +46,21 @@ type Analyzer interface {
 	Analyze(ctx context.Context, wt *gogit.Worktree, paths []string, prior ...Diagnostic) ([]Diagnostic, error)
 }
 
+// CommitMessager is an optional interface for an Analyzer that fixes files
+// itself and wants to say what it changed in the commit message.
+//
+// When the analyzer fixes every diagnostic, the agent never runs, so no one
+// writes a commit message. The reconciler then uses a generic list headed
+// "Automated fixes:". That list shows which rule fired and where, but not what
+// the commit changed, and its first line is the same for every analyzer. The
+// analyzer knows exactly what it changed, so it can describe the change.
+type CommitMessager interface {
+	// CommitMessage returns the commit message for the fixed diagnostics. The
+	// first line is the subject. Return an empty string to use the generic
+	// list instead.
+	CommitMessage(diagnostics []Diagnostic) string
+}
+
 // Diagnostic represents a single issue discovered by an Analyzer.
 type Diagnostic struct {
 	// Path is the file path relative to the repo root.
@@ -85,6 +100,18 @@ func (d Diagnostic) AsFinding() callbacks.Finding {
 		Name:       id,
 		Details:    details,
 	}
+}
+
+// analyzerCommitMessage returns the commit message for a commit made only of
+// analyzer fixes: the analyzer's own message when it provides one, and the
+// generic list otherwise.
+func analyzerCommitMessage(a Analyzer, diagnostics []Diagnostic) string {
+	if cm, ok := a.(CommitMessager); ok {
+		if msg := cm.CommitMessage(diagnostics); msg != "" {
+			return msg
+		}
+	}
+	return commitMessage(diagnostics)
 }
 
 // commitMessage builds a commit message enumerating the fixed diagnostics.

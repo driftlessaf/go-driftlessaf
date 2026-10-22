@@ -297,10 +297,10 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 			// reasoning entry, but the log persisted from prior iterations
 			// must still render rather than drop from the regenerated body.
 			// The commit contributes no headline either, so analyzer-only PRs
-			// use their path-based title fallback instead of the generic
-			// analyzer commit message.
+			// use their path-based title fallback instead of the analyzer's
+			// commit message.
 			if allFixed {
-				msg := commitMessage(diagnostics)
+				msg := analyzerCommitMessage(r.analyzer, diagnostics)
 				prData.ReasoningSummary = renderReasoningLog(session.ReasoningLog())
 				prData.Headline = prHeadline(session.Headline(), "", usePRBranch)
 				session.SetHeadline(prData.Headline)

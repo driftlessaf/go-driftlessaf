@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -647,6 +648,64 @@ func TestCommitMessage(t *testing.T) {
 			for _, notWant := range tt.notContains {
 				if strings.Contains(msg, notWant) {
 					t.Errorf("commit message should not contain %q in:\n%s", notWant, msg)
+				}
+			}
+		})
+	}
+}
+
+// messagingAnalyzer is a fakeAnalyzer that also implements CommitMessager. It
+// records the diagnostics it was asked to describe.
+type messagingAnalyzer struct {
+	fakeAnalyzer
+	message string
+	got     []Diagnostic
+}
+
+var _ CommitMessager = (*messagingAnalyzer)(nil)
+
+func (a *messagingAnalyzer) CommitMessage(diagnostics []Diagnostic) string {
+	a.got = diagnostics
+	return a.message
+}
+
+func TestAnalyzerCommitMessage(t *testing.T) {
+	diagnostics := []Diagnostic{{
+		Path: "go.mod", Message: "outdated module", Rule: "deps", Fixed: true,
+	}}
+	generic := commitMessage(diagnostics)
+
+	tests := []struct {
+		name         string
+		analyzer     Analyzer
+		want         string
+		wantSeenDiag bool
+	}{{
+		name:     "analyzer without CommitMessager uses the generic list",
+		analyzer: &fakeAnalyzer{},
+		want:     generic,
+	}, {
+		name:         "analyzer message is used",
+		analyzer:     &messagingAnalyzer{message: "fix(deps): bump foo to 1.2.3\n\nFixes the outdated module."},
+		want:         "fix(deps): bump foo to 1.2.3\n\nFixes the outdated module.",
+		wantSeenDiag: true,
+	}, {
+		name:         "empty analyzer message uses the generic list",
+		analyzer:     &messagingAnalyzer{},
+		want:         generic,
+		wantSeenDiag: true,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := analyzerCommitMessage(tt.analyzer, diagnostics)
+			if got != tt.want {
+				t.Errorf("analyzerCommitMessage: got = %q, want = %q", got, tt.want)
+			}
+			if tt.wantSeenDiag {
+				ma := tt.analyzer.(*messagingAnalyzer)
+				if !slices.Equal(ma.got, diagnostics) {
+					t.Errorf("diagnostics passed to CommitMessage: got = %v, want = %v", ma.got, diagnostics)
 				}
 			}
 		})
