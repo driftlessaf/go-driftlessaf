@@ -16,7 +16,7 @@ import (
 func Example_new() {
 	// In an integration test, call:
 	//
-	//   mgr, err := smtesting.New[MyDetails](ctx, t, "my-reconciler")
+	//   mgr, err := smtesting.New[MyDetails](ctx, t)
 	//   if err != nil {
 	//       t.Fatal(err)
 	//   }
@@ -24,4 +24,14 @@ func Example_new() {
 	// The manager is authenticated via chainctl and ready to write attestations.
 	fmt.Println("New requires chainctl authentication")
 	// Output: New requires chainctl authentication
+}
+
+// Example_localSigning shows managers sharing a local trust environment.
+func Example_localSigning() {
+	// In a test:
+	// local := smtesting.NewLocal(t)
+	// writer, err := statusmanager.New[Details](t.Context(), local.Options()...)
+	// reader, err := statusmanager.NewReadOnly[Details](t.Context(), local.Options()...)
+	fmt.Println("local keys and HTTP services; production signer and verifier")
+	// Output: local keys and HTTP services; production signer and verifier
 }

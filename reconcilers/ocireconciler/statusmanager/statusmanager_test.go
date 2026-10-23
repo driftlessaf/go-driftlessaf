@@ -1,5 +1,3 @@
-//go:build withauth
-
 /*
 Copyright 2025 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
@@ -34,8 +32,9 @@ func setupTestRegistry(t *testing.T) string {
 }
 
 // TestStatusManagerSignAndVerify tests the full lifecycle of signing and verifying
-// attestations using a real Sigstore infrastructure and local test registry.
+// attestations using local signing services and a local test registry.
 func TestStatusManagerSignAndVerify(t *testing.T) {
+	local := statusmanagertesting.NewLocal(t)
 	ctx := context.Background()
 
 	// Set up local test registry
@@ -43,9 +42,9 @@ func TestStatusManagerSignAndVerify(t *testing.T) {
 	t.Logf("Using test registry: %s", registryHost)
 
 	// Create a writable manager for signing
-	writer, err := statusmanagertesting.New[TestStatus](ctx, t,
+	writer, err := statusmanager.New[TestStatus](ctx, append(local.Options(),
 		statusmanager.WithRepositoryOverride(registryHost+"/test-repo"),
-	)
+	)...)
 	require.NoError(t, err, "failed to create writable manager")
 
 	// Create a test digest reference
@@ -118,9 +117,9 @@ func TestStatusManagerSignAndVerify(t *testing.T) {
 
 	// Test read-only manager: reading back what the writer produced requires
 	// only the same payload type, which carries the predicate type.
-	readOnlyManager, err := statusmanagertesting.NewReadOnly[TestStatus](ctx, t,
+	readOnlyManager, err := statusmanager.NewReadOnly[TestStatus](ctx, append(local.Options(),
 		statusmanager.WithRepositoryOverride(registryHost+"/test-repo"),
-	)
+	)...)
 	require.NoError(t, err, "failed to create read-only manager")
 
 	readOnlySession := readOnlyManager.NewSession(digest)
@@ -157,13 +156,14 @@ func (TestStatus) PredicateType() string { return "https://status.test/statusman
 // TestStatusManagerWithoutRepositoryOverride tests that the manager works without
 // WithRepositoryOverride by deriving the attestation repository from the digest.
 func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
+	local := statusmanagertesting.NewLocal(t)
 	ctx := context.Background()
 
 	registryHost := setupTestRegistry(t)
 	t.Logf("Using test registry: %s", registryHost)
 
 	// Create manager WITHOUT WithRepositoryOverride
-	manager, err := statusmanagertesting.New[TestStatus](ctx, t)
+	manager, err := statusmanager.New[TestStatus](ctx, local.Options()...)
 	require.NoError(t, err, "failed to create manager without repository override")
 
 	// Use a digest that references the test registry
@@ -222,14 +222,15 @@ func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
 // bundle lives in the OCI registry only. So a 200 MB payload, well past anything
 // the v1 path could carry, now signs, stores, and reads back intact.
 func TestStatusManagerLargePayload(t *testing.T) {
+	local := statusmanagertesting.NewLocal(t)
 	ctx := context.Background()
 
 	registryHost := setupTestRegistry(t)
 	t.Logf("Using test registry: %s", registryHost)
 
-	manager, err := statusmanagertesting.New[LargeTestStatus](ctx, t,
+	manager, err := statusmanager.New[LargeTestStatus](ctx, append(local.Options(),
 		statusmanager.WithRepositoryOverride(registryHost+"/large-payload-repo"),
-	)
+	)...)
 	require.NoError(t, err, "failed to create manager")
 
 	digest, err := name.NewDigest("example.com/foo@sha256:3333333333333333333333333333333333333333333333333333333333333333")
@@ -279,13 +280,14 @@ func (LargeTestStatus) PredicateType() string { return "https://status.test/stat
 // cleanup policies operate on versions, and referrer manifests are not
 // versions.
 func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
+	local := statusmanagertesting.NewLocal(t)
 	ctx := context.Background()
 
 	registryHost := setupTestRegistry(t)
 
-	writer, err := statusmanagertesting.New[TestStatus](ctx, t,
+	writer, err := statusmanager.New[TestStatus](ctx, append(local.Options(),
 		statusmanager.WithRepositoryOverride(registryHost+"/skip-same-repo"),
-	)
+	)...)
 	require.NoError(t, err, "failed to create writable manager")
 
 	digest, err := name.NewDigest("example.com/foo@sha256:1111111111111111111111111111111111111111111111111111111111111111")

@@ -1,5 +1,3 @@
-//go:build withauth
-
 /*
 Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
@@ -41,6 +39,7 @@ func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // registry ping across many sessions), while a Manager without an override
 // keeps clean-slate options per call (a ping per read).
 func TestRepositoryOverrideSharesPuller(t *testing.T) {
+	local := statusmanagertesting.NewLocal(t)
 	ctx := t.Context()
 	registryHost := setupTestRegistry(t)
 
@@ -60,7 +59,7 @@ func TestRepositoryOverrideSharesPuller(t *testing.T) {
 			if tc.override {
 				opts = append(opts, statusmanager.WithRepositoryOverride(registryHost+"/reuse-repo"))
 			}
-			mgr, err := statusmanagertesting.NewReadOnly[TestStatus](ctx, t, opts...)
+			mgr, err := statusmanager.NewReadOnly[TestStatus](ctx, append(local.Options(), opts...)...)
 			require.NoError(t, err)
 
 			var afterFirst int32

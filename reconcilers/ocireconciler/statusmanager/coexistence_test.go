@@ -1,5 +1,3 @@
-//go:build withauth
-
 /*
 Copyright 2026 Chainguard, Inc.
 SPDX-License-Identifier: Apache-2.0
@@ -36,18 +34,19 @@ func (coexistenceSBOMStatus) PredicateType() string {
 }
 
 func TestStatusManagersWithDistinctPredicatesCoexist(t *testing.T) {
+	local := statusmanagertesting.NewLocal(t)
 	ctx := t.Context()
 	registryHost := setupTestRegistry(t)
 	repository := registryHost + "/predicate-coexistence-repo"
 
-	scanManager, err := statusmanagertesting.New[coexistenceScanStatus](ctx, t,
+	scanManager, err := statusmanager.New[coexistenceScanStatus](ctx, append(local.Options(),
 		statusmanager.WithRepositoryOverride(repository),
-	)
+	)...)
 	require.NoError(t, err, "creating scan status manager")
 
-	sbomManager, err := statusmanagertesting.New[coexistenceSBOMStatus](ctx, t,
+	sbomManager, err := statusmanager.New[coexistenceSBOMStatus](ctx, append(local.Options(),
 		statusmanager.WithRepositoryOverride(repository),
-	)
+	)...)
 	require.NoError(t, err, "creating SBOM status manager")
 
 	digest, err := name.NewDigest("example.com/subject@sha256:2222222222222222222222222222222222222222222222222222222222222222")
