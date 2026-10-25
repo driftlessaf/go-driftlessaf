@@ -91,8 +91,6 @@ type config struct {
 	ownerConcurrency int
 	shuffle          func(n int, swap func(i, j int))
 	windowFactor     int
-	launched         func(n int)
-	settled          func(started bool)
 }
 
 // WithOwnerConcurrency limits the number of active keys owned by the queue's
@@ -147,27 +145,6 @@ func WithBackoff(fn func(attempts int) time.Duration) Option {
 	return func(c *config) { c.backoff = fn }
 }
 
-// WithLaunchHooks reports how many slots each pass launches and when each of
-// them is let go, so a caller that reserves slots per pass can hand them back
-// slot by slot rather than when the whole pass finishes.
-//
-// launched is called exactly once per pass, before HandleAsync returns, with
-// the number of slots the pass launched; it is zero when the pass launched
-// none, including when it failed. A slot whose claim is lost to another
-// dispatcher tries the next candidate, so it may attempt several keys.
-// settled is called exactly once for each slot, after its last claim
-// attempt: with started false when no Start succeeded, otherwise with
-// started true after its callback returned and its queue transition
-// (Complete, Requeue, or Deadletter) finished or failed. settled runs on the
-// slot's goroutine, so it must be safe for concurrent calls and can run before
-// launched does. A nil hook is skipped.
-func WithLaunchHooks(launched func(n int), settled func(started bool)) Option {
-	return func(c *config) {
-		c.launched = launched
-		c.settled = settled
-	}
-}
-
 func applyOptions(opts []Option) config {
 	cfg := config{
 		errors:       nopErrorEmitter{},
@@ -176,12 +153,6 @@ func applyOptions(opts []Option) config {
 	}
 	for _, o := range opts {
 		o(&cfg)
-	}
-	if cfg.launched == nil {
-		cfg.launched = func(int) {}
-	}
-	if cfg.settled == nil {
-		cfg.settled = func(bool) {}
 	}
 	return cfg
 }

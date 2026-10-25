@@ -23,11 +23,6 @@ import (
 // report the key as dead-lettered.
 var ErrDeadletterSkipped = errors.New("workqueue: dead-letter skipped, lease changed since observation")
 
-// ErrClaimLost is returned (wrapped) by QueuedKey.Start when another
-// dispatcher claimed the key first. The dispatcher then tries its next
-// candidate with the same slot; any other Start error ends the slot's pass.
-var ErrClaimLost = errors.New("workqueue: claim lost to another dispatcher")
-
 // NoRetryDetails marks the error as non-retriable with the given reason.
 // If this error is returned to the dispatcher, it will not requeue the key.
 func NonRetriableError(err error, reason string) error {

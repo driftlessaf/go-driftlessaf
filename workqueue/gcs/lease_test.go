@@ -1260,9 +1260,6 @@ func TestStartReturnsCopyFailure(t *testing.T) {
 			if gerr, ok := errors.AsType[*googleapi.Error](err); !ok || gerr.Code != test.status {
 				t.Errorf("Start() error: got = %v, want = a googleapi.Error with code %d", err, test.status)
 			}
-			if got := errors.Is(err, workqueue.ErrClaimLost); got != test.wantRace {
-				t.Errorf("Start() error wraps ErrClaimLost: got = %t, want = %t", got, test.wantRace)
-			}
 			if _, ok := findCall(f.recorded(), http.MethodDelete, "/o/"); ok {
 				t.Error("delete call: got = one, want = none (the queued object belongs to the winner)")
 			}

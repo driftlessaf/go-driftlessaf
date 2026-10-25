@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package inmem
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -35,10 +34,6 @@ func TestWorkQueue(t *testing.T) {
 	conformance.TestMaxRetry(t, ctor)
 
 	conformance.TestBackoffDelay(t, ctor)
-
-	conformance.TestTenantFairness(t, func(limit int, tenant workqueue.TenantFunc) workqueue.Interface {
-		return NewWorkQueue(limit, WithTenant(tenant))
-	})
 }
 
 func Test_Get_KeyNotFound(t *testing.T) {
@@ -134,50 +129,5 @@ func Test_Get_InProgressKey(t *testing.T) {
 	}
 	if got, want := resp.Key, "test-key"; got != want {
 		t.Errorf("key: got = %v, want = %v", got, want)
-	}
-}
-
-func TestWithoutTenantKeysAreNotTenantKeys(t *testing.T) {
-	wq := NewWorkQueue(10)
-	ctx := t.Context()
-	for _, key := range []string{"a/1", "b/1"} {
-		if err := wq.Queue(ctx, key, workqueue.Options{}); err != nil {
-			t.Fatalf("Queue(%q) failed: %v", key, err)
-		}
-	}
-	_, qd, _, err := wq.Enumerate(ctx)
-	if err != nil {
-		t.Fatalf("Enumerate failed: %v", err)
-	}
-	if _, err := qd[0].Start(ctx); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
-	wip, qd, _, err := wq.Enumerate(ctx)
-	if err != nil {
-		t.Fatalf("Enumerate failed: %v", err)
-	}
-	if _, ok := wip[0].(workqueue.TenantKey); ok {
-		t.Errorf("in-progress key %q implements workqueue.TenantKey without WithTenant", wip[0].Name())
-	}
-	if _, ok := qd[0].(workqueue.TenantKey); ok {
-		t.Errorf("queued key %q implements workqueue.TenantKey without WithTenant", qd[0].Name())
-	}
-}
-
-func TestStartReportsLostClaim(t *testing.T) {
-	wq := NewWorkQueue(10)
-	ctx := t.Context()
-	if err := wq.Queue(ctx, "key", workqueue.Options{}); err != nil {
-		t.Fatalf("Queue failed: %v", err)
-	}
-	_, qd, _, err := wq.Enumerate(ctx)
-	if err != nil {
-		t.Fatalf("Enumerate failed: %v", err)
-	}
-	if _, err := qd[0].Start(ctx); err != nil {
-		t.Fatalf("first Start failed: %v", err)
-	}
-	if _, err := qd[0].Start(ctx); !errors.Is(err, workqueue.ErrClaimLost) {
-		t.Errorf("second Start: got = %v, want = an error wrapping workqueue.ErrClaimLost", err)
 	}
 }

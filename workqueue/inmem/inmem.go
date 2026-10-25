@@ -8,6 +8,7 @@ package inmem
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -23,13 +24,6 @@ type Option func(*wq)
 // starts. Defaults to "", which records nothing.
 func WithIdentity(identity string) Option {
 	return func(w *wq) { w.identity = identity }
-}
-
-// WithTenant orders the keys of each priority fairly across the tenants fn
-// assigns them to (see workqueue.TenantSelector), and makes the keys this
-// queue enumerates implement workqueue.TenantKey.
-func WithTenant(fn workqueue.TenantFunc) Option {
-	return func(w *wq) { w.tenant = fn }
 }
 
 // NewWorkQueue creates a new in-memory workqueue.
@@ -50,8 +44,6 @@ func NewWorkQueue(limit int, opts ...Option) workqueue.Interface {
 type wq struct {
 	limit    int
 	identity string
-	// tenant assigns keys to tenants; nil disables tenant-fair ordering.
-	tenant workqueue.TenantFunc
 
 	// rw guards the key sets.
 	rw    sync.RWMutex
@@ -158,50 +150,57 @@ func (w *wq) Enumerate(_ context.Context) ([]workqueue.ObservedInProgressKey, []
 	w.rw.RLock()
 	defer w.rw.RUnlock()
 	wip := make([]workqueue.ObservedInProgressKey, 0, len(w.wip))
-	sel := workqueue.NewTenantSelector[*queuedKey](w.limit)
+	qd := make([]struct {
+		workqueue.Options
+		key      string
+		attempts int
+		ts       time.Time
+	}, 0, w.limit+1)
 
 	for k, item := range w.wip {
-		ipk := &inProgressKey{
+		wip = append(wip, &inProgressKey{
 			wq:    w,
 			key:   k,
 			owner: item.owner,
-		}
-		if w.tenant == nil {
-			wip = append(wip, ipk)
-			continue
-		}
-		tenant := w.tenant(k)
-		sel.InProgress(tenant)
-		wip = append(wip, tenantInProgressKey{inProgressKey: ipk, tenant: tenant})
+		})
 	}
 
-	// Collect the next "limit" queued keys.
-	for k, item := range w.queue {
-		if time.Now().UTC().Before(item.NotBefore) {
+	// Collect the top "limit" queued keys.
+	for k, ts := range w.queue {
+		if time.Now().UTC().Before(ts.NotBefore) {
 			// Skip keys that are not ready to be processed.
 			continue
 		}
-		tenant := ""
-		if w.tenant != nil {
-			tenant = w.tenant(k)
-		}
-		sel.Add(&queuedKey{
-			Options:  item.Options,
-			wq:       w,
+		qd = append(qd, struct {
+			workqueue.Options
+			key      string
+			attempts int
+			ts       time.Time
+		}{
+			Options:  ts.Options,
 			key:      k,
-			attempts: item.attempts,
-			tenant:   tenant,
-		}, tenant, k, item.Priority, item.queued)
+			attempts: ts.attempts,
+			ts:       ts.queued,
+		})
+		sort.Slice(qd, func(i, j int) bool {
+			if qd[i].Priority == qd[j].Priority {
+				return qd[i].ts.Before(qd[j].ts)
+			}
+			return qd[i].Priority > qd[j].Priority
+		})
+		if len(qd) > w.limit {
+			qd = qd[:w.limit]
+		}
 	}
 
-	selected := sel.Select()
-	qk := make([]workqueue.QueuedKey, 0, len(selected))
-	for _, q := range selected {
-		if w.tenant != nil {
-			qk = append(qk, tenantQueuedKey{q})
-		} else {
-			qk = append(qk, q)
-		}
+	qk := make([]workqueue.QueuedKey, 0, len(qd))
+	for _, q := range qd {
+		qk = append(qk, &queuedKey{
+			Options:  q.Options,
+			wq:       w,
+			key:      q.key,
+			attempts: q.attempts,
+		})
 	}
 	// In-memory implementation doesn't support dead-lettering, return empty slice
 	return wip, qk, nil, nil
@@ -337,32 +336,11 @@ type queuedKey struct {
 
 	attempts int
 
-	wq     *wq
-	key    string
-	tenant string
+	wq  *wq
+	key string
 }
 
 var _ workqueue.QueuedKey = (*queuedKey)(nil)
-
-// tenantQueuedKey is a queuedKey enumerated by a queue with a TenantFunc.
-type tenantQueuedKey struct{ *queuedKey }
-
-var _ workqueue.TenantKey = (*tenantQueuedKey)(nil)
-
-// Tenant implements workqueue.TenantKey.
-func (q tenantQueuedKey) Tenant() string { return q.tenant }
-
-// tenantInProgressKey is an inProgressKey observed by a queue with a
-// TenantFunc.
-type tenantInProgressKey struct {
-	*inProgressKey
-	tenant string
-}
-
-var _ workqueue.TenantKey = (*tenantInProgressKey)(nil)
-
-// Tenant implements workqueue.TenantKey.
-func (o tenantInProgressKey) Tenant() string { return o.tenant }
 
 // Name implements workqueue.Key.
 func (q *queuedKey) Name() string {
@@ -379,12 +357,12 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	q.wq.rw.Lock()
 	defer q.wq.rw.Unlock()
 	if _, ok := q.wq.wip[q.key]; ok {
-		// Another dispatcher sharing this queue claimed the key first.
-		return nil, fmt.Errorf("%w: key %q already in progress", workqueue.ErrClaimLost, q.key)
+		// This should never happen, unless we have bad locking.
+		return nil, fmt.Errorf("key %q already in progress", q.key)
 	}
 	if _, ok := q.wq.queue[q.key]; !ok {
-		// Another dispatcher sharing this queue claimed and finished the key.
-		return nil, fmt.Errorf("%w: key %q has disappeared from the backlog", workqueue.ErrClaimLost, q.key)
+		// This should never happen, unless we have bad locking.
+		return nil, fmt.Errorf("key %q has disappeared from the backlog", q.key)
 	}
 
 	delete(q.wq.queue, q.key)

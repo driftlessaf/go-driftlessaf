@@ -1297,7 +1297,7 @@ func TestOrderCandidates_PreservesPriority(t *testing.T) {
 	}
 
 	for seed := range uint64(50) {
-		got := orderCandidates(next, nil, nil, 32, seededShuffle(seed))
+		got := orderCandidates(next, nil, 32, seededShuffle(seed))
 		if len(got) != len(next) {
 			t.Fatalf("seed %d: got %d keys, want %d", seed, len(got), len(next))
 		}
@@ -1323,7 +1323,7 @@ func TestOrderCandidates_WindowBound(t *testing.T) {
 
 	moved := false
 	for seed := range uint64(50) {
-		got := keyNames(orderCandidates(next, nil, nil, 4, seededShuffle(seed)))
+		got := keyNames(orderCandidates(next, nil, 4, seededShuffle(seed)))
 		for _, name := range got[:4] {
 			if _, ok := inWindow[name]; !ok {
 				t.Fatalf("seed %d: %q entered the window from outside it: %v", seed, name, got)
@@ -1346,7 +1346,7 @@ func TestOrderCandidates_DropsActive(t *testing.T) {
 	active := map[string]struct{}{"k0": {}}
 
 	for seed := range uint64(50) {
-		got := keyNames(orderCandidates(next, active, nil, 2, seededShuffle(seed)))
+		got := keyNames(orderCandidates(next, active, 2, seededShuffle(seed)))
 		if diff := cmp.Diff(3, len(got)); diff != "" {
 			t.Fatalf("seed %d: wrong candidate count (-want +got):\n%s", seed, diff)
 		}
@@ -1385,7 +1385,7 @@ func TestOrderCandidates_DisabledPassesInputThrough(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Active keys stay in place here: the dispatch loop skips them
 			// itself, so a disabled ordering has nothing to drop.
-			got := keyNames(orderCandidates(next, active, nil, tc.window, tc.shuffle))
+			got := keyNames(orderCandidates(next, active, tc.window, tc.shuffle))
 			if diff := cmp.Diff([]string{"k0", "k1", "k2", "k3"}, got); diff != "" {
 				t.Errorf("candidates were reordered or filtered (-want +got):\n%s", diff)
 			}
@@ -1396,13 +1396,13 @@ func TestOrderCandidates_DisabledPassesInputThrough(t *testing.T) {
 func TestOrderCandidates_SeededDeterministic(t *testing.T) {
 	next := queuedKeys(32)
 
-	first := keyNames(orderCandidates(next, nil, nil, 32, seededShuffle(7)))
-	again := keyNames(orderCandidates(next, nil, nil, 32, seededShuffle(7)))
+	first := keyNames(orderCandidates(next, nil, 32, seededShuffle(7)))
+	again := keyNames(orderCandidates(next, nil, 32, seededShuffle(7)))
 	if diff := cmp.Diff(first, again); diff != "" {
 		t.Fatalf("same seed produced different orders (-first +again):\n%s", diff)
 	}
 
-	other := keyNames(orderCandidates(next, nil, nil, 32, seededShuffle(8)))
+	other := keyNames(orderCandidates(next, nil, 32, seededShuffle(8)))
 	if cmp.Diff(first, other) == "" {
 		t.Fatal("seeds 7 and 8 produced the same order over 32 keys")
 	}
@@ -1435,7 +1435,7 @@ func contentionRates(t *testing.T, launchLimit, window int, spread bool) (float6
 			if !spread {
 				shuffle = nil
 			}
-			picks := orderCandidates(next, nil, nil, window, shuffle)[:launchLimit]
+			picks := orderCandidates(next, nil, window, shuffle)[:launchLimit]
 			for _, key := range picks {
 				attempts++
 				if _, taken := claimed[key.Name()]; taken {
@@ -1876,7 +1876,7 @@ func TestOrderCandidates_NeverPromotesPastTheWindow(t *testing.T) {
 	const window = DefaultCandidateWindowFactor
 	next := queuedKeys(window * 4)
 	for seed := range uint64(200) {
-		got := orderCandidates(next, nil, nil, window, seededShuffle(seed))
+		got := orderCandidates(next, nil, window, seededShuffle(seed))
 		if len(got) != len(next) {
 			t.Fatalf("seed %d: got %d candidates, want %d", seed, len(got), len(next))
 		}

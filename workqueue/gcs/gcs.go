@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,14 +67,6 @@ func WithScheduledWaitWarningThreshold(threshold time.Duration) Option {
 	return func(w *wq) { w.scheduledWaitWarningThreshold = threshold }
 }
 
-// WithTenant orders the keys of each priority fairly across the tenants fn
-// assigns them to (see workqueue.TenantSelector), and makes the keys this
-// queue enumerates implement workqueue.TenantKey. It also emits
-// workqueue_queued_keys_by_tenant for the tenants with the largest backlog.
-func WithTenant(fn workqueue.TenantFunc) Option {
-	return func(w *wq) { w.tenant = fn }
-}
-
 // NewWorkQueue creates a new GCS-backed workqueue.
 func NewWorkQueue(client ClientInterface, limit int, opts ...Option) workqueue.Interface {
 	w := &wq{
@@ -97,16 +90,6 @@ type wq struct {
 	// scheduledWaitWarningThreshold controls the durable high-wait log emitted
 	// after a queued key is successfully claimed. Non-positive means disabled.
 	scheduledWaitWarningThreshold time.Duration
-	// tenant assigns keys to tenants; nil disables tenant-fair ordering.
-	tenant workqueue.TenantFunc
-}
-
-// tenantOf returns the tenant of key, or "" when no TenantFunc is configured.
-func (w *wq) tenantOf(key string) string {
-	if w.tenant == nil {
-		return ""
-	}
-	return w.tenant(key)
 }
 
 // baseLabels returns the {service_name, revision_name, queue_name} labels that
@@ -387,7 +370,7 @@ type enumerationState struct {
 	w            *wq
 	labels       prometheus.Labels
 	wip          []workqueue.ObservedInProgressKey
-	qd           *workqueue.TenantSelector[*queuedKey]
+	qd           []*queuedKey
 	dl           []workqueue.DeadLetteredKey
 	queued       int
 	notbefore    int
@@ -407,7 +390,7 @@ func (w *wq) enumerate(ctx context.Context, capacity *int, ownerCapacity int) ([
 		w:           w,
 		labels:      labels,
 		wip:         make([]workqueue.ObservedInProgressKey, 0, w.limit),
-		qd:          workqueue.NewTenantSelector[*queuedKey](w.limit),
+		qd:          make([]*queuedKey, 0, w.limit+1),
 		ownerCounts: map[string]int{},
 	}
 	readQueued := capacity == nil
@@ -467,14 +450,9 @@ func (w *wq) enumerate(ctx context.Context, capacity *int, ownerCapacity int) ([
 		}
 	}
 
-	selected := state.qd.Select()
-	qk := make([]workqueue.QueuedKey, 0, len(selected))
-	for _, qi := range selected {
-		if w.tenant != nil {
-			qk = append(qk, tenantQueuedKey{qi})
-		} else {
-			qk = append(qk, qi)
-		}
+	qk := make([]workqueue.QueuedKey, 0, len(state.qd))
+	for _, qi := range state.qd {
+		qk = append(qk, qi)
 	}
 
 	// In-progress metrics are always current because that prefix is always read.
@@ -493,9 +471,6 @@ func (w *wq) enumerate(ctx context.Context, capacity *int, ownerCapacity int) ([
 		mQueuedKeysLowerBound.With(labels).Set(float64(state.queued + state.notbefore))
 		mNotBeforeKeys.With(labels).Set(float64(state.notbefore))
 		mMaxAttempts.With(labels).Set(float64(state.maxAttempts))
-		if w.tenant != nil {
-			setQueuedKeysByTenant(labels, state.qd.Backlog())
-		}
 	}
 	if readDead {
 		mDeadLetteredKeys.With(labels).Set(float64(state.deadlettered))
@@ -541,15 +516,7 @@ func (s *enumerationState) add(ctx context.Context, attrs *keyAttrs) {
 	switch {
 	case strings.HasPrefix(attrs.Name, inProgressPrefix):
 		ipk := &inProgressKey{client: w.client, attrs: attrs, priority: priority, queueName: w.name}
-		if w.tenant != nil {
-			tenant := w.tenant(strings.TrimPrefix(attrs.Name, inProgressPrefix))
-			s.wip = append(s.wip, tenantInProgressKey{inProgressKey: ipk, tenant: tenant})
-			if !ipk.IsOrphaned() {
-				s.qd.InProgress(tenant)
-			}
-		} else {
-			s.wip = append(s.wip, ipk)
-		}
+		s.wip = append(s.wip, ipk)
 		if owner, ok := attrs.Metadata[ownerMetadataKey]; ok && owner != "" {
 			s.ownerCounts[owner]++
 		} else {
@@ -575,17 +542,26 @@ func (s *enumerationState) add(ctx context.Context, attrs *keyAttrs) {
 			}
 		}
 		mTimeUntilEligible.With(s.labels).Observe(timeUntilEligible)
-		key := strings.TrimPrefix(attrs.Name, queuedPrefix)
-		tenant := w.tenantOf(key)
-		s.qd.Add(&queuedKey{
+		s.qd = append(s.qd, &queuedKey{
 			client:                        w.client,
 			attrs:                         attrs,
 			priority:                      priority,
 			queueName:                     w.name,
 			identity:                      w.identity,
 			scheduledWaitWarningThreshold: w.scheduledWaitWarningThreshold,
-			tenant:                        tenant,
-		}, tenant, key, priority, attrs.Created)
+		})
+		sort.Slice(s.qd, func(i, j int) bool {
+			if lhs, rhs := s.qd[i].Priority(), s.qd[j].Priority(); lhs != rhs {
+				return lhs > rhs
+			}
+			if !s.qd[i].attrs.Created.Equal(s.qd[j].attrs.Created) {
+				return s.qd[i].attrs.Created.Before(s.qd[j].attrs.Created)
+			}
+			return s.qd[i].attrs.Name < s.qd[j].attrs.Name
+		})
+		if len(s.qd) > w.limit {
+			s.qd = s.qd[:w.limit]
+		}
 		s.queued++
 
 	case strings.HasPrefix(attrs.Name, deadLetterPrefix):
@@ -1309,29 +1285,7 @@ type queuedKey struct {
 	// scheduledWaitWarningThreshold is copied from the queue when enumerated.
 	// Non-positive means disabled.
 	scheduledWaitWarningThreshold time.Duration
-	// tenant is the key's tenant, or "" when the queue has no TenantFunc.
-	tenant string
 }
-
-// tenantQueuedKey is a queuedKey enumerated by a queue with a TenantFunc.
-type tenantQueuedKey struct{ *queuedKey }
-
-var _ workqueue.TenantKey = (*tenantQueuedKey)(nil)
-
-// Tenant implements workqueue.TenantKey.
-func (q tenantQueuedKey) Tenant() string { return q.tenant }
-
-// tenantInProgressKey is an inProgressKey observed by a queue with a
-// TenantFunc.
-type tenantInProgressKey struct {
-	*inProgressKey
-	tenant string
-}
-
-var _ workqueue.TenantKey = (*tenantInProgressKey)(nil)
-
-// Tenant implements workqueue.TenantKey.
-func (o tenantInProgressKey) Tenant() string { return o.tenant }
 
 // baseLabels returns the labels every metric emitted from this key carries.
 func (q *queuedKey) baseLabels() prometheus.Labels {
@@ -1433,12 +1387,12 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 		if lostOwnership(err) {
 			clog.DebugContextf(ctx, "Start: lost claim race for key %q: %v", key, err)
 			mLostStartRaces.With(q.baseLabels()).Add(1)
-			return nil, fmt.Errorf("%w: Run() = %w", workqueue.ErrClaimLost, err)
+		} else {
+			clog.WarnContextf(ctx, "Start: copy to in-progress failed for key %q: %v", key, err)
 		}
-		clog.WarnContextf(ctx, "Start: copy to in-progress failed for key %q: %v", key, err)
 		return nil, fmt.Errorf("Run() = %w", err)
 	}
-	logHighScheduledWait(ctx, scheduledWait, q.scheduledWaitWarningThreshold, q.tenant)
+	logHighScheduledWait(ctx, scheduledWait, q.scheduledWaitWarningThreshold)
 	if err := q.client.Object(srcObject).Delete(ctx); err != nil {
 		// The in-progress object was already created by the copy above,
 		// so we proceed normally. The queued object will be cleaned up
@@ -1462,7 +1416,7 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	return oip, nil
 }
 
-func logHighScheduledWait(ctx context.Context, wait, threshold time.Duration, tenant string) {
+func logHighScheduledWait(ctx context.Context, wait, threshold time.Duration) {
 	if threshold <= 0 || wait < threshold {
 		return
 	}
@@ -1470,7 +1424,6 @@ func logHighScheduledWait(ctx context.Context, wait, threshold time.Duration, te
 		"event", "workqueue_scheduled_wait_high",
 		"scheduled_wait_seconds", wait.Seconds(),
 		"threshold_seconds", threshold.Seconds(),
-		"tenant", tenant,
 	)
 }
 

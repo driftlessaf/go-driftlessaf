@@ -27,13 +27,6 @@ SPDX-License-Identifier: Apache-2.0
 // many others in one pass, and a fresh shuffle each pass gives every candidate
 // in the window the same chance every time.
 //
-// Keys that implement [workqueue.TenantKey] are shuffled per tenant round
-// instead of per priority run, so that no key jumps ahead of another tenant's
-// earlier round. A round holding few tenants is a short group and spreads
-// less, so dispatchers contend more for it. Consecutive rounds holding only
-// one tenant's key are shuffled together, which keeps the tail of a
-// single-tenant flood spread across dispatchers.
-//
 // # Error Handling
 //
 // When a callback returns an error, the dispatcher requeues, dead-letters,
