@@ -115,6 +115,8 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 // nothing, so repeating it would only repeat the failure.
 func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) (Future, bool, func() int) {
 	cfg := applyOptions(opts)
+	launched := 0
+	defer func() { cfg.launched(launched) }()
 	identity := wq.Identity()
 	if cfg.ownerConcurrency > 0 && identity == "" {
 		return func() error { return fmt.Errorf("owner concurrency requires a non-empty queue identity") }, false, func() int { return 0 }
@@ -223,7 +225,7 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 
 	var claims sync.WaitGroup
 	var claimed atomic.Int64
-	idx, launched := 0, 0
+	idx := 0
 	for ; idx < len(next) && launched < launchLimit; idx++ {
 		nextKey := next[idx]
 
@@ -250,8 +252,10 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			claims.Done()
 			if err != nil {
 				clog.DebugContextf(ctx, "Failed to start key %q: %v", nextKey.Name(), err)
+				cfg.settled(false)
 				return nil
 			}
+			defer cfg.settled(true)
 
 			// Attempt to perform the actual reconciler invocation.
 			err = f(oip.Context(), oip.Name(), workqueue.Options{
