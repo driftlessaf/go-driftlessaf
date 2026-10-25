@@ -363,3 +363,38 @@ func TestParseURL_ValidatesURL(t *testing.T) {
 		})
 	}
 }
+
+func TestTenant(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{{
+		name: "pull request",
+		key:  "https://github.com/chainguard-dev/mono/pull/123",
+		want: "chainguard-dev",
+	}, {
+		name: "owner is lowercased",
+		key:  "https://github.com/MattMoor/stereo/commit/e8711f2?before=54fd42a",
+		want: "mattmoor",
+	}, {
+		name: "scheme-relative key",
+		key:  "github.com/Octo-Org/repo/tree/main/dir",
+		want: "octo-org",
+	}, {
+		name: "unparseable key",
+		key:  "not-a-github-url",
+		want: "",
+	}, {
+		name: "other host",
+		key:  "https://gitlab.com/owner/repo/issues/1",
+		want: "",
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Tenant(tc.key); got != tc.want {
+				t.Errorf("Tenant(%q): got = %q, want = %q", tc.key, got, tc.want)
+			}
+		})
+	}
+}

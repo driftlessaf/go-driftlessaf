@@ -8,6 +8,8 @@ package gcs
 import (
 	"cmp"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -53,6 +55,13 @@ var (
 			Help: "The number of keys currently in the backlog of this workqueue.",
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
+	)
+	mQueuedKeysByTenant = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "workqueue_queued_keys_by_tenant",
+			Help: "The number of eligible queued keys per tenant, for the tenants with the largest backlog; the rest are summed into one series with overflow=\"true\" and an empty tenant. Emitted only by queues configured WithTenant.",
+		},
+		[]string{"service_name", "revision_name", "queue_name", "tenant", "overflow"},
 	)
 	mQueuedKeysLowerBound = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -207,6 +216,39 @@ var (
 		[]string{"service_name", "revision_name", "queue_name", "operation"},
 	)
 )
+
+// topTenants is how many tenants workqueue_queued_keys_by_tenant names; the
+// rest share the overflow series, which bounds the label's cardinality. The
+// overflow series is told apart by its own label rather than a reserved
+// tenant name, because a TenantFunc may return any string.
+const topTenants = 10
+
+// setQueuedKeysByTenant replaces the workqueue_queued_keys_by_tenant series
+// for labels with the topTenants largest backlogs, plus the overflow series.
+func setQueuedKeysByTenant(labels prometheus.Labels, backlog map[string]int) {
+	tenants := slices.Collect(maps.Keys(backlog))
+	slices.SortFunc(tenants, func(a, b string) int {
+		return cmp.Or(cmp.Compare(backlog[b], backlog[a]), cmp.Compare(a, b))
+	})
+	mQueuedKeysByTenant.DeletePartialMatch(labels)
+	other := 0
+	for i, tenant := range tenants {
+		if i >= topTenants {
+			other += backlog[tenant]
+			continue
+		}
+		l := maps.Clone(labels)
+		l["tenant"] = tenant
+		l["overflow"] = "false"
+		mQueuedKeysByTenant.With(l).Set(float64(backlog[tenant]))
+	}
+	if len(tenants) > topTenants {
+		l := maps.Clone(labels)
+		l["tenant"] = ""
+		l["overflow"] = "true"
+		mQueuedKeysByTenant.With(l).Set(float64(other))
+	}
+}
 
 // depthLabels are the base labels for a QueuedDepth call. It mirrors
 // wq.baseLabels, which QueuedDepth cannot use: it is a free function over a

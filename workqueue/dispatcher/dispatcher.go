@@ -115,6 +115,8 @@ func HandleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 // nothing, so repeating it would only repeat the failure.
 func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batchSize int, f Callback, maxRetry int, opts ...Option) (Future, bool, func() int) {
 	cfg := applyOptions(opts)
+	launched := 0
+	defer func() { cfg.launched(launched) }()
 	identity := wq.Identity()
 	if cfg.ownerConcurrency > 0 && identity == "" {
 		return func() error { return fmt.Errorf("owner concurrency requires a non-empty queue identity") }, false, func() int { return 0 }
@@ -158,10 +160,14 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	// Use context.WithoutCancel to ensure the move completes even if the
 	// parent context is canceled.
 	activeKeys := make(map[string]struct{}, len(wip))
+	tenantWIP := make(map[string]int, len(wip))
 	ownerWIP := 0
 	for _, x := range wip {
 		if !x.IsOrphaned() {
 			activeKeys[x.Name()] = struct{}{}
+			if tk, ok := x.(workqueue.TenantKey); ok {
+				tenantWIP[tk.Tenant()]++
+			}
 			if cfg.ownerConcurrency > 0 && x.Owner() == identity {
 				ownerWIP++
 			}
@@ -218,40 +224,66 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 
 	// An identity means sibling dispatchers may be reading this same ordering.
 	if identity != "" {
-		next = orderCandidates(next, activeKeys, cfg.windowFactor*launchLimit, cfg.shuffle)
+		next = orderCandidates(next, activeKeys, tenantWIP, cfg.windowFactor*launchLimit, cfg.shuffle)
+	}
+
+	// Slots draw candidates from a shared cursor, so a slot whose claim is
+	// lost to another dispatcher can try the next candidate in this pass.
+	var cursor sync.Mutex
+	idx := 0
+	nextCandidate := func() (workqueue.QueuedKey, bool) {
+		cursor.Lock()
+		defer cursor.Unlock()
+		for idx < len(next) {
+			key := next[idx]
+			idx++
+			// A key that is already in progress is not a candidate.
+			if _, ok := activeKeys[key.Name()]; !ok {
+				return key, true
+			}
+		}
+		return nil, false
 	}
 
 	var claims sync.WaitGroup
 	var claimed atomic.Int64
-	idx, launched := 0, 0
-	for ; idx < len(next) && launched < launchLimit; idx++ {
-		nextKey := next[idx]
-
-		// If the next key is already in progress, then move to the next candidate.
-		if _, ok := activeKeys[nextKey.Name()]; ok {
-			continue
+	for launched < launchLimit {
+		nextKey, ok := nextCandidate()
+		if !ok {
+			break
 		}
 
-		// At this point, we know that nextKey gets launched.  There are two paths below:
-		// 1. One is where we lose the race and someone else launches it, and
-		// 2. The other is where we launch it.
-		// By incrementing the counter here, we ensure we don't overlaunch keys due to a race.
+		// At this point, we know that this slot gets launched, whether or not
+		// any of its claims succeed. By incrementing the counter here, we
+		// ensure we don't overlaunch keys due to a race.
 		launched++
 		claims.Add(1)
 
 		// This is done in a Go routine so that we can process keys concurrently.
 		eg.Go(func() error {
-			// Start the work, moving it to be in-progress. If we are unsuccessful starting
-			// the work, then someone beat us to it, so move on to the next key.
-			oip, err := nextKey.Start(ctx)
+			// Start the work, moving it to be in-progress. If another
+			// dispatcher beat us to it, claim the next candidate instead.
+			key := nextKey
+			oip, err := key.Start(ctx)
+			for errors.Is(err, workqueue.ErrClaimLost) {
+				clog.DebugContextf(ctx, "Lost claim on key %q, trying the next candidate: %v", key.Name(), err)
+				candidate, ok := nextCandidate()
+				if !ok {
+					break
+				}
+				key = candidate
+				oip, err = key.Start(ctx)
+			}
 			if err == nil {
 				claimed.Add(1)
 			}
 			claims.Done()
 			if err != nil {
-				clog.DebugContextf(ctx, "Failed to start key %q: %v", nextKey.Name(), err)
+				clog.DebugContextf(ctx, "Failed to start key %q: %v", key.Name(), err)
+				cfg.settled(false)
 				return nil
 			}
+			defer cfg.settled(true)
 
 			// Attempt to perform the actual reconciler invocation.
 			err = f(oip.Context(), oip.Name(), workqueue.Options{
@@ -454,7 +486,10 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 	more := launched == launchLimit && launchLimit < openSlots
 	if more {
 		more = false
-		for _, k := range next[idx:] {
+		cursor.Lock()
+		rest := next[idx:]
+		cursor.Unlock()
+		for _, k := range rest {
 			if _, ok := activeKeys[k.Name()]; !ok {
 				more = true
 				break
@@ -493,12 +528,27 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 // until the window covers the whole list, loss rises toward
 // 1-(1-L/limit)^(k-1). Every regime still beats taking the head, where all but
 // one claim per contested key is lost.
+//
+// With tenant keys the window applies per group (see orderCandidates), not per
+// priority run, so a group shorter than the window caps the spread and raises
+// loss toward the head-taking figure. The rounds of a few tenants are short
+// groups; the single-tenant tail of a flood is merged back into one.
 const DefaultCandidateWindowFactor = 48
 
 // orderCandidates returns the launchable keys from next, with the head of each
-// priority run shuffled so that dispatchers sharing a queue tend to pick
-// different keys. Without it every dispatcher reads the same ordering and
-// races for the same head, and all but one lose the slot for the pass.
+// group of keys sharing a priority and a round shuffled so that dispatchers
+// sharing a queue tend to pick different keys. Without it every dispatcher
+// reads the same ordering and races for the same head, and all but one lose
+// the slot for the pass.
+//
+// A key's round is its tenant's count in inflight plus its index among the
+// keys of that tenant and priority in next, the same round the queue ordered
+// it by (see workqueue.TenantSelector). Keys that do not implement
+// workqueue.TenantKey are all in round 0, so each priority run is one group.
+// Consecutive one-key groups from the same tenant and priority are merged
+// into one group, so the tail of a run that one tenant dominates still
+// spreads across dispatchers. One-key groups from different tenants are not
+// merged, and each is launched in queue order like taking the head.
 //
 // Keys in active are dropped rather than left in place, so they cannot spend
 // window positions that no dispatcher can claim. A key appears both queued and
@@ -506,27 +556,59 @@ const DefaultCandidateWindowFactor = 48
 // object. With no shuffle source or no window the input is returned as it
 // came, active keys included, and the caller's own skip handles them.
 //
-// Relative order across priorities is preserved, so a lower-priority key never
-// precedes a higher-priority one. Within one priority only the first window
-// keys are permuted, which bounds how far a key can be passed over in a single
-// pass.
-func orderCandidates(next []workqueue.QueuedKey, active map[string]struct{}, window int, shuffle func(n int, swap func(i, j int))) []workqueue.QueuedKey {
+// Relative order across groups is preserved, so a lower-priority key never
+// precedes a higher-priority one, and a later round never precedes an earlier
+// one. Within one group only the first window keys are permuted, which bounds
+// how far a key can be passed over in a single pass.
+func orderCandidates(next []workqueue.QueuedKey, active map[string]struct{}, inflight map[string]int, window int, shuffle func(n int, swap func(i, j int))) []workqueue.QueuedKey {
 	if shuffle == nil || window <= 0 {
 		return next
 	}
 
+	// Rounds are counted over next before active keys are dropped, because
+	// the queue counted those keys too.
+	type tenantPriority struct {
+		tenant   string
+		priority int64
+	}
+	seen := make(map[tenantPriority]int, len(next))
 	eligible := make([]workqueue.QueuedKey, 0, len(next))
+	rounds := make([]int, 0, len(next))
+	tenants := make([]string, 0, len(next))
 	for _, key := range next {
+		round, tenant := 0, ""
+		if tk, ok := key.(workqueue.TenantKey); ok {
+			tenant = tk.Tenant()
+			tp := tenantPriority{tenant: tenant, priority: key.Priority()}
+			round = inflight[tenant] + seen[tp]
+			seen[tp]++
+		}
 		if _, ok := active[key.Name()]; ok {
 			continue
 		}
 		eligible = append(eligible, key)
+		rounds = append(rounds, round)
+		tenants = append(tenants, tenant)
 	}
 
-	for start := 0; start < len(eligible); {
-		end := start + 1
-		for end < len(eligible) && eligible[end].Priority() == eligible[start].Priority() {
+	// groupEnd returns the end of the (priority, round) group starting at i.
+	groupEnd := func(i int) int {
+		end := i + 1
+		for end < len(eligible) && eligible[end].Priority() == eligible[i].Priority() && rounds[end] == rounds[i] {
 			end++
+		}
+		return end
+	}
+	for start := 0; start < len(eligible); {
+		end := groupEnd(start)
+		// A run of one-key groups from the same tenant, such as the tail of a
+		// tenant holding most of the backlog, is shuffled as one group.
+		// Reordering a tenant's own keys never moves another tenant's key
+		// ahead of its round.
+		if end == start+1 {
+			for end < len(eligible) && eligible[end].Priority() == eligible[start].Priority() && tenants[end] == tenants[start] && groupEnd(end) == end+1 {
+				end++
+			}
 		}
 		if n := min(window, end-start); n > 1 {
 			run := eligible[start : start+n]

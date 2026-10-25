@@ -42,7 +42,7 @@ func TestLogHighScheduledWait(t *testing.T) {
 			logger := clog.New(slog.NewJSONHandler(&buf, nil))
 			ctx := clog.WithLogger(t.Context(), logger)
 
-			logHighScheduledWait(ctx, tc.wait, tc.threshold)
+			logHighScheduledWait(ctx, tc.wait, tc.threshold, "octo-org")
 
 			got := buf.String()
 			if tc.wantLog != strings.Contains(got, `"event":"workqueue_scheduled_wait_high"`) {
@@ -50,6 +50,9 @@ func TestLogHighScheduledWait(t *testing.T) {
 			}
 			if tc.wantLog && !strings.Contains(got, `"threshold_seconds":3600`) {
 				t.Fatalf("structured wait warning missing threshold: %s", got)
+			}
+			if tc.wantLog && !strings.Contains(got, `"tenant":"octo-org"`) {
+				t.Fatalf("structured wait warning missing tenant: %s", got)
 			}
 		})
 	}
