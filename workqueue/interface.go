@@ -46,7 +46,9 @@ type Interface interface {
 
 	// Enumerate returns:
 	// - a list of all of the in-progress keys,
-	// - a list of the next "N" keys in the queue (according to its configured ordering),
+	// - a list of the next "N" keys in the queue (according to its configured
+	//   ordering: priority, then age, with a TenantFunc ordering the keys of
+	//   each priority by round as TenantSelector describes),
 	// - a list of all dead-lettered keys, or
 	// - an error if the workqueue is unable to enumerate the keys.
 	Enumerate(ctx context.Context) ([]ObservedInProgressKey, []QueuedKey, []DeadLetteredKey, error)
@@ -133,7 +135,8 @@ type QueuedKey interface {
 	Key
 
 	// Start initiates processing of the key, returning an OwnedInProgressKey
-	// on success and an error on failure.
+	// on success and an error on failure. The error wraps ErrClaimLost when
+	// another dispatcher claimed the key first.
 	Start(context.Context) (OwnedInProgressKey, error)
 }
 

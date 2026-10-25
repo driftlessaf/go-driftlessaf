@@ -103,6 +103,10 @@ func TestWorkQueue(t *testing.T) {
 	conformance.TestBackoffDelay(t, func(u int) workqueue.Interface {
 		return NewWorkQueue(client.Bucket(bucket), u)
 	})
+
+	conformance.TestTenantFairness(t, func(limit int, tenant workqueue.TenantFunc) workqueue.Interface {
+		return NewWorkQueue(client.Bucket(bucket), limit, WithTenant(tenant))
+	})
 }
 
 // listedFields returns the object attributes named inside the items(...) group

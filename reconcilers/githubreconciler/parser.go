@@ -106,6 +106,19 @@ func ParseURL(uri string) (*Resource, error) {
 	}
 }
 
+// Tenant returns the lowercased owner of the GitHub resource key names, for use
+// as a workqueue.TenantFunc. A GitHub App installation belongs to one account,
+// so keys with the same tenant share an installation's rate limit. A key that
+// does not parse returns "", grouping malformed keys as one tenant so they
+// cannot outrank real ones.
+func Tenant(key string) string {
+	res, err := ParseURL(key)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(res.Owner)
+}
+
 // hasScheme reports whether uri begins with a URL scheme (e.g. "https://"). It is
 // deliberately strict: the text before "://" must contain no "/" or "." so a
 // scheme-relative key like "github.com/org/repo" is not mistaken for one.
