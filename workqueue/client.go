@@ -31,6 +31,7 @@ func NewWorkqueueClient(ctx context.Context, endpoint string, addlOpts ...grpc.D
 	}
 
 	target, opts := delegate.GRPCOptions(*apiURI)
+	opts = append(opts, keepaliveOptions(apiURI.Scheme)...)
 
 	// If the endpoint is TLS terminated (not on K8s), then we are running on
 	// Cloud Run and we should authenticate with an ID token.
@@ -55,6 +56,22 @@ func NewWorkqueueClient(ctx context.Context, endpoint string, addlOpts ...grpc.D
 		WorkqueueServiceClient: NewWorkqueueServiceClient(conn),
 		conn:                   conn,
 	}, nil
+}
+
+// keepaliveOptions returns the keepalive dial options for a target with the
+// given URL scheme. An https target is a Cloud Run service reached through
+// Google's frontend, where an outbound VPC connection that sits idle for ten
+// minutes is severed without notice; pinging it keeps a long unary RPC's
+// connection alive and surfaces a dead one within the ping timeout instead of
+// on the next write. Any other target talks to a gRPC server directly, and a
+// server on gRPC's default enforcement policy answers these pings with a
+// too_many_pings GOAWAY, so those targets get none. Callers can still supply
+// their own keepalive parameters through addlOpts, which apply last.
+func keepaliveOptions(scheme string) []grpc.DialOption {
+	if scheme != "https" {
+		return nil
+	}
+	return []grpc.DialOption{delegate.KeepaliveDialOption()}
 }
 
 type clients struct {
