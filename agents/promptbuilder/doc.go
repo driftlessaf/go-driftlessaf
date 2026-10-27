@@ -106,6 +106,16 @@ Invalid examples:
   - {{test-case}} (contains hyphen)
   - {{test.value}} (contains dot)
 
+# Embedded Templates
+
+A template too long for a Go literal can live in a file the program embeds
+with //go:embed:
+
+	//go:embed prompts/analyze.md
+	var prompts embed.FS
+
+	var analyze = promptbuilder.MustNewPromptFromEmbed(prompts, "prompts/analyze.md")
+
 # Bindable Interface
 
 Types can implement the Bindable interface to provide custom binding logic.
@@ -128,7 +138,8 @@ no binding is needed:
 # Security Properties
 
  1. No Raw User Input - User data must go through encoders (XML, JSON, or YAML)
- 2. Type-Safe Literals - stringLiteral ensures only developer literals bypass encoding
+ 2. Type-Safe Templates - stringLiteral and embed.FS ensure only developer
+    literals and embedded files bypass encoding
  3. Automatic Escaping - Encoding libraries handle all escaping for user data
  4. No Transitive Substitution - Single-pass tokenization prevents recursive replacement
  5. Immutable Prompts - All operations return new instances, preventing mutation

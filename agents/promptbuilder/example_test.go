@@ -38,6 +38,24 @@ func ExampleMustNewPrompt() {
 	// Output: Template has 1 binding
 }
 
+// ExampleNewPromptFromEmbed demonstrates creating a prompt from an embedded
+// template file
+func ExampleNewPromptFromEmbed() {
+	ctx := context.Background()
+	// templates is declared with //go:embed testdata/greeting.md
+	p, err := promptbuilder.NewPromptFromEmbed(templates, "testdata/greeting.md")
+	if err != nil {
+		clog.FatalContextf(ctx, "%v", err)
+	}
+
+	result, err := p.MustBindStringLiteral("name", "world").Build()
+	if err != nil {
+		clog.FatalContextf(ctx, "%v", err)
+	}
+	fmt.Print(result)
+	// Output: Hello world.
+}
+
 // ExamplePrompt_BindStringLiteral demonstrates binding literal string values
 func ExamplePrompt_BindStringLiteral() {
 	ctx := context.Background()
