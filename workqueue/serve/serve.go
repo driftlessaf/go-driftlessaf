@@ -7,9 +7,6 @@ package serve
 
 import (
 	"context"
-	"errors"
-	"net/http"
-	"time"
 
 	"chainguard.dev/driftlessaf/workqueue"
 	"chainguard.dev/go-grpc-kit/pkg/duplex"
@@ -57,18 +54,10 @@ func WithInterceptors(inter ...grpc.UnaryServerInterceptor) Option {
 	return func(o *options) { o.interceptors = append(o.interceptors, inter...) }
 }
 
-// shutdownGrace bounds the drain once ctx is cancelled, so it stays inside
-// Cloud Run's SIGTERM to SIGKILL grace period.
-const shutdownGrace = 8 * time.Second
-
 // ListenAndServe registers srv and a health service on a duplex gRPC server,
 // starts the metrics listener and memusage.Heartbeat, and blocks until ctx is
-// cancelled or the server fails. On cancellation it drains in-flight requests
-// for up to shutdownGrace and returns nil. The metrics listener and the memory
-// heartbeat run for the life of the process, not of the call, so a second call
-// with the same metrics port in one process exits the process. Callers set up
-// profiling, metrics, and tracing exporters before calling it, as
-// githubreconciler.Main does.
+// cancelled or the server fails. Callers set up profiling, metrics, and
+// tracing exporters before calling it, as githubreconciler.Main does.
 func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, opts ...Option) error {
 	o := options{port: 8080, metricsPort: 2112}
 	for _, opt := range opts {
@@ -95,33 +84,5 @@ func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, o
 	go memusage.Heartbeat(context.WithoutCancel(ctx))
 
 	clog.InfoContext(ctx, "Starting workqueue server", "port", o.port)
-
-	// duplex.ListenAndServe does not watch ctx, so cancellation is bridged to
-	// Shutdown here. Shutdown blocks until in-flight requests finish or
-	// shutdownGrace passes; the receive afterwards joins the serve goroutine
-	// and keeps a real serve error.
-	serveErrCh := make(chan error, 1)
-	go func() {
-		serveErrCh <- d.ListenAndServe(ctx)
-	}()
-
-	var serveErr error
-	select {
-	case <-ctx.Done():
-		start := time.Now()
-		clog.InfoContext(ctx, "workqueue server draining", "cause", context.Cause(ctx), "deadline", shutdownGrace.String())
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
-		defer cancel()
-		if err := d.Shutdown(shutdownCtx); err != nil {
-			clog.WarnContext(ctx, "workqueue server shutdown did not finish cleanly", "error", err, "elapsed", time.Since(start).String())
-		} else {
-			clog.InfoContext(ctx, "workqueue server drained", "elapsed", time.Since(start).String())
-		}
-		serveErr = <-serveErrCh
-	case serveErr = <-serveErrCh:
-	}
-	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		return serveErr
-	}
-	return nil
+	return d.ListenAndServe(ctx)
 }
