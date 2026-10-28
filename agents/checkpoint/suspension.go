@@ -19,9 +19,7 @@ import (
 // like any other error, every metaagent/bot wrapper propagates it untouched
 // (early-return on err != nil), and the reconciler at the top extracts it with
 // AsSuspension. Because it travels as an ordinary error, no exported executor
-// Interface ever has to grow a method to express "I paused". A ReasonSubmitted
-// suspension is the exception to dropping the value: it comes with the
-// accepted response.
+// Interface ever has to grow a method to express "I paused".
 type Suspension struct {
 	// Envelope is the serializable capture of the paused conversation.
 	Envelope

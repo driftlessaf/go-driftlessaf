@@ -63,94 +63,6 @@ func WithSuspendTool[Request promptbuilder.Bindable, Response any](provider Susp
 	}
 }
 
-// WithSuspendOnSubmit makes an accepted submission pause the conversation
-// instead of ending it, for a caller that reviews the work and may send it
-// back: the model keeps its context, where a fresh Execute would start over.
-//
-// When the submit tool commits a result (its validators passed), Execute
-// returns that Response together with a *checkpoint.Suspension error with
-// Reason checkpoint.ReasonSubmitted, whose one pending call is the submit
-// call. Read the submission from the Response, not from the call's
-// InputJSON: that is the model's raw input, which the submit tool may have
-// repaired before validating it. ResumeWithResults (ResultResumer) continues
-// the conversation with the caller's review as the submit call's tool
-// result; Resume would frame it as a human's answer instead. The
-// conversation then runs to the next submission or ask, and a resumed run
-// returns a submission the same way. These suspensions are not questions for
-// a human, so a caller parks them itself rather than through the suspend
-// package's Coordinator.
-//
-// Such a run never ends with a Response and a nil error: a regular tool
-// writing a result through its result pointer does not end it either. Only
-// the turn's first submission is reviewed; a second gets an error result,
-// and a suspend-tool call in the same turn is answered as not asked. A
-// submission on the last turn of the budget parks with no turns left, so it
-// cannot be resumed; leave room in WithMaxTurns for the rounds a review may
-// send back.
-//
-// The option requires a submit tool (WithSubmitResultProvider). It is part of
-// the resume config digest, so an envelope parked with it does not resume on
-// an executor without it.
-func WithSuspendOnSubmit[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
-	return func(e *executor[Request, Response]) error {
-		e.suspendOnSubmit = true
-		return nil
-	}
-}
-
-// buildSubmitSuspension is buildSuspension for an accepted submission under
-// WithSuspendOnSubmit: the same envelope, with the submit call pending and
-// Reason checkpoint.ReasonSubmitted.
-func (e *executor[Request, Response]) buildSubmitSuspension(
-	params anthropic.MessageNewParams,
-	tools map[string]claudetool.Metadata[Response],
-	turn int,
-	submitCall anthropic.ToolUseBlock,
-	traceID string,
-	state loopState,
-) (*checkpoint.Suspension, error) {
-	susp, err := e.buildSuspension(params, tools, turn, submitCall, traceID, state)
-	if err != nil {
-		return nil, err
-	}
-	// The ask-a-friend constructor derives a question from the call's input;
-	// a submission carries none.
-	susp.Reason, susp.Question = checkpoint.ReasonSubmitted, ""
-	return susp, nil
-}
-
-// extraSubmissionResult answers a submission after the first in one turn
-// under WithSuspendOnSubmit: only the first is reviewed.
-func extraSubmissionResult(id string) anthropic.ContentBlockParamUnion {
-	return anthropic.ContentBlockParamUnion{
-		OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: id,
-			IsError:   anthropic.Bool(true),
-			Content: []anthropic.ToolResultBlockParamContentUnion{{
-				OfText: &anthropic.TextBlockParam{
-					Text: `{"error":"only one submission per turn is reviewed; an earlier submit call in this turn is the one under review"}`,
-				},
-			}},
-		},
-	}
-}
-
-// notAskedResult answers a suspend-tool call that a suspending submission in
-// the same turn overtook. The question was never sent, and the model must
-// know that, since its conversation continues.
-func notAskedResult(id string) anthropic.ContentBlockParamUnion {
-	return anthropic.ContentBlockParamUnion{
-		OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: id,
-			Content: []anthropic.ToolResultBlockParamContentUnion{{
-				OfText: &anthropic.TextBlockParam{
-					Text: `{"status":"not_asked","reason":"you submitted in the same turn, so the question was not sent; ask again if you still need an answer"}`,
-				},
-			}},
-		},
-	}
-}
-
 // suspendToolName returns the configured ask-a-friend suspend tool's name, or ""
 // when WithSuspendTool was not applied. Symmetric with submitToolName.
 func (e *executor[Request, Response]) suspendToolName() string {
@@ -281,20 +193,10 @@ func (e *executor[Request, Response]) exhaustedEnvelope(
 // restored prefix with the live TTL. Because an unset TTL is omitted from the
 // marshaled markers, envelopes from executors without WithCacheTTL keep the
 // digest they were parked with.
-//
-// WithSuspendOnSubmit changes what a resumed conversation's submit does, so it
-// joins the digest. Only executors with the option digest the flag, so
-// envelopes from executors without it keep resuming.
 func (e *executor[Request, Response]) configDigest(tools map[string]claudetool.Metadata[Response]) (string, error) {
 	staticParams, _, _, err := e.buildStaticParams(tools, "")
 	if err != nil {
 		return "", fmt.Errorf("build static params for digest: %w", err)
-	}
-	if e.suspendOnSubmit {
-		return checkpoint.DigestJSON(struct {
-			Params          anthropic.MessageNewParams `json:"params"`
-			SuspendOnSubmit bool                       `json:"suspend_on_submit"`
-		}{Params: staticParams, SuspendOnSubmit: true})
 	}
 	return checkpoint.DigestJSON(staticParams)
 }

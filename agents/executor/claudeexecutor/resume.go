@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -45,28 +44,12 @@ type Resumer[Request promptbuilder.Bindable, Response any] interface {
 	Resume(ctx context.Context, env checkpoint.Envelope, answers map[string]string, tools map[string]claudetool.Metadata[Response]) (Response, error)
 }
 
-// ResultResumer resumes a suspended conversation with results the caller
-// framed itself, for a pending call whose result is not a human's answer: a
-// reviewer's verdict on a submission that suspended
-// (WithSuspendOnSubmit), or the caller's refusal of a suspend call. Resume
-// frames every answer as a human's; ResumeWithResults places each result in
-// the transcript as it is. Like Resumer it is kept off Interface and reached
-// by type assertion.
-type ResultResumer[Request promptbuilder.Bindable, Response any] interface {
-	// ResumeWithResults is Resume with results, keyed by pending tool_use
-	// ID, used verbatim as the pending calls' tool results. Every pending
-	// call needs a non-empty result: there is no placeholder to fall back
-	// on, and an empty tool result is a non-retryable 400.
-	ResumeWithResults(ctx context.Context, env checkpoint.Envelope, results map[string]string, tools map[string]claudetool.Metadata[Response]) (Response, error)
-}
-
-// The concrete executor satisfies Interface (fresh runs), Resumer and
-// ResultResumer (resumed runs); a resume-capable caller obtains the latter by
-// type-asserting the Interface returned by New.
+// The concrete executor satisfies both Interface (fresh runs) and Resumer
+// (resumed runs); a resume-capable caller obtains the latter by type-asserting
+// the Interface returned by New.
 var (
-	_ Interface[promptbuilder.Bindable, any]     = (*executor[promptbuilder.Bindable, any])(nil)
-	_ Resumer[promptbuilder.Bindable, any]       = (*executor[promptbuilder.Bindable, any])(nil)
-	_ ResultResumer[promptbuilder.Bindable, any] = (*executor[promptbuilder.Bindable, any])(nil)
+	_ Interface[promptbuilder.Bindable, any] = (*executor[promptbuilder.Bindable, any])(nil)
+	_ Resumer[promptbuilder.Bindable, any]   = (*executor[promptbuilder.Bindable, any])(nil)
 )
 
 // Resume implements Resumer. It reconstructs the Anthropic request from the
@@ -79,31 +62,6 @@ func (e *executor[Request, Response]) Resume(
 	env checkpoint.Envelope,
 	answers map[string]string,
 	tools map[string]claudetool.Metadata[Response],
-) (Response, error) {
-	return e.resume(ctx, env, tools, func(params *anthropic.MessageNewParams) error {
-		return appendPendingAnswers(params, env.PendingToolCalls, answers)
-	})
-}
-
-// ResumeWithResults implements ResultResumer.
-func (e *executor[Request, Response]) ResumeWithResults(
-	ctx context.Context,
-	env checkpoint.Envelope,
-	results map[string]string,
-	tools map[string]claudetool.Metadata[Response],
-) (Response, error) {
-	return e.resume(ctx, env, tools, func(params *anthropic.MessageNewParams) error {
-		return appendPendingResults(params, env.PendingToolCalls, results)
-	})
-}
-
-// resume is Resume and ResumeWithResults: pair fills the pending calls' slot
-// in the restored request.
-func (e *executor[Request, Response]) resume(
-	ctx context.Context,
-	env checkpoint.Envelope,
-	tools map[string]claudetool.Metadata[Response],
-	pair func(*anthropic.MessageNewParams) error,
 ) (Response, error) {
 	var zero Response
 	// Fail-closed configuration checks. A resume must reconstruct the request
@@ -132,7 +90,7 @@ func (e *executor[Request, Response]) resume(
 	// completes the tool_use/tool_result pairing the API requires: the suspend
 	// call was left unanswered in the captured transcript so the answer could
 	// take its slot on resume.
-	if err := pair(&params); err != nil {
+	if err := appendPendingAnswers(&params, env.PendingToolCalls, answers); err != nil {
 		return zero, err
 	}
 	state, err := decodeLoopState(ctx, env.LoopState)
@@ -249,22 +207,17 @@ func appendPendingAnswers(params *anthropic.MessageNewParams, pending []checkpoi
 	if err != nil {
 		return err
 	}
-	appendToolResults(last, framed)
-	return nil
-}
-
-// appendToolResults appends one text tool_result per answer to msg.
-func appendToolResults(msg *anthropic.MessageParam, answers []checkpoint.FramedAnswer) {
-	for _, a := range answers {
-		msg.Content = append(msg.Content, anthropic.ContentBlockParamUnion{
+	for _, f := range framed {
+		last.Content = append(last.Content, anthropic.ContentBlockParamUnion{
 			OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: a.ID,
+				ToolUseID: f.ID,
 				Content: []anthropic.ToolResultBlockParamContentUnion{{
-					OfText: &anthropic.TextBlockParam{Text: a.Text},
+					OfText: &anthropic.TextBlockParam{Text: f.Text},
 				}},
 			},
 		})
 	}
+	return nil
 }
 
 // lastUserMessage returns the restored transcript's final message, which must
@@ -286,29 +239,4 @@ func lastUserMessage(params *anthropic.MessageNewParams) (*anthropic.MessagePara
 // so the trace is self-describing.
 func resumeTracePrompt(env checkpoint.Envelope) string {
 	return fmt.Sprintf("resume suspended agent (key=%q, run=%q, reason=%q)", env.ReconcilerKey, env.RunID, env.Reason)
-}
-
-// appendPendingResults pairs each pending call with the caller's result,
-// verbatim, in the restored request's last user message.
-func appendPendingResults(params *anthropic.MessageNewParams, pending []checkpoint.PendingToolCall, results map[string]string) error {
-	if len(pending) == 0 {
-		return errors.New("resume: the envelope has no pending tool calls to answer")
-	}
-	last, err := lastUserMessage(params)
-	if err != nil {
-		return fmt.Errorf("resume: %w (the slot the result pairs into)", err)
-	}
-	verbatim := make([]checkpoint.FramedAnswer, 0, len(pending))
-	for _, pc := range pending {
-		if pc.ID == "" {
-			return errors.New("resume: pending tool call has an empty ID; cannot pair a result")
-		}
-		text := results[pc.ID]
-		if strings.TrimSpace(text) == "" {
-			return fmt.Errorf("resume: no result for pending call %q (%s)", pc.ID, pc.Name)
-		}
-		verbatim = append(verbatim, checkpoint.FramedAnswer{ID: pc.ID, Name: pc.Name, Text: text})
-	}
-	appendToolResults(last, verbatim)
-	return nil
 }

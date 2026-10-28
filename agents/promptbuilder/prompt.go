@@ -34,17 +34,11 @@ type Prompt struct {
 
 // NewPrompt creates a new prompt from a template literal and parses bindings
 func NewPrompt(template stringLiteral) (*Prompt, error) {
-	return newPrompt(string(template))
-}
-
-// newPrompt parses template. Callers pass only program text, a literal or an
-// embedded file; runtime data belongs in bindings.
-func newPrompt(template string) (*Prompt, error) {
 	bindings := make(map[string]binding)
 
 	// Walk through the template and collect all bindings
 	// The result should be identical to the input since we return the same placeholders
-	tmpl, err := walkTemplate(template, func(name string) (string, error) {
+	tmpl, err := walkTemplate(string(template), func(name string) (string, error) {
 		if _, exists := bindings[name]; !exists {
 			bindings[name] = &unboundBinding{name: name}
 		}

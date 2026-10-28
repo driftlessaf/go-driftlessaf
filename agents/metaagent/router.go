@@ -298,7 +298,7 @@ func requirementsForConfig[Resp, CB any](protocol modelrouter.Protocol, config C
 		PromptCaching:       config.UserPromptSuffix != nil && protocol == modelrouter.ProtocolAnthropicMessages,
 		ToolCalling:         true,
 		TerminalSubmission:  true,
-		SuspendResume:       config.SuspendToolName != "" || config.SuspendOnSubmit,
+		SuspendResume:       config.SuspendToolName != "",
 		MaximumOutputTokens: config.MaxTokens != 0,
 		RefusalRecovery:     config.RefusalNudgeMaxRetries != 0,
 	}

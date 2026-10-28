@@ -74,7 +74,6 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	effort               anthropic.OutputConfigEffort        // "" = model default (high); set via WithEffort to tune reasoning depth / token spend
 	submitTool           claudetool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
 	suspendTool          *anthropic.ToolParam                // opt-in: set via WithSuspendTool — the held-out ask-a-friend tool; nil disables suspension entirely
-	suspendOnSubmit      bool                                // opt-in: set via WithSuspendOnSubmit — an accepted submission suspends the run instead of ending it
 	telemetry            *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig          retry.RetryConfig                   // retry configuration for transient Claude API errors
 	resourceLabels       map[string]string                   // resource labels for GCP billing attribution
@@ -308,9 +307,6 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 		if err := execshared.ValidateSuspendToolName(e.suspendTool.Name, e.submitToolName()); err != nil {
 			return nil, err
 		}
-	}
-	if e.suspendOnSubmit && e.submitTool.Handler == nil {
-		return nil, errors.New("WithSuspendOnSubmit requires a submit tool (WithSubmitResultProvider)")
 	}
 
 	// Claude on Vertex AI forwards request labels to Cloud Billing only from
@@ -671,21 +667,7 @@ func (e *executor[Request, Response]) runConversation(
 		// committed flag is the submit tool's explicit signal; the zero-value
 		// check preserves the legacy contract for regular tools that write a
 		// non-zero result through their result pointer.
-		if e.suspendOnSubmit && committed {
-			// The submission suspends the run, with its call pending in an
-			// empty user message the result pairs into. No turn has run, so
-			// the resumed conversation starts at turn 0.
-			params.Messages = append(params.Messages, anthropic.MessageParam{Role: anthropic.MessageParamRoleUser})
-			susp, berr := e.buildSubmitSuspension(params, tools, -1, toolCall, trace.ID, loopState{})
-			if berr != nil {
-				return response, berr
-			}
-			clog.InfoContext(ctx, "Suspending Claude agent execution on its seeded submission", "tool_use_id", toolCall.ID)
-			trace.Suspend(susp.Reason)
-			e.telemetry.RecordTurns(ctx, 0, false)
-			return finalResult, susp
-		}
-		if !e.suspendOnSubmit && (committed || !reflect.ValueOf(finalResult).IsZero()) {
+		if committed || !reflect.ValueOf(finalResult).IsZero() {
 			clog.InfoContext(ctx, "Seed tool set final result, exiting immediately")
 			e.telemetry.RecordTurns(ctx, 0, false)
 			return finalResult, nil
@@ -1048,24 +1030,10 @@ func (e *executor[Request, Response]) runConversation(
 			// toolResults below so the human answer takes the pending slot on
 			// resume.
 			suspendIdx := -1
-			// submitIdx records the slot of the turn's first committed
-			// submission when WithSuspendOnSubmit is set: it suspends the run
-			// rather than ending it, and its result is left out of
-			// toolResults so the answer takes its slot on resume.
-			submitIdx := -1
 			var toolResults []anthropic.ContentBlockParamUnion
 			for i := range toolUseBlocks {
 				if outcomes[i].err != nil {
 					return response, true, outcomes[i].err
-				}
-				if e.suspendOnSubmit && outcomes[i].committed {
-					if submitIdx < 0 {
-						submitIdx = i
-						continue
-					}
-					// Only the turn's first submission is reviewed; a later
-					// one must not read as accepted.
-					outcomes[i].result = extraSubmissionResult(toolUseBlocks[i].ID)
 				}
 				if isSuspend(toolUseBlocks[i].Name) {
 					suspendIdx = i
@@ -1077,20 +1045,12 @@ func (e *executor[Request, Response]) runConversation(
 				// is never told "submitted successfully" on a run that keeps
 				// going. The zero-value check preserves the legacy contract
 				// for regular tools that write a non-zero result through
-				// their result pointer. Under WithSuspendOnSubmit a result
-				// never ends the run, so neither check applies.
-				if !e.suspendOnSubmit && (outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero()) {
+				// their result pointer.
+				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.telemetry.RecordTurns(ctx, turn+1, false)
 					return perCallResults[i], true, nil
 				}
-			}
-
-			// A submission that suspends the turn makes a sibling ask moot,
-			// as a terminal one does, but the conversation goes on, so the
-			// ask's call needs a result of its own.
-			if submitIdx >= 0 && suspendIdx >= 0 {
-				toolResults = append(toolResults, notAskedResult(toolUseBlocks[suspendIdx].ID))
 			}
 
 			// The cut-off call closes the turn's content, so its result
@@ -1107,18 +1067,6 @@ func (e *executor[Request, Response]) runConversation(
 				Role:    anthropic.MessageParamRoleUser,
 				Content: toolResults,
 			})
-
-			if submitIdx >= 0 {
-				susp, berr := e.buildSubmitSuspension(params, tools, turn, toolUseBlocks[submitIdx], trace.ID, loopState{TruncatedToolCalls: truncatedToolCalls})
-				if berr != nil {
-					return response, true, berr
-				}
-				clog.InfoContext(ctx, "Suspending Claude agent execution on its submission",
-					"turn", turn, "tool", toolUseBlocks[submitIdx].Name, "tool_use_id", toolUseBlocks[submitIdx].ID)
-				trace.Suspend(susp.Reason)
-				e.telemetry.RecordTurns(ctx, turn+1, false)
-				return perCallResults[submitIdx], true, susp
-			}
 
 			// No terminal result won the turn: if the model asked to pause, park
 			// the conversation now. Every sibling handler has finished and its

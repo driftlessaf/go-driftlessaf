@@ -202,10 +202,6 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 		}))
 	}
 
-	if config.SuspendOnSubmit {
-		executorOpts = append(executorOpts, claudeexecutor.WithSuspendOnSubmit[Req, Resp]())
-	}
-
 	executor, err := claudeexecutor.NewWithMessages[Req, Resp](construction.messages, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude executor: %w", err)
@@ -255,21 +251,6 @@ func (a *claudeAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.
 		return zero, fmt.Errorf("claude executor does not support resume")
 	}
 	return resumer.Resume(ctx, env, answers, claudetool.Map(tools))
-}
-
-// ResumeWithResults implements ResultResumer by delegating to the concrete
-// Claude executor, reached by type assertion as in Resume.
-func (a *claudeAgent[Req, Resp, CB]) ResumeWithResults(ctx context.Context, env checkpoint.Envelope, results map[string]string, callbacks CB) (Resp, error) {
-	var zero Resp
-	tools, err := a.config.Tools.Tools(ctx, callbacks)
-	if err != nil {
-		return zero, fmt.Errorf("building tools: %w", err)
-	}
-	resumer, ok := a.executor.(claudeexecutor.ResultResumer[Req, Resp])
-	if !ok {
-		return zero, fmt.Errorf("claude executor does not support resuming with results")
-	}
-	return resumer.ResumeWithResults(ctx, env, results, claudetool.Map(tools))
 }
 
 // Continue implements Continuer by delegating to the concrete Claude

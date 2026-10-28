@@ -267,9 +267,6 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	if config.SuspendToolName != "" {
 		return fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the OpenAI-compatible backend; it lands with the chatcompletionexecutor suspend/resume slice", config.SuspendToolName)
 	}
-	if config.SuspendOnSubmit {
-		return errors.New("suspend/resume (SuspendOnSubmit) is not yet supported on the OpenAI-compatible backend")
-	}
 	if config.MaxToolCallsBeforeFinalize != 0 {
 		return fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the OpenAI-compatible backend", config.MaxToolCallsBeforeFinalize)
 	}

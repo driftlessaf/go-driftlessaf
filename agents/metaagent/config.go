@@ -188,17 +188,6 @@ type Config[Resp, CB any] struct {
 	// Ignored when SuspendToolName is empty.
 	SuspendToolDescription string
 
-	// SuspendOnSubmit makes an accepted submission suspend the run instead of
-	// ending it (claudeexecutor.WithSuspendOnSubmit): Execute returns the
-	// accepted Resp with a *checkpoint.Suspension whose pending call is the
-	// submit call, and ResumeWithResults (AsResultResumer) continues the same
-	// conversation with the caller's review as that call's result.
-	//
-	// Claude backend only; the Gemini and OpenAI-compatible backends reject
-	// it at construction. When false (the default), an accepted submission
-	// ends the run.
-	SuspendOnSubmit bool
-
 	// OmitResultSchemaFields lists JSON property names the terminal submit
 	// tool withholds from the payload schema it advertises
 	// (submitresult.Options.OmitPayloadFields). Resp is unchanged, which is

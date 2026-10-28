@@ -98,13 +98,6 @@ SPDX-License-Identifier: Apache-2.0
 // set SuspendToolName at construction until their executors grow suspend
 // support. See the suspend package for the park/wake orchestration around it.
 //
-// Setting Config.SuspendOnSubmit (Claude only) makes an accepted submission
-// suspend the run instead of ending it, so a reviewer can send the work back
-// into the same conversation. Execute returns the accepted Resp alongside the
-// suspension, whose pending call is the submit call; the ResultResumer
-// capability (obtained via AsResultResumer) continues the conversation with
-// the review as that call's result, verbatim.
-//
 // # Continuing past the turn budget
 //
 // A Claude-backed run that spends its whole MaxTurns returns an
