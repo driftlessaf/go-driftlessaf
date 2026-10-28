@@ -159,32 +159,41 @@ func TestZeroRouteResolutionCannotBind(t *testing.T) {
 func TestNewRoutedRejectsUnsupportedRequirementsBeforeAdapter(t *testing.T) {
 	t.Parallel()
 
-	selection := modelrouter.Selection{Provider: "test-provider", LogicalModel: "test/model"}
-	route := routedTestRoute(selection, modelrouter.ProtocolOpenAIChatCompletions, "deployment-42")
-	route.Capabilities.SuspendResume = false
-	routes := mustRouteRegistry(t, route)
+	for name, configure := range map[string]func(*Config[*basetenTestResponse, toolcall.EmptyTools]){
+		"suspend tool":      func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.SuspendToolName = "ask_friend" },
+		"suspend on submit": func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.SuspendOnSubmit = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	adapterCalls := 0
-	adapters, err := NewOpenAIChatCompletionsAdapterRegistry(OpenAIChatCompletionsRegistration{
-		Provider: selection.Provider,
-		Adapter: func(context.Context, modelrouter.Plan) (OpenAIChatCompletionsBinding, error) {
-			adapterCalls++
-			return OpenAIChatCompletionsBinding{}, errors.New("must not be called")
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewOpenAIChatCompletionsAdapterRegistry: %v", err)
-	}
-	router := mustRouter(t, routes, AdapterRegistries{OpenAIChatCompletions: adapters})
-	config := routedTestConfig(t)
-	config.SuspendToolName = "ask_friend"
+			selection := modelrouter.Selection{Provider: "test-provider", LogicalModel: "test/model"}
+			route := routedTestRoute(selection, modelrouter.ProtocolOpenAIChatCompletions, "deployment-42")
+			route.Capabilities.SuspendResume = false
+			routes := mustRouteRegistry(t, route)
 
-	_, err = NewRouted[*testRequest](t.Context(), router, selection, config)
-	if !errors.Is(err, modelrouter.ErrUnsupportedCapability) {
-		t.Fatalf("NewRouted error = %v, want ErrUnsupportedCapability", err)
-	}
-	if adapterCalls != 0 {
-		t.Fatalf("adapter calls = %d, want 0", adapterCalls)
+			adapterCalls := 0
+			adapters, err := NewOpenAIChatCompletionsAdapterRegistry(OpenAIChatCompletionsRegistration{
+				Provider: selection.Provider,
+				Adapter: func(context.Context, modelrouter.Plan) (OpenAIChatCompletionsBinding, error) {
+					adapterCalls++
+					return OpenAIChatCompletionsBinding{}, errors.New("must not be called")
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewOpenAIChatCompletionsAdapterRegistry: %v", err)
+			}
+			router := mustRouter(t, routes, AdapterRegistries{OpenAIChatCompletions: adapters})
+			config := routedTestConfig(t)
+			configure(&config)
+
+			_, err = NewRouted[*testRequest](t.Context(), router, selection, config)
+			if !errors.Is(err, modelrouter.ErrUnsupportedCapability) {
+				t.Fatalf("NewRouted error = %v, want ErrUnsupportedCapability", err)
+			}
+			if adapterCalls != 0 {
+				t.Fatalf("adapter calls = %d, want 0", adapterCalls)
+			}
+		})
 	}
 }
 

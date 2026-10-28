@@ -49,6 +49,23 @@ func TestSuspendToolRejectedOnGeminiBackend(t *testing.T) {
 	}
 }
 
+// TestSuspendOnSubmitRejectedOffClaude: SuspendOnSubmit fails construction on
+// the backends without executor suspend support, as SuspendToolName does.
+func TestSuspendOnSubmitRejectedOffClaude(t *testing.T) {
+	cfg := suspendConfig(t)
+	cfg.SuspendToolName, cfg.SuspendToolDescription = "", ""
+	cfg.SuspendOnSubmit = true
+	for model, want := range map[string]string{
+		"gemini-2.5-flash":      "not yet supported on the Gemini backend",
+		"google/gemini-2.5-pro": "not yet supported on the OpenAI-compatible backend",
+	} {
+		_, err := New[*testRequest](t.Context(), "test-project", "us-central1", model, cfg)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("New(%s) with SuspendOnSubmit: got %v, want %q", model, err, want)
+		}
+	}
+}
+
 // TestSuspendToolRejectedOnOpenAIBackend is the OpenAI-compatible twin of the
 // Gemini test above. The rejection fires before credential acquisition, so no
 // fake ADC is needed.

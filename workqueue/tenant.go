@@ -31,6 +31,9 @@ type TenantKey interface {
 // tenant's oldest key goes first and tenants with less work running go ahead
 // of busy ones.
 //
+// Consumer-specific scheduling policies belong in the consumer; they must not
+// change this selector's ordering for queues that opt into tenant fairness.
+//
 // When every key has the same tenant, round grows with creation time within
 // a priority, and the order is exactly priority, then creation time, then
 // name.

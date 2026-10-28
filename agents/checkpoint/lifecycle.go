@@ -32,6 +32,12 @@ const ReasonAwaitingAnswer = "awaiting answer"
 // conversation at a larger budget.
 const ReasonTurnsExhausted = "turn budget exhausted"
 
+// ReasonSubmitted is the Envelope.Reason for a suspension an accepted
+// submission triggers under claudeexecutor.WithSuspendOnSubmit. The executor
+// returns the accepted response alongside it, so a wrapper must forward the
+// value as well as the error.
+const ReasonSubmitted = "submitted"
+
 // StatusAwaitingAnswer is the status value in the synthetic tool result
 // recorded for the suspend call itself (the call is intercepted, never
 // dispatched, so the transcript needs a placeholder result to stay paired).

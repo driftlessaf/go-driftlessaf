@@ -57,3 +57,22 @@ func AsResumer[Req promptbuilder.Bindable, Resp, CB any](agent Agent[Req, Resp, 
 	r, ok := agent.(Resumer[Req, Resp, CB])
 	return r, ok
 }
+
+// ResultResumer is the capability to resume a suspended conversation with
+// results the caller framed itself (claudeexecutor.ResultResumer), for a
+// pending call whose result is not a human's answer. Only the Claude backend
+// implements it.
+type ResultResumer[Req promptbuilder.Bindable, Resp, CB any] interface {
+	Agent[Req, Resp, CB]
+
+	// ResumeWithResults rebuilds the paused conversation from env and
+	// continues it with results, keyed by pending call ID, as the pending
+	// calls' tool results verbatim.
+	ResumeWithResults(ctx context.Context, env checkpoint.Envelope, results map[string]string, callbacks CB) (Resp, error)
+}
+
+// AsResultResumer returns agent as a ResultResumer, and whether it is one.
+func AsResultResumer[Req promptbuilder.Bindable, Resp, CB any](agent Agent[Req, Resp, CB]) (ResultResumer[Req, Resp, CB], bool) {
+	r, ok := agent.(ResultResumer[Req, Resp, CB])
+	return r, ok
+}
