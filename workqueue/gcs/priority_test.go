@@ -112,7 +112,7 @@ func TestUpdateMetadataPriority(t *testing.T) {
 
 			if err := updateMetadata(t.Context(), client, "foo", map[string]string{
 				priorityMetadataKey: tc.incoming,
-			}); err != nil {
+			}, true); err != nil {
 				t.Fatalf("updateMetadata(foo, priority=%q) = %v, want nil", tc.incoming, err)
 			}
 

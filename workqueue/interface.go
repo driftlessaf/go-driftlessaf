@@ -88,7 +88,9 @@ type Options struct {
 
 	// NotBefore is the earliest time that the key should be processed.
 	// When deduplicating, the earliest time is used unless NotBeforeFloor is set
-	// on the queued entry (see NotBeforeFloor).
+	// on the queued entry (see NotBeforeFloor). A Queue that pulls a queued
+	// entry's future NotBefore earlier (cutting a failure backoff short) is new
+	// input, and resets the key's attempt count.
 	NotBefore time.Time
 
 	// Delay is an optional duration to wait before processing the key.

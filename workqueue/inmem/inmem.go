@@ -85,7 +85,15 @@ func (w *wq) Queue(_ context.Context, key string, opts workqueue.Options) error 
 		}
 		return nil
 	}
+	pending := qi.NotBefore
 	mergeOptions(&qi.Options, opts)
+	if qi.NotBefore.Before(pending) && pending.After(time.Now()) {
+		// New input cut a pending wait (a failure backoff) short: the key
+		// starts a fresh retry budget. Keeping the count would let a key whose
+		// events keep arriving spend every retry within seconds and be
+		// dead-lettered.
+		qi.attempts = 0
+	}
 	w.queue[key] = qi
 	return nil
 }

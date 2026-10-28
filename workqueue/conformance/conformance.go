@@ -1066,6 +1066,44 @@ func TestBackoffDelay(t *testing.T, ctor func(int) workqueue.Interface) {
 		})
 	})
 
+	ct.scenario("an enqueue that cuts a backoff short resets attempts", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		// New input for a key backing off from a failure runs it promptly,
+		// and as a fresh start: a key whose events keep arriving would
+		// otherwise spend its whole retry budget within seconds and be
+		// dead-lettered.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{Priority: 100}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if err := owned.RequeueWithOptions(ctx, workqueue.Options{BackoffDelay: 10 * delay}); err != nil {
+			t.Fatalf("RequeueWithOptions failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+
+		if err := wq.Queue(ctx, "foo", workqueue.Options{Priority: 100}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd = checkQueue(t, wq, ExpectedState{
+			Queued: []string{"foo"},
+		})
+		owned, err = qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if got := owned.GetAttempts(); got != 1 {
+			t.Errorf("attempt count after an enqueue cut the backoff short: got = %d, want = 1", got)
+		}
+		if err := owned.Complete(ctx); err != nil {
+			t.Fatalf("Complete failed: %v", err)
+		}
+	})
+
 	ct.scenario("backoff delay preserves attempts so dead-letter stays reachable", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
 		// Drive the attempt count up via a plain (failure) requeue, then use a
 		// BackoffDelay requeue and confirm the count keeps climbing rather than

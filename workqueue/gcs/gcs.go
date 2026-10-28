@@ -189,6 +189,11 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 	writer := w.client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).If(storage.Conditions{
 		DoesNotExist: true,
 	}).NewWriter(ctx)
+	// The object is empty. The default ChunkSize makes every Writer allocate a
+	// 16 MiB upload buffer up front, which a busy ingress multiplies by its
+	// request concurrency. The minimum still buffers the payload, which the
+	// client needs to retry a transient failure; zero would turn those off.
+	writer.ChunkSize = googleapi.MinUploadChunkSize
 
 	writer.Metadata = map[string]string{
 		priorityMetadataKey: formatPriority(opts.Priority),
@@ -211,7 +216,7 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 		clog.DebugContextf(ctx, "Key %q already exists", key)
 		mDedupedKeys.With(w.baseLabels()).Add(1)
 
-		if err := updateMetadata(ctx, w.client, key, writer.Metadata); err != nil {
+		if err := updateMetadata(ctx, w.client, key, writer.Metadata, true); err != nil {
 			if errors.Is(err, storage.ErrObjectNotExist) {
 				clog.InfoContextf(ctx, "Key %q was deleted before we could fetch the duplicate, recursing.", key)
 				return w.Queue(ctx, key, opts)
@@ -222,16 +227,64 @@ func (w *wq) Queue(ctx context.Context, key string, opts workqueue.Options) erro
 	return nil
 }
 
-func updateMetadata(ctx context.Context, client ClientInterface, key string, metadata map[string]string) error {
+// updateMetadataAttempts bounds updateMetadata's read-merge-write loop.
+const updateMetadataAttempts = 5
+
+// updateMetadataRetryInterval is the base of the linear, jittered wait between
+// updateMetadata attempts. GCS allows about one metadata mutation per second
+// per object, so the waits approach that. It is a variable so tests can
+// shorten it.
+var updateMetadataRetryInterval = 250 * time.Millisecond
+
+// updateMetadata merges metadata (priority and not-before) into the queued
+// object for key. newInput marks a producer enqueue, as opposed to a requeue
+// merging into a queued twin: one that cuts a pending not-before short resets
+// the attempt count. Concurrent enqueues of one hot key race on the same object,
+// so each write is pinned to the generation and metageneration it merged
+// against and is re-read and re-merged when it loses: the re-read usually
+// finds the winner already applied the change, and the merge is then a no-op.
+func updateMetadata(ctx context.Context, client ClientInterface, key string, metadata map[string]string, newInput bool) error {
+	for attempt := 1; ; attempt++ {
+		err := updateMetadataOnce(ctx, client, key, metadata, newInput)
+		if err == nil || attempt == updateMetadataAttempts || !metadataContention(err) {
+			// Every caller recovers from a vanished queued object by retrying,
+			// so that case is routine; any other failure is not.
+			if errors.Is(err, storage.ErrObjectNotExist) {
+				clog.DebugContextf(ctx, "updateMetadata: queued object for key %q no longer exists: %v", key, err)
+			} else if err != nil {
+				clog.WarnContextf(ctx, "updateMetadata failed for key %q: %v", key, err)
+			}
+			return err
+		}
+		delay := time.Duration(attempt) * updateMetadataRetryInterval
+		delay += rand.N(delay) //nolint:gosec // G404: jitter, not security-sensitive
+		clog.InfoContextf(ctx, "updateMetadata: lost a metadata race on key %q (attempt %d), retrying in %v: %v", key, attempt, delay, err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("updateMetadata: %w (last error: %w)", ctx.Err(), err)
+		case <-time.After(delay):
+		}
+	}
+}
+
+// metadataContention reports whether err is GCS rejecting a metadata write
+// because another writer got there first (409 edited during the operation,
+// 412 precondition) or because the object's mutation rate was exceeded (429).
+func metadataContention(err error) bool {
+	gerr, ok := errors.AsType[*googleapi.Error](err)
+	if !ok {
+		return false
+	}
+	switch gerr.Code {
+	case http.StatusConflict, http.StatusPreconditionFailed, http.StatusTooManyRequests:
+		return true
+	}
+	return false
+}
+
+func updateMetadataOnce(ctx context.Context, client ClientInterface, key string, metadata map[string]string, newInput bool) error {
 	attrs, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Attrs(ctx)
 	if err != nil {
-		// Every caller recovers from a vanished queued object by retrying, so
-		// that case is routine; any other failure is not.
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			clog.DebugContextf(ctx, "updateMetadata: queued object for key %q no longer exists: %v", key, err)
-		} else {
-			clog.WarnContextf(ctx, "updateMetadata: Attrs failed for key %q: %v", key, err)
-		}
 		return fmt.Errorf("Attrs() = %w", err)
 	}
 	// Inialialize the metadata map if it's nil.
@@ -279,15 +332,24 @@ func updateMetadata(ctx context.Context, client ClientInterface, key string, met
 		attrs.Metadata[notBeforeMetadataKey] = incomingNB
 		update = true
 	}
+	if newInput && attrs.Metadata[notBeforeMetadataKey] < existingNB && existingNB > time.Now().UTC().Format(time.RFC3339) {
+		if a, ok := attrs.Metadata[attemptsMetadataKey]; ok && a != "0" {
+			// New input cut a pending wait (a failure backoff) short: the key
+			// starts a fresh retry budget. Keeping the count would let a key
+			// whose events keep arriving spend every retry within seconds and
+			// be dead-lettered.
+			clog.InfoContextf(ctx, "Resetting %s attempts from %q: an enqueue cut its pending not-before %q short", key, a, existingNB)
+			attrs.Metadata[attemptsMetadataKey] = "0"
+			update = true
+		}
+	}
 	if update {
-		if _, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Update(ctx, storage.ObjectAttrsToUpdate{
+		if _, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).If(storage.Conditions{
+			GenerationMatch:     attrs.Generation,
+			MetagenerationMatch: attrs.Metageneration,
+		}).Update(ctx, storage.ObjectAttrsToUpdate{
 			Metadata: attrs.Metadata,
 		}); err != nil {
-			if errors.Is(err, storage.ErrObjectNotExist) {
-				clog.DebugContextf(ctx, "updateMetadata: queued object for key %q no longer exists: %v", key, err)
-			} else {
-				clog.WarnContextf(ctx, "updateMetadata: Update failed for key %q: %v", key, err)
-			}
 			return fmt.Errorf("Update() = %w", err)
 		}
 	}
@@ -928,7 +990,7 @@ func (o *inProgressKey) requeueOnce(ctx context.Context, opts workqueue.Options,
 		clog.WarnContextf(ctx, "RequeueWithOptions: copy to queued failed for key %q: %v", key, err)
 		return false, fmt.Errorf("Run() = %w", err)
 	} else if exists {
-		if err := updateMetadata(ctx, o.client, key, copier.Metadata); err != nil {
+		if err := updateMetadata(ctx, o.client, key, copier.Metadata, false); err != nil {
 			if errors.Is(err, storage.ErrObjectNotExist) {
 				clog.InfoContextf(ctx, "Key %q was deleted before we could fetch the duplicate, recursing.", key)
 				return true, nil

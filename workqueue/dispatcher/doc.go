@@ -58,8 +58,12 @@ SPDX-License-Identifier: Apache-2.0
 // [workqueue.MaximumBackoffPeriod]. The fast first step keeps races and
 // transient blips cheap; the widening keeps persistent failures — an
 // infrastructure storm, a deterministic error awaiting a fix — from burning
-// the dead-letter budget in minutes. The attempt count is always preserved,
-// so the dead-letter cutoff stays reachable. Failure classification
+// the dead-letter budget in minutes. A backoff requeue preserves the attempt
+// count, so the dead-letter cutoff stays reachable while nothing new arrives.
+// A [workqueue.Interface.Queue] that pulls the pending backoff earlier is new
+// input and resets the count to zero, so a key that fails deterministically
+// while its events keep arriving retries once per event instead of
+// dead-lettering. Failure classification
 // ([workqueue.IsInfrastructureError]) is surfaced on dispatch error events
 // for observability but does not change scheduling.
 //
