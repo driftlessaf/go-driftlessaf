@@ -100,6 +100,23 @@ func TestWorktreeToolsOffsetSchemaMinimum(t *testing.T) {
 	}
 }
 
+func TestWorktreeToolsSearchNote(t *testing.T) {
+	for _, note := range []string{"", "Skipped oversized files; inspect them with read_file."} {
+		t.Run(note, func(t *testing.T) {
+			tool := worktreeToolDefs[string](callbacks.WorktreeCallbacks{
+				SearchCodebase: func(context.Context, string, string, string, int, int) (callbacks.SearchResult, error) {
+					return callbacks.SearchResult{Note: note}, nil
+				},
+			})["search_codebase"]
+			trace, _ := agenttrace.StartTrace[string](t.Context(), "test")
+			resp := tool.Handler(t.Context(), ToolCall{ID: "s1", Name: "search_codebase", Args: map[string]any{"pattern": "needle"}}, trace, nil)
+			if got, present := resp["note"]; note == "" && present || note != "" && got != note {
+				t.Errorf("note = %v, present = %v, want %q when nonempty", got, present, note)
+			}
+		})
+	}
+}
+
 // TestWorktreeToolsReadFileReportsOffset checks that read_file relays the
 // window's actual start, which precedes the requested offset when the window
 // was aligned to the beginning of its line.
