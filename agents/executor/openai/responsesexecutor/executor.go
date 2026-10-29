@@ -223,7 +223,7 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 			}
 			execshared.RecordCallLatency(ctx, trace, turn, timer.Latency())
 			turn.RecordTokens(out.Usage.InputTokens, out.Usage.OutputTokens)
-			turn.RecordCacheTokens(out.Usage.InputTokensDetails.CachedTokens, 0)
+			turn.RecordCacheTokens(out.Usage.InputTokensDetails.CachedTokens, out.Usage.InputTokensDetails.CacheWriteTokens)
 			turn.RecordReasoningTokens(out.Usage.OutputTokensDetails.ReasoningTokens)
 			reported := effort.Level(out.Reasoning.Effort)
 			switch reported {
@@ -235,7 +235,7 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 				Turn: index, Requested: e.config.Effort, Reported: reported,
 			})
 			e.recorder.RecordTokens(ctx, out.Usage.InputTokens, out.Usage.OutputTokens)
-			e.recorder.RecordCacheTokens(ctx, out.Usage.InputTokensDetails.CachedTokens, 0)
+			e.recorder.RecordCacheTokens(ctx, out.Usage.InputTokensDetails.CachedTokens, out.Usage.InputTokensDetails.CacheWriteTokens)
 			responsePayload, err := safePayload(out)
 			if err != nil {
 				turn.Fail(err)

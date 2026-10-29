@@ -80,14 +80,15 @@ suspend/resume, hosted tools, and configurable refusal nudges aren't advertised.
 ## Observability and validation
 
 Turn traces include the route's provider, logical model, protocol, provider model
-ID, input/output tokens, cache-read tokens, and reasoning tokens. Reasoning is
-already included in output tokens; cache reads are already included in input
-tokens. Don't add either subset again when calculating totals. The nullable
+ID, input/output tokens, cache-read tokens, cache-write tokens (as
+`cache_creation_tokens`), and reasoning tokens. Reasoning is already included in
+output tokens; cache reads and cache writes are already included in input
+tokens. Don't add any of these subsets again when calculating totals. The nullable
 `turns.reasoning_tokens` schema addition must be deployed before the first
 Responses run. A recorder that rejects unknown fields can reject the entire
 trace row if its table still uses the older schema. Verify the deployed table
-schema before collecting evaluation results. This change doesn't add model
-prices or dashboard charts.
+schema before collecting evaluation results. The agent trace cost view
+(`agents/agenttrace/cost-view`) prices the GPT models it lists.
 
 The HTTP/SSE fixture tests exercise the actual SDK decoder, native continuation,
 reasoning-state replay, parallel terminal ordering, schema rejection, malformed

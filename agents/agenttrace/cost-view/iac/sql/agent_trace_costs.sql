@@ -1,11 +1,13 @@
--- Cost estimates for Claude, Gemini, and Grok traffic. Rates are currently
--- provider-agnostic: Anthropic direct (api.anthropic.com) list prices match
--- Vertex AI Global region list prices for every model below, so one price row
--- covers both serving paths. Each price row carries a pricing_provider field
--- (NULL = any provider) and price resolution already filters on it, so making
--- a model's rates diverge later is a one-line change per rate: add a
--- provider-specific row ('anthropic' | 'gcp.vertex_ai') next to (or instead
--- of) its NULL row. Resolution picks exactly one row per tier — provider-
+-- Cost estimates for Claude, Gemini, Grok, and OpenAI GPT traffic. Claude,
+-- Gemini and Grok rates are provider-agnostic: Anthropic direct
+-- (api.anthropic.com) list prices match Vertex AI Global region list prices
+-- for those models, so one price row covers both serving paths. GPT rows are
+-- Bedrock-specific (see below). Each price row carries a pricing_provider
+-- field (NULL = any provider) and price resolution already filters on it, so
+-- making a model's rates diverge later is a one-line change per rate: add a
+-- provider-specific row ('anthropic' | 'gcp.vertex_ai' | 'aws.bedrock') next
+-- to (or instead of) its NULL row. A turn whose provider matches no row for
+-- its model, such as a GPT turn without provider attribution, has NULL cost. Resolution picks exactly one row per tier — provider-
 -- specific rows win over NULL rows, and LIMIT 1 bounds the match — so a NULL
 -- row coexisting with provider-specific rows can never fan out the output or
 -- double-count cost.
@@ -23,13 +25,14 @@
 -- were last-turn snapshots from an assigning RecordTokenUsage and
 -- undercounted real spend on multi-turn traces by ~28x.
 --
--- Tier matching is per-call (each turn classified independently against 200K)
--- which matches Anthropic and Vertex billing semantics. All four cost
+-- Tier matching is per-call (each turn classified independently against 200K,
+-- or 272K for GPT), which matches Anthropic, Vertex and Bedrock billing
+-- semantics. All four cost
 -- columns (input / output / cache_read / cache_creation) honor the Large
 -- Context tier identically — same gating predicate, same per-turn
 -- granularity. Sonnet 4.6 is uniform-priced on both providers so the tier
 -- never engages today; the logic is in place for Sonnet 4.5 / Gemini 2.5
--- Pro / 3.x Pro / Grok 4.7 traffic.
+-- Pro / 3.x Pro / Grok 4.7 / GPT traffic.
 --
 -- Gemini input_tokens include cached tokens: googleexecutor records
 -- PromptTokenCount, which per the genai usage metadata contract counts
@@ -43,6 +46,19 @@
 -- Rows whose implicit cache hits carry no cache_read_tokens stay priced at
 -- the full input rate; older rows from executors without explicit caching,
 -- such as the judge, are in that set.
+--
+-- OpenAI GPT models are served only through AWS Bedrock US geographic
+-- profiles, so their rows carry pricing_provider 'aws.bedrock' and the
+-- Geo CRIS rate, which includes Bedrock's 10% fee over OpenAI list prices.
+-- OpenAI's usage contract counts both the tokens read from the cache
+-- (input_tokens_details.cached_tokens) and the tokens written to it
+-- (cache_write_tokens) inside input_tokens, and the Responses executor records
+-- them again as cache_read_tokens and cache_creation_tokens. GPT input is
+-- therefore priced on input_tokens minus both, and written tokens at the
+-- cache-write rate. Bedrock's default caching mode for GPT-5.6 and later
+-- writes to the cache on every call, at 1.25x input for the default 30-minute
+-- TTL. A GPT call above 272K input tokens bills every token at the
+-- long-context rate.
 --
 -- Model matching prefers the first non-empty turns[].logical_model value and
 -- falls back to the trace-level model for historical rows. The logical model
@@ -63,6 +79,8 @@
 --
 -- Sources: https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
 --          https://platform.claude.com/docs/en/pricing
+--          https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-terra.html
+--          (and the GPT-6 Astra, GPT-5.6 Terra and GPT-5.6 Sol model cards)
 WITH prices AS (
   SELECT * FROM UNNEST([
     -- USD per token = page price / 1e6
@@ -126,7 +144,20 @@ WITH prices AS (
     -- (https://docs.x.ai/developers/pricing). Retrieved 2026-10-06 from
     -- https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
     STRUCT('grok-4.7',                      'Standard',      NULL, 2.0e-6,  6.0e-6, 5.0e-7,  0.0),
-    STRUCT('grok-4.7',                      'Large Context', NULL, 4.0e-6,  1.2e-5, 1.0e-6,  0.0)
+    STRUCT('grok-4.7',                      'Large Context', NULL, 4.0e-6,  1.2e-5, 1.0e-6,  0.0),
+    -- OpenAI GPT on AWS Bedrock, Standard tier, Geo CRIS (US). Cache read =
+    -- 0.1x input, except GPT-6.1 Terra (0.05x). Cache write (30-minute TTL) =
+    -- 1.25x input. Above 272K input tokens, input, cache and output rates
+    -- step up (Large Context rows). Retrieved 2026-10-29 from the Bedrock
+    -- model cards.
+    STRUCT('gpt-6.1-terra', 'Standard',      'aws.bedrock', 1.1e-6,  5.5e-6,  5.5e-8, 1.375e-6),
+    STRUCT('gpt-6.1-terra', 'Large Context', 'aws.bedrock', 2.2e-6,  8.25e-6, 1.1e-7, 2.75e-6),
+    STRUCT('gpt-6-astra',   'Standard',      'aws.bedrock', 1.1e-5,  5.5e-5,  1.1e-6, 1.375e-5),
+    STRUCT('gpt-6-astra',   'Large Context', 'aws.bedrock', 2.2e-5,  8.25e-5, 2.2e-6, 2.75e-5),
+    STRUCT('gpt-5.6-terra', 'Standard',      'aws.bedrock', 2.2e-6,  1.32e-5, 2.2e-7, 2.75e-6),
+    STRUCT('gpt-5.6-terra', 'Large Context', 'aws.bedrock', 4.4e-6,  1.98e-5, 4.4e-7, 5.5e-6),
+    STRUCT('gpt-5.6-sol',   'Standard',      'aws.bedrock', 4.4e-6,  2.2e-5,  4.4e-7, 5.5e-6),
+    STRUCT('gpt-5.6-sol',   'Large Context', 'aws.bedrock', 8.8e-6,  3.3e-5,  8.8e-7, 1.1e-5)
   ])
 ),
 attributed AS (
@@ -200,6 +231,10 @@ matched AS (
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.6-flash(@.*)?$')                        THEN 'gemini-3.6-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.8-flash(@.*)?$')                        THEN 'gemini-3.8-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(xai/)?grok-4\.7(@.*)?$')                                   THEN 'grok-4.7'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(openai/)?gpt-6\.1-terra$')                                  THEN 'gpt-6.1-terra'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(openai/)?gpt-6-astra$')                                     THEN 'gpt-6-astra'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(openai/)?gpt-5\.6-terra$')                                  THEN 'gpt-5.6-terra'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(openai/)?gpt-5\.6-sol$')                                    THEN 'gpt-5.6-sol'
       ELSE NULL
     END AS pricing_model
   FROM attributed a
@@ -237,16 +272,19 @@ priced AS (
 SELECT
   m.* EXCEPT (p_std, p_large),
   -- Per-call sums over turns[]. Each turn picks its own tier based on
-  -- that call's input_tokens against the 200K threshold, or its whole prompt
-  -- against 100K for Haiku 5.5. Gemini input cost excludes cache_read_tokens
-  -- (see header).
+  -- that call's input_tokens against the 200K threshold (272K for GPT), or
+  -- its whole prompt against 100K for Haiku 5.5. Gemini and GPT input cost
+  -- excludes cache_read_tokens, and GPT input cost also excludes
+  -- cache_creation_tokens (see header).
   (
     SELECT SUM(
       GREATEST(COALESCE(turn.input_tokens, 0)
-        - IF(STARTS_WITH(m.pricing_model, 'gemini-'), COALESCE(turn.cache_read_tokens, 0), 0), 0) *
+        - IF(STARTS_WITH(m.pricing_model, 'gemini-') OR STARTS_WITH(m.pricing_model, 'gpt-'), COALESCE(turn.cache_read_tokens, 0), 0)
+        - IF(STARTS_WITH(m.pricing_model, 'gpt-'), COALESCE(turn.cache_creation_tokens, 0), 0), 0) *
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.input_price,
@@ -260,6 +298,7 @@ SELECT
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.output_price,
@@ -273,6 +312,7 @@ SELECT
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_read_price,
@@ -286,6 +326,7 @@ SELECT
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_creation_price,
@@ -296,10 +337,12 @@ SELECT
   (
     SELECT SUM(
       GREATEST(COALESCE(turn.input_tokens, 0)
-        - IF(STARTS_WITH(m.pricing_model, 'gemini-'), COALESCE(turn.cache_read_tokens, 0), 0), 0) *
+        - IF(STARTS_WITH(m.pricing_model, 'gemini-') OR STARTS_WITH(m.pricing_model, 'gpt-'), COALESCE(turn.cache_read_tokens, 0), 0)
+        - IF(STARTS_WITH(m.pricing_model, 'gpt-'), COALESCE(turn.cache_creation_tokens, 0), 0), 0) *
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.input_price,
@@ -308,6 +351,7 @@ SELECT
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.output_price,
@@ -316,6 +360,7 @@ SELECT
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_read_price,
@@ -324,6 +369,7 @@ SELECT
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
+           OR (STARTS_WITH(m.pricing_model, 'gpt-') AND turn.input_tokens > 272000)
            OR (m.pricing_model = 'claude-haiku-5-5' AND COALESCE(turn.input_tokens, 0)
              + COALESCE(turn.cache_read_tokens, 0) + COALESCE(turn.cache_creation_tokens, 0) > 100000),
            p_large.cache_creation_price,

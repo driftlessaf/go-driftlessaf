@@ -72,7 +72,7 @@ func emit(w http.ResponseWriter, items ...map[string]any) {
 		}
 	}
 	b, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{
-		"id": "resp_fixture", "status": "completed", "output": items, "usage": map[string]any{"input_tokens": 100, "output_tokens": 30, "total_tokens": 130, "input_tokens_details": map[string]any{"cached_tokens": 20}, "output_tokens_details": map[string]any{"reasoning_tokens": 10}},
+		"id": "resp_fixture", "status": "completed", "output": items, "usage": map[string]any{"input_tokens": 100, "output_tokens": 30, "total_tokens": 130, "input_tokens_details": map[string]any{"cached_tokens": 20, "cache_write_tokens": 50}, "output_tokens_details": map[string]any{"reasoning_tokens": 10}},
 	}})
 	_, _ = fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", b)
 }
@@ -702,7 +702,7 @@ func TestTraceUsageAttributionAndOpaqueRedaction(t *testing.T) {
 		t.Fatal("missing turn trace")
 	}
 	turn := tracer.trace.Turns[0]
-	if turn.InputTokens != 100 || turn.OutputTokens != 30 || turn.ReasoningTokens != 10 || turn.CacheReadTokens != 20 || turn.Protocol != "openai-responses" || turn.Provider != "aws.bedrock" {
+	if turn.InputTokens != 100 || turn.OutputTokens != 30 || turn.ReasoningTokens != 10 || turn.CacheReadTokens != 20 || turn.CacheCreationTokens != 50 || turn.Protocol != "openai-responses" || turn.Provider != "aws.bedrock" {
 		t.Fatalf("turn=%+v", turn)
 	}
 	payload, err := safePayload(map[string]any{"input": []any{map[string]any{"type": "reasoning", "encrypted_content": "private-canary"}}, "text": "visible"})
