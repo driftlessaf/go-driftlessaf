@@ -17,9 +17,14 @@ SPDX-License-Identifier: Apache-2.0
 //
 // Tool metadata comes from a `submitresult:"..."` struct tag on a blank field
 // of the response type: comma-delimited key=value pairs (name, description,
-// payload, payloadDescription, success). A comma inside a value is written
-// escaped as `\,` (`\\,` inside a raw-string tag); an unescaped comma ends
-// the value.
+// payload, payloadDescription, success) and the bare key flat. A comma
+// inside a value is written escaped as `\,` (`\\,` inside a raw-string tag);
+// an unescaped comma ends the value.
+//
+// Under flat (Options.FlatPayload) each payload property is its own tool
+// parameter, read by exact name, and a submit with a required one missing or
+// null is rejected; the payload leniency below applies only to a nested
+// payload.
 //
 // Payload leniency: when the model JSON-encodes the payload object into a
 // string instead of passing it as a nested object (a common model mistake),

@@ -8,11 +8,11 @@ package submitresult
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
+	"github.com/invopop/jsonschema"
 	"google.golang.org/genai"
 )
 
@@ -20,47 +20,52 @@ import (
 func GoogleTool[Response any](opts Options[Response]) (googletool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
-	responseSchema, err := opts.schemaForResponse()
+	props, required, flat, err := toolParameters(opts, func(s *jsonschema.Schema) (*genai.Schema, error) {
+		if g := schemaToGenai(s); g != nil {
+			return g, nil
+		}
+		return nil, errors.New("failed to derive payload schema")
+	})
 	if err != nil {
-		return googletool.SubmitMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
-	}
-	responseSchema.Description = opts.PayloadDescription
-
-	genaiPayload := schemaToGenai(responseSchema)
-	if genaiPayload == nil {
-		return googletool.SubmitMetadata[Response]{}, errors.New("failed to derive payload schema")
+		return googletool.SubmitMetadata[Response]{}, err
 	}
 
 	handler := func(ctx context.Context, call *genai.FunctionCall, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
-		return buildOutcome(ctx, opts, trace, call.ID, call.Name, call.Args)
+		return buildOutcome(ctx, opts, flat, trace, call.ID, call.Name, call.Args)
 	}
 
 	return googletool.SubmitMetadata[Response]{
 		Definition: &genai.FunctionDeclaration{
 			Name:        opts.ToolName,
 			Description: opts.Description,
-			Parameters:  googleInputSchema(opts.PayloadFieldName, genaiPayload, opts.OmitReasoning),
+			Parameters:  googleInputSchema(props, required, flat, opts.OmitReasoning),
 		},
 		Handler: handler,
 	}, nil
 }
 
 // googleInputSchema builds the {reasoning, <payload>} schema for the terminal
-// submit_result tool.
-func googleInputSchema(payloadFieldName string, payloadSchema *genai.Schema, omitReasoning bool) *genai.Schema {
+// submit_result tool from the parameters toolParameters renders. A flat
+// payload's properties keep their struct order, after reasoning, as a nested
+// payload's do inside it.
+func googleInputSchema(properties map[string]*genai.Schema, required []string, flat *flatParameters, omitReasoning bool) *genai.Schema {
 	input := &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			payloadFieldName: payloadSchema,
-		},
-		Required: []string{payloadFieldName},
+		Type:       genai.TypeObject,
+		Properties: properties,
+		Required:   required,
+	}
+	if flat != nil {
+		input.PropertyOrdering = flat.names
 	}
 	if !omitReasoning {
 		input.Properties["reasoning"] = &genai.Schema{
 			Type:        genai.TypeString,
 			Description: reasoningDescription,
 		}
-		input.Required = append([]string{"reasoning"}, input.Required...)
+		input.Required = append([]string{"reasoning"}, required...)
+		if flat != nil {
+			input.PropertyOrdering = append([]string{"reasoning"}, flat.names...)
+		}
 	}
 	return input
 }

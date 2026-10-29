@@ -23,15 +23,9 @@ import (
 func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
-	responseSchema, err := opts.schemaForResponse()
+	props, required, flat, err := toolParameters(opts, schemaToAny)
 	if err != nil {
-		return openaistool.SubmitMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
-	}
-	responseSchema.Description = opts.PayloadDescription
-
-	payloadSchema, err := schemaToMap(responseSchema)
-	if err != nil {
-		return openaistool.SubmitMetadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
+		return openaistool.SubmitMetadata[Response]{}, err
 	}
 
 	handler := func(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
@@ -43,7 +37,7 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 			trace.RejectedToolCall(tc.ID, tc.Function.Name, map[string]any{"arguments": tc.Function.Arguments}, fmt.Errorf("%w: failed to parse tool arguments: %w", ErrParameter, err))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool arguments: %v", err)}
 		}
-		return buildOutcome(ctx, opts, trace, tc.ID, tc.Function.Name, args)
+		return buildOutcome(ctx, opts, flat, trace, tc.ID, tc.Function.Name, args)
 	}
 
 	return openaistool.SubmitMetadata[Response]{
@@ -51,7 +45,7 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 			Function: shared.FunctionDefinitionParam{
 				Name:        opts.ToolName,
 				Description: oaiparam.NewOpt(opts.Description),
-				Parameters:  openaiInputSchema(opts.PayloadFieldName, payloadSchema, opts.OmitReasoning),
+				Parameters:  openaiInputSchema(props, required, opts.OmitReasoning),
 			},
 		},
 		Handler: handler,
@@ -59,21 +53,19 @@ func OpenAITool[Response any](opts Options[Response]) (openaistool.SubmitMetadat
 }
 
 // openaiInputSchema builds the {reasoning, <payload>} parameters for the
-// terminal submit_result tool.
-func openaiInputSchema(payloadFieldName string, payloadSchema map[string]any, omitReasoning bool) shared.FunctionParameters {
+// terminal submit_result tool from the parameters toolParameters renders.
+func openaiInputSchema(properties map[string]any, required []string, omitReasoning bool) shared.FunctionParameters {
 	input := shared.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			payloadFieldName: payloadSchema,
-		},
-		"required": []string{payloadFieldName},
+		"type":       "object",
+		"properties": properties,
+		"required":   required,
 	}
 	if !omitReasoning {
-		input["properties"].(map[string]any)["reasoning"] = map[string]any{
+		properties["reasoning"] = map[string]any{
 			"type":        "string",
 			"description": reasoningDescription,
 		}
-		input["required"] = []string{"reasoning", payloadFieldName}
+		input["required"] = append([]string{"reasoning"}, required...)
 	}
 	return input
 }
