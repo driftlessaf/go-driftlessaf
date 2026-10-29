@@ -591,9 +591,6 @@ func formatSearchResult(searchPath, pattern, filter string, result callbacks.Sea
 		resp["next_offset"] = *result.NextOffset
 	}
 	resp["has_more"] = result.HasMore
-	if result.Note != "" {
-		resp["note"] = result.Note
-	}
 	return resp
 }
 

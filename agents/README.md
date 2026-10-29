@@ -26,9 +26,6 @@ The following components are available:
   `agents/promptbuilder/`.
 - **Tool calling**: Helpers for function/tool calling with Claude and Gemini
   in`agents/toolcall/`.
-  Worktree search callbacks can set `SearchResult.Note` to describe omissions or
-  limitations; `search_codebase` includes nonempty notes in its response so the
-  model can distinguish an incomplete search from an absence of matches.
 - **Result parsing**: Structured output extraction from model responses in
   `agents/result/`.
 
