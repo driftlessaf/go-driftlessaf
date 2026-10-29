@@ -46,19 +46,6 @@ type Options[Response any] struct {
 	// name fails tool construction rather than leaving the field advertised,
 	// so a later json-tag rename cannot silently re-expose it.
 	OmitPayloadFields []string
-
-	// FlatPayload advertises each payload property as its own tool
-	// parameter, beside reasoning, instead of the payload as one object
-	// parameter named PayloadFieldName; PayloadFieldName and
-	// PayloadDescription go unused. Claude sometimes writes an object
-	// parameter's members as nested parameter tags, which the API cuts off
-	// at the first closing tag and delivers as a string; a flat tool of
-	// scalar properties has no object parameter to write that way. An
-	// object or array property is still one, and no string coercion
-	// applies to it. A submit is read by exact property name, and one
-	// missing or null for a required property is rejected. A payload
-	// property named reasoning needs OmitReasoning.
-	FlatPayload bool
 }
 
 func (o *Options[Response]) setDefaults() {
@@ -86,52 +73,6 @@ func (o *Options[Response]) setDefaults() {
 	if o.Generator == nil {
 		o.Generator = schema.NewGenerator()
 	}
-}
-
-// flatParameters is a flat payload's tool parameters, which buildOutcome
-// reads a submit's arguments by.
-type flatParameters struct {
-	// names is every payload property, in struct order.
-	names []string
-	// required is the properties the payload requires, never nil.
-	required []string
-}
-
-// toolParameters renders, with convert, the submit tool's parameters other
-// than reasoning, and names the ones it requires: the payload as the one
-// parameter PayloadFieldName, or under FlatPayload each payload property,
-// which flat then describes. flat is nil for a nested payload.
-func toolParameters[Response, S any](o Options[Response], convert func(*jsonschema.Schema) (S, error)) (params map[string]S, required []string, flat *flatParameters, err error) {
-	s, err := o.schemaForResponse()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("derive payload schema: %w", err)
-	}
-	if !o.FlatPayload {
-		s.Description = o.PayloadDescription
-		payload, err := convert(s)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("convert payload schema: %w", err)
-		}
-		return map[string]S{o.PayloadFieldName: payload}, []string{o.PayloadFieldName}, nil, nil
-	}
-	if s.Properties == nil || s.Properties.Len() == 0 {
-		return nil, nil, nil, errors.New("derive payload schema: a flat payload has no properties")
-	}
-	if _, ok := s.Properties.Get("reasoning"); ok && !o.OmitReasoning {
-		return nil, nil, nil, errors.New("derive payload schema: a flat payload's reasoning property collides with the reasoning parameter; set OmitReasoning")
-	}
-	params = make(map[string]S, s.Properties.Len())
-	flat = &flatParameters{names: make([]string, 0, s.Properties.Len()), required: make([]string, len(s.Required))}
-	copy(flat.required, s.Required)
-	for pair := s.Properties.Oldest(); pair != nil; pair = pair.Next() {
-		p, err := convert(pair.Value)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("convert payload property %q: %w", pair.Key, err)
-		}
-		params[pair.Key] = p
-		flat.names = append(flat.names, pair.Key)
-	}
-	return params, flat.required, flat, nil
 }
 
 func (o *Options[Response]) schemaForResponse() (*jsonschema.Schema, error) {
@@ -165,12 +106,6 @@ func omitProperties(s *jsonschema.Schema, names []string) error {
 		return slices.Contains(names, field)
 	})
 	return nil
-}
-
-// schemaToAny is schemaToMap as a property of the map[string]any parameters
-// a Claude or OpenAI tool definition carries.
-func schemaToAny(s *jsonschema.Schema) (any, error) {
-	return schemaToMap(s)
 }
 
 func schemaToMap(s *jsonschema.Schema) (map[string]any, error) {

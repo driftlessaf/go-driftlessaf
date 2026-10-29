@@ -10,9 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -72,7 +70,7 @@ func arrivedAsString(args map[string]any, field string) string {
 // buildOutcome turns decoded submit tool-call arguments into a SubmitOutcome.
 // It is shared by the per-provider submit tool handlers, which differ only in
 // how they acquire the argument map.
-func buildOutcome[Response any](ctx context.Context, opts Options[Response], flat *flatParameters, trace *agenttrace.Trace[Response], id, name string, args map[string]any) toolcall.SubmitOutcome[Response] {
+func buildOutcome[Response any](ctx context.Context, opts Options[Response], trace *agenttrace.Trace[Response], id, name string, args map[string]any) toolcall.SubmitOutcome[Response] {
 	var reasoning string
 	if !opts.OmitReasoning {
 		var err error
@@ -89,23 +87,6 @@ func buildOutcome[Response any](ctx context.Context, opts Options[Response], fla
 		embedded = jsonMemberOffset(reasoning, opts.PayloadFieldName)
 	}
 	switch {
-	case flat != nil:
-		// The arguments are the payload, so none of the recoveries below
-		// apply. Only the advertised properties are read, by exact name, so
-		// an unadvertised key cannot reach the response through
-		// encoding/json's case-insensitive match.
-		if missing := slices.DeleteFunc(slices.Clone(flat.required), func(p string) bool { return args[p] != nil }); len(missing) > 0 {
-			cause := fmt.Errorf("missing required parameters %s; pass each as its own top-level parameter (arguments arrived: %q)",
-				strings.Join(missing, ", "), slices.Sorted(maps.Keys(args)))
-			trace.RejectedToolCall(id, name, args, fmt.Errorf("%w: %w", ErrParameter, cause))
-			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("%s", cause)}
-		}
-		payloadRaw = make(map[string]any, len(flat.names))
-		for _, p := range flat.names {
-			if v, ok := args[p]; ok {
-				payloadRaw[p] = v
-			}
-		}
 	case err == nil:
 	case args[opts.PayloadFieldName] == nil && strings.Contains(reasoning, parameterOpener(opts.PayloadFieldName)):
 		// reasoning is empty under OmitReasoning, so this arm never fires

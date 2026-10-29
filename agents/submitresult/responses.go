@@ -7,6 +7,7 @@ package submitresult
 
 import (
 	"context"
+	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -26,20 +27,25 @@ type ResponsesMetadata[Response any] struct {
 // or credentials. It shares payload parsing with the other protocol adapters.
 func ResponsesTool[Response any](opts Options[Response]) (ResponsesMetadata[Response], error) {
 	opts.setDefaults()
-	props, required, flat, err := toolParameters(opts, schemaToAny)
+	s, err := opts.schemaForResponse()
 	if err != nil {
-		return ResponsesMetadata[Response]{}, err
+		return ResponsesMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
+	}
+	s.Description = opts.PayloadDescription
+	payload, err := schemaToMap(s)
+	if err != nil {
+		return ResponsesMetadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
 	}
 	return ResponsesMetadata[Response]{
 		Definition: responses.FunctionToolParam{
 			Name: opts.ToolName, Description: param.NewOpt(opts.Description),
-			Parameters: openaiInputSchema(props, required, opts.OmitReasoning),
+			Parameters: openaiInputSchema(opts.PayloadFieldName, payload, opts.OmitReasoning),
 			// Existing schemas include optional properties. The executor enforces
 			// schema and semantic validation before accepting a submission.
 			Strict: param.NewOpt(false),
 		},
 		Handler: func(ctx context.Context, call toolcall.ToolCall, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
-			return buildOutcome(ctx, opts, flat, trace, call.ID, call.Name, call.Args)
+			return buildOutcome(ctx, opts, trace, call.ID, call.Name, call.Args)
 		},
 	}, nil
 }

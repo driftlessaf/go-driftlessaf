@@ -22,9 +22,15 @@ import (
 func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
-	props, required, flat, err := toolParameters(opts, schemaToAny)
+	responseSchema, err := opts.schemaForResponse()
 	if err != nil {
-		return claudetool.SubmitMetadata[Response]{}, err
+		return claudetool.SubmitMetadata[Response]{}, fmt.Errorf("derive payload schema: %w", err)
+	}
+	responseSchema.Description = opts.PayloadDescription
+
+	payloadSchema, err := schemaToMap(responseSchema)
+	if err != nil {
+		return claudetool.SubmitMetadata[Response]{}, fmt.Errorf("convert payload schema: %w", err)
 	}
 
 	handler := func(ctx context.Context, toolUse anthropic.ToolUseBlock, trace *agenttrace.Trace[Response]) toolcall.SubmitOutcome[Response] {
@@ -38,33 +44,36 @@ func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata
 			}, fmt.Errorf("%w: failed to parse tool input: %w", ErrParameter, err))
 			return toolcall.SubmitOutcome[Response]{ToolResult: params.Error("Failed to parse tool input: %v", err)}
 		}
-		return buildOutcome(ctx, opts, flat, trace, toolUse.ID, toolUse.Name, args)
+		return buildOutcome(ctx, opts, trace, toolUse.ID, toolUse.Name, args)
 	}
 
 	return claudetool.SubmitMetadata[Response]{
 		Definition: anthropic.ToolParam{
 			Name:        opts.ToolName,
 			Description: anthropic.String(opts.Description),
-			InputSchema: claudeInputSchema(props, required, opts.OmitReasoning),
+			InputSchema: claudeInputSchema(opts.PayloadFieldName, payloadSchema, opts.OmitReasoning),
 		},
 		Handler: handler,
 	}, nil
 }
 
 // claudeInputSchema builds the {reasoning, <payload>} input schema for the
-// terminal submit_result tool from the parameters toolParameters renders.
-func claudeInputSchema(properties map[string]any, required []string, omitReasoning bool) anthropic.ToolInputSchemaParam {
+// terminal submit_result tool.
+func claudeInputSchema(payloadFieldName string, payloadSchema map[string]any, omitReasoning bool) anthropic.ToolInputSchemaParam {
+	properties := map[string]any{
+		payloadFieldName: payloadSchema,
+	}
 	input := anthropic.ToolInputSchemaParam{
 		Type:       constant.Object("object"),
 		Properties: properties,
-		Required:   required,
+		Required:   []string{payloadFieldName},
 	}
 	if !omitReasoning {
 		properties["reasoning"] = map[string]any{
 			"type":        "string",
 			"description": reasoningDescription,
 		}
-		input.Required = append([]string{"reasoning"}, required...)
+		input.Required = append([]string{"reasoning"}, input.Required...)
 	}
 	return input
 }
