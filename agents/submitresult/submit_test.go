@@ -32,7 +32,7 @@ func TestSubmissionDoesNotLogReasoning(t *testing.T) {
 	opts := Options[sampleResult]{PayloadFieldName: "analysis"}
 	opts.setDefaults()
 	trace := agenttrace.NewDefaultTracer[sampleResult](ctx).NewTrace(ctx, "fixture")
-	out := buildOutcome(ctx, opts, trace, "submit", "submit_result", args)
+	out := buildOutcome(ctx, opts, nil, trace, "submit", "submit_result", args)
 	if !out.Accepted || out.Reasoning != reasoning {
 		t.Fatalf("outcome: got accepted = %v, reasoning preserved = %v, want both true", out.Accepted, out.Reasoning == reasoning)
 	}

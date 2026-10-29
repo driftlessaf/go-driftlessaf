@@ -6,7 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 package submitresult
 
 import (
+	"cmp"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +22,7 @@ type tagMetadata struct {
 	SuccessMessage     string
 	PayloadFieldName   string
 	PayloadDescription string
+	FlatPayload        bool
 }
 
 // OptionsForResponse returns an Options pre-populated from the annotations present on
@@ -33,6 +36,7 @@ func OptionsForResponse[T any]() Options[T] {
 		SuccessMessage:     meta.SuccessMessage,
 		PayloadFieldName:   meta.PayloadFieldName,
 		PayloadDescription: meta.PayloadDescription,
+		FlatPayload:        meta.FlatPayload,
 	}
 }
 
@@ -90,6 +94,9 @@ func parseTag(tag string, meta *tagMetadata) {
 			meta.PayloadFieldName = value
 		case "payloaddescription":
 			meta.PayloadDescription = value
+		case "flat":
+			flat, err := strconv.ParseBool(cmp.Or(value, "true"))
+			meta.FlatPayload = err == nil && flat
 		}
 	}
 }
