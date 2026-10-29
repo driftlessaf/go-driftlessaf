@@ -22,10 +22,11 @@ import (
 const countFramingTokens = 4096
 
 // InputTooLargeError reports that a turn's request did not fit the input
-// budget even after older tool results were reduced, so the provider was not
-// called. Budget is ContextWindow minus OutputHeadroom (the request's
-// max_tokens) minus a 1% tolerance. InputTokens is the first exact count and
-// ReducedInputTokens the last one; they are equal when nothing was reduced.
+// budget, so the provider was not called. Older tool results were reduced
+// first unless WithInputBudgetNoReduction is set. Budget is ContextWindow
+// minus OutputHeadroom (the request's max_tokens) minus a 1% tolerance.
+// InputTokens is the first exact count and ReducedInputTokens the last one;
+// they are equal when nothing was reduced.
 //
 // The Error text deliberately avoids the phrases that classify an error as a
 // stream failure, a turn-limit stop or a transient API error, so string-based
@@ -144,6 +145,8 @@ func (e *executor[Request, Response]) countTokens(ctx context.Context, cfg retry
 // bound fits. Otherwise every decision uses an exact count: reduce the
 // oldest results just enough, recount, reduce every remaining eligible
 // result, recount, then reject. That caps a turn at three count calls.
+// With WithInputBudgetNoReduction both reduction passes are skipped and the
+// first exact count over the budget rejects the turn.
 func (e *executor[Request, Response]) enforceInputBudget(ctx context.Context, cfg retry.RetryConfig, params *anthropic.MessageNewParams, protected func(name string) bool) error {
 	budget := inputBudget(e.contextWindow, params.MaxTokens)
 	cp, err := countParams(*params)
@@ -163,7 +166,11 @@ func (e *executor[Request, Response]) enforceInputBudget(ctx context.Context, cf
 
 	current := inputTokens
 	reducedResults := 0
-	for _, all := range []bool{false, true} {
+	passes := []bool{false, true}
+	if e.inputBudgetNoReduction {
+		passes = nil
+	}
+	for _, all := range passes {
 		n := reduceToolResults(params.Messages, protected, current-budget, all)
 		if n == 0 {
 			continue

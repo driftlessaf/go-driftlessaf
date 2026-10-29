@@ -81,6 +81,8 @@ SPDX-License-Identifier: Apache-2.0
 //     cuts off a tool call (defaults to 1)
 //   - WithInputBudget: Keep every request inside the model's context window
 //     (off by default; see Input Budget)
+//   - WithInputBudgetNoReduction: Reject an over-budget turn at once instead
+//     of reducing older tool results first (off by default; see Input Budget)
 //
 // # Prompt Caching
 //
@@ -152,7 +154,11 @@ SPDX-License-Identifier: Apache-2.0
 //  4. A count still over the budget returns *InputTooLargeError and makes no
 //     provider call.
 //
-// A turn over the budget makes three count calls at most.
+// A turn over the budget makes three count calls at most. With
+// WithInputBudgetNoReduction step 3 is skipped: the first count over the
+// budget returns *InputTooLargeError with nothing reduced, so the cached
+// prefix is never rewritten. See the option's documentation for when failing
+// fast costs less than reducing.
 //
 // An older tool result is one before the last assistant message. A result
 // that the model has not read yet is never reduced. A result is eligible

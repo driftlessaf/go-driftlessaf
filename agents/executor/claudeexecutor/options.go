@@ -238,6 +238,24 @@ func WithInputBudget[Request promptbuilder.Bindable, Response any](contextWindow
 	}
 }
 
+// WithInputBudgetNoReduction makes a turn over the input budget fail with an
+// *InputTooLargeError at once, with no tool result reduced. The budget itself
+// comes from WithInputBudget, and New fails when that option is absent.
+//
+// Reducing a tool result rewrites a block near the front of the messages,
+// which invalidates the prompt cache for everything after the static prefix.
+// Once a conversation reaches the budget, every later turn overflows by the
+// size of its new tool result and reduces one more old result, so each turn
+// re-writes the whole conversation prefix at cache-write price. An agent that
+// can answer the error by starting a continuation conversation on a small
+// prefix pays less by failing fast than by hovering at the budget.
+func WithInputBudgetNoReduction[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.inputBudgetNoReduction = true
+		return nil
+	}
+}
+
 // WithThinking enables extended thinking mode with the specified token budget
 // The budget_tokens parameter sets the maximum tokens Claude can use for reasoning
 // This must be less than max_tokens and at least 1024 tokens is recommended

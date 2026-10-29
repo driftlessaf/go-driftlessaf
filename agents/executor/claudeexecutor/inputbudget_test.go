@@ -328,6 +328,10 @@ func TestInputBudgetLimits(t *testing.T) {
 		name:       "a negative window",
 		opts:       opts{claudeexecutor.WithInputBudget[errCapRequest, errCapResponse](-1)},
 		wantNewErr: "must not be negative",
+	}, {
+		name:       "no reduction without a budget",
+		opts:       opts{claudeexecutor.WithInputBudgetNoReduction[errCapRequest, errCapResponse]()},
+		wantNewErr: "requires WithInputBudget",
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -633,6 +637,84 @@ func TestInputBudgetOrder(t *testing.T) {
 				if strings.Contains(err.Error(), s) {
 					t.Errorf("error text %q contains %q, which another classifier matches", err.Error(), s)
 				}
+			}
+		})
+	}
+}
+
+// TestInputBudgetNoReduction proves that the same one-token overflow is
+// reduced and sent by default, and rejected on its first count, with nothing
+// reduced and no provider call, under WithInputBudgetNoReduction.
+func TestInputBudgetNoReduction(t *testing.T) {
+	t.Parallel()
+
+	const bytesPerToken = 2
+	countBytes := probeCountBytes(t, budgetOrderRun())
+	tests := []struct {
+		name        string
+		opts        []claudeexecutor.Option[errCapRequest, errCapResponse]
+		wantOrder   []string
+		wantReduced int
+	}{{
+		name:        "the default reduces the oldest result and calls the provider",
+		wantOrder:   []string{hitCount, hitCount, hitMessages},
+		wantReduced: 1,
+	}, {
+		name:      "no reduction rejects on the first count",
+		opts:      []claudeexecutor.Option[errCapRequest, errCapResponse]{claudeexecutor.WithInputBudgetNoReduction[errCapRequest, errCapResponse]()},
+		wantOrder: []string{hitCount},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			first := ceilDiv(countBytes, bytesPerToken)
+			budget := first - 1
+			window := windowFor(t, budget, 8192)
+			client, spy := newBudgetServer(t, budgetServer{bytesPerToken: bytesPerToken, turn: func(int) []string { return answerTurn }})
+
+			opts := append([]claudeexecutor.Option[errCapRequest, errCapResponse]{
+				claudeexecutor.WithInputBudget[errCapRequest, errCapResponse](window),
+			}, tt.opts...)
+			got, err := budgetOrderRun().execute(t, client, opts...)
+			order, _, counts, messageBodies := spy.snapshot()
+			if diff := cmp.Diff(tt.wantOrder, order); diff != "" {
+				t.Errorf("request order (-want, +got):\n%s", diff)
+			}
+			if counts[0] != first {
+				t.Fatalf("first count: got = %d, want = %d (the probe's request)", counts[0], first)
+			}
+
+			if tt.wantReduced > 0 {
+				if err != nil {
+					t.Fatalf("Execute: %v", err)
+				}
+				if got.Answer != "42" {
+					t.Errorf("Answer: got = %q, want = %q", got.Answer, "42")
+				}
+				if !resultReduced(t, messageBodies[0], "toolu_p1") {
+					t.Error("toolu_p1 not reduced in the sent request")
+				}
+				return
+			}
+
+			tooLarge, ok := errors.AsType[*claudeexecutor.InputTooLargeError](err)
+			if !ok {
+				t.Fatalf("Execute: got = %v, want an *InputTooLargeError", err)
+			}
+			want := &claudeexecutor.InputTooLargeError{
+				Model:              "claude-sonnet-4-6",
+				ContextWindow:      window,
+				OutputHeadroom:     8192,
+				Budget:             budget,
+				InputTokens:        first,
+				ReducedInputTokens: first,
+				ReducedResults:     0,
+			}
+			if diff := cmp.Diff(want, tooLarge); diff != "" {
+				t.Errorf("InputTooLargeError (-want, +got):\n%s", diff)
+			}
+			if _, isRequeue := workqueue.GetRequeueDelay(err); isRequeue {
+				t.Error("rejection carries a requeue delay, want a terminal error")
 			}
 		})
 	}

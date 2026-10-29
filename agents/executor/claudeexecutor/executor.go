@@ -197,6 +197,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// WithInputBudget. See inputbudget.go.
 	inputBudgetEnabled bool
 	contextWindow      int64
+	// inputBudgetNoReduction makes an over-budget turn fail without
+	// reducing older tool results first. Set via WithInputBudgetNoReduction.
+	inputBudgetNoReduction bool
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -295,6 +298,8 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 		if budget := inputBudget(e.contextWindow, e.maxTokens); budget <= 0 {
 			return nil, fmt.Errorf("WithInputBudget: max_tokens %d leaves no input budget in the %d-token context window of model %q", e.maxTokens, e.contextWindow, e.capabilityModelName)
 		}
+	} else if e.inputBudgetNoReduction {
+		return nil, errors.New("WithInputBudgetNoReduction requires WithInputBudget: there is no budget to enforce")
 	}
 
 	// A suspend tool must not share the terminal submit tool's name: the two
