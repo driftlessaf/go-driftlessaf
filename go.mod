@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	chainguard.dev/apko v1.4.13
 	chainguard.dev/go-grpc-kit v0.20.0
-	chainguard.dev/sdk v0.1.440
+	chainguard.dev/sdk v0.1.404
 	cloud.google.com/go/aiplatform v1.126.0
 	cloud.google.com/go/compute/metadata v0.10.0
 	cloud.google.com/go/kms v1.33.0
@@ -18,12 +18,13 @@ require (
 	github.com/aws/smithy-go v1.28.2
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chainguard-dev/terraform-infra-common v1.80.1
+	github.com/chainguard-dev/terraform-infra-common v1.25.0
 	github.com/chainguard-dev/terraform-provider-cosign v0.5.1
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467
 	github.com/digitorus/timestamp v0.0.0-20250524132541-c45532741eea
+	github.com/github/smimesign v0.2.0
 	github.com/go-git/go-billy/v5 v5.9.2
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/go-jose/go-jose/v4 v4.1.5
@@ -45,8 +46,10 @@ require (
 	github.com/sethvargo/go-envconfig v1.4.3
 	github.com/shurcooL/githubv4 v0.0.0-20260209031235-2402fdf4a9ed
 	github.com/sigstore/cosign/v3 v3.1.3
+	github.com/sigstore/fulcio v1.8.8
 	github.com/sigstore/gitsign v0.17.1
 	github.com/sigstore/protobuf-specs v0.5.2
+	github.com/sigstore/rekor v1.5.4
 	github.com/sigstore/rekor-tiles/v2 v2.3.0
 	github.com/sigstore/sigstore v1.11.0
 	github.com/sigstore/sigstore-go v1.3.0
@@ -136,7 +139,6 @@ require (
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
-	github.com/github/smimesign v0.2.0 // indirect
 	github.com/go-chi/chi/v5 v5.3.1 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
@@ -239,8 +241,6 @@ require (
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.8 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
-	github.com/sigstore/fulcio v1.8.8 // indirect
-	github.com/sigstore/rekor v1.5.4 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.10.9 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/azure v1.10.9 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.10.9 // indirect
@@ -299,6 +299,10 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace chainguard.dev/sdk => ../../public/sdk
+
+replace github.com/chainguard-dev/terraform-infra-common => ../terraform-infra-common
 
 // TEMPORARY: sigstore-go v1.3.0 added GetLogEntryByUUID to sign.RekorClient,
 // which gitsign's validatingRekorClient does not implement, so every module
