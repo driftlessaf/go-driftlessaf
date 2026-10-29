@@ -93,9 +93,9 @@ func NewLocal(t *testing.T) *Local {
 		t.Fatalf("GenerateTSAIntermediate: %v", err)
 	}
 	tsaKey := newECDSAKey(t)
-	tsaCert, err := ca.GenerateTSALeafCert(now.Add(-5*time.Minute), tsaKey, tsaIntermediate, tsaIntermediateKey)
+	tsaCert, err := issueTSALeaf(&tsaKey.PublicKey, now, tsaIntermediate, tsaIntermediateKey)
 	if err != nil {
-		t.Fatalf("GenerateTSALeafCert: %v", err)
+		t.Fatalf("issueTSALeaf: %v", err)
 	}
 	rekorKey := newECDSAKey(t)
 
@@ -373,6 +373,38 @@ func issueLeaf(pub *ecdsa.PublicKey, san, iss string, issuerCert *x509.Certifica
 	}
 	template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{Id: asn1.ObjectIdentifier(ctx509.OIDExtensionCTSCT), Value: encoded})
 	der, err := x509.CreateCertificate(rand.Reader, template, issuerCert, pub, issuerKey)
+	if err != nil {
+		return nil, err
+	}
+	return x509.ParseCertificate(der)
+}
+
+// timestampingOID is the id-kp-timeStamping extended key usage.
+var timestampingOID = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 8}
+
+// issueTSALeaf issues the timestamp authority's certificate, valid from just
+// before now until the trusted root's validity ends an hour later, so a test
+// that runs for many minutes still gets timestamps that verify. It copies
+// sigstore-go's ca.GenerateTSALeafCert, including the critical timestamping EKU
+// that verification requires, but that helper's certificate is valid for only
+// ten minutes.
+func issueTSALeaf(pub *ecdsa.PublicKey, now time.Time, issuerCert *x509.Certificate, issuerKey crypto.Signer) (*x509.Certificate, error) {
+	eku, err := asn1.Marshal([]asn1.ObjectIdentifier{timestampingOID})
+	if err != nil {
+		return nil, err
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageTimeStamping},
+		ExtraExtensions: []pkix.Extension{{
+			Id:       asn1.ObjectIdentifier{2, 5, 29, 37},
+			Critical: true,
+			Value:    eku,
+		}},
+	}, issuerCert, pub, issuerKey)
 	if err != nil {
 		return nil, err
 	}
