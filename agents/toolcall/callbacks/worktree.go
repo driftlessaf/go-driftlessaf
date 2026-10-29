@@ -83,6 +83,9 @@ type SearchResult struct {
 
 	// HasMore indicates that additional matches exist beyond this page.
 	HasMore bool
+
+	// Note explains omissions or other qualifications on the search results.
+	Note string
 }
 
 // EditResult is the result of an EditFile callback call.
