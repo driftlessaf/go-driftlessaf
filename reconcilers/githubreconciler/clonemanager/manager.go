@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -451,7 +452,43 @@ func (m *Manager) resetClone(ctx context.Context, cl *clone) error {
 	if err := cl.root.Remove(".git/info/exclude"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clearing .git/info/exclude: %w", err)
 	}
+	// A git repository nested in a tracked directory keeps its files across
+	// any reset and clean, and the go-git backend's clean keeps untracked ones
+	// too. Their files would reach the next lease, so a clone that still holds
+	// one is discarded rather than pooled.
+	nested, err := nestedRepository(ctx, cl.root)
+	if err != nil {
+		return fmt.Errorf("checking for nested repositories: %w", err)
+	}
+	if nested != "" {
+		return fmt.Errorf("nested git repository at %s", nested)
+	}
 	return nil
+}
+
+// nestedRepository returns the first path below the working tree's root
+// named .git, a directory or a gitfile, or "" when there is none. The walk goes
+// through the clone's root, so it neither follows symlinks nor leaves the
+// clone, and it stops between filesystem calls once ctx is done.
+func nestedRepository(ctx context.Context, root *os.Root) (string, error) {
+	var nested string
+	err := fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case d.Name() != ".git":
+			return nil
+		case path == ".git" && d.IsDir():
+			return fs.SkipDir
+		case path == ".git":
+			return nil
+		}
+		nested = path
+		return fs.SkipAll
+	})
+	return nested, err
 }
 
 // releaseClone returns a clone to the back of the pool. Combined with
@@ -791,8 +828,11 @@ func (l *Lease) BaseCommit() plumbing.Hash {
 
 // Return resets the working tree and places the clone back into the manager's
 // pool. Clones that have served the manager's fetch bound are discarded
-// instead, so a replacement is cloned fresh on a later lease. Once Return
-// succeeds, the lease should be considered invalid.
+// instead, so a replacement is cloned fresh on a later lease. A clone the reset
+// cannot bring back to a clean tree is discarded as well, and Return reports
+// why: one such case is a git repository nested in the tree, which the go-git
+// backend's clean keeps even in untracked directories. Once Return succeeds,
+// the lease should be considered invalid.
 func (l *Lease) Return(ctx context.Context) error {
 	if max := l.manager.maxFetches; max > 0 && l.clone.fetches >= max {
 		clog.InfoContextf(ctx, "Discarding clone %s after %d fetches", filepath.Base(l.clone.path), l.clone.fetches)

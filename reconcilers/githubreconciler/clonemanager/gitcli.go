@@ -126,9 +126,12 @@ func (b cliBackend) reset(ctx context.Context, cl *clone) error {
 	// -x removes ignored and .git/info/exclude'd files to match go-git's
 	// reset+clean: without it an exclude entry planted by untrusted code
 	// would keep its payload alive across leases, to be swept up by the
-	// stage-everything commit of a later lease. Neither backend removes
-	// untracked nested git repositories (native git needs -ff for that).
-	return b.runInClone(ctx, cl, "", "clean", "--quiet", "-fdx")
+	// stage-everything commit of a later lease. The second -f removes
+	// untracked nested git repositories too, such as tool caches cloned into
+	// the tree, so their clone can be reused. A repository nested in a
+	// tracked directory survives any clean, and resetClone discards the
+	// clone for it.
+	return b.runInClone(ctx, cl, "", "clean", "--quiet", "-ffdx")
 }
 
 // runInClone runs git inside the clone's working tree, resetting the clone's

@@ -1027,3 +1027,199 @@ func TestDefaultBackend(t *testing.T) {
 		}
 	})
 }
+
+// plantRepository initializes a git repository at dir, as untrusted code with
+// worktree write access could, with one file beside its .git.
+func plantRepository(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := git.PlainInit(dir, false); err != nil {
+		t.Fatalf("PlainInit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "payload.yaml"), []byte("planted"), 0o644); err != nil {
+		t.Fatalf("WriteFile payload: %v", err)
+	}
+}
+
+// plantGitfile writes a gitfile at dir/.git pointing elsewhere, the other form
+// a nested repository's marker takes, with one file beside it.
+func plantGitfile(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+t.TempDir()+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile gitfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "payload.yaml"), []byte("planted"), 0o644); err != nil {
+		t.Fatalf("WriteFile payload: %v", err)
+	}
+}
+
+func TestReturnDiscardsNestedRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, dir string)
+	}{
+		{"repository", plantRepository},
+		{"gitfile", plantGitfile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachBackend(t, func(t *testing.T, opts ...Option) {
+				testReturnDiscardsNestedRepository(t, tc.plant, opts...)
+			})
+		})
+	}
+}
+
+func testReturnDiscardsNestedRepository(t *testing.T, plant func(t *testing.T, dir string), opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Lease 1 plants a repository in the tracked packages directory, which
+	// no clean removes, and returns the clone.
+	lease1, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 1: %v", err)
+	}
+	dir := lease1.WorkingTree()
+	plant(t, filepath.Join(dir, "packages"))
+	if err := lease1.Return(ctx); err == nil {
+		t.Error("Return 1: got = nil, want = an error naming the nested repository")
+	}
+
+	// Lease 2 gets a fresh clone without the planted repository or its file.
+	lease2, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 2: %v", err)
+	}
+	t.Cleanup(func() { _ = lease2.Return(ctx) })
+	if lease2.WorkingTree() == dir {
+		t.Errorf("Lease 2 working tree: got = %s, want = a fresh clone", lease2.WorkingTree())
+	}
+	for _, p := range []string{filepath.Join("packages", ".git"), filepath.Join("packages", "payload.yaml")} {
+		if _, err := os.Lstat(filepath.Join(lease2.WorkingTree(), p)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s in Lease 2: got = %v, want = %v", p, err, os.ErrNotExist)
+		}
+	}
+}
+
+func TestReturnCleansUntrackedNestedRepository(t *testing.T) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, WithGitCLI())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// A repository in an untracked directory, such as a tool's cache, is
+	// cleaned away, so the clone stays pooled.
+	lease1, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 1: %v", err)
+	}
+	dir := lease1.WorkingTree()
+	plantRepository(t, filepath.Join(dir, "cache", "module"))
+	if err := lease1.Return(ctx); err != nil {
+		t.Fatalf("Return 1: %v", err)
+	}
+
+	lease2, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 2: %v", err)
+	}
+	t.Cleanup(func() { _ = lease2.Return(ctx) })
+	if lease2.WorkingTree() != dir {
+		t.Fatalf("Lease 2 working tree: got = %s, want = %s", lease2.WorkingTree(), dir)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("cache after Return: got = %v, want = %v", err, os.ErrNotExist)
+	}
+}
+
+// The go-git backend's clean keeps a repository in an untracked directory, so
+// the clone holding it is discarded instead.
+func TestReturnDiscardsUntrackedNestedRepositoryWithGoGit(t *testing.T) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, WithGoGit())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, _ := initTestRepo(t)
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Ref:   "master",
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease1, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 1: %v", err)
+	}
+	dir := lease1.WorkingTree()
+	plantRepository(t, filepath.Join(dir, "cache", "module"))
+	if err := lease1.Return(ctx); err == nil {
+		t.Error("Return 1: got = nil, want = an error naming the nested repository")
+	}
+
+	lease2, err := mgr.Lease(ctx, res)
+	if err != nil {
+		t.Fatalf("Lease 2: %v", err)
+	}
+	t.Cleanup(func() { _ = lease2.Return(ctx) })
+	if lease2.WorkingTree() == dir {
+		t.Errorf("Lease 2 working tree: got = %s, want = a fresh clone", lease2.WorkingTree())
+	}
+	if _, err := os.Lstat(filepath.Join(lease2.WorkingTree(), "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("cache in Lease 2: got = %v, want = %v", err, os.ErrNotExist)
+	}
+}
+
+func TestNestedRepositoryStopsWithContext(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { root.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := nestedRepository(ctx, root); !errors.Is(err, context.Canceled) {
+		t.Errorf("nestedRepository with a done context: got = %v, want = %v", err, context.Canceled)
+	}
+}
