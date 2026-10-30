@@ -199,6 +199,10 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithInputBudgetNoReduction[Req, Resp]())
 	}
 
+	if config.CacheTTL != 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithCacheTTL[Req, Resp](config.CacheTTL))
+	}
+
 	if config.SuspendToolName != "" {
 		name, desc := config.SuspendToolName, config.SuspendToolDescription
 		executorOpts = append(executorOpts, claudeexecutor.WithSuspendTool[Req, Resp](func() (anthropic.ToolParam, error) {

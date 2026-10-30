@@ -362,6 +362,9 @@ func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol
 	if config.InputBudgetNoReduction && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: InputBudgetNoReduction is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}
+	if config.CacheTTL != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: CacheTTL is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
 	switch protocol {
 	case modelrouter.ProtocolGoogleGenAI:
 		// Long-decode models (Gemini 4) accept more output than one request

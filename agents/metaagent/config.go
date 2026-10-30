@@ -171,6 +171,16 @@ type Config[Resp, CB any] struct {
 	// answers the error with a fresh conversation pays less this way.
 	InputBudgetNoReduction bool
 
+	// CacheTTL sets the lifetime of the prompt-cache breakpoints: 5 minutes
+	// or 1 hour, and zero leaves the API's 5-minute default. A 1-hour entry
+	// costs more to write but survives a tool call that blocks for longer
+	// than 5 minutes, which would otherwise expire the cache and rewrite the
+	// whole conversation on the next turn. Claude backend only: the Gemini
+	// and OpenAI-compatible backends, and routed protocols other than
+	// Anthropic Messages, reject a non-zero value at construction. See
+	// claudeexecutor.WithCacheTTL.
+	CacheTTL time.Duration
+
 	// SuspendToolName, when non-empty, enables the ask-a-friend suspend/resume
 	// capability: the backend advertises a held-out tool by this name, and when
 	// the model calls it, Execute returns a *checkpoint.Suspension (extract it

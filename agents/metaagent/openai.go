@@ -282,6 +282,9 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	if config.InputBudgetNoReduction {
 		return errors.New("InputBudgetNoReduction is not supported on the OpenAI-compatible backend")
 	}
+	if config.CacheTTL != 0 {
+		return errors.New("CacheTTL is not supported on the OpenAI-compatible backend")
+	}
 	return nil
 }
 
