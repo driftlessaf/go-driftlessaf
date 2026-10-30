@@ -123,9 +123,9 @@ type Config[Resp, CB any] struct {
 	// callbacks.ResultValidator.
 	ResultValidators []callbacks.ResultValidator[Resp]
 
-	// RefusalNudgeMaxRetries bounds how many times a turn refused by
-	// Anthropic's safety classifier is retried with a nudge instead of
-	// failing the run immediately. Zero (the default) leaves a refusal fatal,
+	// RefusalNudgeMaxRetries bounds how many consecutive turns refused by
+	// Anthropic's safety classifier are retried with a nudge before the run
+	// fails; an unrefused turn resets the count. Zero (the default) leaves a refusal fatal,
 	// same as before this field existed, surfaced as a
 	// *claudeexecutor.RefusalError. The compatibility New path applies it only
 	// to Claude. NewRouted rejects it before adapter construction unless the

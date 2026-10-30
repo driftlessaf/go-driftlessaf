@@ -41,6 +41,9 @@ func TestResolve(t *testing.T) {
 	claudeAutoToolChoice.AutomaticToolChoiceOnly = true
 	claudeOpus55 := claudeAutoToolChoice
 	claudeOpus55.ContextWindow = 1_000_000
+	// Mythos 5.1 is Fable 5.1 under another id, with its window listed.
+	claudeMythos51 := claudeAutoToolChoice
+	claudeMythos51.ContextWindow = 1_000_000
 	claudeOpus48 := claudeAdaptive
 	claudeOpus48.ContextWindow = 1_000_000
 	claudeHaiku55 := claudeAdaptive
@@ -82,7 +85,7 @@ func TestResolve(t *testing.T) {
 		// Backend routing shapes, including unknown ids.
 		{"gemini-2.5-flash", geminiBudget},
 		{"claude-fable-5", claudeAdaptive},
-		{"claude-mythos-5-1", claudeAdaptive},
+		{"claude-mythos-5-1", claudeMythos51},
 		{"claude-fable-5-1", claudeAutoToolChoice},
 		// Haiku 5.5 takes the adaptive surface but accepts a forced tool_choice.
 		{"claude-haiku-5-5", claudeHaiku55},
@@ -161,7 +164,7 @@ func TestResolve(t *testing.T) {
 		{"claude-opus-4-7", claudeAdaptive},
 		{"claude-opus-4-8@default", claudeOpus48},
 		{"claude-fable-5@default", claudeAdaptive},
-		{"claude-mythos-5-1@default", claudeAdaptive},
+		{"claude-mythos-5-1@default", claudeMythos51},
 		{"claude-sonnet-5@20260301", claudeAdaptive},
 		// Future Claude ids keep the newest surface by default; they miss
 		// the sampling-removed table too, so those parameters stay accepted
@@ -247,6 +250,10 @@ func TestResolveContextWindow(t *testing.T) {
 		{"claude-opus-4-8-1", 0},
 		{"claude-haiku-5-5", 1_000_000},
 		{"claude-haiku-5-5@default", 1_000_000},
+		{"claude-mythos-5-1", 1_000_000},
+		{"claude-mythos-5-1@default", 1_000_000},
+		{"claude-mythos-5", 0},
+		{"claude-fable-5-1", 0},
 		{"claude-opus-4-7", 0},
 		{"claude-opus-5", 0},
 		{"claude-sonnet-4-6", 0},

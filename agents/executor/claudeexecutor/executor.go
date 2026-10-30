@@ -178,11 +178,12 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// append semantic validators via WithResultValidator (repeatable).
 	resultValidators []callbacks.ResultValidator[Response]
 
-	// refusalNudgeMaxRetries bounds the number of times a turn refused by
-	// Anthropic's safety classifier (StopReason "refusal") is retried with a
-	// nudge instead of failing the run immediately. Zero (the default)
-	// disables retrying: a refusal fails the run right away, as a RefusalError.
-	// Set via WithRefusalNudge. See refusal.go.
+	// refusalNudgeMaxRetries bounds how many consecutive turns refused by
+	// Anthropic's safety classifier (StopReason "refusal") are retried with a
+	// nudge before the run fails; a turn that completes without a refusal
+	// resets the count. Zero (the default) disables retrying: a refusal fails
+	// the run right away, as a RefusalError. Set via WithRefusalNudge. See
+	// refusal.go.
 	refusalNudgeMaxRetries int
 
 	// truncatedToolCallRetries bounds how many turns per run cut off at
@@ -503,10 +504,12 @@ func (e *executor[Request, Response]) runConversation(
 	// injected: only the first forces the submit tool, and once it is set the
 	// tool-call cap sends nothing.
 	finalizeNudged := false
-	// refusalRetries counts turns retried after a safety-classifier refusal,
-	// bounded by refusalNudgeMaxRetries (see WithRefusalNudge). Zero when the
-	// option is unset, since the bound itself is zero and no retry is ever
-	// attempted.
+	// refusalRetries counts consecutive turns retried after a
+	// safety-classifier refusal, bounded by refusalNudgeMaxRetries (see
+	// WithRefusalNudge); a turn that completes without a refusal resets it,
+	// so only a refusal the nudge cannot clear ends a long conversation.
+	// Zero when the option is unset, since the bound itself is zero and no
+	// retry is ever attempted.
 	refusalRetries := 0
 	// truncatedToolCalls counts the run's turns the output cap cut off mid
 	// tool call, bounded by truncatedToolCallRetries (see
@@ -869,7 +872,8 @@ func (e *executor[Request, Response]) runConversation(
 		// WithRefusalNudge (refusalNudgeMaxRetries == 0) this fails the run
 		// immediately, same as before, just with a *RefusalError carrying the
 		// category instead of the generic message. With the option enabled,
-		// up to refusalNudgeMaxRetries turns are retried with a nudge first.
+		// up to refusalNudgeMaxRetries consecutive refused turns are retried
+		// with a nudge first; a turn that completes resets the count.
 		if message.StopReason == anthropic.StopReasonRefusal {
 			refErr := refusalError(message.StopDetails)
 			clog.WarnContext(ctx, "Claude's safety classifier refused to respond",
@@ -909,6 +913,7 @@ func (e *executor[Request, Response]) runConversation(
 			}
 			return response, true, refErr
 		}
+		refusalRetries = 0
 
 		// Strip degenerate empty text blocks (streamed with zero text_delta
 		// events during provider anomaly windows) before the response is
@@ -1195,10 +1200,14 @@ func (e *executor[Request, Response]) runConversation(
 			e.telemetry.RecordToolCall(ctx, "submit_result_redirect")
 
 			params.Messages = append(params.Messages, message.ToParam())
+			// Work can be asked for only while a turn remains after the
+			// next one to submit in; on the run's last two turns the
+			// redirect asks for the submit call alone.
+			roomToWork := len(tools) > 0 && turn+2 < startTurn+turnBudget
 			params.Messages = append(params.Messages, anthropic.MessageParam{
 				Role: anthropic.MessageParamRoleUser,
 				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock(fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName)),
+					anthropic.NewTextBlock(textRedirectText(e.capabilityModelName, submitToolName, roomToWork)),
 				},
 			})
 			// Auto-only models receive the prompt without a forced tool choice.
@@ -1531,6 +1540,21 @@ func (e *executor[Request, Response]) evaluateSubmission(
 	return execshared.GateSubmission(ctx, e.submitTool.Handler(ctx, toolUse, trace),
 		trace, toolUse.ID, toolUse.Name, args,
 		e.resultValidators, e.telemetry, e.submitToolName(), resultPtr)
+}
+
+// textRedirectText is the user turn appended after a text-only turn. Where
+// the submit tool can be forced, the next turn can only be that call, and
+// the text says so. On an automatic-only model nothing is forced, and a
+// text-only turn deep in a run is usually a statement of intent ("I'll now
+// run X") rather than a finished task: while roomToWork (the caller's tools
+// are registered and the turn budget leaves room to use them before
+// submitting) the text asks for that work as tool calls, with the terminal
+// tool only at the end.
+func textRedirectText(modelName, submitToolName string, roomToWork bool) string {
+	if roomToWork && model.Resolve(modelName).AutomaticToolChoiceOnly {
+		return fmt.Sprintf("Your last message was text, which nothing reads. If it described work still to do, do that work now with tool calls. Call the %s tool only when the task is complete, or when you cannot complete it, with what you established and what blocked you.", submitToolName)
+	}
+	return fmt.Sprintf("You must call the %s tool to return your response. Do not respond with plain text. If you encountered an error or cannot complete the task, call %s with an appropriate error or summary.", submitToolName, submitToolName)
 }
 
 // submitToolChoice steers terminal submission where the model permits it.

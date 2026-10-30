@@ -6,7 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +16,10 @@ import (
 	"sync"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
@@ -223,5 +227,86 @@ func TestRefusalOnFinalTurnReturnsTypedError(t *testing.T) {
 	// request reaches the API.
 	if got := len(requests()); got != 1 {
 		t.Errorf("HTTP requests: got = %d, want = 1 (no retry on the final turn)", got)
+	}
+}
+
+// lookupTurn is a turn that calls the lookup tool: a turn that completes
+// without a refusal, between refusals.
+func lookupTurn(n int) []string {
+	return []string{
+		fmt.Sprintf(`{"type":"message_start","message":{"id":"msg_%d","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}`, n),
+		fmt.Sprintf(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_%d","name":"lookup","input":{}}}`, n),
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	}
+}
+
+// TestRefusalNudgeCountsConsecutiveRefusals pins that the nudge bound is
+// over refusals in a row, not over the conversation: a long run that is
+// refused now and then, and recovers each time, keeps going, while refusals
+// the nudge does not clear still exhaust the bound. A cumulative count ended
+// a healthy conversation on an unlucky nth refusal hours in.
+func TestRefusalNudgeCountsConsecutiveRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		turns        []string // r: refused, l: lookup tool call, a: final answer
+		wantAnswer   bool
+		wantRequests int
+	}{
+		{name: "recovered refusals do not accumulate", turns: []string{"r", "l", "r", "l", "r", "a"}, wantAnswer: true, wantRequests: 6},
+		{name: "refusals in a row exhaust the bound", turns: []string{"r", "l", "r", "r"}, wantRequests: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, requests := newExecTestClient(t, func(n int) []string {
+				if n > len(tc.turns) {
+					t.Errorf("request %d: the script has %d turns", n, len(tc.turns))
+					return answerTurn
+				}
+				switch tc.turns[n-1] {
+				case "r":
+					return refusalTurn
+				case "l":
+					return lookupTurn(n)
+				default:
+					return answerTurn
+				}
+			})
+			prompt, err := promptbuilder.NewPrompt("hello")
+			if err != nil {
+				t.Fatalf("NewPrompt: %v", err)
+			}
+			exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
+				client,
+				prompt,
+				claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+				claudeexecutor.WithMaxTurns[errCapRequest, errCapResponse](10),
+				claudeexecutor.WithRefusalNudge[errCapRequest, errCapResponse](1),
+			)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			resp, execErr := exec.Execute(t.Context(), errCapRequest{}, map[string]claudetool.Metadata[errCapResponse]{
+				"lookup": {
+					Definition: anthropic.ToolParam{Name: "lookup", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}},
+					Handler: func(context.Context, anthropic.ToolUseBlock, *agenttrace.Trace[errCapResponse], *errCapResponse) map[string]any {
+						return map[string]any{"result": "synthetic evidence"}
+					},
+				},
+			})
+			if tc.wantAnswer {
+				if execErr != nil || resp.Answer != "42" {
+					t.Fatalf("Execute: resp = %+v, err = %v, want the answer after three recovered refusals", resp, execErr)
+				}
+			} else {
+				if _, ok := errors.AsType[*claudeexecutor.RefusalError](execErr); !ok {
+					t.Fatalf("Execute error: got %v (%T), want *claudeexecutor.RefusalError", execErr, execErr)
+				}
+			}
+			if got := len(requests()); got != tc.wantRequests {
+				t.Errorf("HTTP requests: got = %d, want = %d", got, tc.wantRequests)
+			}
+		})
 	}
 }

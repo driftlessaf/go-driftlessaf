@@ -39,6 +39,7 @@ func TestFableTerminalSubmissionAndHistory(t *testing.T) {
 		{name: "Fable redirect", model: "claude-fable-5-1", autoOnly: true},
 		{name: "Fable early finalize", model: "claude-fable-5-1", finalize: 1, autoOnly: true},
 		{name: "Fable never submits", model: "claude-fable-5-1", noSubmit: true, autoOnly: true},
+		{name: "Mythos 5.1 redirect", model: "claude-mythos-5-1", autoOnly: true},
 		{name: "Sonnet 5.5 redirect", model: "claude-sonnet-5-5", autoOnly: true},
 		{name: "Sonnet 5.5 early finalize", model: "claude-sonnet-5-5", finalize: 1, autoOnly: true},
 		{name: "existing Claude still forces redirect", model: "claude-sonnet-5", finalize: 1},

@@ -119,6 +119,8 @@ var preXHighEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, eff
 // "@" suffix) that reject a forced tool_choice.
 var automaticToolChoiceOnlyModels = []string{
 	"claude-fable-5-1",
+	// The same model as Fable 5.1 under the Project Glasswing id.
+	"claude-mythos-5-1",
 	"claude-opus-5-5",
 	"claude-sonnet-5-5",
 }
@@ -127,9 +129,14 @@ var automaticToolChoiceOnlyModels = []string{
 // exact base ids, not prefixes, so a new model reports an unknown window
 // until its limit is verified rather than inheriting a neighbour's.
 var contextWindows = map[string]int64{
-	"claude-opus-4-8":                 1_000_000,
-	"claude-opus-5-5":                 1_000_000,
-	"claude-haiku-5-5":                1_000_000,
+	"claude-opus-4-8":  1_000_000,
+	"claude-opus-5-5":  1_000_000,
+	"claude-haiku-5-5": 1_000_000,
+	// The vendor-documented window, which is also the default on every
+	// platform that serves the model. A deployment served a smaller window
+	// passes it through WithInputBudget.
+	// See: https://platform.claude.com/docs/en/build-with-claude/context-windows#context-window-sizes-by-model
+	"claude-mythos-5-1":               1_000_000,
 	"gemini-4-argon":                  1_048_576,
 	"gemini-4-argon-cyber-permissive": 1_048_576,
 }

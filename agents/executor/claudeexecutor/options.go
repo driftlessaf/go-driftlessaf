@@ -499,7 +499,8 @@ func WithForceSubmitToolChoice[Request promptbuilder.Bindable, Response any](def
 
 // WithRefusalNudge enables bounded in-loop recovery when a turn is refused by
 // Anthropic's safety classifier (Message.StopReason == "refusal") instead of
-// failing the run on the first refusal. Each refusal, up to maxRetries times,
+// failing the run on the first refusal. Each refusal, up to maxRetries in a
+// row (a turn that completes without a refusal resets the count),
 // appends a synthetic user-turn message naming the refusal category and
 // instructing the model to continue via tool calls rather than a
 // natural-language response (see refusalNudgeText), then retries the turn.
