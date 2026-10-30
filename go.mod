@@ -22,7 +22,7 @@ require (
 	github.com/chainguard-dev/terraform-provider-cosign v0.5.1
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467
+	github.com/cyberphone/json-canonicalization v0.0.0-20261011152517-32a48195b9b2
 	github.com/digitorus/timestamp v0.0.0-20250524132541-c45532741eea
 	github.com/github/smimesign v0.2.0
 	github.com/go-git/go-billy/v5 v5.9.2
