@@ -12,6 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 //   - Creating or updating PRs (upsert pattern)
 //   - Checking if a PR should be skipped
 //   - Closing any outstanding PRs
+//   - Arming auto-merge on a PR (EnableAutoMerge)
 //
 // # Generic Type Parameter
 //
