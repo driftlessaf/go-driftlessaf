@@ -7,6 +7,7 @@ package changemanager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -163,6 +164,48 @@ func TestFlushThreadActions(t *testing.T) {
 	}
 }
 
+// TestFlushedReplySettlesThreadFromAnotherApp pins that a reply the flush posts
+// reads back as the bot's own when a later session reads the thread through
+// another App installation, where viewerDidAuthor is false.
+func TestFlushedReplySettlesThreadFromAnotherApp(t *testing.T) {
+	var posted string
+	gql := newTestGraphQLClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Variables struct {
+				Input struct {
+					Body string `json:"body"`
+				} `json:"input"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		posted = req.Variables.Input.Body
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"C_1"}}}}`)
+	}))
+	s := &Session[testData]{
+		manager:   &CM[testData]{identity: "test-bot", findingReplies: true},
+		gqlClient: gql,
+		findings:  []callbacks.Finding{{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"}},
+	}
+	if err := s.FindingCallbacks().Reply(t.Context(), "PRRT_a", "Not a defect: the value is validated first."); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	s.flushThreadActions(t.Context(), false)
+
+	if !strings.HasPrefix(posted, "Not a defect: the value is validated first.") {
+		t.Errorf("posted body: got = %q, want the reply text first", posted)
+	}
+	comments := []gqlThreadComment{
+		threadComment("maintainer", "User", "MEMBER", "is this validated?", "https://gh/member"),
+		threadComment("octo-sts-3", "Bot", "NONE", posted, "https://gh/app"),
+	}
+	if threadAwaitsReply(comments, nil, threadReplyMarker("test-bot")) {
+		t.Error("threadAwaitsReply: got = true, want = false (the bot's posted reply settles the thread)")
+	}
+}
+
 func TestDropThreadActions(t *testing.T) {
 	rec := &mutationRecorder{threads: []string{"PRRT_a", "PRRT_b"}}
 	s := &Session[testData]{
@@ -259,6 +302,54 @@ func TestUpsertAppliesThreadActionsByOutcome(t *testing.T) {
 			}
 			if !slices.Equal(rec.calls, tc.wantCalls) {
 				t.Errorf("mutations: got = %v, want = %v", rec.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestUpsertNoChangeFailsWhenRefutationDoesNotPost proves a run that changed
+// nothing fails, rather than reporting no changes, when a refutation reply does
+// not post: the thread would otherwise wait on the bot with no commit to spend
+// the budget, and every later event would run the agent again.
+func TestUpsertNoChangeFailsWhenRefutationDoesNotPost(t *testing.T) {
+	tests := []struct {
+		name      string
+		fail      []string
+		wantErrIs error
+	}{
+		{name: "a posted refutation reports no changes", wantErrIs: ErrNoChanges},
+		{name: "an unposted refutation fails the run", fail: []string{"reply:PRRT_a"}, wantErrIs: errThreadRepliesNotPosted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cm, err := New[testData]("test-bot",
+				template.Must(template.New("title").Parse("{{.PackageName}}")),
+				template.Must(template.New("body").Parse("Update {{.PackageName}}")),
+				WithCloseOnEmptyDiff[testData](false), WithFindingReplies[testData]())
+			if err != nil {
+				t.Fatalf("creating CM: %v", err)
+			}
+			rec := &mutationRecorder{threads: []string{"PRRT_a"}}
+			session := &Session[testData]{
+				manager:    cm,
+				gqlClient:  newTestGraphQLClient(t, failMutations(rec, tc.fail...)),
+				owner:      "test-owner",
+				repo:       "test-repo",
+				branchName: "test-bot/pkg",
+				ref:        "main",
+				findings:   []callbacks.Finding{{Kind: callbacks.FindingKindReview, Identifier: "PRRT_a"}},
+			}
+			_, err = session.Upsert(t.Context(), &testData{PackageName: "pkg"}, false, nil, func(ctx context.Context, _ string) error {
+				if err := session.FindingCallbacks().Reply(ctx, "PRRT_a", "Not a defect: the value is validated first."); err != nil {
+					return err
+				}
+				return ErrNoChanges
+			})
+			if !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("Upsert error: got = %v, want %v", err, tc.wantErrIs)
+			}
+			if errors.Is(tc.wantErrIs, errThreadRepliesNotPosted) && errors.Is(err, ErrNoChanges) {
+				t.Errorf("Upsert error: got = %v, want one that does not report no changes", err)
 			}
 		})
 	}

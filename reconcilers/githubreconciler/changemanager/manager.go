@@ -788,7 +788,7 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect unresolved review thread findings from trusted authors
-		threadFindings, awaiting := collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors)
+		threadFindings, awaiting := collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors, threadReplyMarker(cm.identity))
 		findings = append(findings, threadFindings...)
 		awaitingReviewThreads = awaiting
 
@@ -848,7 +848,7 @@ func (cm *CM[T]) NewSession(
 // It also returns the set of thread node ids the returned findings cover, all of
 // which await this bot. HasUnresolvedReviews consults it so a thread the bot has
 // already answered does not keep renewing the commit budget.
-func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}) ([]callbacks.Finding, map[string]struct{}) {
+func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}, replyMarker string) ([]callbacks.Finding, map[string]struct{}) {
 	findings := make([]callbacks.Finding, 0, len(threads.Nodes))
 	awaiting := make(map[string]struct{})
 
@@ -875,7 +875,7 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 		// A settled thread (the bot's own reply is its latest relevant comment)
 		// is excluded so the fixer does not see, and reply to, a finding it has
 		// already answered. A trusted reply after the bot's reopens it.
-		if !threadAwaitsReply(thread.Comments.Nodes, trustedAuthors) {
+		if !threadAwaitsReply(thread.Comments.Nodes, trustedAuthors, replyMarker) {
 			clog.DebugContextf(ctx, "Skipping settled review thread (bot replied last) id=%s path=%s", thread.Id, thread.Path)
 			continue
 		}
@@ -901,23 +901,43 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 
 // threadAwaitsReply reports whether an unresolved review thread is still waiting
 // on this bot. It walks the thread's comments in chronological order and tracks
-// the last one that is relevant: either the bot's own comment (ViewerDidAuthor)
+// the last one that is relevant: either the bot's own comment (ownThreadReply)
 // or a comment from a trusted author. The thread awaits the bot when that last
 // relevant comment is not the bot's own. A thread the bot answered last is
 // settled until a trusted author replies again, so a refuted finding the bot
 // replied to and left open no longer renews the commit budget. Untrusted
 // comments neither settle nor reopen a thread.
-func threadAwaitsReply(comments []gqlThreadComment, trustedAuthors map[string]struct{}) bool {
+func threadAwaitsReply(comments []gqlThreadComment, trustedAuthors map[string]struct{}, replyMarker string) bool {
 	awaiting := false
 	for _, c := range comments {
 		switch {
-		case c.ViewerDidAuthor:
+		case ownThreadReply(c, replyMarker):
 			awaiting = false
 		case authorTrusted(c.AuthorAssociation, c.Author.Login, c.Author.Typename, trustedAuthors):
 			awaiting = true
 		}
 	}
 	return awaiting
+}
+
+// threadReplyMarker is the hidden line that ends every review-thread reply the
+// CM with this identity posts (see flushThreadActions).
+func threadReplyMarker(identity string) string {
+	return "<!-- " + identity + ":thread-reply -->"
+}
+
+// ownThreadReply reports whether this bot wrote c: the authenticated token
+// wrote it, or a GitHub App wrote it carrying replyMarker. A bot can post
+// through more than one App installation, and viewerDidAuthor holds only for
+// the one whose token is reading, so its reply from another App is known by
+// the marker. The marker names the CM's identity, so a reply another bot posted
+// through a shared App does not settle this bot's thread, and a person who
+// pastes the marker is not taken for the bot.
+func ownThreadReply(c gqlThreadComment, replyMarker string) bool {
+	if c.ViewerDidAuthor {
+		return true
+	}
+	return c.Author.Typename == "Bot" && replyMarker != "" && strings.Contains(c.Body, replyMarker)
 }
 
 // reviewBodyIdentifierPrefix distinguishes review body findings from thread findings.

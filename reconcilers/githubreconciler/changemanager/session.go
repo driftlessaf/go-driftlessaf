@@ -1137,7 +1137,8 @@ func (s *Session[T]) BeginThreadActionScope() (discard func()) {
 // resolution with no commit behind it would tell the reviewer the thread is
 // handled when it is not, so those are dropped and logged. Failures are logged
 // rather than returned: the commit is already on the branch, and a thread left
-// unresolved resurfaces as a finding on the next pass.
+// unresolved resurfaces as a finding on the next pass. It returns how many
+// replies did not post.
 //
 // A resolution carries its disposition or does not happen. With replies
 // enabled, a thread is resolved only once a reply posted on it in this flush,
@@ -1149,10 +1150,10 @@ func (s *Session[T]) BeginThreadActionScope() (discard func()) {
 // with the bot's reply last, which the next pass reads as settled (see
 // threadAwaitsReply) and so never revisits, and a retracted reply hands the
 // thread back to the bot.
-func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
+func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) (unposted int) {
 	replies, resolves := s.threads.take()
 	if len(replies) == 0 && len(resolves) == 0 {
-		return
+		return 0
 	}
 	if !committed {
 		kept := make([]threadReply, 0, len(replies))
@@ -1169,9 +1170,10 @@ func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
 	// replied holds, per thread, the node ids of the replies that posted.
 	replied := make(map[string][]string, len(replies))
 	for _, r := range replies {
-		commentID, err := replyToReviewThread(ctx, s.gqlClient, r.threadID, r.body)
+		commentID, err := replyToReviewThread(ctx, s.gqlClient, r.threadID, s.markReply(r.body))
 		if err != nil {
 			clog.WarnContext(ctx, "failed to post a review-thread reply", "thread", r.threadID, "error", err.Error())
+			unposted++
 			continue
 		}
 		replied[r.threadID] = append(replied[r.threadID], commentID)
@@ -1190,6 +1192,17 @@ func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) {
 			s.retractReplies(ctx, id, replied[id])
 		}
 	}
+	return unposted
+}
+
+// markReply ends body with the CM's threadReplyMarker, so a later session
+// reading the thread through another App installation still knows the reply
+// as its own (see ownThreadReply).
+func (s *Session[T]) markReply(body string) string {
+	if s.manager == nil || s.manager.identity == "" {
+		return body
+	}
+	return body + "\n\n" + threadReplyMarker(s.manager.identity)
 }
 
 // retractReplies removes the disposition replies posted on a thread whose
@@ -1334,6 +1347,10 @@ func deleteReviewThreadComment(ctx context.Context, gqlClient *graphqlclient.Gra
 // callbacks using clonemanager.MakeAndPushChanges don't need to map it manually.
 var ErrNoChanges = errors.New("no changes")
 
+// errThreadRepliesNotPosted fails a run that changed nothing and could not post
+// a review-thread reply (see Upsert).
+var errThreadRepliesNotPosted = errors.New("review-thread replies not posted")
+
 // Upsert creates a new PR or updates an existing one with the provided properties.
 // Labels exceeding GitHub's limit are shortened to a 40-character prefix and
 // 10-character hash. It only calls makeChanges when refresh is needed: no existing
@@ -1384,7 +1401,13 @@ func (s *Session[T]) Upsert(
 
 	switch {
 	case errors.Is(err, ErrNoChanges) || errors.Is(err, clonemanager.ErrNothingToCommit):
-		s.flushThreadActions(ctx, false)
+		// A refutation that did not post leaves its thread waiting on the bot,
+		// with no commit to spend the budget, so every later event would run
+		// the agent again. Failing the run hands it to the queue's bounded
+		// retries instead.
+		if unposted := s.flushThreadActions(ctx, false); unposted > 0 {
+			return "", fmt.Errorf("upsert %s: %d review-thread replies did not post: %w", s.branchName, unposted, errThreadRepliesNotPosted)
+		}
 		return "", fmt.Errorf("upsert %s: %w", s.branchName, ErrNoChanges)
 	case err != nil:
 		s.dropThreadActions(ctx)
