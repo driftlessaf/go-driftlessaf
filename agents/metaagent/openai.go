@@ -279,6 +279,9 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	if config.EnforceInputBudget {
 		return errors.New("EnforceInputBudget is not supported on the OpenAI-compatible backend")
 	}
+	if config.InputBudgetNoReduction {
+		return errors.New("InputBudgetNoReduction is not supported on the OpenAI-compatible backend")
+	}
 	return nil
 }
 

@@ -12,11 +12,12 @@ import (
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 )
 
-// TestEnforceInputBudgetBackends pins that EnforceInputBudget reaches
-// claudeexecutor.WithInputBudget on the Claude backend and is a construction
-// error on the others, never silently dropped. The Claude rows observe the
-// option through the executor's own construction checks: an unknown model
-// with no window, a window that max_tokens fills, and a negative window all
+// TestEnforceInputBudgetBackends pins that EnforceInputBudget and
+// InputBudgetNoReduction reach their claudeexecutor options on the Claude
+// backend and are a construction error on the others, never silently
+// dropped. The Claude rows observe the options through the executor's own
+// construction checks: an unknown model with no window, a window that
+// max_tokens fills, a negative window and no-reduction without a budget all
 // fail only when the option is applied.
 func TestEnforceInputBudgetBackends(t *testing.T) {
 	for _, tc := range []struct {
@@ -61,6 +62,20 @@ func TestEnforceInputBudgetBackends(t *testing.T) {
 		},
 		wantErr: "must not be negative",
 	}, {
+		name:  "claude no reduction on the budget",
+		model: "claude-opus-5-5",
+		mutate: func(c *Config[*testResponse, testCallbacks]) {
+			c.EnforceInputBudget = true
+			c.InputBudgetNoReduction = true
+		},
+	}, {
+		name:  "claude no reduction without a budget",
+		model: "claude-opus-5-5",
+		mutate: func(c *Config[*testResponse, testCallbacks]) {
+			c.InputBudgetNoReduction = true
+		},
+		wantErr: "WithInputBudgetNoReduction requires WithInputBudget",
+	}, {
 		name:  "claude off ignores the window",
 		model: "claude-test-model",
 		mutate: func(c *Config[*testResponse, testCallbacks]) {
@@ -83,6 +98,20 @@ func TestEnforceInputBudgetBackends(t *testing.T) {
 			c.EnforceInputBudget = true
 		},
 		wantErr: "EnforceInputBudget is not supported on the OpenAI-compatible backend",
+	}, {
+		name:  "gemini rejects no reduction",
+		model: "gemini-2.5-flash",
+		mutate: func(c *Config[*testResponse, testCallbacks]) {
+			c.InputBudgetNoReduction = true
+		},
+		wantErr: "InputBudgetNoReduction is not supported on the Gemini backend",
+	}, {
+		name:  "openai-compatible rejects no reduction",
+		model: "google/gemini-2.5-pro",
+		mutate: func(c *Config[*testResponse, testCallbacks]) {
+			c.InputBudgetNoReduction = true
+		},
+		wantErr: "InputBudgetNoReduction is not supported on the OpenAI-compatible backend",
 	}, {
 		name:  "gemini off ignores the window",
 		model: "gemini-2.5-flash",
@@ -117,20 +146,26 @@ func TestEnforceInputBudgetBackends(t *testing.T) {
 }
 
 // TestRoutedInputBudgetProtocolGate pins the routed twin: only the Anthropic
-// Messages protocol accepts EnforceInputBudget, every protocol still accepts
-// a config with the budget off, and a negative window is refused before any
-// protocol is considered.
+// Messages protocol accepts EnforceInputBudget and InputBudgetNoReduction,
+// every protocol still accepts a config with the budget off, and a negative
+// window is refused before any protocol is considered.
 func TestRoutedInputBudgetProtocolGate(t *testing.T) {
 	for _, tc := range []struct {
-		protocol modelrouter.Protocol
-		enforce  bool
-		wantErr  bool
+		protocol    modelrouter.Protocol
+		enforce     bool
+		noReduction bool
+		wantErr     string
 	}{
 		{protocol: modelrouter.ProtocolAnthropicMessages, enforce: true},
-		{protocol: modelrouter.ProtocolGoogleGenAI, enforce: true, wantErr: true},
-		{protocol: modelrouter.ProtocolOpenAIChatCompletions, enforce: true, wantErr: true},
-		{protocol: modelrouter.ProtocolOpenAIResponses, enforce: true, wantErr: true},
-		{protocol: modelrouter.ProtocolSystemOne, enforce: true, wantErr: true},
+		{protocol: modelrouter.ProtocolGoogleGenAI, enforce: true, wantErr: "EnforceInputBudget is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolOpenAIChatCompletions, enforce: true, wantErr: "EnforceInputBudget is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolOpenAIResponses, enforce: true, wantErr: "EnforceInputBudget is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolSystemOne, enforce: true, wantErr: "EnforceInputBudget is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolAnthropicMessages, enforce: true, noReduction: true},
+		{protocol: modelrouter.ProtocolGoogleGenAI, noReduction: true, wantErr: "InputBudgetNoReduction is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolOpenAIChatCompletions, noReduction: true, wantErr: "InputBudgetNoReduction is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolOpenAIResponses, noReduction: true, wantErr: "InputBudgetNoReduction is supported only on the Anthropic Messages protocol"},
+		{protocol: modelrouter.ProtocolSystemOne, noReduction: true, wantErr: "InputBudgetNoReduction is supported only on the Anthropic Messages protocol"},
 		{protocol: modelrouter.ProtocolAnthropicMessages},
 		{protocol: modelrouter.ProtocolGoogleGenAI},
 		{protocol: modelrouter.ProtocolOpenAIChatCompletions},
@@ -139,12 +174,16 @@ func TestRoutedInputBudgetProtocolGate(t *testing.T) {
 	} {
 		cfg := finalizeConfig(t, 0)
 		cfg.EnforceInputBudget = tc.enforce
+		cfg.InputBudgetNoReduction = tc.noReduction
 		err := validateRoutedConfigForProtocol(tc.protocol, "", cfg)
-		if gotErr := err != nil; gotErr != tc.wantErr {
-			t.Errorf("validateRoutedConfigForProtocol(%s, enforce=%v): got err = %v, want error = %v", tc.protocol, tc.enforce, err, tc.wantErr)
+		if tc.wantErr == "" {
+			if err != nil {
+				t.Errorf("validateRoutedConfigForProtocol(%s, enforce=%v, noReduction=%v): got err = %v, want nil", tc.protocol, tc.enforce, tc.noReduction, err)
+			}
+			continue
 		}
-		if tc.wantErr && !strings.Contains(err.Error(), "EnforceInputBudget is supported only on the Anthropic Messages protocol") {
-			t.Errorf("validateRoutedConfigForProtocol(%s): got err = %v, want the EnforceInputBudget protocol error", tc.protocol, err)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("validateRoutedConfigForProtocol(%s, enforce=%v, noReduction=%v): got err = %v, want containing %q", tc.protocol, tc.enforce, tc.noReduction, err, tc.wantErr)
 		}
 	}
 

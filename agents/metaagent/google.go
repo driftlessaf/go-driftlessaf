@@ -54,6 +54,9 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	if config.EnforceInputBudget {
 		return nil, errors.New("EnforceInputBudget is not supported on the Gemini backend")
 	}
+	if config.InputBudgetNoReduction {
+		return nil, errors.New("InputBudgetNoReduction is not supported on the Gemini backend")
+	}
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  projectID,

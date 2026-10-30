@@ -163,6 +163,14 @@ type Config[Resp, CB any] struct {
 	// is set; must not be negative.
 	InputContextWindow int64
 
+	// InputBudgetNoReduction, when true, makes a request over the input
+	// budget fail with the ErrInputTooLarge error at once, with no tool
+	// result reduced. Construction fails when EnforceInputBudget is not
+	// set, and on every backend that rejects EnforceInputBudget. See
+	// claudeexecutor.WithInputBudgetNoReduction for why an agent that
+	// answers the error with a fresh conversation pays less this way.
+	InputBudgetNoReduction bool
+
 	// SuspendToolName, when non-empty, enables the ask-a-friend suspend/resume
 	// capability: the backend advertises a held-out tool by this name, and when
 	// the model calls it, Execute returns a *checkpoint.Suspension (extract it
