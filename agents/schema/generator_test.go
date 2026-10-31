@@ -27,16 +27,16 @@ func TestReflect(t *testing.T) {
 
 	s := schema.Reflect(&sample{})
 	if s == nil {
-		t.Fatal("expected schema")
+		t.Fatal("schema: got = nil, want = non-nil")
 	}
 
 	if len(s.Required) != 1 || s.Required[0] != "name" {
-		t.Fatalf("unexpected required: %#v", s.Required)
+		t.Fatalf("required: got = %#v, want = [name]", s.Required)
 	}
 
 	props := s.Properties
 	if props == nil {
-		t.Fatal("expected properties")
+		t.Fatal("properties: got = nil, want = non-nil")
 	}
 
 	name, ok := props.Get("name")
@@ -44,7 +44,7 @@ func TestReflect(t *testing.T) {
 		t.Fatal("missing name property")
 	}
 	if name.Description != "Name" {
-		t.Fatalf("unexpected description: %q", name.Description)
+		t.Fatalf("description: got = %q, want = %q", name.Description, "Name")
 	}
 
 	nestedSchema, ok := props.Get("nested")
@@ -53,14 +53,14 @@ func TestReflect(t *testing.T) {
 	}
 	nestedProps := nestedSchema.Properties
 	if nestedProps == nil {
-		t.Fatal("expected nested properties")
+		t.Fatal("nested properties: got = nil, want = non-nil")
 	}
 	valueSchema, ok := nestedProps.Get("value")
 	if !ok {
 		t.Fatal("missing nested value property")
 	}
 	if valueSchema.Description != "Nested value" {
-		t.Fatalf("unexpected nested description: %q", valueSchema.Description)
+		t.Fatalf("nested description: got = %q, want = %q", valueSchema.Description, "Nested value")
 	}
 }
 
@@ -86,7 +86,7 @@ func TestRealAgentTypeSchemas(t *testing.T) {
 
 			// Validate basic structure
 			if s.Type != "object" {
-				t.Errorf("expected object type, got %s", s.Type)
+				t.Errorf("type: got = %s, want = object", s.Type)
 			}
 
 			// Validate properties exist
@@ -95,7 +95,7 @@ func TestRealAgentTypeSchemas(t *testing.T) {
 				t.Error("missing name property")
 			}
 			if nameProp.Description != "Name field" {
-				t.Errorf("expected description 'Name field', got %q", nameProp.Description)
+				t.Errorf("description: got = %q, want = %q", nameProp.Description, "Name field")
 			}
 		},
 	}, {
@@ -115,7 +115,7 @@ func TestRealAgentTypeSchemas(t *testing.T) {
 				t.Error("items should be array")
 			}
 			if itemsProp.Description != "List of items" {
-				t.Errorf("expected description, got %q", itemsProp.Description)
+				t.Errorf("description: got = %q, want = %q", itemsProp.Description, "List of items")
 			}
 
 			// Validate nested object in array
@@ -127,7 +127,7 @@ func TestRealAgentTypeSchemas(t *testing.T) {
 				t.Error("missing nested value property")
 			}
 			if valueProp.Description != "Inner value" {
-				t.Errorf("expected nested description, got %q", valueProp.Description)
+				t.Errorf("nested description: got = %q, want = %q", valueProp.Description, "Inner value")
 			}
 		},
 	}}
@@ -174,7 +174,7 @@ func TestJudgeTypeSchema(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			generatedSchema := schema.Reflect(tt.responseType)
 			if generatedSchema == nil {
-				t.Fatal("expected schema to be generated")
+				t.Fatal("generated schema: got = nil, want = non-nil")
 			}
 
 			actualJSON, err := json.MarshalIndent(generatedSchema, "", "  ")
@@ -193,7 +193,7 @@ func TestJudgeTypeSchema(t *testing.T) {
 			}
 
 			if err := compareSchemas(expected, actual, ""); err != nil {
-				t.Errorf("Schema mismatch:\n%s\n\nActual schema:\n%s", err, string(actualJSON))
+				t.Errorf("schema: got = %s, want = match; mismatch: %v", string(actualJSON), err)
 			}
 		})
 	}
