@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package statusmanager_test
 
 import (
-	"context"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +34,7 @@ func setupTestRegistry(t *testing.T) string {
 // attestations using local signing services and a local test registry.
 func TestStatusManagerSignAndVerify(t *testing.T) {
 	local := statusmanagertesting.NewLocal(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Set up local test registry
 	registryHost := setupTestRegistry(t)
@@ -157,7 +156,7 @@ func (TestStatus) PredicateType() string { return "https://status.test/statusman
 // WithRepositoryOverride by deriving the attestation repository from the digest.
 func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
 	local := statusmanagertesting.NewLocal(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	registryHost := setupTestRegistry(t)
 	t.Logf("Using test registry: %s", registryHost)
@@ -223,7 +222,7 @@ func TestStatusManagerWithoutRepositoryOverride(t *testing.T) {
 // the v1 path could carry, now signs, stores, and reads back intact.
 func TestStatusManagerLargePayload(t *testing.T) {
 	local := statusmanagertesting.NewLocal(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	registryHost := setupTestRegistry(t)
 	t.Logf("Using test registry: %s", registryHost)
@@ -281,7 +280,7 @@ func (LargeTestStatus) PredicateType() string { return "https://status.test/stat
 // versions.
 func TestStatusManagerSkipsIdenticalStatus(t *testing.T) {
 	local := statusmanagertesting.NewLocal(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	registryHost := setupTestRegistry(t)
 

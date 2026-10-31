@@ -27,7 +27,7 @@ func TestReconcileParseFailure(t *testing.T) {
 		return nil
 	}))
 
-	err := r.Reconcile(context.Background(), "not-a-digest")
+	err := r.Reconcile(t.Context(), "not-a-digest")
 	if err == nil {
 		t.Fatal("error: got = nil, wanted = non-nil")
 	}
@@ -47,7 +47,7 @@ func TestReconcileDelegates(t *testing.T) {
 		return nil
 	}))
 
-	if err := r.Reconcile(context.Background(), "cgr.dev/example@"+testDigest); err != nil {
+	if err := r.Reconcile(t.Context(), "cgr.dev/example@"+testDigest); err != nil {
 		t.Fatalf("Reconcile error: got = %v, wanted = nil", err)
 	}
 	if !called {
@@ -62,7 +62,7 @@ func TestProcessPropagatesErrors(t *testing.T) {
 		return want
 	}))
 
-	_, err := r.Process(context.Background(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
+	_, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
 	if !errors.Is(err, want) {
 		t.Errorf("Process error: got = %v, wanted = %v", err, want)
 	}
@@ -79,7 +79,7 @@ func TestReconcileNameOptionsApplied(t *testing.T) {
 		}),
 	)
 
-	if err := r.Reconcile(context.Background(), "example@"+testDigest); err != nil {
+	if err := r.Reconcile(t.Context(), "example@"+testDigest); err != nil {
 		t.Fatalf("Reconcile error: got = %v, wanted = nil", err)
 	}
 	if want := "registry.dev"; got != want {
@@ -99,7 +99,7 @@ func TestReconcileWithRegistryFixture(t *testing.T) {
 	}))
 
 	ref := strings.TrimPrefix(srv.URL, "http://") + "/repo@" + testDigest
-	if err := r.Reconcile(context.Background(), ref); err != nil {
+	if err := r.Reconcile(t.Context(), ref); err != nil {
 		t.Fatalf("Reconcile error: got = %v, wanted = nil", err)
 	}
 	if !called {
@@ -114,7 +114,7 @@ func TestProcessRequeue(t *testing.T) {
 		return workqueue.RequeueAfter(want)
 	}))
 
-	resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
+	resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
 	if err != nil {
 		t.Fatalf("Process error: got = %v, wanted = nil", err)
 	}
@@ -129,7 +129,7 @@ func TestProcessNonRetriable(t *testing.T) {
 		return workqueue.NonRetriableError(errors.New("boom"), "fail")
 	}))
 
-	resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
+	resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
 	if err != nil {
 		t.Fatalf("Process error: got = %v, wanted = nil", err)
 	}
@@ -141,7 +141,7 @@ func TestProcessNonRetriable(t *testing.T) {
 // TestProcessNoReconcilerConfigured verifies that Process fails when no reconciler is set.
 func TestProcessNoReconcilerConfigured(t *testing.T) {
 	r := New()
-	_, err := r.Process(context.Background(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
+	_, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
 	if err == nil {
 		t.Error("error: got = nil, wanted = non-nil")
 	}
@@ -159,7 +159,7 @@ func TestProcessHappyPathWithRegistry(t *testing.T) {
 	}))
 
 	key := strings.TrimPrefix(srv.URL, "http://") + "/repo@" + testDigest
-	resp, err := r.Process(context.Background(), &workqueue.ProcessRequest{Key: key})
+	resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: key})
 	if err != nil {
 		t.Fatalf("Process error: got = %v, wanted = nil", err)
 	}
