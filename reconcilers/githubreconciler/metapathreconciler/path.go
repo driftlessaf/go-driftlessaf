@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"slices"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -44,7 +43,7 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	// every early return below skips: a PR created by a run that died between
 	// PullRequests.Create and its label call would otherwise stay unlabeled for
 	// its whole life. No API call when the labels are already present.
-	if err := session.AddLabels(ctx, r.labels); err != nil {
+	if err := session.AddLabels(ctx, r.staticLabels(res)); err != nil {
 		return fmt.Errorf("apply static labels: %w", err)
 	}
 
@@ -269,7 +268,7 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	}
 
 	// Compute PR labels: static labels + dynamic labels from labelFn.
-	labels := slices.Clone(r.labels)
+	labels := r.staticLabels(res)
 	if r.labelFn != nil {
 		labels = append(labels, r.labelFn(ctx, res, diagnostics, findings)...)
 	}

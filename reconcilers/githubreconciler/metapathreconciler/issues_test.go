@@ -401,3 +401,37 @@ func TestDeriveIssuesForwardsPrior(t *testing.T) {
 		t.Errorf("prior (-want, +got):\n%s", diff)
 	}
 }
+
+func TestStaticLabelsAppendResourceLabels(t *testing.T) {
+	var o prOptions
+	WithLabels("automated pr").applyPR(&o)
+	WithResourceLabels(func(res *githubreconciler.Resource) []string {
+		if res.Path == "os/curl.yaml" {
+			return []string{"canary"}
+		}
+		return nil
+	}).applyPR(&o)
+	c := core{labels: o.labels, resourceLabelFn: o.resourceLabelFn}
+
+	tests := []struct {
+		path string
+		want []string
+	}{{
+		path: "os/curl.yaml",
+		want: []string{"automated pr", "canary"},
+	}, {
+		path: "os/openssl.yaml",
+		want: []string{"automated pr"},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := c.staticLabels(&githubreconciler.Resource{Type: githubreconciler.ResourceTypePath, Path: tt.path})
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("staticLabels (-want, +got):\n%s", diff)
+			}
+		})
+	}
+	if diff := cmp.Diff([]string{"automated pr"}, c.labels); diff != "" {
+		t.Errorf("labels after staticLabels (-want, +got):\n%s", diff)
+	}
+}

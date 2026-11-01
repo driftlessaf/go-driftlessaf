@@ -210,7 +210,7 @@ func (r *IssueReconciler) reconcilePathIssues(ctx context.Context, res *githubre
 		desired = truncated
 	}
 
-	labels := slices.Clone(r.labels)
+	labels := r.staticLabels(res)
 	if r.labelFn != nil {
 		labels = append(labels, r.labelFn(ctx, res, diagnostics, nil)...)
 	}

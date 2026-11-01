@@ -33,10 +33,11 @@ type IssuesOption interface {
 
 // commonOptions holds the configuration shared by every reconciler variant.
 type commonOptions struct {
-	mode           Mode
-	labels         []string
-	labelFn        func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
-	syntheticPaths bool
+	mode            Mode
+	labels          []string
+	labelFn         func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
+	resourceLabelFn func(*githubreconciler.Resource) []string
+	syntheticPaths  bool
 }
 
 // prOptions holds the configuration for a reconciler built with NewPR.
@@ -189,5 +190,17 @@ func WithGrouping(g Grouping) IssuesOption {
 func WithGiveUpComment(marker string, render func(explanation string) string) PROption {
 	return prOption(func(o *prOptions) {
 		o.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
+	})
+}
+
+// WithResourceLabels configures a function that computes labels from the
+// resource alone, such as a canary label for a hashed share of paths. The
+// labels join the static labels configured via WithLabels and converge the
+// same way: a pull request that already exists gets a missing one added
+// directly, without the refresh that a missing WithLabelFunc label triggers,
+// which reruns the agent.
+func WithResourceLabels(fn func(*githubreconciler.Resource) []string) Option {
+	return option(func(o *commonOptions) {
+		o.resourceLabelFn = fn
 	})
 }

@@ -8,6 +8,7 @@ package metapathreconciler
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -33,10 +34,24 @@ type core struct {
 	// See WithLabelFunc.
 	labelFn func(context.Context, *githubreconciler.Resource, []Diagnostic, []callbacks.Finding) []string
 
+	// resourceLabelFn optionally computes labels from the resource alone.
+	// See WithResourceLabels.
+	resourceLabelFn func(*githubreconciler.Resource) []string
+
 	// syntheticPaths, when true, means resource paths name no file on the
 	// default branch, so a missing path is analyzed rather than treated as a
 	// removed file. See WithSyntheticPaths.
 	syntheticPaths bool
+}
+
+// staticLabels returns the labels a resource carries whatever the analysis
+// finds: the WithLabels labels followed by the WithResourceLabels ones.
+func (c *core) staticLabels(res *githubreconciler.Resource) []string {
+	labels := slices.Clone(c.labels)
+	if c.resourceLabelFn != nil {
+		labels = append(labels, c.resourceLabelFn(res)...)
+	}
+	return labels
 }
 
 // newCore builds the shared reconciler state from the common configuration.
@@ -46,13 +61,14 @@ func newCore(ctx context.Context, identity string, analyzer Analyzer, cloneMeta 
 		return core{}, fmt.Errorf("create status manager: %w", err)
 	}
 	return core{
-		identity:       identity,
-		analyzer:       analyzer,
-		statusManager:  sm,
-		cloneMeta:      cloneMeta,
-		mode:           o.mode,
-		labels:         o.labels,
-		labelFn:        o.labelFn,
-		syntheticPaths: o.syntheticPaths,
+		identity:        identity,
+		analyzer:        analyzer,
+		statusManager:   sm,
+		cloneMeta:       cloneMeta,
+		mode:            o.mode,
+		labels:          o.labels,
+		labelFn:         o.labelFn,
+		resourceLabelFn: o.resourceLabelFn,
+		syntheticPaths:  o.syntheticPaths,
 	}, nil
 }
