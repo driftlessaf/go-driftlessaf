@@ -42,6 +42,13 @@ func (s *Store) Put(ctx context.Context, name string, data []byte, cond blob.Con
 	}
 	w := obj.NewWriter(ctx)
 	w.ContentType = "application/octet-stream"
+	// The writer allocates a ChunkSize buffer up front, 16 MiB by default. A
+	// chunk one byte longer than data holds all of it, so the upload is a
+	// single request that the client can retry and that carries the CRC32C
+	// the client computes, for GCS to check. A chunk exactly len(data) long
+	// fills before the writer sees EOF and opens a resumable session instead.
+	// Zero would upload in one request with no retry and no checksum sent.
+	w.ChunkSize = min(len(data)+1, w.ChunkSize)
 	_, writeErr := w.Write(data)
 	// Always Close, and prefer its error: storage.Writer uploads asynchronously,
 	// so Close carries the authoritative server response (e.g. a 412 on a failed

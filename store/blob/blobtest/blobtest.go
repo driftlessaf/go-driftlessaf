@@ -148,6 +148,19 @@ func RunConformance(t *testing.T, newStore func() Store) {
 		t.Fatalf("Delete(name2 cleanup): %v", err)
 	}
 
+	// An empty body is an object: Get reports ok=true with no bytes, so a caller
+	// can tell it from an absent one.
+	empty := root + "empty"
+	if _, err := store.Put(ctx, empty, []byte{}, blob.Cond{DoesNotExist: true}); err != nil {
+		t.Fatalf("Put(empty): %v", err)
+	}
+	if got, _, ok, err := store.Get(ctx, empty); err != nil || !ok || len(got) != 0 {
+		t.Errorf("Get(empty): got %q ok=%t err=%v, want no bytes ok=true err=nil", got, ok, err)
+	}
+	if err := store.Delete(ctx, empty, 0); err != nil {
+		t.Fatalf("Delete(empty cleanup): %v", err)
+	}
+
 	// Delete with a wrong generation is rejected and leaves the object intact.
 	if err := store.Delete(ctx, name, gen3+1000); !errors.Is(err, blob.ErrPreconditionFailed) {
 		t.Fatalf("Delete(wrong gen): got %v, want ErrPreconditionFailed", err)
