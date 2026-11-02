@@ -134,6 +134,23 @@ func TestHasUnresolvedReviews(t *testing.T) {
 			{Kind: callbacks.FindingKindReview, Identifier: reviewBodyIdentifierPrefix + "9"},
 		},
 		want: true,
+	}, {
+		// A conversation comment is a finding only while it awaits a reply, so it
+		// counts without an entry in the awaiting set.
+		name: "conversation comment counts",
+		findings: []callbacks.Finding{
+			{Kind: callbacks.FindingKindCICheck, Identifier: "1"},
+			{Kind: callbacks.FindingKindReview, Identifier: conversationIdentifier(42)},
+		},
+		want: true,
+	}, {
+		name: "no conversation comment and no awaiting thread",
+		findings: []callbacks.Finding{
+			{Kind: callbacks.FindingKindCICheck, Identifier: "1"},
+			{Kind: callbacks.FindingKindReview, Identifier: "thread-abc"},
+		},
+		awaiting: map[string]struct{}{"thread-other": {}},
+		want:     false,
 	}}
 
 	for _, tt := range tests {

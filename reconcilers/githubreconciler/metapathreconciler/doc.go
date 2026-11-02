@@ -22,6 +22,12 @@ SPDX-License-Identifier: Apache-2.0
 //	(3) other PRs → run analyzer on changed files, report all diagnostics
 //	(fixed and unfixed) as check annotations.
 //
+// For NewPR, WithHumanCommentAck puts a 👀 on comments people leave on a pull
+// request the reconciler owns, when they were left after the head commit and
+// within the last 24 hours. It skips comments that mention someone other than
+// the bot, and pull requests a person has taken over (the skip label or an
+// assignee). It is off by default.
+//
 // # Path reconciliation with NewPR
 //
 // Path resources trigger analysis: the analyzer runs on the file path,
