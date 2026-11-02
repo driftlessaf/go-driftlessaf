@@ -46,6 +46,7 @@ type prOptions struct {
 	baseRevalidation                bool
 	unknownMergeabilityRequeueAfter time.Duration
 	giveUp                          *changemanager.GiveUpComment
+	ackComments                     bool
 }
 
 // defaultPROptions returns the configuration NewPR starts from before applying
@@ -190,6 +191,27 @@ func WithGrouping(g Grouping) IssuesOption {
 func WithGiveUpComment(marker string, render func(explanation string) string) PROption {
 	return prOption(func(o *prOptions) {
 		o.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
+	})
+}
+
+// commentAckWindow is how far back a comment can have been created and still
+// get a 👀 from WithHumanCommentAck.
+const commentAckWindow = 24 * time.Hour
+
+// WithHumanCommentAck puts a 👀 on comments that people leave on a pull request
+// this reconciler owns, so they can see the bot has noticed. It covers
+// conversation comments and inline review comments, and only comments from
+// people with a trusted association (see changemanager.TrustedAuthorAssociation)
+// left within the last 24 hours. A conversation comment also has to come after
+// the head commit, the same cutoff changemanager.WithConversationComments uses;
+// an inline comment has no such cutoff, but one in a resolved thread gets none.
+// It skips comments that mention someone other than the bot, and pull requests
+// a person has taken over (they have the skip label or an assignee). A
+// conversation comment left while a run is in progress can end up older than
+// the commit that run pushes, so it is never acked. Off by default.
+func WithHumanCommentAck() PROption {
+	return prOption(func(o *prOptions) {
+		o.ackComments = true
 	})
 }
 
