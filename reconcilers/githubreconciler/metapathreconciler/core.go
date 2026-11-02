@@ -13,9 +13,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
-	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/commentack"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
-	"github.com/google/go-github/v88/github"
 )
 
 // core holds the state shared by every reconciler variant in this package
@@ -44,13 +42,6 @@ type core struct {
 	// default branch, so a missing path is analyzed rather than treated as a
 	// removed file. See WithSyntheticPaths.
 	syntheticPaths bool
-
-	// ackComments turns on the 👀 reaction on people's comments. See
-	// WithHumanCommentAck.
-	ackComments bool
-	// commentAPI builds the client that reads comments and adds reactions. It is
-	// a field so tests can replace it.
-	commentAPI func(*github.Client) commentack.API
 }
 
 // staticLabels returns the labels a resource carries whatever the analysis
@@ -79,6 +70,5 @@ func newCore(ctx context.Context, identity string, analyzer Analyzer, cloneMeta 
 		labelFn:         o.labelFn,
 		resourceLabelFn: o.resourceLabelFn,
 		syntheticPaths:  o.syntheticPaths,
-		commentAPI:      func(gh *github.Client) commentack.API { return commentack.NewClient(gh) },
 	}, nil
 }

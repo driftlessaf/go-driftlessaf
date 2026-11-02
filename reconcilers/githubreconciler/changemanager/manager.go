@@ -61,40 +61,9 @@ func WithFindingsIteration[T any]() Option[T] {
 // carry the capability. When enabled, reply bodies are sanitized before they
 // reach GitHub (see sanitizeReplyBody): a body that begins with an @mention line
 // carries a reviewer command, an embedded image or off-site link is untrusted
-// content, and a secret-shaped string must never be echoed back onto a PR. The
-// cleaning is a backstop, not a secret scanner: it catches known token formats
-// only, so a bot that enables replies should not give its fixer access to
-// secrets.
+// content, and a secret-shaped string must never be echoed back onto a PR.
 func WithFindingReplies[T any]() Option[T] {
 	return func(cm *CM[T]) {
-		cm.findingReplies = true
-	}
-}
-
-// WithConversationComments makes a session read the comments people leave in the
-// pull request's conversation, not just review threads and review bodies. Each
-// comment from a trusted author (see authorTrusted) that was left after the head
-// commit and that the bot has not yet replied to becomes a finding. Like a
-// review body, a comment left before the head commit already had its chance, so
-// a new commit clears it, and old comments do not turn into findings when a bot
-// that already has pull requests turns this on. A comment that mentions someone
-// other than the bot is skipped, since it is meant for that person. The
-// comments are read even on a pull request with the skip label or an assignee;
-// the caller's ShouldSkip decides whether a person took over, and the caller
-// must check it before acting on findings. A comment left while a run is in
-// progress can end up older than the commit that run pushes, so it is never
-// read.
-//
-// It also enables replies (WithFindingReplies), since a comment is marked
-// handled only by the bot's reply. The fixer answers a comment with a new
-// comment that links the one it answers. The reply is posted whether or not the
-// run committed a change, so a question gets an answer, but a run that fails
-// drops it with the other queued thread actions, so the comment is offered
-// again on the next run. Off by default, and when off the pull request query is
-// unchanged.
-func WithConversationComments[T any]() Option[T] {
-	return func(cm *CM[T]) {
-		cm.conversationComments = true
 		cm.findingReplies = true
 	}
 }
@@ -374,9 +343,6 @@ type CM[T any] struct {
 	// limited to the suites of checkApps when non-empty; see WithCheckSuites.
 	checkSuites bool
 	checkApps   []int64
-	// conversationComments makes sessions read comments in the pull request's
-	// conversation as findings; see WithConversationComments.
-	conversationComments bool
 }
 
 // GraphQL types for querying check runs
@@ -515,14 +481,6 @@ var trustedAuthorAssociations = map[string]struct{}{
 	"OWNER":        {},
 	"MEMBER":       {},
 	"COLLABORATOR": {},
-}
-
-// TrustedAuthorAssociation reports whether a comment author's association (as
-// GitHub reports it, for example "OWNER") is one a bot acts on: the same
-// associations whose review comments become findings.
-func TrustedAuthorAssociation(association string) bool {
-	_, ok := trustedAuthorAssociations[association]
-	return ok
 }
 
 // botLoginSuffix is the "[bot]" login suffix GitHub appends to a GitHub App's
@@ -762,7 +720,6 @@ func (cm *CM[T]) NewSession(
 		meta          metadata
 
 		awaitingReviewThreads map[string]struct{}
-		conversationByID      map[string]gqlConversationComment
 	)
 
 	vars := map[string]any{
@@ -838,24 +795,6 @@ func (cm *CM[T]) NewSession(
 		// Collect review body findings from trusted authors on the current commit
 		findings = append(findings, collectReviewBodyFindings(ctx, pr.HeadRefOid, pr.Reviews, cm.trustedReviewAuthors)...)
 
-		// Collect conversation comments from trusted authors, for a manager that
-		// asked for them. A pull request with this manager's skip label is left
-		// alone, so its comments are not read. Assignees are not checked here: only
-		// the caller knows which ones the bot set itself, so the caller's ShouldSkip
-		// decides whether a person took over.
-		if cm.conversationComments && !slices.Contains(prLabels, skipLabelFor(cm.identity)) {
-			conv, err := queryConversationComments(ctx, gqlClient, owner, repo, pr.Number)
-			if err != nil {
-				return nil, err
-			}
-			botLogin := strings.TrimSuffix(conv.authorLogin, "[bot]")
-			findings = append(findings, collectConversationFindings(ctx, conv.comments, cm.trustedReviewAuthors, conv.headCommitted, botLogin)...)
-			conversationByID = make(map[string]gqlConversationComment, len(conv.comments))
-			for _, c := range conv.comments {
-				conversationByID[conversationIdentifier(c.DatabaseId)] = c
-			}
-		}
-
 		// Recover the embedded metadata (e.g. the commit-budget baseline);
 		// absent on PRs whose body predates this block.
 		if ed, err := cm.templateExecutor.Extract(prBody); err == nil {
@@ -892,7 +831,6 @@ func (cm *CM[T]) NewSession(
 		meta:          meta,
 
 		reviewThreadsAwaitingReply: awaitingReviewThreads,
-		conversationByID:           conversationByID,
 		threads:                    &threadActions{},
 	}, nil
 }

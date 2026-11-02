@@ -107,11 +107,6 @@ type Session[T any] struct {
 	// has already answered does not renew the commit budget.
 	reviewThreadsAwaitingReply map[string]struct{}
 
-	// conversationByID holds the pull request's conversation comments by finding
-	// identifier, so a queued reply can link and quote the comment it answers.
-	// Set only for a manager built with WithConversationComments.
-	conversationByID map[string]gqlConversationComment
-
 	// draftNote, when non-empty, makes the in-flight Upsert publish as a draft
 	// and appends the note to the pull request body; see PublishAsDraft.
 	draftNote string
@@ -126,32 +121,7 @@ type Session[T any] struct {
 
 // skipLabel returns the skip label for this session's identity.
 func (s *Session[T]) skipLabel() string {
-	return skipLabelFor(s.manager.identity)
-}
-
-// skipLabelFor returns the label that tells the bot with this identity to leave
-// a pull request alone.
-func skipLabelFor(identity string) string {
-	return "skip:" + identity
-}
-
-// takenOver reports whether a person has taken over a pull request with these
-// labels and assignees: it has skipLabel, or it is assigned to someone not in
-// excludeAssignees.
-func takenOver(labels, assignees []string, skipLabel string, excludeAssignees []string) bool {
-	if slices.Contains(labels, skipLabel) {
-		return true
-	}
-	excluded := make(map[string]struct{}, len(excludeAssignees))
-	for _, a := range excludeAssignees {
-		excluded[a] = struct{}{}
-	}
-	for _, a := range assignees {
-		if _, ok := excluded[a]; !ok {
-			return true
-		}
-	}
-	return false
+	return "skip:" + s.manager.identity
 }
 
 // ShouldSkip checks if the existing PR should be skipped.
@@ -164,7 +134,20 @@ func (s *Session[T]) ShouldSkip(excludeAssignees ...string) bool {
 	if s.prNumber == 0 {
 		return false
 	}
-	return takenOver(s.prLabels, s.prAssignees, s.skipLabel(), excludeAssignees)
+	if slices.Contains(s.prLabels, s.skipLabel()) {
+		return true
+	}
+	// Only skip if there are assignees that are not in the exclude list.
+	excluded := make(map[string]struct{}, len(excludeAssignees))
+	for _, a := range excludeAssignees {
+		excluded[a] = struct{}{}
+	}
+	for _, a := range s.prAssignees {
+		if _, ok := excluded[a]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // HasSkipLabel returns true if the PR has the skip label applied.
@@ -926,8 +909,7 @@ func (s *Session[T]) Findings() []callbacks.Finding {
 // counts only while it awaits the bot, meaning its most recent relevant comment
 // is not the bot's own reply (see threadAwaitsReply); a thread the bot answered
 // last is settled until a trusted author replies again, and a resolved thread is
-// never a finding. A conversation comment always counts too: it stops being a
-// finding once the bot has replied to it. Returns false if no PR exists.
+// never a finding. Returns false if no PR exists.
 //
 // Callers gate ResetCommitBudget on this so review feedback grants a fresh
 // commit budget. Because a thread the bot has answered no longer counts, a
@@ -938,7 +920,7 @@ func (s *Session[T]) HasUnresolvedReviews() bool {
 		if f.Kind != callbacks.FindingKindReview {
 			continue
 		}
-		if strings.HasPrefix(f.Identifier, reviewBodyIdentifierPrefix) || strings.HasPrefix(f.Identifier, conversationIdentifierPrefix) {
+		if strings.HasPrefix(f.Identifier, reviewBodyIdentifierPrefix) {
 			return true
 		}
 		if _, awaiting := s.reviewThreadsAwaitingReply[f.Identifier]; awaiting {
@@ -1021,9 +1003,6 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 		Resolve: func(_ context.Context, identifier string) error {
 			if strings.HasPrefix(identifier, reviewBodyIdentifierPrefix) {
 				return errors.New("cannot resolve review body findings, only review thread findings can be resolved")
-			}
-			if strings.HasPrefix(identifier, conversationIdentifierPrefix) {
-				return errors.New("cannot resolve conversation comment findings, only review thread findings can be resolved")
 			}
 			if _, err := s.findingByID(callbacks.FindingKindReview, identifier); err != nil {
 				return err
@@ -1171,18 +1150,10 @@ func (s *Session[T]) BeginThreadActionScope() (discard func()) {
 // with the bot's reply last, which the next pass reads as settled (see
 // threadAwaitsReply) and so never revisits, and a retracted reply hands the
 // thread back to the bot.
-//
-// Replies to conversation comments are taken out first and posted whether or
-// not the run committed a change (see postConversationReplies); the rules above
-// cover the rest. One that does not post counts in the number returned, like a
-// thread reply. A run that fails never reaches this flush: it drops them with
-// the other queued thread actions (see dropThreadActions), so the comment is
-// offered again on the next run.
 func (s *Session[T]) flushThreadActions(ctx context.Context, committed bool) (unposted int) {
 	replies, resolves := s.threads.take()
-	replies, unposted = s.postConversationReplies(ctx, replies)
 	if len(replies) == 0 && len(resolves) == 0 {
-		return unposted
+		return 0
 	}
 	if !committed {
 		kept := make([]threadReply, 0, len(replies))
@@ -1232,40 +1203,6 @@ func (s *Session[T]) markReply(body string) string {
 		return body
 	}
 	return body + "\n\n" + threadReplyMarker(s.manager.identity)
-}
-
-// postConversationReplies posts the queued replies that answer conversation
-// comments, then returns the rest, which are review-thread replies, and how
-// many conversation replies did not post. A conversation reply stands on its
-// own, since the agent may only be answering a question, so it is posted
-// whether or not the run committed a change. A run that fails drops it with the
-// other queued thread actions instead (see dropThreadActions), so the comment is
-// offered again on the next run. A failed post is logged and counted: the
-// comment still has no reply, so the next run offers it to the agent again.
-func (s *Session[T]) postConversationReplies(ctx context.Context, replies []threadReply) (rest []threadReply, unposted int) {
-	rest = make([]threadReply, 0, len(replies))
-	for _, r := range replies {
-		if !strings.HasPrefix(r.threadID, conversationIdentifierPrefix) {
-			rest = append(rest, r)
-			continue
-		}
-		if err := s.postConversationReply(ctx, r); err != nil {
-			clog.WarnContext(ctx, "failed to post a conversation comment reply", "comment", r.threadID, "error", err.Error())
-			unposted++
-		}
-	}
-	return rest, unposted
-}
-
-// postConversationReply posts r as a new comment on the pull request.
-func (s *Session[T]) postConversationReply(ctx context.Context, r threadReply) error {
-	c, ok := s.conversationByID[r.threadID]
-	if !ok {
-		return fmt.Errorf("no conversation comment for %s", r.threadID)
-	}
-	body := conversationReplyBody(c, r.body)
-	_, _, err := s.client.Issues.CreateComment(ctx, s.owner, s.repo, s.prNumber, &github.IssueComment{Body: &body})
-	return err
 }
 
 // retractReplies removes the disposition replies posted on a thread whose

@@ -13,13 +13,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
-	"time"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
-	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/graphqlclient"
-	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/internal/commentack"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/statusmanager"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
@@ -28,13 +24,7 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
-// reconcilePullRequest handles PR events. When WithHumanCommentAck is set, it
-// first puts a 👀 on people's comments on a pull request it owns, before any of
-// the cases below. It skips comments that mention someone other than the bot,
-// and it skips the ack on a pull request a person has taken over (it has the
-// skip label or an assignee). It asks GitHub whether it owns the pull request
-// at most once, and the cases below reuse that answer. Then it takes one of
-// three ways:
+// reconcilePullRequest handles PR events with a three-way branch:
 //  1. Skip label present → report neutral/skipped status
 //  2. Our identity prefix on branch → report neutral status + re-queue path
 //  3. Other PRs → run analyzer on changed files, report findings as check annotations
@@ -55,28 +45,6 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 	ctx = clog.WithValues(ctx, "sha", sha)
 	log := clog.FromContext(ctx)
 	session := r.statusManager.NewSession(gh, res, sha)
-
-	// owns reports whether this reconciler owns the pull request, asking GitHub
-	// at most once. The branch name only says the PR may be ours.
-	branch := pr.GetHead().GetRef()
-	prefix := r.identity + "/"
-	owns := sync.OnceValues(func() (bool, error) {
-		if !strings.HasPrefix(branch, prefix) {
-			return false, nil
-		}
-		return r.viewerOwnsPR(ctx, gh, res)
-	})
-
-	// Acknowledge people's comments before any case below can return early. A
-	// pull request a person has taken over is theirs to answer, so it gets no 👀.
-	if r.ackComments && !tookOver(pr, r.identity) {
-		if owned, err := owns(); err != nil {
-			clog.WarnContext(ctx, "could not determine pull request ownership for comment acknowledgement", "error", err)
-		} else if owned {
-			// The author of a pull request the bot owns is the bot.
-			r.ackOwnedPRComments(ctx, gh, res, strings.TrimSuffix(pr.GetUser().GetLogin(), "[bot]"))
-		}
-	}
 
 	// reportNeutral posts a completed/neutral status for this SHA, but only
 	// after confirming we have not already done so. ObservedState issues a
@@ -116,8 +84,10 @@ func (r *core) reconcilePullRequest(ctx context.Context, res *githubreconciler.R
 	// claiming it: the authenticated app must have authored the pull request and
 	// its head branch must live in this repository, not a fork. A pull request
 	// that only borrows the prefix falls through to Case 3.
+	branch := pr.GetHead().GetRef()
+	prefix := r.identity + "/"
 	if strings.HasPrefix(branch, prefix) {
-		owned, err := owns()
+		owned, err := r.viewerOwnsPR(ctx, gh, res)
 		if err != nil {
 			return fmt.Errorf("determine pull request ownership: %w", err)
 		}
@@ -288,30 +258,6 @@ func (r *core) analyzeReview(ctx context.Context, wt *gogit.Worktree, paths []st
 			"outside_changed_lines", dropped-withoutAnchor-outsidePaths)
 	}
 	return filtered, nil
-}
-
-// ackOwnedPRComments puts a 👀 on the recent comments people left on a pull
-// request this reconciler owns. It skips comments that mention someone other
-// than botLogin, the bot's login. The caller checks that WithHumanCommentAck
-// was set and that no person has taken over the pull request (see tookOver). A
-// failure is logged and the reconcile carries on: a missed 👀 is tried again
-// the next time the pull request is reconciled.
-func (r *core) ackOwnedPRComments(ctx context.Context, gh *github.Client, res *githubreconciler.Resource, botLogin string) {
-	err := commentack.Ack(ctx, r.commentAPI(gh), res.Owner, res.Repo, res.Number, commentack.Options{
-		Now:      time.Now(),
-		Window:   commentAckWindow,
-		Trusted:  changemanager.TrustedAuthorAssociation,
-		BotLogin: botLogin,
-	})
-	if err != nil {
-		clog.WarnContext(ctx, "could not acknowledge pull request comments", "error", err)
-	}
-}
-
-// tookOver reports whether a person has taken over the pull request: it has
-// the skip label for identity, or it has any assignee.
-func tookOver(pr *github.PullRequest, identity string) bool {
-	return hasLabel(pr, fmt.Sprintf("skip:%s", identity)) || len(pr.Assignees) > 0
 }
 
 // ownsPR is the pure ownership decision for a pull request whose head branch

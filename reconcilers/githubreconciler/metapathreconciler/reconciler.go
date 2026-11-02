@@ -145,7 +145,6 @@ func NewPR[Req promptbuilder.Bindable, Resp Result, CB any](
 	if err != nil {
 		return nil, err
 	}
-	c.ackComments = o.ackComments
 	return &PRReconciler[Req, Resp, CB]{
 		core:                            c,
 		changeManager:                   changeManager,

@@ -60,16 +60,4 @@ SPDX-License-Identifier: Apache-2.0
 //	if err := session.CloseAnyOutstanding(ctx, "Closing due to version downgrade"); err != nil {
 //	    return err
 //	}
-//
-// # Conversation Comments
-//
-// By default a session reads review threads and review bodies as findings. With
-// WithConversationComments it also reads the comments people leave in the pull
-// request's conversation. A comment left after the head commit becomes a finding
-// until the bot replies to it. A comment that mentions someone other than the
-// bot does not. The comments are not read when the pull request has the
-// skip label. An assignee does not stop them: the caller's ShouldSkip decides
-// whether a person took over. The option also enables replies, so the fixer can
-// answer. It is off by default, and when off the pull request query is the same
-// as without it.
 package changemanager
