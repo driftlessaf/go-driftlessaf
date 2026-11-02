@@ -161,6 +161,9 @@ func (e *executor[Request, Response]) restoreParams(env checkpoint.Envelope, too
 	if err := json.Unmarshal(env.ProviderState, &params); err != nil {
 		return params, fmt.Errorf("unmarshal provider state: %w", err)
 	}
+	if err := restoreToolUseInputs(env.ProviderState, params.Messages); err != nil {
+		return params, err
+	}
 
 	// Strip every message-block cache_control marker BEFORE the tail tracker
 	// runs. The captured transcript carries the capture-time tail markers; left
@@ -184,6 +187,35 @@ func (e *executor[Request, Response]) restoreParams(env checkpoint.Envelope, too
 	}
 	params.Tools, params.System = live.Tools, live.System
 	return params, nil
+}
+
+// restoreToolUseInputs puts every tool_use input back as the bytes the
+// captured request held. The SDK decodes an input into a map, which encodes
+// again with its keys sorted and its numbers and escapes rewritten; the
+// prompt cache matches on bytes, so a rewritten input makes the resumed
+// request miss the cache from that call on and write the conversation again.
+func restoreToolUseInputs(state json.RawMessage, messages []anthropic.MessageParam) error {
+	var raw struct {
+		Messages []struct {
+			Content []struct {
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(state, &raw); err != nil {
+		return fmt.Errorf("unmarshal provider state tool inputs: %w", err)
+	}
+	if len(raw.Messages) != len(messages) {
+		return fmt.Errorf("provider state: %d raw messages for %d decoded", len(raw.Messages), len(messages))
+	}
+	for m := range messages {
+		for b := range messages[m].Content {
+			if tu := messages[m].Content[b].OfToolUse; tu != nil && b < len(raw.Messages[m].Content) {
+				tu.Input = raw.Messages[m].Content[b].Input
+			}
+		}
+	}
+	return nil
 }
 
 // runRestored drives the shared turn loop over a restored request for budget

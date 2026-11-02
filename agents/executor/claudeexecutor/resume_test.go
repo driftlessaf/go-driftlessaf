@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -403,4 +404,114 @@ func TestResumeFailsClosedOnModelDrift(t *testing.T) {
 	if !errors.Is(err, checkpoint.ErrConfigDrift) {
 		t.Errorf("Resume error: got %v, want checkpoint.ErrConfigDrift", err)
 	}
+}
+
+// TestResumeReplaysTranscriptVerbatim pins that a parked conversation's
+// transcript goes back on the wire as the live run sent it. The prompt cache
+// matches on the request's bytes, so a resumed request that re-encodes an
+// earlier turn (a tool_use input's keys reordered, 1.50 written as 1.5, a
+// thinking block changed) misses the cache from that turn on and pays to
+// write the whole conversation again. The live run's second request carries
+// the first three messages; the resumed request must carry them byte for
+// byte, cache_control markers aside (those move with the tail by design).
+func TestResumeReplaysTranscriptVerbatim(t *testing.T) {
+	// Keys out of alphabetical order, a number with a trailing zero and text
+	// the encoder escapes: each would come back different from a decode into
+	// a map and an encode out of it.
+	const input = `{"ref":"main","pattern":"a <b> & \u00e9","n":1.50}`
+	partial, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bodies []string
+	srv := newValidatingAnthropicServer(t, func(reqNum int, body []byte) []string {
+		bodies = append(bodies, string(body))
+		switch reqNum {
+		case 1:
+			return wrapTurn("msg_1",
+				`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"look it up"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"c2ln"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_grep","name":"git_grep","input":{}}}`,
+				fmt.Sprintf(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":%s}}`, partial),
+				`{"type":"content_block_stop","index":1}`)
+		case 2:
+			return wrapTurn("msg_2", toolUseBlockSSE(t, 0, "toolu_ask", askAFriendToolName, map[string]any{"question": "go on?"})...)
+		default:
+			return []string{
+				`{"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"usage":{"input_tokens":30,"output_tokens":5}}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\"answer\":\"done\"}"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+				`{"type":"message_stop"}`,
+			}
+		}
+	})
+	client := anthropic.NewClient(option.WithBaseURL(srv.URL), option.WithAPIKey("test"), option.WithMaxRetries(0))
+	prompt, err := promptbuilder.NewPrompt("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](client, prompt,
+		claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askAFriendProvider()),
+		claudeexecutor.WithCacheTTL[errCapRequest, errCapResponse](time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := map[string]claudetool.Metadata[errCapResponse]{"git_grep": gitGrepTool(nil)}
+	_, err = exec.Execute(t.Context(), errCapRequest{}, tools)
+	susp, ok := checkpoint.AsSuspension(err)
+	if !ok {
+		t.Fatalf("Execute: got %v, want a suspension", err)
+	}
+	// The envelope crosses a store as JSON, as every caller keeps it.
+	raw, err := json.Marshal(susp.Envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env checkpoint.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	resumer, ok := exec.(claudeexecutor.ResultResumer[errCapRequest, errCapResponse])
+	if !ok {
+		t.Fatal("executor does not satisfy ResultResumer")
+	}
+	if _, err := resumer.ResumeWithResults(t.Context(), env, map[string]string{"toolu_ask": "yes"}, tools); err != nil {
+		t.Fatalf("ResumeWithResults: %v", err)
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("requests: got %d, want 3", len(bodies))
+	}
+	live, resumed := rawMessages(t, bodies[1]), rawMessages(t, bodies[2])
+	if len(live) != 3 || len(resumed) != 5 {
+		t.Fatalf("messages: live %d, resumed %d, want 3 and 5", len(live), len(resumed))
+	}
+	for i := range live {
+		if got, want := withoutCacheControl(resumed[i]), withoutCacheControl(live[i]); got != want {
+			t.Errorf("message %d:\nresumed: %s\nlive:    %s", i, got, want)
+		}
+	}
+}
+
+// rawMessages splits a request body's messages without re-encoding them.
+func rawMessages(t *testing.T, body string) []json.RawMessage {
+	t.Helper()
+	var req struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	return req.Messages
+}
+
+var cacheControlField = regexp.MustCompile(`,"cache_control":\{[^{}]*\}|"cache_control":\{[^{}]*\},?`)
+
+func withoutCacheControl(m json.RawMessage) string {
+	return cacheControlField.ReplaceAllString(string(m), "")
 }
