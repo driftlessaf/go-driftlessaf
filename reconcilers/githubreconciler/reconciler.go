@@ -171,7 +171,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 	// Parse the URL to extract resource information
 	resource, err := ParseURL(url)
 	if err != nil {
-		return fmt.Errorf("parsing URL: %w", err)
+		// Parsing is deterministic, so a retry fails the same way and only
+		// ends in the dead-letter queue. A bot rolled back from another
+		// reconciler finds that reconciler's keys in its queue; each is
+		// dropped, and a resync enqueues its resource again.
+		mUnparseableKeys.Inc()
+		return workqueue.NonRetriableError(fmt.Errorf("parsing URL: %w", err), "not a GitHub resource URL")
 	}
 
 	if r.ownerFilter != nil {

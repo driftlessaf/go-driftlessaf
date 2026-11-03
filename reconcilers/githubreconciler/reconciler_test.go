@@ -13,10 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/testing/protocmp"
 
 	"chainguard.dev/driftlessaf/workqueue"
 )
@@ -309,5 +312,49 @@ func TestReconciler_Process_RequeueFloor(t *testing.T) {
 	}
 	if !resp.GetRequeueFloor() {
 		t.Error("RequeueFloor = false, want true for RequeueNotBefore")
+	}
+}
+
+func TestReconciler_Process_UnparseableKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{{
+		name: "dataplane URI",
+		key:  "dataplane://chainguard-dev/mono/main/bots/vpa-bot",
+	}, {
+		name: "not a URL",
+		key:  "not-a-url",
+	}, {
+		name: "GitHub URL with an unknown resource type",
+		key:  "https://github.com/owner/repo/wiki/Home",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			r := NewReconciler(NewClientCache(mockTokenSourceFunc), WithReconciler(func(_ context.Context, _ *Resource, _ *github.Client) error {
+				called = true
+				return nil
+			}))
+
+			before := testutil.ToFloat64(mUnparseableKeys)
+
+			// A nil error with an empty response completes the key: the
+			// dispatcher neither retries it nor dead-letters it.
+			resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: tt.key})
+			if err != nil {
+				t.Fatalf("Process: got err = %v, want nil", err)
+			}
+			if diff := cmp.Diff(&workqueue.ProcessResponse{}, resp, protocmp.Transform()); diff != "" {
+				t.Errorf("Process response (-want, +got):\n%s", diff)
+			}
+			if called {
+				t.Error("reconciler func was called for a key that does not parse")
+			}
+			if got := testutil.ToFloat64(mUnparseableKeys) - before; got != 1 {
+				t.Errorf("github_reconciler_unparseable_keys_total increase: got = %v, want = 1", got)
+			}
+		})
 	}
 }
