@@ -85,7 +85,10 @@ WITH prices AS (
   SELECT * FROM UNNEST([
     -- USD per token = page price / 1e6
     -- Claude. Uniform across context size, except Sonnet 4.5 and Haiku 5.5
-    -- (Large Context rows below). Cache creation (5m TTL) = 1.25x input.
+    -- (Large Context rows below). Cache creation (5m TTL) = 1.25x input. A
+    -- turn whose cache_ttl_seconds is 3600 or more writes at the 1h rate, 2x
+    -- input on Anthropic, Vertex and Bedrock alike; the final SELECT gets it by
+    -- scaling the 5m rate by 1.6, so every Claude row must keep 5m = 1.25x input.
     -- Cache read = 0.1x input, except Fable 5.1 (0.025x), Opus 5.5 and
     -- Sonnet 5.5 (0.05x), whose rows carry the reduced rate directly.
     STRUCT(
@@ -275,7 +278,10 @@ SELECT
   -- that call's input_tokens against the 200K threshold (272K for GPT), or
   -- its whole prompt against 100K for Haiku 5.5. Gemini and GPT input cost
   -- excludes cache_read_tokens, and GPT input cost also excludes
-  -- cache_creation_tokens (see header).
+  -- cache_creation_tokens (see header). Claude cache writes under a 1h TTL
+  -- cost 1.6x the 5m rate; a NULL TTL (rows before the field existed, or no
+  -- caching) keeps the 5m rate. Other families carry their own write rate,
+  -- whatever TTL they record.
   (
     SELECT SUM(
       GREATEST(COALESCE(turn.input_tokens, 0)
@@ -323,6 +329,7 @@ SELECT
   (
     SELECT SUM(
       COALESCE(turn.cache_creation_tokens, 0) *
+        IF(STARTS_WITH(m.pricing_model, 'claude-') AND turn.cache_ttl_seconds >= 3600, 1.6, 1) *
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
@@ -366,6 +373,7 @@ SELECT
            p_large.cache_read_price,
            p_std.cache_read_price)
       + COALESCE(turn.cache_creation_tokens, 0) *
+        IF(STARTS_WITH(m.pricing_model, 'claude-') AND turn.cache_ttl_seconds >= 3600, 1.6, 1) *
         IF((turn.input_tokens > 200000 AND m.pricing_model IN (
              'claude-sonnet-4-5','gemini-2.5-pro','gemini-3-pro-preview','gemini-3.1-pro-preview','grok-4.7'
            ))
