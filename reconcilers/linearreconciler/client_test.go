@@ -870,3 +870,56 @@ func TestGetDocument_NotFound(t *testing.T) {
 		t.Fatalf("GetDocument() error = %v, want ErrDocumentNotFound", err)
 	}
 }
+
+// GetIssue asks for the issue's project and surfaces it, so a reconciler can
+// confine itself to one project; an issue outside any project reports an
+// empty Project.
+func TestGetIssue_Project(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		project  any
+		wantID   string
+		wantName string
+	}{
+		{name: "in a project", project: map[string]any{"id": "proj-1", "name": "Tidy-Up"}, wantID: "proj-1", wantName: "Tidy-Up"},
+		{name: "no project", project: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Query string `json:"query"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decoding request: %v", err)
+				}
+				gotQuery = body.Query
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"issue": map[string]any{
+							"id":         "iss-1",
+							"identifier": "SEC-1",
+							"title":      "t",
+							"team":       map[string]any{"id": "team-1", "key": "SEC", "name": "Security"},
+							"project":    tc.project,
+							"labels":     map[string]any{"nodes": []any{}},
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			issue, err := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL).GetIssue(t.Context(), "iss-1")
+			if err != nil {
+				t.Fatalf("GetIssue: %v", err)
+			}
+			if !strings.Contains(gotQuery, "project { id name }") {
+				t.Errorf("query does not select the project:\n%s", gotQuery)
+			}
+			if issue.Project.ID != tc.wantID || issue.Project.Name != tc.wantName {
+				t.Errorf("project: got = %q/%q, want = %q/%q", issue.Project.ID, issue.Project.Name, tc.wantID, tc.wantName)
+			}
+		})
+	}
+}

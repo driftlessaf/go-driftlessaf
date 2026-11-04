@@ -399,6 +399,7 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 			id identifier title description updatedAt completedAt url
 			state { name type }
 			team { id key name }
+			project { id name }
 			assignee { id name }
 			creator { id name app }
 			labels { nodes { name } }
@@ -454,10 +455,10 @@ type ListTeamIssuesOptions struct {
 // the completed and canceled workflow-state types (see closedStateTypes).
 //
 // The returned issues carry what eligibility and state handling need — title,
-// description, workflow state, labels, and attachments — so a caller can filter
-// issues and load reconciler state (NewStateManager) without a per-issue
-// GetIssue round-trip. Assignee, creator, comments, and documents are NOT
-// fetched: those fields are nil or empty on every issue returned here, so
+// description, workflow state, labels, project, and attachments — so a caller
+// can filter issues and load reconciler state (NewStateManager) without a
+// per-issue GetIssue round-trip. Assignee, creator, comments, and documents are
+// NOT fetched: those fields are nil or empty on every issue returned here, so
 // dereferencing Assignee or Creator panics. Use GetIssue when they are needed.
 //
 // Results are ordered by createdAt. That matters for the cursor: under Linear's
@@ -473,6 +474,7 @@ func (c *Client) ListTeamIssues(ctx context.Context, teamKey string, opts ListTe
 				id identifier title description updatedAt completedAt url
 				state { name type }
 				team { id key name }
+				project { id name }
 				labels { nodes { name } }
 				` + listAttachmentsSelection + `
 			}

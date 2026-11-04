@@ -65,6 +65,14 @@ type Issue struct {
 		Name string `json:"name"`
 	} `json:"team"`
 
+	// Project is the project the issue belongs to, if any; both fields are
+	// empty for an issue outside any project. Populated by GetIssue and
+	// ListTeamIssues.
+	Project struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"project"`
+
 	Assignee *User `json:"assignee"`
 
 	// Creator is the Linear user who originally filed the issue. Populated
