@@ -46,6 +46,12 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		return fmt.Errorf("fetch issue: %w", err)
 	}
 
+	// An issue from an untrusted author never runs the agent. The cleanup cases
+	// below still apply to it, so a PR it opened earlier closes with it.
+	author := issue.GetUser()
+	untrusted := r.trustIssueAuthors &&
+		!changemanager.TrustedAuthor(issue.GetAuthorAssociation(), author.GetLogin(), author.GetType(), r.trustedIssueAuthors)
+
 	// Create a change session for the PR (needed for skip label check and PR cleanup)
 	changeSession, err := r.changeManager.NewSession(ctx, gh, res)
 	if err != nil {
@@ -92,7 +98,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	// Only the unknown-mergeability case below waits on mergeability, so wait
 	// only when no earlier case would decide the reconcile. The next pass reads
 	// the issue again too, since it can change while this one waits.
-	if !rechecked && r.mergeabilityRecheck > 0 && state.IsUnknown() && issue.GetState() != "closed" &&
+	if !rechecked && !untrusted && r.mergeabilityRecheck > 0 && state.IsUnknown() && issue.GetState() != "closed" &&
 		(r.requiredLabel == "" || hasLabel(issue, r.requiredLabel)) &&
 		!state.HitMaxCommits() && !state.HasFindings() && !state.HasPendingChecks() {
 		select {
@@ -144,6 +150,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			prURL = ""
 		}
 		r.emitTransition(ctx, issue, prURL, to, mode, TriggerIssueClosed)
+		return nil
+
+	case untrusted:
+		log.With("author", author.GetLogin(), "association", issue.GetAuthorAssociation()).Info("Issue author is not trusted, skipping")
 		return nil
 
 	case state.NeedsRebase():

@@ -525,6 +525,14 @@ func TrustedAuthorAssociation(association string) bool {
 	return ok
 }
 
+// TrustedAuthor reports whether a bot acts on content from an author: one with
+// a trusted association (see TrustedAuthorAssociation), or a bot named in
+// trustedLogins, matched as for WithTrustedReviewAuthors. typename is the
+// author's type as GitHub reports it ("Bot" for a GitHub App).
+func TrustedAuthor(association, login, typename string, trustedLogins map[string]struct{}) bool {
+	return authorTrusted(association, login, typename, trustedLogins)
+}
+
 // botLoginSuffix is the "[bot]" login suffix GitHub appends to a GitHub App's
 // login in REST responses. GraphQL drops the suffix and reports the actor's
 // __typename as "Bot" instead. Normalizing across the two shapes lets an

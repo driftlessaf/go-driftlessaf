@@ -32,6 +32,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// to only process issues managed by a specific identity.
 	requiredLabel string
 
+	// trustIssueAuthors, when set, limits reconciliation to issues whose author
+	// is trusted: a trusted association or a login in trustedIssueAuthors. See
+	// WithTrustedIssueAuthors.
+	trustIssueAuthors   bool
+	trustedIssueAuthors map[string]struct{}
+
 	// draftLabel, when set and present on the issue, opens the generated PR as a
 	// draft. Empty (the default) always opens ready-for-review PRs. The draft
 	// state only takes effect at PR creation — GitHub's REST edit endpoint
@@ -101,6 +107,24 @@ type Option[Req promptbuilder.Bindable, Resp Result, CB any] func(*Reconciler[Re
 func WithRequiredLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.requiredLabel = label
+	}
+}
+
+// WithTrustedIssueAuthors limits the reconciler to issues whose author it
+// trusts: a person whose association is trusted (see
+// changemanager.TrustedAuthorAssociation), or a GitHub App named in logins.
+// Every other issue is skipped before the agent runs, so an issue opened by an
+// untrusted author never becomes a request. Logins match as for
+// changemanager.WithTrustedReviewAuthors. Off by default.
+func WithTrustedIssueAuthors[Req promptbuilder.Bindable, Resp Result, CB any](logins ...string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.trustIssueAuthors = true
+		r.trustedIssueAuthors = make(map[string]struct{}, len(logins))
+		for _, l := range logins {
+			if l != "" {
+				r.trustedIssueAuthors[l] = struct{}{}
+			}
+		}
 	}
 }
 

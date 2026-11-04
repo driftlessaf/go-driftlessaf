@@ -82,5 +82,8 @@ func newReconciler[CB any](
 		// Only process issues that have the managed label.
 		// This ensures we only materialize solutions for issues that are ready.
 		metareconciler.WithRequiredLabel[*Request, *Result, CB](fmt.Sprintf("%s/managed", identity)),
+		// Only process issues from owners, members, and collaborators, so text
+		// from an outside author never reaches the agent.
+		metareconciler.WithTrustedIssueAuthors[*Request, *Result, CB](),
 	), nil
 }
