@@ -51,7 +51,7 @@ const (
 	// truncate. Reconcilers whose repeat action is expensive or externally
 	// visible should carry a second, authoritative dedup signal rather than
 	// rely on state alone.
-	attachmentsSelection = `attachments(first: ` + attachmentsPageSize + `) { nodes { id title subtitle url createdAt } }`
+	attachmentsSelection = `attachments(first: ` + attachmentsPageSize + `) { nodes { id title subtitle url createdAt creator { id } } }`
 
 	// listAttachmentsSelection is the same connection for the list query, which
 	// asks for a page of issues rather than one. A nested connection multiplies
@@ -62,7 +62,7 @@ const (
 	// the narrower page size to hold that product down, and accepts a lower
 	// truncation threshold in exchange; the caveat above applies with more
 	// force.
-	listAttachmentsSelection = `attachments(first: ` + listAttachmentsPageSize + `) { nodes { id title subtitle url createdAt } }`
+	listAttachmentsSelection = `attachments(first: ` + listAttachmentsPageSize + `) { nodes { id title subtitle url createdAt creator { id } } }`
 
 	// Page sizes, as strings because they are concatenated into query literals.
 	attachmentsPageSize     = "250" // Linear's per-page maximum.
@@ -151,7 +151,64 @@ type Client struct {
 	isAPIKey    bool
 
 	// BotUserID is the authenticated user's ID, resolved during reconciler construction.
+	// A client built outside New resolves it on first use (see ResolveBotUserID).
 	BotUserID string
+
+	// botMu guards the lazy resolution of BotUserID. It is separate from mu,
+	// which graphql holds while refreshing the token.
+	botMu sync.Mutex
+
+	// trustedStateCreators are user IDs whose state attachments are trusted in
+	// addition to the bot user's (see WithTrustedStateCreators).
+	trustedStateCreators []string
+}
+
+// WithTrustedStateCreators trusts state attachments created by these Linear
+// user IDs as well as the bot user's own. Use it when the same bot runs under
+// more than one identity, for example a sweep that operators run with their
+// own API keys: each run writes state as its operator, and the next run, by
+// someone else, must still read it. State from any other creator is refused.
+// Empty IDs are ignored.
+func (c *Client) WithTrustedStateCreators(ids ...string) *Client {
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			c.trustedStateCreators = append(c.trustedStateCreators, id)
+		}
+	}
+	return c
+}
+
+// StateCreatorIDs returns the user IDs whose state attachments this client
+// trusts: the bot user (resolved as by ResolveBotUserID) followed by any IDs
+// passed to WithTrustedStateCreators.
+func (c *Client) StateCreatorIDs(ctx context.Context) ([]string, error) {
+	botID, err := c.ResolveBotUserID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{botID}, c.trustedStateCreators...), nil
+}
+
+// ResolveBotUserID returns BotUserID, querying the viewer and caching the
+// result when the client was not constructed through New (for example a
+// one-shot sweep that builds its client directly and calls NewStateManager).
+// Callers that read their own state attachments without a StateManager use
+// it to check an attachment's creator (see Issue.FindLatestAttachmentBy).
+func (c *Client) ResolveBotUserID(ctx context.Context) (string, error) {
+	c.botMu.Lock()
+	defer c.botMu.Unlock()
+	if c.BotUserID != "" {
+		return c.BotUserID, nil
+	}
+	viewer, err := c.GetViewer(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolving bot user: %w", err)
+	}
+	if viewer.ID == "" {
+		return "", errors.New("resolving bot user: viewer has no ID")
+	}
+	c.BotUserID = viewer.ID
+	return c.BotUserID, nil
 }
 
 // NewClient creates a new Linear client that uses OAuth client_credentials.

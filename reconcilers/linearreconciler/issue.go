@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package linearreconciler
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -36,6 +37,10 @@ type Attachment struct {
 	Subtitle  string    `json:"subtitle"`
 	URL       string    `json:"url"`
 	CreatedAt time.Time `json:"createdAt"`
+	// Creator is the Linear user that created the attachment. Nil when
+	// Linear did not report one; callers deciding whether to trust the
+	// attachment's content must treat nil as untrusted.
+	Creator *User `json:"creator"`
 }
 
 // Issue represents a Linear issue with its comments, attachments, and labels.
@@ -169,6 +174,30 @@ func (i *Issue) FindLatestAttachment(title string) *Attachment {
 			continue
 		}
 		a := &i.Attachments.Nodes[idx]
+		if latest == nil || a.CreatedAt.After(latest.CreatedAt) {
+			latest = a
+		}
+	}
+	return latest
+}
+
+// FindLatestAttachmentBy is FindLatestAttachment restricted to attachments
+// whose creator is creatorID. An attachment with no reported creator never
+// matches, and neither does any attachment when creatorID is empty.
+func (i *Issue) FindLatestAttachmentBy(title, creatorID string) *Attachment {
+	return i.FindLatestAttachmentFrom(title, creatorID)
+}
+
+// FindLatestAttachmentFrom is FindLatestAttachment restricted to attachments
+// whose creator is one of creatorIDs. An attachment with no reported creator
+// never matches, and empty IDs match nothing.
+func (i *Issue) FindLatestAttachmentFrom(title string, creatorIDs ...string) *Attachment {
+	var latest *Attachment
+	for idx := range i.Attachments.Nodes {
+		a := &i.Attachments.Nodes[idx]
+		if a.Title != title || a.Creator == nil || a.Creator.ID == "" || !slices.Contains(creatorIDs, a.Creator.ID) {
+			continue
+		}
 		if latest == nil || a.CreatedAt.After(latest.CreatedAt) {
 			latest = a
 		}

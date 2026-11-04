@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/reconcilers/linearreconciler"
+	"github.com/chainguard-dev/clog"
 )
 
 // resolveRepoTarget determines the GitHub repository for a Linear issue by
@@ -19,7 +20,8 @@ import (
 // RepoTargetResolver if no upstream state is found.
 func (r *Reconciler[Req, Resp, CB, T, PT]) resolveRepoTarget(ctx context.Context, issue *linearreconciler.Issue) (*RepoTarget, error) {
 	title := r.upstreamPrefix + "_state"
-	att := issue.FindAttachment(title)
+	trustedIDs := append([]string{r.linearClient.BotUserID}, r.upstreamBotUserIDs...)
+	att := latestTrustedAttachment(ctx, issue, title, trustedIDs...)
 	if att != nil && att.URL != "" {
 		target, err := fetchRepoTarget(ctx, r.linearClient, att.URL)
 		if err != nil {
@@ -35,6 +37,36 @@ func (r *Reconciler[Req, Resp, CB, T, PT]) resolveRepoTarget(ctx context.Context
 	}
 
 	return nil, fmt.Errorf("no repo target found: no %q attachment and no fallback resolver configured", title)
+}
+
+// latestTrustedAttachment returns the newest attachment with the given title
+// that was created by a trusted bot user, or nil. Attachments from any other
+// creator (or with no creator) are ignored: any issue participant can add an
+// attachment with the reserved title, and its repo field selects the GitHub
+// repository this reconciler clones from and pushes to.
+func latestTrustedAttachment(ctx context.Context, issue *linearreconciler.Issue, title string, trustedIDs ...string) *linearreconciler.Attachment {
+	trusted := make(map[string]struct{}, len(trustedIDs))
+	for _, id := range trustedIDs {
+		if id != "" {
+			trusted[id] = struct{}{}
+		}
+	}
+
+	var latest *linearreconciler.Attachment
+	for _, a := range issue.FindAttachmentsByTitle(title) {
+		if a.Creator == nil {
+			clog.WarnContextf(ctx, "Ignoring state attachment %q with no creator", a.ID)
+			continue
+		}
+		if _, ok := trusted[a.Creator.ID]; !ok {
+			clog.WarnContextf(ctx, "Ignoring state attachment %q from untrusted creator %q", a.ID, a.Creator.ID)
+			continue
+		}
+		if latest == nil || a.CreatedAt.After(latest.CreatedAt) {
+			latest = &a
+		}
+	}
+	return latest
 }
 
 // fetchRepoTarget downloads and deserializes a RepoTarget from an attachment URL.

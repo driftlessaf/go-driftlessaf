@@ -88,9 +88,29 @@ func (sm *StateManager) UnprocessedComments(botUserID string) []Comment {
 // regression (executing → pending) and the dedup guards in
 // reconcileScaffolding being bypassed because state.ProjectID looked
 // empty. See DEV-1272 (2026-05-12) for the original incident.
+//
+// Only attachments this bot created, or a creator passed to
+// Client.WithTrustedStateCreators created, are trusted. Anyone who can edit
+// the issue can add an attachment with the state title, and its content would
+// otherwise drive the bot's phase, project, and repository decisions.
+// Attachments from other creators are skipped. When the title is present but
+// no matching attachment is from a trusted creator, Load returns an error
+// rather than "no state": reporting no state would make the caller start over
+// and repeat side effects its real state records as done.
 func (sm *StateManager) Load(ctx context.Context, v any) (bool, error) {
-	att := sm.issue.FindLatestAttachment(sm.client.stateAttachmentTitle())
-	if att == nil || att.URL == "" {
+	title := sm.client.stateAttachmentTitle()
+	if sm.issue.FindLatestAttachment(title) == nil {
+		return false, nil
+	}
+	trusted, err := sm.client.StateCreatorIDs(ctx)
+	if err != nil {
+		return false, fmt.Errorf("verifying state attachment creator: %w", err)
+	}
+	att := sm.issue.FindLatestAttachmentFrom(title, trusted...)
+	if att == nil {
+		return false, fmt.Errorf("state attachment %q exists but none was created by a trusted creator %v; refusing to load untrusted state", title, trusted)
+	}
+	if att.URL == "" {
 		return false, nil
 	}
 

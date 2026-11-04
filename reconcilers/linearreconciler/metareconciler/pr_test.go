@@ -169,7 +169,7 @@ func newLinearStateFixture(t *testing.T, initialStateJSON string) *linearStateFi
 		URL:        "https://linear.app/test/issue/TEST-1",
 	}
 	f.issue.Attachments.Nodes = []linearreconciler.Attachment{
-		{ID: "att-1", Title: "materializer_state", URL: f.server.URL + "/state.json"},
+		{ID: "att-1", Title: "materializer_state", URL: f.server.URL + "/state.json", Creator: &linearreconciler.User{ID: "bot-1"}},
 	}
 	return f
 }

@@ -50,6 +50,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 	// to read repo target information from its state attachment.
 	upstreamPrefix string
 
+	// upstreamBotUserIDs are the Linear user IDs trusted to have written the
+	// upstream state attachment, in addition to this reconciler's own bot
+	// user. Attachments from any other creator are ignored.
+	upstreamBotUserIDs []string
+
 	// docDrivenLabel, when non-empty, is added to the PR label set whenever
 	// the resolved repo target carries a DesignDoc path. Empty disables
 	// doc-driven stamping entirely (the default).
@@ -96,6 +101,7 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT State
 type options struct {
 	requiredLabel         string
 	upstreamPrefix        string
+	upstreamBotUserIDs    []string
 	docDrivenLabel        string
 	branchPrefixResolver  BranchPrefixResolver
 	repoTargetResolver    RepoTargetResolver
@@ -118,9 +124,25 @@ func WithRequiredLabel(label string) Option {
 // WithUpstreamPrefix sets the state prefix used by the upstream bot whose
 // state attachment contains the repo target. Defaults to "planner" when
 // no option is supplied.
+//
+// Only attachments created by this reconciler's own bot user, or by a user
+// passed to WithUpstreamBotUserIDs, are read. When the upstream bot runs as
+// a different Linear user, pass its user ID to WithUpstreamBotUserIDs;
+// otherwise its state is ignored and the repo target falls back to the
+// RepoTargetResolver.
 func WithUpstreamPrefix(prefix string) Option {
 	return func(o *options) {
 		o.upstreamPrefix = prefix
+	}
+}
+
+// WithUpstreamBotUserIDs sets the Linear user IDs whose state attachments
+// are trusted as the source of the repo target. The reconciler's own bot
+// user is always trusted. Attachments created by anyone else are ignored, so
+// an issue participant cannot redirect the reconciler to another repository.
+func WithUpstreamBotUserIDs(ids ...string) Option {
+	return func(o *options) {
+		o.upstreamBotUserIDs = ids
 	}
 }
 
@@ -230,6 +252,7 @@ func New[Req promptbuilder.Bindable, Resp Result, CB any, T any, PT StateConstra
 		prLabels:             prLabels,
 		requiredLabel:        o.requiredLabel,
 		upstreamPrefix:       o.upstreamPrefix,
+		upstreamBotUserIDs:   o.upstreamBotUserIDs,
 		docDrivenLabel:       o.docDrivenLabel,
 		branchPrefixResolver: o.branchPrefixResolver,
 		repoTargetResolver:   o.repoTargetResolver,

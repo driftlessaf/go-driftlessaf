@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// stateTestBotID is the viewer the mock server reports, and so the creator
+// Load trusts for state attachments.
+const stateTestBotID = "bot-1"
+
 // testBotState is a sample bot domain struct used in tests.
 type testBotState struct {
 	Location string `json:"location"`
@@ -58,6 +62,10 @@ func newStateTestServer(t *testing.T, attachmentContent map[string][]byte) *http
 
 		var resp any
 		switch {
+		case strings.Contains(req.Query, "viewer"):
+			resp = map[string]any{
+				"viewer": map[string]any{"id": stateTestBotID, "name": "Test Bot"},
+			}
 		case strings.Contains(req.Query, "commentCreate"):
 			resp = map[string]any{
 				"commentCreate": map[string]any{
@@ -112,7 +120,7 @@ func TestStateManager_LoadSave_RoundTrip(t *testing.T) {
 
 	issue := &Issue{ID: "issue-1"}
 	issue.Attachments.Nodes = []Attachment{
-		{ID: "att-1", Title: "test_state", URL: srv.URL + "/state.json"},
+		{ID: "att-1", Title: "test_state", URL: srv.URL + "/state.json", Creator: &User{ID: stateTestBotID}},
 	}
 
 	sm := client.NewStateManager(issue)
@@ -158,7 +166,7 @@ func TestStateManager_BotStructStaysClean(t *testing.T) {
 
 	issue := &Issue{ID: "issue-1"}
 	issue.Attachments.Nodes = []Attachment{
-		{ID: "att-1", Title: "test_state", URL: srv.URL + "/state.json"},
+		{ID: "att-1", Title: "test_state", URL: srv.URL + "/state.json", Creator: &User{ID: stateTestBotID}},
 	}
 
 	sm := client.NewStateManager(issue)
