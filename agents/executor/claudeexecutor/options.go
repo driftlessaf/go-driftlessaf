@@ -108,6 +108,19 @@ func WithEffort[Request promptbuilder.Bindable, Response any](level effort.Level
 	}
 }
 
+// WithRequestTimeout bounds each Messages or CountTokens attempt, including
+// response-body reads. Zero inherits the caller's deadline. Retry waits and
+// tool execution use the caller's context; a timeout is not retried.
+func WithRequestTimeout[Request promptbuilder.Bindable, Response any](timeout time.Duration) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if timeout < 0 {
+			return fmt.Errorf("request timeout must not be negative, got %s", timeout)
+		}
+		e.requestTimeout = timeout
+		return nil
+	}
+}
+
 // WithMaxTurns sets the maximum number of conversation turns (LLM round-trips)
 // before the executor aborts. This prevents runaway loops where the model
 // keeps calling tools without converging on a result.

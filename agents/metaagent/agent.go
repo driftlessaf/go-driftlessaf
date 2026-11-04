@@ -38,6 +38,12 @@ func New[Req promptbuilder.Bindable, Resp, CB any](
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
 	info := model.Resolve(modelName)
+	if config.ClaudeRequestTimeout < 0 {
+		return nil, fmt.Errorf("ClaudeRequestTimeout must not be negative, got %s", config.ClaudeRequestTimeout)
+	}
+	if config.ClaudeRequestTimeout != 0 && info.Backend != model.BackendClaude {
+		return nil, fmt.Errorf("ClaudeRequestTimeout requires the Claude backend")
+	}
 	switch info.Backend {
 	case model.BackendGemini:
 		return newGoogleAgent[Req, Resp, CB](ctx, projectID, region, modelName, config)

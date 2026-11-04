@@ -49,6 +49,12 @@ type Config[Resp, CB any] struct {
 	// before the executor aborts. Zero means use the executor's default.
 	MaxTurns int
 
+	// ClaudeRequestTimeout bounds each Anthropic Messages or CountTokens
+	// attempt, including streaming reads. Zero inherits the caller's deadline.
+	// Tool execution and retry waits remain bounded by the caller's context.
+	// Nonzero values require the Claude backend or Anthropic Messages protocol.
+	ClaudeRequestTimeout time.Duration
+
 	// ResponsesRequestTimeout bounds each HTTP attempt on a NewRouted
 	// openai-responses agent. Zero inherits the execution deadline.
 	ResponsesRequestTimeout time.Duration

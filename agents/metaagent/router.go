@@ -305,6 +305,9 @@ func requirementsForConfig[Resp, CB any](protocol modelrouter.Protocol, config C
 }
 
 func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
+	if config.ClaudeRequestTimeout < 0 {
+		return fmt.Errorf("creating routed meta-agent: ClaudeRequestTimeout must not be negative, got %s", config.ClaudeRequestTimeout)
+	}
 	if config.ResponsesRequestTimeout < 0 || config.ResponsesExecutionTimeout < 0 {
 		return errors.New("creating routed meta-agent: Responses timeouts cannot be negative")
 	}
@@ -350,6 +353,9 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 }
 
 func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol, logicalModel string, config Config[Resp, CB]) error {
+	if config.ClaudeRequestTimeout != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: ClaudeRequestTimeout requires Anthropic Messages, not %s", protocol)
+	}
 	if config.MaxToolCallsBeforeFinalize != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: MaxToolCallsBeforeFinalize is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}

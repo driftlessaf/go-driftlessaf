@@ -129,7 +129,9 @@ func hasMedia(messages []anthropic.MessageParam) bool {
 // can neither let an oversized request through nor fail the item outright.
 func (e *executor[Request, Response]) countTokens(ctx context.Context, cfg retry.RetryConfig, cp anthropic.MessageCountTokensParams) (int64, error) {
 	res, err := retry.RetryWithBackoff(ctx, cfg, "count_tokens", isRetryableClaudeError, func() (*anthropic.MessageTokensCount, error) {
-		return e.messages.CountTokens(ctx, cp)
+		attemptCtx, cancel := e.attemptContext(ctx)
+		defer cancel()
+		return e.messages.CountTokens(attemptCtx, cp)
 	})
 	if err != nil {
 		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryableClaudeError, "Claude API"); requeueErr != nil {

@@ -66,6 +66,7 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	systemInstructions   *promptbuilder.Prompt
 	prompt               *promptbuilder.Prompt
 	maxTokens            int64
+	requestTimeout       time.Duration
 	maxTurns             int // maximum conversation turns before aborting
 	temperature          float64
 	temperatureSet       bool                                // true when WithTemperature was applied; lets us warn if it gets dropped for a model that doesn't accept sampling params
@@ -762,8 +763,11 @@ func (e *executor[Request, Response]) runConversation(
 		// fresh timer, so the latency recorded below is the answering attempt's.
 		var timer *calltiming.Timer
 		message, err := retry.RetryWithBackoff(ctx, turnCfg, "stream_message", isRetryableClaudeError, func() (anthropic.Message, error) {
+			attemptCtx, cancel := e.attemptContext(ctx)
+			defer cancel()
 			timer = new(calltiming.Timer)
-			stream := e.messages.NewStreaming(timer.Context(ctx), params, e.requestOptions...)
+			stream := e.messages.NewStreaming(timer.Context(attemptCtx), params, e.requestOptions...)
+			defer stream.Close()
 			var msg anthropic.Message
 			for stream.Next() {
 				event := stream.Current()
@@ -1264,6 +1268,13 @@ func (e *executor[Request, Response]) runConversation(
 	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", turnBudget)
 	e.telemetry.RecordTurns(ctx, lastTurn, true)
 	return response, e.maxTurnsError(ctx, params, tools, lastTurn-1, turnBudget, trace.ID, loopState{TruncatedToolCalls: truncatedToolCalls})
+}
+
+func (e *executor[Request, Response]) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if e.requestTimeout > 0 {
+		return context.WithTimeout(ctx, e.requestTimeout)
+	}
+	return context.WithCancel(ctx)
 }
 
 // servingAttribution returns the route attribution for one turn, stamped with

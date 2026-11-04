@@ -130,6 +130,7 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 	}
 	executorOpts := []claudeexecutor.Option[Req, Resp]{
 		modelOption,
+		claudeexecutor.WithRequestTimeout[Req, Resp](config.ClaudeRequestTimeout),
 		claudeexecutor.WithMaxTokens[Req, Resp](cmp.Or(config.MaxTokens, defaultMaxTokens)),
 		claudeexecutor.WithSubmitResultProvider[Req, Resp](func() (claudetool.SubmitMetadata[Resp], error) { return submitTool, nil }),
 		claudeexecutor.WithResourceLabels[Req, Resp](construction.resourceLabels),
