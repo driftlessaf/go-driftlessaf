@@ -453,7 +453,8 @@ func (e *executor[Request, Response]) Execute(
 			// Dispatch the turn's tool calls under a bounded pool, collecting all
 			// results before checking for a final result so the conversation
 			// history stays consistent (every tool result message is appended).
-			// Submit calls are held out until the pool drains — see
+			// Calls of tools that declare AfterSiblings run once the pool
+			// drains, and submit calls after those — see
 			// execshared.DispatchToolCalls for the concurrency and
 			// submit-quiesce semantics. Each handler writes into its own result
 			// slot so the shared finalResultPtr is never raced, and the tool
@@ -468,6 +469,7 @@ func (e *executor[Request, Response]) Execute(
 			perCallResults := make([]Response, len(toolCalls))
 
 			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
+				func(tc openai.ChatCompletionMessageToolCallUnion) bool { return tools[tc.Function.Name].AfterSiblings },
 				func(tc openai.ChatCompletionMessageToolCallUnion) bool { return heldOut(tc.Function.Name) },
 				func(i int, tc openai.ChatCompletionMessageToolCallUnion) {
 					resJSON, committed, cerr := executeToolCall(tc, parsedArgs[i], &perCallResults[i])

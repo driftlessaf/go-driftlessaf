@@ -51,18 +51,19 @@ func ExampleSubmitPredicate() {
 }
 
 func ExampleDispatchToolCalls() {
-	// Submit calls are held out of the pool and run only after every other
-	// handler has finished; a concurrency of 1 runs the pooled calls
-	// strictly in order.
-	calls := []string{"submit_result", "read_file", "list_dir"}
+	// run_gate declares AfterSiblings, so it runs once the pooled calls have
+	// finished; submit calls are held out until everything else has. A
+	// concurrency of 1 runs each pool strictly in order.
+	calls := []string{"submit_result", "run_gate", "read_file", "list_dir"}
 	var order []string
 	execshared.DispatchToolCalls(calls, 1,
+		func(call string) bool { return call == "run_gate" },
 		func(call string) bool { return call == "submit_result" },
 		func(_ int, call string) { order = append(order, call) },
 	)
 	fmt.Println(order)
 	// Output:
-	// [read_file list_dir submit_result]
+	// [read_file list_dir run_gate submit_result]
 }
 
 func ExampleGateSubmission() {

@@ -1030,8 +1030,9 @@ func (e *executor[Request, Response]) runConversation(
 				}
 			}
 
-			// Dispatch the turn's tool calls under a bounded pool, holding
-			// submit calls out until the pool drains — see
+			// Dispatch the turn's tool calls under a bounded pool; calls of
+			// tools that declare AfterSiblings run once it drains, and submit
+			// calls after those — see
 			// execshared.DispatchToolCalls for the concurrency and
 			// submit-quiesce semantics. Each handler writes into its own result
 			// slot so the shared finalResultPtr is never raced; results are then
@@ -1048,6 +1049,7 @@ func (e *executor[Request, Response]) runConversation(
 			perCallResults := make([]Response, len(toolUseBlocks))
 
 			execshared.DispatchToolCalls(toolUseBlocks, e.toolCallConcurrency,
+				func(toolUse anthropic.ToolUseBlock) bool { return tools[toolUse.Name].AfterSiblings },
 				func(toolUse anthropic.ToolUseBlock) bool { return heldOut(toolUse.Name) },
 				func(i int, toolUse anthropic.ToolUseBlock) {
 					res, committed, cerr := executeToolCall(toolUse, &perCallResults[i])

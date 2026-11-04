@@ -361,7 +361,9 @@ func (e *executor[Request, Response]) dispatch(ctx context.Context, calls []resp
 	outcomes := make([]outcome, len(calls))
 	isSubmit := execshared.SubmitPredicate(tools, e.submit.Definition.Name, true)
 	committed := false // terminal callbacks run sequentially after ordinary tools join
-	execshared.DispatchToolCalls(calls, e.config.ToolCallConcurrency, func(c responses.ResponseFunctionToolCall) bool { return isSubmit(c.Name) }, func(i int, c responses.ResponseFunctionToolCall) {
+	afterSiblings := func(c responses.ResponseFunctionToolCall) bool { return tools[c.Name].Def.AfterSiblings }
+	terminal := func(c responses.ResponseFunctionToolCall) bool { return isSubmit(c.Name) }
+	execshared.DispatchToolCalls(calls, e.config.ToolCallConcurrency, afterSiblings, terminal, func(i int, c responses.ResponseFunctionToolCall) {
 		o := &outcomes[i]
 		if err := ctx.Err(); err != nil {
 			o.err = err

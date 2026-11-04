@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
@@ -167,7 +169,7 @@ func TestDispatchToolCallsHoldsSubmitOutOfPool(t *testing.T) {
 	var pooled atomic.Int32
 	pooledDoneAtSubmit := make([]int32, 0, 2)
 	slots := make([]string, len(calls))
-	DispatchToolCalls(calls, 4, isSubmit, func(i int, call string) {
+	DispatchToolCalls(calls, 4, func(string) bool { return false }, isSubmit, func(i int, call string) {
 		slots[i] = call
 		if isSubmit(call) {
 			pooledDoneAtSubmit = append(pooledDoneAtSubmit, pooled.Load())
@@ -182,6 +184,56 @@ func TestDispatchToolCallsHoldsSubmitOutOfPool(t *testing.T) {
 	if diff := cmp.Diff([]int32{2, 2}, pooledDoneAtSubmit); diff != "" {
 		t.Errorf("pooled handlers finished before each submit run (-want, +got):\n%s", diff)
 	}
+}
+
+// TestDispatchToolCallsRunsAfterSiblingsBetweenPoolAndSubmit asserts the
+// three tiers: afterSiblings calls start only once every pooled call has
+// finished, run concurrently with each other, and finish before any held-out
+// call runs, wherever the model listed them.
+func TestDispatchToolCallsRunsAfterSiblingsBetweenPoolAndSubmit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := []string{"submit_result", "after_a", "pooled", "after_b"}
+		after := func(call string) bool { return strings.HasPrefix(call, "after_") }
+		held := func(call string) bool { return call == "submit_result" }
+		// Each after call waits for the other to start, so after calls run
+		// one at a time would block for good, which synctest reports.
+		started := map[string]chan struct{}{"after_a": make(chan struct{}), "after_b": make(chan struct{})}
+		other := map[string]string{"after_a": "after_b", "after_b": "after_a"}
+
+		var mu sync.Mutex
+		var pooledDone bool
+		afterDone := 0
+		var violations []string
+		DispatchToolCalls(calls, 4, after, held, func(_ int, call string) {
+			if call == "pooled" {
+				// The bubble's clock: calls pooled beside it run before
+				// the sleep ends.
+				time.Sleep(time.Second)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case call == "pooled":
+				pooledDone = true
+			case after(call):
+				if !pooledDone {
+					violations = append(violations, call+" started before the pooled call finished")
+				}
+				close(started[call])
+				mu.Unlock()
+				<-started[other[call]]
+				mu.Lock()
+				afterDone++
+			case held(call):
+				if afterDone != 2 {
+					violations = append(violations, fmt.Sprintf("submit ran after %d of 2 after calls", afterDone))
+				}
+			}
+		})
+		for _, v := range violations {
+			t.Error(v)
+		}
+	})
 }
 
 // TestDispatchToolCallsBoundsConcurrency asserts that no more than the
@@ -203,7 +255,8 @@ func TestDispatchToolCallsBoundsConcurrency(t *testing.T) {
 
 			var mu sync.Mutex
 			inFlight, maxInFlight := 0, 0
-			DispatchToolCalls(make([]int, 8), tt.concurrency, func(int) bool { return false }, func(int, int) {
+			none := func(int) bool { return false }
+			DispatchToolCalls(make([]int, 8), tt.concurrency, none, none, func(int, int) {
 				mu.Lock()
 				inFlight++
 				maxInFlight = max(maxInFlight, inFlight)

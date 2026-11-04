@@ -27,27 +27,41 @@ func SubmitPredicate[Meta any](tools map[string]Meta, submitToolName string, sub
 // outcome in per-index slots so concurrent handlers never race on shared
 // state, and must be safe for concurrent use when concurrency exceeds 1.
 //
-// Calls matching isSubmit are held out of the pool and run sequentially only
-// after every pooled handler has finished: a submission claims the turn's
-// work is complete, and its result validators may read state the other
-// handlers produce (worktrees, files), so they must observe the finished
-// state rather than race the handlers still producing it. Slot order is
-// preserved, so the callers' in-order result consumption is unaffected.
-func DispatchToolCalls[Call any](calls []Call, concurrency int, isSubmit func(Call) bool, run func(i int, call Call)) {
-	g := new(errgroup.Group)
-	g.SetLimit(max(1, concurrency))
-	for i, call := range calls {
-		if isSubmit(call) {
-			continue
+// The calls run in three tiers, each starting once the one before it has
+// finished:
+//
+//  1. every call matching neither predicate, in the pool;
+//  2. calls matching afterSiblings (tools that declare
+//     toolcall.Definition.AfterSiblings), in a second pool of the same bound:
+//     each reads state the first tier writes, so it must see that state
+//     finished;
+//  3. calls matching heldOut (submit, suspend), sequentially in slot order: a
+//     submission claims the turn's work is complete, and its result validators
+//     may read state the other handlers produce (worktrees, files), so they
+//     must observe the finished state rather than race the handlers still
+//     producing it, the second tier's included.
+//
+// Slot order is preserved, so the callers' in-order result consumption is
+// unaffected.
+func DispatchToolCalls[Call any](calls []Call, concurrency int, afterSiblings, heldOut func(Call) bool, run func(i int, call Call)) {
+	pool := func(pick func(Call) bool) {
+		g := new(errgroup.Group)
+		g.SetLimit(max(1, concurrency))
+		for i, call := range calls {
+			if !pick(call) {
+				continue
+			}
+			g.Go(func() error {
+				run(i, call)
+				return nil
+			})
 		}
-		g.Go(func() error {
-			run(i, call)
-			return nil
-		})
+		_ = g.Wait()
 	}
-	_ = g.Wait()
+	pool(func(call Call) bool { return !heldOut(call) && !afterSiblings(call) })
+	pool(func(call Call) bool { return !heldOut(call) && afterSiblings(call) })
 	for i, call := range calls {
-		if isSubmit(call) {
+		if heldOut(call) {
 			run(i, call)
 		}
 	}

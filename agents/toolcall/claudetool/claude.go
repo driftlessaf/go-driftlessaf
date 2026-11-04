@@ -33,6 +33,11 @@ type Metadata[Response any] struct {
 	// LogPolicy is copied from toolcall.Definition by FromTool. A caller
 	// assembling Metadata by hand must copy it too, or arguments are logged.
 	LogPolicy *toolcall.ArgLogPolicy
+
+	// AfterSiblings is copied from toolcall.Definition by FromTool: the
+	// executor runs the tool's calls after the turn's other calls, before
+	// its submit.
+	AfterSiblings bool
 }
 
 // SubmitMetadata describes the terminal submit tool for the Claude executor.
@@ -64,9 +69,10 @@ func Error(format string, args ...any) map[string]any {
 // FromTool converts a unified tool to Claude-specific metadata.
 func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
 	return Metadata[Resp]{
-		Definition: toolParam(t.Def),
-		Handler:    handler(t),
-		LogPolicy:  t.Def.LogPolicy,
+		Definition:    toolParam(t.Def),
+		Handler:       handler(t),
+		LogPolicy:     t.Def.LogPolicy,
+		AfterSiblings: t.Def.AfterSiblings,
 	}
 }
 

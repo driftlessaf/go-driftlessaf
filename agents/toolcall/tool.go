@@ -62,6 +62,14 @@ type Definition struct {
 	// never sent to a provider, an MCP client, or a consumer's schema digest.
 	LogPolicy *ArgLogPolicy `json:"-"`
 
+	// AfterSiblings holds the tool's calls out of a turn's concurrent
+	// dispatch. They start once every other call of the turn has finished,
+	// except calls of other AfterSiblings tools, which run beside them, and
+	// the submit and suspend calls, which wait for them. Set it on a tool
+	// that reads state its siblings write, so a call issued beside a write
+	// sees the finished write. `json:"-"` keeps it out of the tool contract.
+	AfterSiblings bool `json:"-"`
+
 	// OutputSchema is an optional JSON Schema describing the tool's response.
 	// Used by MCP's Tool.OutputSchema field.
 	OutputSchema *Schema

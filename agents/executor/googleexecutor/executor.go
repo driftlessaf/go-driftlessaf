@@ -823,8 +823,9 @@ func (e *executor[Request, Response]) Execute(
 
 		// If there are tool calls, execute them and send responses
 		if len(toolCalls) > 0 {
-			// Dispatch the turn's function calls under a bounded pool, holding
-			// submit calls out until the pool drains — see
+			// Dispatch the turn's function calls under a bounded pool; calls
+			// of tools that declare AfterSiblings run once it drains, and
+			// submit calls after those — see
 			// execshared.DispatchToolCalls for the concurrency and
 			// submit-quiesce semantics. Each handler writes into its own result
 			// slot so the shared finalResultPtr is never raced; the response
@@ -840,6 +841,7 @@ func (e *executor[Request, Response]) Execute(
 			parts := make([]*genai.Part, len(toolCalls))
 
 			execshared.DispatchToolCalls(toolCalls, e.toolCallConcurrency,
+				func(call *genai.FunctionCall) bool { return tools[call.Name].AfterSiblings },
 				func(call *genai.FunctionCall) bool { return heldOut(call.Name) },
 				func(i int, call *genai.FunctionCall) {
 					part, committed, cerr := executeToolCall(call, &perCallResults[i])
