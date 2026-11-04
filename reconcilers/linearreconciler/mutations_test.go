@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -178,6 +180,148 @@ func TestCreateIssue_AssigneeID(t *testing.T) {
 	}
 	if got := gotInput["assigneeId"]; got != "user-uuid" {
 		t.Errorf("assigneeId = %v, want user-uuid", got)
+	}
+}
+
+// TestCreateIssue_ID pins the id wire format: a caller-chosen ID is sent as
+// IssueCreateInput.id, and an empty one leaves the key out so Linear mints
+// the UUID.
+func TestCreateIssue_ID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{name: "caller-chosen", id: "8f0e4c55-0b7a-4c1e-9a52-3d6f2b1e7a90"},
+		{name: "empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotInput map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Variables map[string]any `json:"variables"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				gotInput, _ = req.Variables["input"].(map[string]any)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"issueCreate": map[string]any{
+							"success": true,
+							"issue":   map[string]any{"id": tt.id, "identifier": "DEV-1", "url": "u"},
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			client := NewClientWithAPIKey("k").WithEndpoint(srv.URL)
+			if _, err := client.CreateIssue(t.Context(), CreateIssueInput{ID: tt.id, TeamID: "t", Title: "T"}); err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			got, present := gotInput["id"]
+			if tt.id == "" {
+				if present {
+					t.Errorf("id present in input when ID was empty: %v", gotInput)
+				}
+				return
+			}
+			if got != tt.id {
+				t.Errorf("id: got = %v, want = %v", got, tt.id)
+			}
+		})
+	}
+}
+
+// linearIssueStore stands in for Linear's issue table: issueCreate inserts
+// under the caller's id, and issue(id:) reads it back. A second insert under
+// a taken id gets the error Linear's server returned for that case,
+// copied verbatim from a live run.
+type linearIssueStore struct {
+	mu     sync.Mutex
+	titles map[string]string
+}
+
+func (s *linearIssueStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !strings.Contains(req.Query, "issueCreate") {
+		id, _ := req.Variables["id"].(string)
+		title, ok := s.titles[id]
+		if !ok {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issue": nil}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issue": map[string]any{"id": id, "identifier": "ECO-1", "title": title},
+			},
+		})
+		return
+	}
+
+	input, _ := req.Variables["input"].(map[string]any)
+	id, _ := input["id"].(string)
+	if _, taken := s.titles[id]; taken {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": nil,
+			"errors": []map[string]any{{
+				"message": "conflict on insert of Issue",
+				"extensions": map[string]any{
+					"code":                   "INPUT_ERROR",
+					"statusCode":             400,
+					"type":                   "invalid input",
+					"userError":              true,
+					"userPresentableMessage": "Entity Issue with id " + id + " already exists.",
+				},
+			}},
+		})
+		return
+	}
+	title, _ := input["title"].(string)
+	s.titles[id] = title
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data": map[string]any{
+			"issueCreate": map[string]any{
+				"success": true,
+				"issue":   map[string]any{"id": id, "identifier": "ECO-1", "url": "https://linear.app/x/issue/ECO-1"},
+			},
+		},
+	})
+}
+
+// TestCreateIssue_DuplicateIDAdopted pins the idempotent-create contract the
+// ID field exists for, against Linear's real refusal: a second create under
+// a taken id is an error that changes nothing, and reading the id adopts the
+// first issue.
+func TestCreateIssue_DuplicateIDAdopted(t *testing.T) {
+	const id = "58ec7402-5dd9-4c57-a68c-70d0f9553855"
+	srv := httptest.NewServer(&linearIssueStore{titles: map[string]string{}})
+	defer srv.Close()
+	client := NewClientWithAPIKey("k").WithEndpoint(srv.URL)
+
+	if _, err := client.CreateIssue(t.Context(), CreateIssueInput{ID: id, TeamID: "t", Title: "first"}); err != nil {
+		t.Fatalf("first CreateIssue: %v", err)
+	}
+	_, err := client.CreateIssue(t.Context(), CreateIssueInput{ID: id, TeamID: "t", Title: "retry"})
+	if err == nil {
+		t.Fatal("second CreateIssue with a taken id: got nil error, want Linear's refusal")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("second CreateIssue error: got = %v, want it to carry Linear's userPresentableMessage", err)
+	}
+
+	issue, err := client.GetIssue(t.Context(), id)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if issue.ID != id || issue.Title != "first" {
+		t.Errorf("adopted issue: got = %s %q, want = %s %q", issue.ID, issue.Title, id, "first")
 	}
 }
 

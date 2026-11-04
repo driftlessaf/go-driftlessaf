@@ -80,6 +80,14 @@ func (c *Client) FindLabelID(ctx context.Context, name string) (string, error) {
 
 // CreateIssueInput is the input for CreateIssue.
 type CreateIssueInput struct {
+	// ID is an optional caller-chosen UUID v4 for the new issue. Linear
+	// refuses a second issueCreate whose id is already taken, so a caller
+	// that stores the ID before its first attempt can retry the create
+	// from any process and still get one issue: when a create fails, read
+	// the issue with GetIssue(ID), and adopt it if it exists. When empty,
+	// Linear mints the UUID.
+	ID string
+
 	TeamID      string
 	Title       string
 	Description string
@@ -122,6 +130,9 @@ func (c *Client) CreateIssue(ctx context.Context, input CreateIssueInput) (Creat
 		"teamId":      input.TeamID,
 		"title":       input.Title,
 		"description": input.Description,
+	}
+	if input.ID != "" {
+		vars["id"] = input.ID
 	}
 	if input.ProjectID != "" {
 		vars["projectId"] = input.ProjectID
