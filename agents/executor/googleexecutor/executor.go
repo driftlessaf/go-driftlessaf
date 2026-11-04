@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/effort"
 	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
@@ -88,6 +88,8 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	thinkingBudget   *int32                              // nil = disabled, non-nil = enabled with budget
 	effortLevel      effort.Level                        // "" = unset; resolved per model via thinkingConfigForEffort
 	submitTool       googletool.SubmitMetadata[Response] // opt-in: set via WithSubmitResultProvider
+	suspendTool      *genai.FunctionDeclaration          // opt-in: set via WithSuspendTool; nil disables suspension
+	suspendOnSubmit  bool                                // opt-in: set via WithSuspendOnSubmit
 	telemetry        *telemetry.Recorder                 // shared GenAI metrics recorder, built after options in New
 	retryConfig      retry.RetryConfig                   // retry configuration for transient Vertex AI errors
 	// retryRequestTimeouts opts into retrying context.DeadlineExceeded from a
@@ -189,6 +191,16 @@ func New[Request promptbuilder.Bindable, Response any](
 			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
+	// Checked after all options so the order WithSuspendTool and
+	// WithSubmitResultProvider were applied in does not matter.
+	if st := exec.suspendTool; st != nil {
+		if err := execshared.ValidateSuspendToolName(st.Name, exec.submitToolName()); err != nil {
+			return nil, err
+		}
+	}
+	if exec.suspendOnSubmit && exec.submitTool.Handler == nil {
+		return nil, errors.New("WithSuspendOnSubmit requires a submit tool (WithSubmitResultProvider)")
+	}
 	// The output-token limit and the thinking-budget check depend on the
 	// final model, so they are validated after all options have been applied.
 	info := model.Resolve(exec.capabilityModel)
@@ -273,8 +285,33 @@ func (e *executor[Request, Response]) Execute(
 		done(resp, err)
 	}()
 
-	// submitToolName is the configured terminal tool the model calls to
-	// return its result. Empty when no submit tool is registered.
+	setup, err := e.prepareRun(ctx, tools)
+	if err != nil {
+		return resp, err
+	}
+	history := []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{{Text: prompt}},
+	}}
+	return e.runConversation(ctx, trace, setup, tools, history, seedToolCalls, 0, e.maxTurns)
+}
+
+// runSetup is the request configuration a run sends on every turn.
+type runSetup struct {
+	config           *genai.GenerateContentConfig
+	toolDeclarations []*genai.FunctionDeclaration
+	// usedCache reports that config references a CachedContent instead of
+	// carrying the system instruction and tools inline.
+	usedCache bool
+	// cacheCreationTokens is the size of a cache this run created, recorded
+	// on its first turn.
+	cacheCreationTokens int64
+}
+
+// staticRequest builds the turn-invariant request: generation settings,
+// system instruction and tool declarations, all inline. The resume config
+// digest is taken over it.
+func (e *executor[Request, Response]) staticRequest(tools map[string]googletool.Metadata[Response]) (*genai.GenerateContentConfig, []*genai.FunctionDeclaration, error) {
 	submitToolName := e.submitToolName()
 
 	// Build tool definitions, sorted by name for deterministic ordering.
@@ -284,7 +321,7 @@ func (e *executor[Request, Response]) Execute(
 	// without sorting, the tool definitions could serialize differently on each
 	// call — producing different cache content even though the tools haven't
 	// changed. Sorting by name ensures stable content across calls.
-	toolDeclarations := make([]*genai.FunctionDeclaration, 0, len(tools)+1)
+	toolDeclarations := make([]*genai.FunctionDeclaration, 0, len(tools)+2)
 	for _, meta := range tools {
 		toolDeclarations = append(toolDeclarations, meta.Definition)
 	}
@@ -297,58 +334,31 @@ func (e *executor[Request, Response]) Execute(
 			toolDeclarations = append(toolDeclarations, e.submitTool.Definition)
 		}
 	}
+	// The suspend tool is advertised the same way. A caller tool of the same
+	// name fails the run in runConversation rather than shadowing it.
+	if name := e.suspendToolName(); name != "" {
+		if _, exists := tools[name]; !exists {
+			toolDeclarations = append(toolDeclarations, e.suspendTool)
+		}
+	}
 	slices.SortFunc(toolDeclarations, func(a, b *genai.FunctionDeclaration) int {
 		return cmp.Compare(a.Name, b.Name)
 	})
 
-	// Create generation config.
 	config := e.generationConfig()
 
-	// Build system instruction content
-	var systemInstruction *genai.Content
 	if e.systemInstructions != nil {
 		systemPrompt, err := e.systemInstructions.Build()
 		if err != nil {
-			return resp, fmt.Errorf("building system prompt: %w", err)
+			return nil, nil, fmt.Errorf("building system prompt: %w", err)
 		}
-		systemInstruction = &genai.Content{
+		config.SystemInstruction = &genai.Content{
 			Parts: []*genai.Part{{Text: systemPrompt}},
 		}
 	}
 
-	// Build tools
-	var genaiTools []*genai.Tool
 	if len(toolDeclarations) > 0 {
-		genaiTools = []*genai.Tool{{FunctionDeclarations: toolDeclarations}}
-	}
-
-	// Attempt to use cached content for system instructions + tools.
-	// When using CachedContent, SystemInstruction and Tools MUST NOT be set
-	// on GenerateContentConfig — they are already in the cache.
-	usedCache := false
-	var cacheCreationTokens int64
-	if e.cacheControl && !e.cacheUnsupported && (systemInstruction != nil || len(genaiTools) > 0) {
-		cacheName, createdTokens, err := e.getOrCreateCache(ctx, systemInstruction, genaiTools)
-		switch {
-		case errors.Is(err, errCacheCreationHeld):
-			// A recent create was rejected and already logged; send inline.
-		case err != nil:
-			clog.WarnContext(ctx, "Failed to create cached content, falling back to non-cached mode", "error", err)
-		default:
-			config.CachedContent = cacheName
-			cacheCreationTokens = createdTokens
-			usedCache = true
-		}
-	}
-
-	// Fall back to inline system instruction and tools if not using cache.
-	if !usedCache {
-		if systemInstruction != nil {
-			config.SystemInstruction = systemInstruction
-		}
-		if len(genaiTools) > 0 {
-			config.Tools = genaiTools
-		}
+		config.Tools = []*genai.Tool{{FunctionDeclarations: toolDeclarations}}
 	}
 
 	// Add response MIME type if provided
@@ -372,52 +382,85 @@ func (e *executor[Request, Response]) Execute(
 	case e.effortLevel != "":
 		config.ThinkingConfig = thinkingConfigForEffort(e.capabilityModel, e.effortLevel)
 	}
+	return config, toolDeclarations, nil
+}
+
+// prepareRun builds the run's request configuration, moving the system
+// instruction and tools into a context cache when one is available.
+func (e *executor[Request, Response]) prepareRun(ctx context.Context, tools map[string]googletool.Metadata[Response]) (runSetup, error) {
+	config, toolDeclarations, err := e.staticRequest(tools)
+	if err != nil {
+		return runSetup{}, err
+	}
+	setup := runSetup{config: config, toolDeclarations: toolDeclarations}
+
+	// When using CachedContent, SystemInstruction and Tools MUST NOT be set
+	// on GenerateContentConfig — they are already in the cache.
+	if e.cacheControl && !e.cacheUnsupported && (config.SystemInstruction != nil || len(config.Tools) > 0) {
+		cacheName, createdTokens, err := e.getOrCreateCache(ctx, config.SystemInstruction, config.Tools)
+		switch {
+		case errors.Is(err, errCacheCreationHeld):
+			// A recent create was rejected and already logged; send inline.
+		case err != nil:
+			clog.WarnContext(ctx, "Failed to create cached content, falling back to non-cached mode", "error", err)
+		default:
+			config.CachedContent = cacheName
+			config.SystemInstruction, config.Tools = nil, nil
+			setup.cacheCreationTokens = createdTokens
+			setup.usedCache = true
+		}
+	}
+	return setup, nil
+}
+
+// runConversation drives the bounded turn loop shared by Execute and Resume.
+// history is the conversation so far: its last content is the user input the
+// first turn sends. Turns are numbered from startTurn, and the run gets
+// budget of them.
+func (e *executor[Request, Response]) runConversation(
+	ctx context.Context,
+	trace *agenttrace.Trace[Response],
+	setup runSetup,
+	tools map[string]googletool.Metadata[Response],
+	history []*genai.Content,
+	seedToolCalls []*genai.FunctionCall,
+	startTurn, budget int,
+) (resp Response, err error) {
+	config, toolDeclarations, usedCache, cacheCreationTokens := setup.config, setup.toolDeclarations, setup.usedCache, setup.cacheCreationTokens
+
+	// submitToolName is the configured terminal tool the model calls to
+	// return its result. Empty when no submit tool is registered.
+	submitToolName := e.submitToolName()
 
 	// Create a new chat session with optional seed messages
 	clog.InfoContext(ctx, "Creating Google AI chat session",
 		"model", e.model,
 	)
 
-	// Pre-execute seed tool calls and prepare history
-	// Build complete history, then split: use first n-1 for chat creation, send last via SendMessage
-	history := make([]*genai.Content, 0, 1+len(seedToolCalls)*2)
-
-	// Add initial user prompt to history
-	history = append(history, &genai.Content{
-		Role: "user",
-		Parts: []*genai.Part{{
-			Text: prompt,
-		}},
-	})
+	// Seed tool calls extend history below. The chat is then created from the
+	// first n-1 entries and the first turn sends the last.
 
 	// finalResult stores the result if a tool sets it
 	var finalResult Response
 	finalResultPtr := &finalResult
 
-	// isSubmit reports whether a call routes to the terminal submit tool. It
-	// is the routing predicate consulted by executeToolCall's dispatch switch.
-	isSubmit := execshared.SubmitPredicate(tools, submitToolName, e.submitTool.Handler != nil)
-
-	// heldOutTools is the set of tool names dispatched sequentially after the
-	// concurrent tool pool drains, rather than within it (see
-	// execshared.DispatchToolCalls). A held-out call's work runs only once
-	// every sibling handler has finished and its real tool_result is in the
-	// transcript. Today the only member is the terminal submit tool — its
-	// result validators may read state the sibling handlers produce
-	// (worktrees, files), so they must observe the finished state rather than
-	// race the handlers still producing it — and only when the call actually
-	// routes to submit (a caller tool of the same name shadows it and is
-	// dispatched in the pool, so it is not held out). Membership is derived
-	// from isSubmit so the two predicates cannot drift. Building the partition
-	// as a set is the seam DEV-2247 widens: the suspend tool joins this set so
-	// it too quiesces behind its siblings' real tool_results.
-	heldOutTools := make(map[string]struct{}, 1)
-	if isSubmit(submitToolName) {
-		heldOutTools[submitToolName] = struct{}{}
+	// isSubmit and isSuspend route the terminal submit tool and the suspend
+	// tool in executeToolCall's dispatch switch. heldOut is their union:
+	// execshared.DispatchToolCalls runs those calls only after every sibling
+	// handler has finished. A submission's validators may read state the
+	// siblings produce, and a suspension must capture the siblings' real
+	// results.
+	suspendToolName := e.suspendToolName()
+	isSubmit, isSuspend, heldOut, err := execshared.HeldOutPartition(tools, submitToolName, e.submitTool.Handler != nil, suspendToolName, e.suspendTool != nil)
+	if err != nil {
+		return resp, err
 	}
-	heldOut := func(name string) bool {
-		_, ok := heldOutTools[name]
-		return ok
+	heldOutNames := make([]string, 0, 2)
+	if isSubmit(submitToolName) {
+		heldOutNames = append(heldOutNames, submitToolName)
+	}
+	if isSuspend(suspendToolName) {
+		heldOutNames = append(heldOutNames, suspendToolName)
 	}
 
 	// Held-out submit and suspend tools are absent from the map, so in a
@@ -426,7 +469,7 @@ func (e *executor[Request, Response]) Execute(
 	for name, t := range tools {
 		policies[name] = t.LogPolicy
 	}
-	argLog := execshared.NewArgLogRedactor(policies, slices.Collect(maps.Keys(heldOutTools))...)
+	argLog := execshared.NewArgLogRedactor(policies, heldOutNames...)
 
 	// executeToolCall runs a single function call and returns its response
 	// part. The handler writes any terminal result into resultPtr; each call
@@ -469,6 +512,12 @@ func (e *executor[Request, Response]) Execute(
 			}
 			committed = com
 			toolResponse = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: result}
+		case isSuspend(call.Name):
+			// The suspend call's real result is the answer a resume supplies.
+			// This placeholder never reaches the model: a terminal result in
+			// the same turn ends the run, and otherwise the consumption loop
+			// drops it.
+			toolResponse = &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: map[string]any{"status": checkpoint.StatusAwaitingAnswer}}
 		default:
 			// The name is unregistered by definition on this branch, so it is
 			// model text: ToolName withholds it and the trace below keeps it.
@@ -498,7 +547,24 @@ func (e *executor[Request, Response]) Execute(
 		// committed flag is the submit tool's explicit signal; the zero-value
 		// check preserves the legacy contract for regular tools that write a
 		// non-zero result through their result pointer.
-		if committed || !reflect.ValueOf(finalResult).IsZero() {
+		if e.suspendOnSubmit && committed {
+			// The submission suspends the run before its first turn, with
+			// the seed call pending in the history's last model content.
+			paused := &genai.Content{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: call}},
+			}
+			history = append(history, paused)
+			susp, err := e.buildSubmitSuspension(history, paused, nil, tools, startTurn-1, startTurn+budget, call, 0, trace.ID)
+			if err != nil {
+				return resp, err
+			}
+			clog.InfoContext(ctx, "Suspending Google AI agent execution on its seeded submission", "id", call.ID)
+			trace.Suspend(susp.Reason)
+			e.telemetry.RecordTurns(ctx, 0, false)
+			return finalResult, susp
+		}
+		if !e.suspendOnSubmit && (committed || !reflect.ValueOf(finalResult).IsZero()) {
 			clog.InfoContext(ctx, "Seed tool set final result, exiting immediately")
 			return finalResult, nil
 		}
@@ -604,7 +670,7 @@ func (e *executor[Request, Response]) Execute(
 		// implicit cache hits in CachedContentTokenCount and bills them at the
 		// cache-read rate.
 		createdTokens := int64(0)
-		if turn == 0 {
+		if turn == startTurn {
 			createdTokens = cacheCreationTokens
 		}
 		if cacheReadTokens > 0 || createdTokens > 0 {
@@ -619,9 +685,9 @@ func (e *executor[Request, Response]) Execute(
 		var zero Response
 		llmTurn := trace.BeginTurnWithAttribution(turn, e.model, e.servingAttribution(usedCache))
 		defer func() {
-			if err != nil {
-				llmTurn.Fail(err)
-			}
+			// A suspension is an intentional halt, not a failure, so it does
+			// not fail the turn.
+			execshared.FailTurnUnlessSuspended(llmTurn, err)
 			llmTurn.End()
 		}()
 
@@ -849,28 +915,81 @@ func (e *executor[Request, Response]) Execute(
 					outcomes[i] = toolOutcome{committed: committed, err: cerr}
 				})
 
-			var toolResponseParts []*genai.Part
-			for i := range toolCalls {
+			// slots holds each call's response part in call order. A pending
+			// call's slot stays nil: its result is the answer a resume
+			// supplies.
+			slots := make([]*genai.Part, len(toolCalls))
+			suspendIdx, submitIdx := -1, -1
+			for i, call := range toolCalls {
 				if outcomes[i].err != nil {
 					return zero, nil, true, outcomes[i].err
+				}
+				if e.suspendOnSubmit && outcomes[i].committed {
+					if submitIdx < 0 {
+						submitIdx = i
+						continue
+					}
+					// Only the turn's first submission is reviewed; a later
+					// one must not read as accepted.
+					parts[i] = extraSubmissionPart(call)
+				}
+				if isSuspend(call.Name) {
+					if suspendIdx < 0 {
+						suspendIdx = i
+						continue
+					}
+					parts[i] = extraSuspendPart(call)
 				}
 				// The committed flag is the submit tool's explicit terminal
 				// signal — it fires even for a zero-value result, so the model
 				// is never told "submitted successfully" on a run that keeps
 				// going. The zero-value check preserves the legacy contract
 				// for regular tools that write a non-zero result through
-				// their result pointer.
-				if outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero() {
+				// their result pointer. Under WithSuspendOnSubmit a result
+				// never ends the run, so neither check applies.
+				if !e.suspendOnSubmit && (outcomes[i].committed || !reflect.ValueOf(perCallResults[i]).IsZero()) {
 					clog.InfoContext(ctx, "Tool set final result, exiting conversation loop", "turns_completed", turn+1)
 					e.telemetry.RecordTurns(ctx, turn+1, false)
 					return perCallResults[i], nil, true, nil
 				}
-				toolResponseParts = append(toolResponseParts, parts[i])
+				slots[i] = parts[i]
+			}
+
+			// A submission that suspends the turn makes a sibling ask moot,
+			// but the conversation goes on, so the ask needs a result.
+			if submitIdx >= 0 && suspendIdx >= 0 {
+				slots[suspendIdx] = notAskedPart(toolCalls[suspendIdx])
+			}
+
+			// A pending call suspends the run here. The curated history ends
+			// with this turn's model content, which is what the next send
+			// would build on.
+			switch {
+			case submitIdx >= 0:
+				susp, err := e.buildSubmitSuspension(slices.Clone(chat.History(true)), candidate.Content, slots, tools, turn, startTurn+budget, toolCalls[submitIdx], submitIdx, trace.ID)
+				if err != nil {
+					return zero, nil, true, err
+				}
+				clog.InfoContext(ctx, "Suspending Google AI agent execution on its submission",
+					"turn", turn, "id", toolCalls[submitIdx].ID)
+				trace.Suspend(susp.Reason)
+				e.telemetry.RecordTurns(ctx, turn+1, false)
+				return perCallResults[submitIdx], nil, true, susp
+			case suspendIdx >= 0:
+				susp, err := e.buildSuspension(slices.Clone(chat.History(true)), candidate.Content, slots, tools, turn, startTurn+budget, toolCalls[suspendIdx], suspendIdx, trace.ID)
+				if err != nil {
+					return zero, nil, true, err
+				}
+				clog.InfoContext(ctx, "Suspending Google AI agent execution to await an answer",
+					"turn", turn, "tool", toolCalls[suspendIdx].Name, "id", toolCalls[suspendIdx].ID)
+				trace.Suspend(susp.Reason)
+				e.telemetry.RecordTurns(ctx, turn+1, false)
+				return zero, nil, true, susp
 			}
 
 			// The next turn sends the tool responses back to the chat.
 			return zero, &modelRequest{
-				parts:      toolResponseParts,
+				parts:      slots,
 				operation:  "send_tool_responses",
 				errContext: "failed to send tool responses",
 			}, false, nil
@@ -917,7 +1036,8 @@ func (e *executor[Request, Response]) Execute(
 		return zero, nil, true, errors.New("unexpected response format from model")
 	}
 
-	for turn := range e.maxTurns {
+	for i := range budget {
+		turn := startTurn + i
 		result, next, done, err := executeTurn(turn, req)
 		// done=true on all terminal paths (including errors); || err != nil is a
 		// safety net in case a future path sets err without setting done.
@@ -932,17 +1052,18 @@ func (e *executor[Request, Response]) Execute(
 	// response. Those tokens are billable, and turns[] is the source of truth
 	// for cost analysis (DEV-1140), so leaving them off would undercount
 	// maxTurns-exhausted runs.
-	llmTurn := trace.BeginTurnWithAttribution(e.maxTurns, e.model, e.servingAttribution(usedCache))
-	if _, err := callModel(e.maxTurns, llmTurn, req); err != nil {
+	lastTurn := startTurn + budget
+	llmTurn := trace.BeginTurnWithAttribution(lastTurn, e.model, e.servingAttribution(usedCache))
+	if _, err := callModel(lastTurn, llmTurn, req); err != nil {
 		llmTurn.Fail(err)
 		llmTurn.End()
 		return resp, err
 	}
 	llmTurn.End()
 
-	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", e.maxTurns)
-	e.telemetry.RecordTurns(ctx, e.maxTurns, true)
-	return resp, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.maxTurns)
+	clog.ErrorContext(ctx, "Agent exceeded maximum conversation turns", "max_turns", budget)
+	e.telemetry.RecordTurns(ctx, lastTurn, true)
+	return resp, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, budget)
 }
 
 // modelRequest is the request a turn sends to the model: the parts, and the

@@ -110,6 +110,20 @@ not lengthen its answers to fill it. Each continuation request re-sends the
 prompt and is billed, and a retry after a failed continuation request starts
 the generation again (see WithRetryConfig).
 
+# Suspend and Resume
+
+WithSuspendTool advertises a held-out tool that pauses the run. When the model
+calls it, Execute waits for the turn's other tool calls to finish, then
+returns a *checkpoint.Suspension whose ProviderState holds the curated chat
+history verbatim, thought signatures included. The executor New returns also
+implements Resumer and ResultResumer: Resume and ResumeWithResults check the
+envelope against the live configuration (checkpoint.ErrConfigDrift on a
+mismatch), send the paused turn's function responses with the answer, and
+continue the conversation. The envelope never names a context cache, so a
+resume uses a cache this executor still holds or creates a new one.
+WithSuspendOnSubmit pauses on every accepted submission instead of ending the
+run.
+
 # Integration with Evaluation
 
 The executor automatically integrates with the evals package for tracing:

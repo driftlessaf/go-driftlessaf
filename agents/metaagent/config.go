@@ -195,10 +195,10 @@ type Config[Resp, CB any] struct {
 	// obtains the resume path by type-asserting the constructed agent with
 	// AsResumer.
 	//
-	// Claude backend only for now: the Gemini and OpenAI-compatible backends
-	// reject a non-empty SuspendToolName at construction with a clear error
-	// until their executors grow suspend support (DEV-2247 follow-up slices) —
-	// silently ignoring it would advertise a lifecycle that can never fire.
+	// The Claude and Gemini backends support it. The OpenAI-compatible
+	// backend rejects a non-empty SuspendToolName at construction with a clear
+	// error until its executor grows suspend support (DEV-2247): silently
+	// ignoring it would advertise a lifecycle that can never fire.
 	// The name must differ from the terminal submit tool's name and from every
 	// caller-registered tool (both validated by the executor). Empty (the
 	// default) leaves suspension disabled and the run's behavior byte-for-byte
@@ -213,13 +213,14 @@ type Config[Resp, CB any] struct {
 	SuspendToolDescription string
 
 	// SuspendOnSubmit makes an accepted submission suspend the run instead of
-	// ending it (claudeexecutor.WithSuspendOnSubmit): Execute returns the
+	// ending it (claudeexecutor.WithSuspendOnSubmit,
+	// googleexecutor.WithSuspendOnSubmit): Execute returns the
 	// accepted Resp with a *checkpoint.Suspension whose pending call is the
 	// submit call, and ResumeWithResults (AsResultResumer) continues the same
 	// conversation with the caller's review as that call's result.
 	//
-	// Claude backend only; the Gemini and OpenAI-compatible backends reject
-	// it at construction. When false (the default), an accepted submission
+	// The Claude and Gemini backends support it; the OpenAI-compatible
+	// backend rejects it at construction. When false (the default), an accepted submission
 	// ends the run.
 	SuspendOnSubmit bool
 
@@ -270,3 +271,10 @@ const suspendQuestionProperty = "question"
 // and the extraction can never drift; the checkpoint package attaches no
 // meaning to the value.
 const suspendContextProperty = "context"
+
+// suspendQuestionDescription and suspendContextDescription describe the
+// suspend tool's two properties to the model, in every backend's schema.
+const (
+	suspendQuestionDescription = "The question itself, first, in one short sentence. If the human must choose, list each option on its own line as 1., 2., 3. Evidence goes in context."
+	suspendContextDescription  = "What you tried and the failing output, so the human can answer without replaying the run. Short sentences. Digests, paths and log excerpts go here."
+)

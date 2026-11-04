@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
@@ -31,19 +32,6 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	projectID, region, model string,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
-	// Suspend/resume is not wired for this backend yet: googleexecutor has no
-	// suspend tool option, so a set SuspendToolName would otherwise be silently
-	// dropped and the advertised pause lifecycle could never fire. Fail closed
-	// with a clear error (before any client is built) until the googleexecutor
-	// suspend/resume slice lands (DEV-2247). googleAgent likewise does not
-	// implement Resumer, so AsResumer reports false for agents built here.
-	if config.SuspendToolName != "" {
-		return nil, fmt.Errorf("suspend/resume (SuspendToolName %q) is not yet supported on the Gemini backend; it lands with the googleexecutor suspend/resume slice", config.SuspendToolName)
-	}
-	if config.SuspendOnSubmit {
-		return nil, errors.New("suspend/resume (SuspendOnSubmit) is not yet supported on the Gemini backend")
-	}
-
 	if config.MaxToolCallsBeforeFinalize != 0 {
 		return nil, fmt.Errorf("MaxToolCallsBeforeFinalize (%d) is not supported on the Gemini backend", config.MaxToolCallsBeforeFinalize)
 	}
@@ -176,6 +164,16 @@ func newGoogleAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, googleexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
+	if config.SuspendToolName != "" {
+		decl := suspendFunctionDeclaration(config.SuspendToolName, config.SuspendToolDescription)
+		executorOpts = append(executorOpts, googleexecutor.WithSuspendTool[Req, Resp](func() (*genai.FunctionDeclaration, error) {
+			return decl, nil
+		}))
+	}
+	if config.SuspendOnSubmit {
+		executorOpts = append(executorOpts, googleexecutor.WithSuspendOnSubmit[Req, Resp]())
+	}
+
 	executor, err := googleexecutor.New[Req, Resp](construction.client, config.UserPrompt, executorOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating Google executor: %w", err)
@@ -194,4 +192,50 @@ func (a *googleAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req, c
 		return zero, fmt.Errorf("building tools: %w", err)
 	}
 	return a.executor.Execute(ctx, request, googletool.Map(tools))
+}
+
+// suspendFunctionDeclaration is the Gemini form of suspendToolParam's schema.
+func suspendFunctionDeclaration(name, desc string) *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        name,
+		Description: desc,
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				suspendQuestionProperty: {Type: genai.TypeString, Description: suspendQuestionDescription},
+				suspendContextProperty:  {Type: genai.TypeString, Description: suspendContextDescription},
+			},
+			Required: []string{suspendQuestionProperty},
+		},
+	}
+}
+
+// Resume implements Resumer by delegating to the Google executor, whose
+// resume capability is kept off googleexecutor.Interface.
+func (a *googleAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.Envelope, answers map[string]string, callbacks CB) (Resp, error) {
+	var zero Resp
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		return zero, fmt.Errorf("building tools: %w", err)
+	}
+	resumer, ok := a.executor.(googleexecutor.Resumer[Req, Resp])
+	if !ok {
+		return zero, errors.New("google executor does not support resume")
+	}
+	return resumer.Resume(ctx, env, answers, googletool.Map(tools))
+}
+
+// ResumeWithResults implements ResultResumer by delegating to the Google
+// executor, as Resume does.
+func (a *googleAgent[Req, Resp, CB]) ResumeWithResults(ctx context.Context, env checkpoint.Envelope, results map[string]string, callbacks CB) (Resp, error) {
+	var zero Resp
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		return zero, fmt.Errorf("building tools: %w", err)
+	}
+	resumer, ok := a.executor.(googleexecutor.ResultResumer[Req, Resp])
+	if !ok {
+		return zero, errors.New("google executor does not support resuming with results")
+	}
+	return resumer.ResumeWithResults(ctx, env, results, googletool.Map(tools))
 }

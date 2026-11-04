@@ -318,8 +318,8 @@ func (executeOnly) Execute(context.Context, *request, toolcall.EmptyTools) (*res
 // ExampleAsResumer demonstrates obtaining the opt-in resume capability from a
 // constructed agent. AsResumer reports false when the agent's backend does not
 // support suspend/resume, so a waker can branch to a fresh run instead of
-// assuming every backend can wake a checkpoint. Today only the Claude backend
-// (Config.SuspendToolName set) yields a Resumer.
+// assuming every backend can wake a checkpoint. The Claude and Gemini backends
+// (Config.SuspendToolName set) yield a Resumer.
 func ExampleAsResumer() {
 	var agent metaagent.Agent[*request, *response, toolcall.EmptyTools] = executeOnly{}
 

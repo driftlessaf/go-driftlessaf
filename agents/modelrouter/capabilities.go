@@ -80,6 +80,7 @@ func protocolCapabilities(protocol Protocol) Capabilities {
 	switch protocol {
 	case ProtocolGoogleGenAI:
 		common.ExplicitThinkingBudget = true
+		common.SuspendResume = true
 		return common
 	case ProtocolAnthropicMessages:
 		common.ExplicitThinkingBudget = true

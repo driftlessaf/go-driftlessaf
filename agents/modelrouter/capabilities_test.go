@@ -32,6 +32,7 @@ func TestEffectiveCapabilities(t *testing.T) {
 				SamplingParameters:     true,
 				ToolCalling:            true,
 				TerminalSubmission:     true,
+				SuspendResume:          true,
 				MaximumOutputTokens:    true,
 			},
 		},
@@ -43,6 +44,7 @@ func TestEffectiveCapabilities(t *testing.T) {
 				SamplingParameters:  true,
 				ToolCalling:         true,
 				TerminalSubmission:  true,
+				SuspendResume:       true,
 				MaximumOutputTokens: true,
 			},
 		},
@@ -189,7 +191,7 @@ func TestPlanValidateRequirements(t *testing.T) {
 	if !errors.Is(err, modelrouter.ErrUnsupportedCapability) {
 		t.Fatalf("ValidateRequirements() error = %v, want ErrUnsupportedCapability", err)
 	}
-	want := `route for provider "vertex" and logical model "gemini-3-flash-preview": unsupported route capability: explicit thinking budget, prompt caching, suspend and resume, refusal recovery`
+	want := `route for provider "vertex" and logical model "gemini-3-flash-preview": unsupported route capability: explicit thinking budget, prompt caching, refusal recovery`
 	if got := err.Error(); got != want {
 		t.Errorf("ValidateRequirements() error = %q, want %q", got, want)
 	}

@@ -52,11 +52,11 @@ func suspendToolParam(name, desc string) anthropic.ToolParam {
 			Properties: map[string]any{
 				suspendQuestionProperty: map[string]any{
 					"type":        "string",
-					"description": "The question itself, first, in one short sentence. If the human must choose, list each option on its own line as 1., 2., 3. Evidence goes in context.",
+					"description": suspendQuestionDescription,
 				},
 				suspendContextProperty: map[string]any{
 					"type":        "string",
-					"description": "What you tried and the failing output, so the human can answer without replaying the run. Short sentences. Digests, paths and log excerpts go here.",
+					"description": suspendContextDescription,
 				},
 			},
 			Required: []string{suspendQuestionProperty},

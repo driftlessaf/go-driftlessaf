@@ -34,41 +34,45 @@ func suspendConfig(t *testing.T) Config[*testResponse, testCallbacks] {
 	}
 }
 
-// TestSuspendToolRejectedOnGeminiBackend pins the fail-closed contract for the
-// backend without executor suspend support: a set SuspendToolName must be a
-// clear construction error, never silently dropped — a run whose model was
-// promised an ask-a-friend tool that is never advertised could neither pause nor
-// be diagnosed.
-func TestSuspendToolRejectedOnGeminiBackend(t *testing.T) {
-	_, err := New[*testRequest](t.Context(), "test-project", "us-central1", "gemini-2.5-flash", suspendConfig(t))
-	if err == nil {
-		t.Fatal("New() with SuspendToolName on Gemini: got nil, want error")
+// TestGeminiAgentIsResumer proves the Gemini backend constructs with the
+// suspend tool and SuspendOnSubmit enabled and exposes both resume
+// capabilities. Construction acquires Application Default Credentials (the
+// Vertex path), so the test points GOOGLE_APPLICATION_CREDENTIALS at a
+// hermetic fake key and no network is touched.
+func TestGeminiAgentIsResumer(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", fakeGoogleCredentials(t))
+
+	cfg := suspendConfig(t)
+	cfg.SuspendOnSubmit = true
+	agent, err := New[*testRequest](t.Context(), "test-project", "us-central1", "gemini-2.5-flash", cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "not yet supported on the Gemini backend") {
-		t.Errorf("New() error = %v, want a clear not-yet-supported error", err)
+	if _, ok := AsResumer[*testRequest](agent); !ok {
+		t.Error("AsResumer() = false for a Gemini-backed agent, want true")
+	}
+	if _, ok := AsResultResumer[*testRequest](agent); !ok {
+		t.Error("AsResultResumer() = false for a Gemini-backed agent, want true")
 	}
 }
 
-// TestSuspendOnSubmitRejectedOffClaude: SuspendOnSubmit fails construction on
-// the backends without executor suspend support, as SuspendToolName does.
-func TestSuspendOnSubmitRejectedOffClaude(t *testing.T) {
+// TestSuspendOnSubmitRejectedOnOpenAIBackend: SuspendOnSubmit fails
+// construction on the backend without executor suspend support, as
+// SuspendToolName does.
+func TestSuspendOnSubmitRejectedOnOpenAIBackend(t *testing.T) {
 	cfg := suspendConfig(t)
 	cfg.SuspendToolName, cfg.SuspendToolDescription = "", ""
 	cfg.SuspendOnSubmit = true
-	for model, want := range map[string]string{
-		"gemini-2.5-flash":      "not yet supported on the Gemini backend",
-		"google/gemini-2.5-pro": "not yet supported on the OpenAI-compatible backend",
-	} {
-		_, err := New[*testRequest](t.Context(), "test-project", "us-central1", model, cfg)
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("New(%s) with SuspendOnSubmit: got %v, want %q", model, err, want)
-		}
+	_, err := New[*testRequest](t.Context(), "test-project", "us-central1", "google/gemini-2.5-pro", cfg)
+	if want := "not yet supported on the OpenAI-compatible backend"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("New() with SuspendOnSubmit: got %v, want %q", err, want)
 	}
 }
 
-// TestSuspendToolRejectedOnOpenAIBackend is the OpenAI-compatible twin of the
-// Gemini test above. The rejection fires before credential acquisition, so no
-// fake ADC is needed.
+// TestSuspendToolRejectedOnOpenAIBackend pins the fail-closed contract for the
+// backend without executor suspend support: a set SuspendToolName must be a
+// clear construction error, never silently dropped. The rejection fires before
+// credential acquisition, so no fake ADC is needed.
 func TestSuspendToolRejectedOnOpenAIBackend(t *testing.T) {
 	_, err := New[*testRequest](t.Context(), "test-project", "us-central1", "google/gemini-2.5-pro", suspendConfig(t))
 	if err == nil {

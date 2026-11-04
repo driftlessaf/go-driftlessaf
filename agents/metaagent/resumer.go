@@ -24,10 +24,9 @@ import (
 // unchanged. This mirrors claudeexecutor.Resumer, which is likewise kept off
 // the executor's exported Interface.
 //
-// Today only the Claude backend implements Resumer; the Gemini and
-// OpenAI-compatible backends gain it together with suspend support in their
-// executors (DEV-2247 follow-up slices), and until then AsResumer reports
-// false for agents built on them.
+// The Claude and Gemini backends implement Resumer. The OpenAI-compatible
+// backend gains it together with suspend support in its executor (DEV-2247),
+// and until then AsResumer reports false for agents built on it.
 //
 // The answers map keys each pending tool-call ID (from
 // Envelope.PendingToolCalls[i].ID — never re-derived from the tool name) to the
@@ -59,9 +58,9 @@ func AsResumer[Req promptbuilder.Bindable, Resp, CB any](agent Agent[Req, Resp, 
 }
 
 // ResultResumer is the capability to resume a suspended conversation with
-// results the caller framed itself (claudeexecutor.ResultResumer), for a
-// pending call whose result is not a human's answer. Only the Claude backend
-// implements it.
+// results the caller framed itself (claudeexecutor.ResultResumer,
+// googleexecutor.ResultResumer), for a pending call whose result is not a
+// human's answer. The Claude and Gemini backends implement it.
 type ResultResumer[Req promptbuilder.Bindable, Resp, CB any] interface {
 	Agent[Req, Resp, CB]
 

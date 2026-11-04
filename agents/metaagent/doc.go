@@ -93,12 +93,12 @@ SPDX-License-Identifier: Apache-2.0
 // Setting Config.SuspendToolName advertises a held-out ask-a-friend tool; when
 // the model calls it, Execute returns a *checkpoint.Suspension instead of a
 // Resp, and the paused conversation is later continued through the opt-in
-// Resumer capability (obtained via AsResumer). Only the Claude backend
-// supports this today — the Gemini and OpenAI-compatible backends reject a
-// set SuspendToolName at construction until their executors grow suspend
-// support. See the suspend package for the park/wake orchestration around it.
+// Resumer capability (obtained via AsResumer). The Claude and Gemini backends
+// support this; the OpenAI-compatible backend rejects a set SuspendToolName at
+// construction until its executor grows suspend support. See the suspend
+// package for the park/wake orchestration around it.
 //
-// Setting Config.SuspendOnSubmit (Claude only) makes an accepted submission
+// Setting Config.SuspendOnSubmit (Claude and Gemini) makes an accepted submission
 // suspend the run instead of ending it, so a reviewer can send the work back
 // into the same conversation. Execute returns the accepted Resp alongside the
 // suspension, whose pending call is the submit call; the ResultResumer

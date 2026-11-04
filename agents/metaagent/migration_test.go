@@ -395,7 +395,6 @@ func TestNewRoutedMigrationRejectsUnsupportedLegacySettings(t *testing.T) {
 		{"Chat Completions thinking budget", modelrouter.ProtocolOpenAIChatCompletions, func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.ThinkingBudget = 2048 }},
 		{"Google refusal recovery", modelrouter.ProtocolGoogleGenAI, func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.RefusalNudgeMaxRetries = 1 }},
 		{"Chat Completions refusal recovery", modelrouter.ProtocolOpenAIChatCompletions, func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.RefusalNudgeMaxRetries = 1 }},
-		{"Google suspend", modelrouter.ProtocolGoogleGenAI, func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.SuspendToolName = "ask_a_friend" }},
 		{"Chat Completions suspend", modelrouter.ProtocolOpenAIChatCompletions, func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.SuspendToolName = "ask_a_friend" }},
 		{"undeclared effort", modelrouter.ProtocolAnthropicMessages, func(c *Config[*basetenTestResponse, toolcall.EmptyTools]) { c.Effort = effort.XHigh }},
 	} {
@@ -414,11 +413,15 @@ func TestNewRoutedMigrationRejectsUnsupportedLegacySettings(t *testing.T) {
 }
 
 func TestNewRoutedRejectsSuspendSubmitCollisionBeforeAdapter(t *testing.T) {
-	route := migrationRoute(modelrouter.ProtocolAnthropicMessages)
-	router := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{})
-	cfg := routedTestConfig(t)
-	cfg.SuspendToolName = "submit_result"
-	if _, err := NewRouted[*testRequest](t.Context(), router, route.Selection, cfg); err == nil || !strings.Contains(err.Error(), "collides with the submit tool name") {
-		t.Fatalf("NewRouted: got = %v, want = suspend/submit collision before adapter lookup", err)
+	for _, protocol := range []modelrouter.Protocol{modelrouter.ProtocolAnthropicMessages, modelrouter.ProtocolGoogleGenAI} {
+		t.Run(string(protocol), func(t *testing.T) {
+			route := migrationRoute(protocol)
+			router := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{})
+			cfg := routedTestConfig(t)
+			cfg.SuspendToolName = "submit_result"
+			if _, err := NewRouted[*testRequest](t.Context(), router, route.Selection, cfg); err == nil || !strings.Contains(err.Error(), "collides with the submit tool name") {
+				t.Fatalf("NewRouted: got = %v, want = suspend/submit collision before adapter lookup", err)
+			}
+		})
 	}
 }
