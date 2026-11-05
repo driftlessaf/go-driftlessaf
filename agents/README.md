@@ -31,6 +31,8 @@ The following components are available:
   model can distinguish an incomplete search from an absence of matches.
 - **Result parsing**: Structured output extraction from model responses in
   `agents/result/`.
+- **Delegates**: Tools that let an agent start background sub-agents, each
+  with a time box, and get their reports back, in `agents/delegate/`.
 
 For providers that support the Responses API, prefer
 [`responsesexecutor`](executor/openai/responsesexecutor/README.md).
