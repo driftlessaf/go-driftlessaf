@@ -221,6 +221,10 @@ func TestInfoSupportsEffort(t *testing.T) {
 		{"gemini-3-pro-preview", effort.XHigh, true},
 		{"meta/llama-3.3-70b-instruct-maas", effort.XHigh, true},
 		{"gpt-5.6-terra", effort.Low, true},
+		{"gpt-5.6-terra", effort.Max, true},
+		{"gpt-5.5-cyber-preview", effort.XHigh, true},
+		{"gpt-5.5-cyber-preview", effort.Max, false},
+		{"GPT-5.5-CYBER-PREVIEW", effort.Max, false},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s@%s", tt.id, tt.level), func(t *testing.T) {

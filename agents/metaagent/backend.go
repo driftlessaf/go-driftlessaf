@@ -13,6 +13,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/anthropicauth"
 	"chainguard.dev/driftlessaf/agents/awsauth"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
+	"chainguard.dev/driftlessaf/agents/openaiauth"
 )
 
 // BackendOption extends a provider backend with an explicitly configured
@@ -49,7 +50,8 @@ func configuredBackendOptions(options []BackendOption) backendOptions {
 }
 
 // Backend is an immutable registration for one provider account. Create
-// it with VertexBackend, BedrockBackend, AnthropicBackend, or NewAdapterBackend.
+// it with VertexBackend, BedrockBackend, AnthropicBackend, OpenAIBackend, or
+// NewAdapterBackend.
 // Its zero value is invalid. Names default to the provider name; distinct names
 // isolate accounts. Factories capture configuration, never route selection.
 type Backend struct {
@@ -102,6 +104,21 @@ func AnthropicBackend(name string, cfg anthropicauth.Config) Backend {
 			return AdapterRegistrations{}, err
 		}
 		return AdapterRegistrations{AnthropicMessages: []AnthropicMessagesRegistration{{Provider: modelrouter.ProviderAnthropic, Adapter: adapter}}}, nil
+	})
+	backend.region = func(string) string { return "" }
+	return backend
+}
+
+// OpenAIBackend captures OpenAI first-party workload identity configuration
+// for the Responses protocol. Target regions are ignored, and credentials are
+// discovered only on the first request.
+func OpenAIBackend(name string, cfg openaiauth.Config) Backend {
+	backend := NewAdapterBackend(name, modelrouter.ProviderOpenAI, func(string) (AdapterRegistrations, error) {
+		adapter, err := NewOpenAIDirectResponsesAdapter(cfg)
+		if err != nil {
+			return AdapterRegistrations{}, err
+		}
+		return AdapterRegistrations{OpenAIResponses: []OpenAIResponsesRegistration{{Provider: modelrouter.ProviderOpenAI, Adapter: adapter}}}, nil
 	})
 	backend.region = func(string) string { return "" }
 	return backend

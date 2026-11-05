@@ -7,13 +7,16 @@ package metaagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/openai/responsesexecutor"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 )
 
@@ -135,6 +138,8 @@ func newRoutedResponsesAgent[Req promptbuilder.Bindable, Resp, CB any](binding O
 		ResourceLabels:      binding.ResourceLabels(),
 		RequestTimeout:      config.ResponsesRequestTimeout,
 		ExecutionTimeout:    config.ResponsesExecutionTimeout,
+		SuspendTool:         suspendFunctionTool(config.SuspendToolName, config.SuspendToolDescription),
+		SuspendOnSubmit:     config.SuspendOnSubmit,
 	})
 	if err != nil {
 		return nil, err
@@ -149,4 +154,55 @@ func (a *responsesAgent[Req, Resp, CB]) Execute(ctx context.Context, request Req
 		return zero, fmt.Errorf("building Responses tools: %w", err)
 	}
 	return a.executor.Execute(ctx, request, tools)
+}
+
+// suspendFunctionTool is the Responses form of suspendToolParam's schema, or
+// nil when name is empty.
+func suspendFunctionTool(name, desc string) *responses.FunctionToolParam {
+	if name == "" {
+		return nil
+	}
+	return &responses.FunctionToolParam{
+		Name:        name,
+		Description: param.NewOpt(desc),
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				suspendQuestionProperty: map[string]any{"type": "string", "description": suspendQuestionDescription},
+				suspendContextProperty:  map[string]any{"type": "string", "description": suspendContextDescription},
+			},
+			"required": []string{suspendQuestionProperty},
+		},
+		Strict: param.NewOpt(false),
+	}
+}
+
+// Resume implements Resumer by delegating to the Responses executor, whose
+// resume capability is kept off responsesexecutor.Interface.
+func (a *responsesAgent[Req, Resp, CB]) Resume(ctx context.Context, env checkpoint.Envelope, answers map[string]string, callbacks CB) (Resp, error) {
+	var zero Resp
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		return zero, fmt.Errorf("building Responses tools: %w", err)
+	}
+	resumer, ok := a.executor.(responsesexecutor.Resumer[Req, Resp])
+	if !ok {
+		return zero, errors.New("responses executor does not support resume")
+	}
+	return resumer.Resume(ctx, env, answers, tools)
+}
+
+// ResumeWithResults implements ResultResumer by delegating to the Responses
+// executor, as Resume does.
+func (a *responsesAgent[Req, Resp, CB]) ResumeWithResults(ctx context.Context, env checkpoint.Envelope, results map[string]string, callbacks CB) (Resp, error) {
+	var zero Resp
+	tools, err := a.config.Tools.Tools(ctx, callbacks)
+	if err != nil {
+		return zero, fmt.Errorf("building Responses tools: %w", err)
+	}
+	resumer, ok := a.executor.(responsesexecutor.ResultResumer[Req, Resp])
+	if !ok {
+		return zero, errors.New("responses executor does not support resuming with results")
+	}
+	return resumer.ResumeWithResults(ctx, env, results, tools)
 }

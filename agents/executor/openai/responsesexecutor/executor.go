@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/effort"
 	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
@@ -30,6 +31,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
+	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
@@ -60,8 +62,25 @@ type Config[Response any] struct {
 	RequestTimeout time.Duration
 
 	// ExecutionTimeout bounds the conversation, including tools and retries.
-	// Zero selects 30 minutes. A shorter caller deadline always wins.
+	// Zero selects 30 minutes. A shorter caller deadline always wins. Each
+	// Resume gets a fresh ExecutionTimeout.
 	ExecutionTimeout time.Duration
+
+	// SuspendTool advertises a held-out tool that pauses the run. When the
+	// model calls it, Execute waits for the turn's other calls to finish and
+	// returns a *checkpoint.Suspension; Resumer continues the conversation.
+	// Its name must differ from the submit tool's and from every caller tool.
+	// Nil disables suspension.
+	SuspendTool *responses.FunctionToolParam
+
+	// SuspendOnSubmit makes an accepted submission pause the run instead of
+	// ending it: Execute returns the accepted Response with a
+	// *checkpoint.Suspension whose Reason is checkpoint.ReasonSubmitted and
+	// whose pending call is the submit call. ResultResumer continues with the
+	// caller's review as that call's result. Only a turn's first submission
+	// is reviewed, and a suspend call in the same turn is answered as not
+	// asked. It is part of the resume config digest.
+	SuspendOnSubmit bool
 }
 
 // Interface executes a native Responses conversation with provider-neutral tools.
@@ -121,6 +140,14 @@ func New[Request promptbuilder.Bindable, Response any](client responses.Response
 	if err != nil {
 		return nil, err
 	}
+	if cfg.SuspendTool != nil {
+		if err := execshared.ValidateSuspendToolName(cfg.SuspendTool.Name, submit.Definition.Name); err != nil {
+			return nil, err
+		}
+		// The executor must not see later caller edits to the definition.
+		suspendTool := *cfg.SuspendTool
+		cfg.SuspendTool = &suspendTool
+	}
 	return &executor[Request, Response]{
 		client:   client,
 		config:   cfg,
@@ -152,13 +179,20 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 	}
 	trace, done := agenttrace.StartTrace[Response](ctx, prompt)
 	defer func() { done(response, err) }()
-	// Structural evidence survives payload truncation and does not contain
-	// prompts or reasoning text. Write only after all tool workers have joined.
-	var reasoningEvidence []reasoningEffortEvidence
-	defer func() { trace.Metadata["responses_reasoning_effort"] = reasoningEvidence }()
-	defs, err := e.definitions(tools)
+	params, err := e.staticParams(tools)
 	if err != nil {
 		return response, err
+	}
+	params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: responses.ResponseInputParam{responses.ResponseInputItemParamOfMessage(prompt, "user")}}
+	return e.runConversation(ctx, trace, params, tools, make(map[string]struct{}), 0, e.config.MaxTurns)
+}
+
+// staticParams builds every request field except the input: the
+// turn-invariant request the resume config digest covers.
+func (e *executor[Request, Response]) staticParams(tools map[string]toolcall.Tool[Response]) (responses.ResponseNewParams, error) {
+	defs, err := e.definitions(tools)
+	if err != nil {
+		return responses.ResponseNewParams{}, err
 	}
 	params := responses.ResponseNewParams{
 		Model:             e.config.Model,
@@ -167,12 +201,11 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 		ParallelToolCalls: param.NewOpt(true),
 		Include:           []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 		Tools:             defs,
-		Input:             responses.ResponseNewParamsInputUnion{OfInputItemList: responses.ResponseInputParam{responses.ResponseInputItemParamOfMessage(prompt, "user")}},
 	}
 	if e.config.SystemInstructions != nil {
 		instructions, err := e.config.SystemInstructions.Build()
 		if err != nil {
-			return response, err
+			return responses.ResponseNewParams{}, err
 		}
 		params.Instructions = param.NewOpt(instructions)
 	}
@@ -185,12 +218,43 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 	if !model.Resolve(e.config.Attribution.LogicalModel).AutomaticToolChoiceOnly {
 		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsRequired)}
 	}
+	return params, nil
+}
+
+// runConversation drives the bounded turn loop shared by Execute and Resume.
+// params carries the conversation so far as its input. Turns are numbered
+// from startTurn, and the run gets budget of them. seen holds every function
+// call ID already in the conversation.
+func (e *executor[Request, Response]) runConversation(
+	ctx context.Context,
+	trace *agenttrace.Trace[Response],
+	params responses.ResponseNewParams,
+	tools map[string]toolcall.Tool[Response],
+	seen map[string]struct{},
+	startTurn, budget int,
+) (response Response, err error) {
+	// isSubmit and isSuspend route the terminal submit tool and the suspend
+	// tool. Both are held out: they run only after every sibling handler has
+	// finished, so a submission's validators see the finished state and a
+	// suspension captures the siblings' real results. A caller tool that
+	// shadows the suspend tool fails the run before any request.
+	isSubmit, isSuspend, heldOut, err := execshared.HeldOutPartition(tools, e.submit.Definition.Name, true, e.suspendToolName(), e.config.SuspendTool != nil)
+	if err != nil {
+		return response, err
+	}
+	route := toolRouting{isSubmit: isSubmit, isSuspend: isSuspend, heldOut: heldOut}
+	// Structural evidence survives payload truncation and does not contain
+	// prompts or reasoning text. Write only after all tool workers have joined.
+	var reasoningEvidence []reasoningEffortEvidence
+	defer func() { trace.Metadata["responses_reasoning_effort"] = reasoningEvidence }()
 	invalid := 0
 	turns := 0
 	limitExceeded := false
 	defer func() { e.recorder.RecordTurns(ctx, turns, limitExceeded) }()
-	seenCalls := make(map[string]struct{})
-	for index := range e.config.MaxTurns {
+	// turnLimit is where this run's budget runs out. A suspension carries what
+	// is left of it, not a figure recomputed from the live MaxTurns.
+	turnLimit := startTurn + budget
+	for index := startTurn; index < turnLimit; index++ {
 		if err := ctx.Err(); err != nil {
 			return response, err
 		}
@@ -252,24 +316,39 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 			}
 			// Preserve native messages, calls, and opaque reasoning. Do not put
 			// encrypted reasoning or raw provider payloads in logs or traces.
-			items, calls, err := continuation(out, seenCalls)
+			items, calls, err := continuation(out, seen)
 			if err != nil {
 				turn.Fail(err)
 				return false, false, err
 			}
 			params.Input.OfInputItemList = append(params.Input.OfInputItemList, items...)
-			accepted, usable, outputs, err := e.dispatch(ctx, calls, tools, trace, &response)
+			result, err := e.dispatch(ctx, calls, tools, route, trace, &response)
 			if err != nil {
 				turn.Fail(err)
 				return false, false, err
 			}
-			params.Input.OfInputItemList = append(params.Input.OfInputItemList, outputs...)
+			if result.pending >= 0 {
+				// A suspension is an intentional halt, so the turn does not
+				// fail. The input now ends with this turn's output items.
+				susp, err := e.buildSuspension(params.Input.OfInputItemList, calls, result, tools, index, turnLimit, trace.ID)
+				if err != nil {
+					turn.Fail(err)
+					return false, false, err
+				}
+				return result.accepted, true, susp
+			}
+			params.Input.OfInputItemList = append(params.Input.OfInputItemList, result.outputs...)
 			if len(calls) == 0 {
 				params.Input.OfInputItemList = append(params.Input.OfInputItemList, responses.ResponseInputItemParamOfMessage("Continue using the available tools, then submit the complete result with the terminal tool.", "user"))
 			}
-			return accepted, usable, nil
+			return result.accepted, result.usable, nil
 		}()
 		if turnErr != nil {
+			if susp, ok := checkpoint.AsSuspension(turnErr); ok {
+				clog.InfoContext(ctx, "Suspending Responses agent execution", "turn", index, "reason", susp.Reason, "tool", susp.PendingToolCalls[0].Name, "id", susp.PendingToolCalls[0].ID)
+				trace.Suspend(susp.Reason)
+				return response, susp
+			}
 			if requeue := retry.RequeueIfRetryable(ctx, turnErr, retryable, e.config.Attribution.ProviderName); requeue != nil {
 				return response, requeue
 			}
@@ -288,11 +367,18 @@ func (e *executor[Request, Response]) Execute(ctx context.Context, request Reque
 		}
 	}
 	limitExceeded = true
-	return response, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, e.config.MaxTurns)
+	return response, fmt.Errorf("%w (%d)", agentexecutor.ErrMaxTurns, budget)
 }
 
 func (e *executor[Request, Response]) definitions(tools map[string]toolcall.Tool[Response]) ([]responses.ToolUnionParam, error) {
 	defs := []responses.ToolUnionParam{{OfFunction: &e.submit.Definition}}
+	// A caller tool of the suspend tool's name fails the run in dispatch
+	// rather than shadowing it.
+	if st := e.config.SuspendTool; st != nil {
+		if _, shadowed := tools[st.Name]; !shadowed {
+			defs = append(defs, responses.ToolUnionParam{OfFunction: st})
+		}
+	}
 	for _, name := range slices.Sorted(maps.Keys(tools)) {
 		t := tools[name]
 		if name == e.submit.Definition.Name || name == "" || name != t.Def.Name || t.Handler == nil {
@@ -352,17 +438,34 @@ func continuation(out *responses.Response, seen map[string]struct{}) (responses.
 	return items, calls, nil
 }
 
-func (e *executor[Request, Response]) dispatch(ctx context.Context, calls []responses.ResponseFunctionToolCall, tools map[string]toolcall.Tool[Response], trace *agenttrace.Trace[Response], result *Response) (bool, bool, responses.ResponseInputParam, error) {
+// dispatchResult is one turn's tool results.
+type dispatchResult struct {
+	accepted, usable bool
+	// outputs holds one function_call_output per call, in call order. The
+	// pending call's entry is the zero value: its result is what a resume
+	// supplies.
+	outputs responses.ResponseInputParam
+	// pending is the index of the call the run pauses on, or -1.
+	pending int
+	// reason is the suspension reason when pending is set.
+	reason string
+}
+
+// toolRouting is a run's held-out partition (see execshared.HeldOutPartition).
+type toolRouting struct {
+	isSubmit, isSuspend, heldOut func(name string) bool
+}
+
+func (e *executor[Request, Response]) dispatch(ctx context.Context, calls []responses.ResponseFunctionToolCall, tools map[string]toolcall.Tool[Response], route toolRouting, trace *agenttrace.Trace[Response], result *Response) (dispatchResult, error) {
 	type outcome struct {
-		output           map[string]any
-		accepted, usable bool
-		err              error
+		output                    map[string]any
+		accepted, usable, suspend bool
+		err                       error
 	}
 	outcomes := make([]outcome, len(calls))
-	isSubmit := execshared.SubmitPredicate(tools, e.submit.Definition.Name, true)
 	committed := false // terminal callbacks run sequentially after ordinary tools join
 	afterSiblings := func(c responses.ResponseFunctionToolCall) bool { return tools[c.Name].Def.AfterSiblings }
-	terminal := func(c responses.ResponseFunctionToolCall) bool { return isSubmit(c.Name) }
+	terminal := func(c responses.ResponseFunctionToolCall) bool { return route.heldOut(c.Name) }
 	execshared.DispatchToolCalls(calls, e.config.ToolCallConcurrency, afterSiblings, terminal, func(i int, c responses.ResponseFunctionToolCall) {
 		o := &outcomes[i]
 		if err := ctx.Err(); err != nil {
@@ -378,43 +481,92 @@ func (e *executor[Request, Response]) dispatch(ctx context.Context, calls []resp
 		}
 		call := toolcall.ToolCall{ID: c.CallID, Name: c.Name, Args: args}
 		e.recorder.RecordToolCall(ctx, c.Name)
-		if isSubmit(c.Name) {
+		switch {
+		case route.isSuspend(c.Name):
+			// Its result is the answer a resume supplies.
+			o.suspend = true
+		case route.isSubmit(c.Name):
 			if committed {
 				o.output = map[string]any{"error": "a terminal result was already accepted"}
+				if e.config.SuspendOnSubmit {
+					o.output = map[string]any{"error": "only one submission per turn is reviewed; an earlier submit call in this turn is the one under review"}
+				}
 				return
 			}
 			submission := e.submit.Handler(ctx, call, trace)
 			o.output, o.accepted, o.err = execshared.GateSubmission(ctx, submission, trace, c.CallID, c.Name, args, e.config.ResultValidators, e.recorder, e.submit.Definition.Name, result)
 			committed = o.accepted
-		} else if t, ok := tools[c.Name]; ok {
-			// A regular handler cannot write the shared final result. The
-			// terminal validator is the only authority to commit it.
-			var scratch Response
-			o.output = t.Handler(ctx, call, trace, &scratch)
-			o.usable = true
-		} else {
-			trace.RejectedToolCall(c.CallID, c.Name, args, errors.New("unknown tool"))
-			o.output = map[string]any{"error": "unknown tool; use an advertised function"}
+		default:
+			if t, ok := tools[c.Name]; ok {
+				// A regular handler cannot write the shared final result. The
+				// terminal validator is the only authority to commit it.
+				var scratch Response
+				o.output = t.Handler(ctx, call, trace, &scratch)
+				o.usable = true
+			} else {
+				trace.RejectedToolCall(c.CallID, c.Name, args, errors.New("unknown tool"))
+				o.output = map[string]any{"error": "unknown tool; use an advertised function"}
+			}
 		}
 	})
-	var outputs responses.ResponseInputParam
-	usable, accepted := false, false
+	res := dispatchResult{outputs: make(responses.ResponseInputParam, len(calls)), pending: -1}
+	submitIdx, suspendIdx := -1, -1
 	for i, o := range outcomes {
 		if o.err != nil {
-			return false, false, nil, o.err
+			return dispatchResult{}, o.err
 		}
-		accepted = accepted || o.accepted
-		usable = usable || o.usable
-		b, err := json.Marshal(o.output)
+		res.accepted = res.accepted || o.accepted
+		res.usable = res.usable || o.usable
+		output := o.output
+		switch {
+		case o.accepted && e.config.SuspendOnSubmit:
+			// The caller's review replaces the acceptance as this call's
+			// result.
+			submitIdx = i
+			continue
+		case o.suspend && suspendIdx < 0:
+			suspendIdx = i
+			continue
+		case o.suspend:
+			output = map[string]any{"error": "only one question per turn is asked; an earlier call in this turn is the one awaiting an answer"}
+		}
+		item, err := encodeOutput(calls[i].CallID, output)
 		if err != nil {
-			return false, false, nil, errors.New("responses tool result is not JSON encodable")
+			return dispatchResult{}, err
 		}
-		if len(b) > maxPayloadBytes {
-			return false, false, nil, errors.New("responses tool result exceeds byte limit")
-		}
-		outputs = append(outputs, functionCallOutput(calls[i].CallID, string(b)))
+		res.outputs[i] = item
 	}
-	return accepted, usable, outputs, nil
+	switch {
+	case submitIdx >= 0:
+		res.pending, res.reason = submitIdx, checkpoint.ReasonSubmitted
+		if suspendIdx >= 0 {
+			// The submission overtook the question, but the conversation goes
+			// on, so the model must learn it was never sent.
+			item, err := encodeOutput(calls[suspendIdx].CallID, map[string]any{
+				"status": "not_asked",
+				"reason": "you submitted in the same turn, so the question was not sent; ask again if you still need an answer",
+			})
+			if err != nil {
+				return dispatchResult{}, err
+			}
+			res.outputs[suspendIdx] = item
+		}
+	case suspendIdx >= 0 && !res.accepted:
+		res.pending, res.reason = suspendIdx, checkpoint.ReasonAwaitingAnswer
+	}
+	return res, nil
+}
+
+// encodeOutput encodes one tool result as its function_call_output item.
+func encodeOutput(callID string, output map[string]any) (responses.ResponseInputItemUnionParam, error) {
+	b, err := json.Marshal(output)
+	if err != nil {
+		return responses.ResponseInputItemUnionParam{}, errors.New("responses tool result is not JSON encodable")
+	}
+	if len(b) > maxPayloadBytes {
+		return responses.ResponseInputItemUnionParam{}, errors.New("responses tool result exceeds byte limit")
+	}
+	return functionCallOutput(callID, string(b)), nil
 }
 
 // functionCallOutput builds the text result item for one function call. The

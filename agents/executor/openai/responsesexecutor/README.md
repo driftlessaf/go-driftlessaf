@@ -75,7 +75,32 @@ declare, so declare only the levels the provider accepts for that model. A
 recognized provider-reported level that differs from the request fails the
 execution.
 Explicit thinking budgets, sampling controls, explicit prompt-cache boundaries,
-suspend/resume, hosted tools, and configurable refusal nudges aren't advertised.
+hosted tools, and configurable refusal nudges aren't advertised.
+
+## Suspend and resume
+
+`Config.SuspendTool` adds a held-out tool. Like the terminal tool, it runs
+only after the turn's other calls finish. A call to it ends `Execute` with a
+`*checkpoint.Suspension`. Its `ProviderState` holds every replayed input item
+exactly as it was encoded on the wire, encrypted reasoning included, plus the
+paused turn's other tool outputs. `Resumer.Resume` and
+`ResultResumer.ResumeWithResults` replay those bytes unchanged and add the
+answer as the paused call's `function_call_output`.
+
+- A resume fails with `checkpoint.ErrConfigDrift` when the provider, model,
+  instructions, tools, output limit, effort, tool choice or `SuspendOnSubmit`
+  differ. Resource labels, timeouts and `MaxTurns` aren't compared.
+- The envelope carries what is left of the run's own turn budget. A resume
+  runs at most `min(RemainingTurns, MaxTurns)` turns.
+- Each resume gets a fresh `ExecutionTimeout`.
+- Only the turn's first suspend call pauses the run. Later ones get an error
+  result.
+- `SuspendOnSubmit` pauses on the first accepted submission and returns it with
+  a `checkpoint.ReasonSubmitted` suspension. A second submission in the same
+  turn gets an error result, and a suspend call in that turn is answered
+  `not_asked`.
+- The replayed input still counts toward the 8 MiB request cap, so a long
+  conversation that parks repeatedly can still reach the cap.
 
 ## Observability and validation
 

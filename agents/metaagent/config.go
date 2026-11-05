@@ -195,10 +195,11 @@ type Config[Resp, CB any] struct {
 	// obtains the resume path by type-asserting the constructed agent with
 	// AsResumer.
 	//
-	// The Claude and Gemini backends support it. The OpenAI-compatible
-	// backend rejects a non-empty SuspendToolName at construction with a clear
-	// error until its executor grows suspend support (DEV-2247): silently
-	// ignoring it would advertise a lifecycle that can never fire.
+	// The Claude, Gemini and Responses backends support it. The
+	// OpenAI-compatible Chat Completions backend rejects a non-empty
+	// SuspendToolName at construction with a clear error until its executor
+	// grows suspend support (DEV-2247): silently ignoring it would advertise a
+	// lifecycle that can never fire.
 	// The name must differ from the terminal submit tool's name and from every
 	// caller-registered tool (both validated by the executor). Empty (the
 	// default) leaves suspension disabled and the run's behavior byte-for-byte
@@ -214,13 +215,13 @@ type Config[Resp, CB any] struct {
 
 	// SuspendOnSubmit makes an accepted submission suspend the run instead of
 	// ending it (claudeexecutor.WithSuspendOnSubmit,
-	// googleexecutor.WithSuspendOnSubmit): Execute returns the
+	// googleexecutor.WithSuspendOnSubmit, responsesexecutor.Config): Execute returns the
 	// accepted Resp with a *checkpoint.Suspension whose pending call is the
 	// submit call, and ResumeWithResults (AsResultResumer) continues the same
 	// conversation with the caller's review as that call's result.
 	//
-	// The Claude and Gemini backends support it; the OpenAI-compatible
-	// backend rejects it at construction. When false (the default), an accepted submission
+	// The Claude, Gemini and Responses backends support it; the
+	// OpenAI-compatible Chat Completions backend rejects it at construction. When false (the default), an accepted submission
 	// ends the run.
 	SuspendOnSubmit bool
 

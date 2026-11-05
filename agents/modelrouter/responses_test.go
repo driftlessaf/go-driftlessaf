@@ -25,7 +25,7 @@ func TestNativeResponsesRouteCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := plan.Capabilities()
-	if !c.ToolCalling || !c.TerminalSubmission || !c.MaximumOutputTokens || c.SamplingParameters || c.PromptCaching || c.SuspendResume || c.RefusalRecovery || c.ExplicitThinkingBudget {
+	if !c.ToolCalling || !c.TerminalSubmission || !c.MaximumOutputTokens || !c.SuspendResume || c.SamplingParameters || c.PromptCaching || c.RefusalRecovery || c.ExplicitThinkingBudget {
 		t.Fatalf("capabilities=%+v", c)
 	}
 	for _, model := range []string{"claude-sonnet-5", "gemini-3.5-flash"} {

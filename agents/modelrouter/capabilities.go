@@ -92,6 +92,7 @@ func protocolCapabilities(protocol Protocol) Capabilities {
 		return common
 	case ProtocolOpenAIResponses:
 		common.SamplingParameters = false
+		common.SuspendResume = true
 		return common
 	case ProtocolTypeSafeSystemOne:
 		// System One is a single-shot typed-question call: no effort, sampling,

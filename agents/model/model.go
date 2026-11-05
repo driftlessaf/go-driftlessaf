@@ -109,6 +109,17 @@ var fullEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, effort.
 // predate the "xhigh" level.
 var preXHighEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, effort.Max}
 
+// noMaxEfforts is the scale for models whose provider rejects "max".
+var noMaxEfforts = []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh}
+
+// openAIEffortOverrides maps lower-cased OpenAI model ids to the levels the
+// provider accepts when that differs from fullEfforts. Keys are exact ids.
+var openAIEffortOverrides = map[string][]effort.Level{
+	// OpenAI's Responses API rejects "max" for gpt-5.5-cyber-preview. It
+	// also accepts "none", which has no provider-neutral level.
+	"gpt-5.5-cyber-preview": noMaxEfforts,
+}
+
 // samplingParamsRemovedPrefixes lists Claude id prefixes for which the
 // Anthropic API removed the sampling parameters (temperature, top_p, top_k)
 // AND the extended-thinking budget parameter (thinking.type="enabled",
@@ -213,9 +224,13 @@ func Resolve(id string) Info {
 		// Chat Completions maps xhigh/max to "high". Responses sends the
 		// level unchanged, and a model can reject some levels, so a
 		// Responses route must declare only the levels its model accepts.
+		efforts := fullEfforts
+		if override, ok := openAIEffortOverrides[lower]; ok {
+			efforts = override
+		}
 		return Info{
 			Backend:           BackendOpenAICompat,
-			Efforts:           slices.Clone(fullEfforts),
+			Efforts:           slices.Clone(efforts),
 			SamplingParams:    true,
 			ExplicitRouteOnly: hasAnyPrefix(lower, explicitRouteOnlyPrefixes),
 		}

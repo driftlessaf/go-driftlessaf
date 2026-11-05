@@ -17,6 +17,8 @@ const (
 	ProviderVertexAI Provider = "vertex"
 	// ProviderAnthropic serves models through Anthropic's first-party API.
 	ProviderAnthropic Provider = "anthropic"
+	// ProviderOpenAI serves models through OpenAI's first-party API.
+	ProviderOpenAI Provider = "openai"
 	// ProviderAWSBedrock serves models through Amazon Bedrock.
 	ProviderAWSBedrock Provider = "bedrock"
 	// ProviderTypeSafe serves System One models through TypeSafe AI's

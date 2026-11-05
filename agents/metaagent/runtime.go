@@ -26,8 +26,9 @@ type VertexConfig struct {
 // TargetConfig selects an exact provider/model pair on a configured backend.
 // It contains no credentials and can be populated from application configuration.
 // Backend defaults to the provider name. Region is required for Vertex AI and
-// ignored for Anthropic-direct. For Bedrock it overrides the configured default
-// region; one of those regions must be set. Catalog probe regions are never defaults.
+// ignored for Anthropic-direct and OpenAI-direct. For Bedrock it overrides the
+// configured default region; one of those regions must be set. Catalog probe
+// regions are never defaults.
 type TargetConfig struct {
 	Provider modelrouter.Provider `env:"PROVIDER"`
 	Model    string               `env:"MODEL"`
