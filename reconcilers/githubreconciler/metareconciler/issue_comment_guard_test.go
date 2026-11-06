@@ -307,6 +307,14 @@ func (h *issueHarness) client(t *testing.T) *github.Client {
 // reconcile builds a reconciler around agent and runs one reconcile of the issue.
 func (h *issueHarness) reconcile(t *testing.T, agent func(context.Context) error, opts ...Option[*testRequest, *publishResult, struct{}]) {
 	t.Helper()
+	if err := h.reconcileErr(t, t.Context(), agent, opts...); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+}
+
+// reconcileErr is reconcile under ctx, returning the reconcile's error.
+func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent func(context.Context) error, opts ...Option[*testRequest, *publishResult, struct{}]) error {
+	t.Helper()
 	cm, err := changemanager.New[PRData[*testRequest]]("test-bot",
 		template.Must(template.New("title").Parse("Update content")),
 		template.Must(template.New("body").Parse("Resolve #123.")))
@@ -334,9 +342,7 @@ func (h *issueHarness) reconcile(t *testing.T, agent func(context.Context) error
 			WithRequiredLabel[*testRequest, *publishResult, struct{}](requiredLabel),
 		}, opts...)...,
 	)
-	if err := rec.reconcileIssue(t.Context(), &githubreconciler.Resource{Owner: "owner", Repo: "repo", Number: 123, Type: githubreconciler.ResourceTypeIssue}, h.client(t)); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	return rec.reconcileIssue(ctx, &githubreconciler.Resource{Owner: "owner", Repo: "repo", Number: 123, Type: githubreconciler.ResourceTypeIssue}, h.client(t))
 }
 
 // step runs one reconcile with a give-up comment and checks the running total

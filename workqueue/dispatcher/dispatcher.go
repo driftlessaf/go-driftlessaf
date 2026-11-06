@@ -35,9 +35,13 @@ func ServiceCallback(client workqueue.WorkqueueServiceClient) Callback {
 // their wire-protocol meaning when the handler runs without a gRPC transport.
 func ProcessCallback(process func(context.Context, *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error)) Callback {
 	return func(ctx context.Context, key string, opts workqueue.Options) error {
+		// Forward the attempt so the processor knows when a failure is its last.
+		attempt, _ := workqueue.AttemptFromContext(ctx)
 		resp, err := process(ctx, &workqueue.ProcessRequest{
-			Key:      key,
-			Priority: opts.Priority,
+			Key:         key,
+			Priority:    opts.Priority,
+			Attempts:    int32(attempt.Number), //nolint:gosec // G115: attempt counts are small
+			MaxAttempts: int32(attempt.Max),    //nolint:gosec // G115: retry budgets are small
 		})
 		if err != nil {
 			return err
@@ -286,7 +290,8 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 			defer cfg.settled(true)
 
 			// Attempt to perform the actual reconciler invocation.
-			err = f(oip.Context(), oip.Name(), workqueue.Options{
+			attemptCtx := workqueue.WithAttempt(oip.Context(), workqueue.Attempt{Number: oip.GetAttempts(), Max: maxRetry})
+			err = f(attemptCtx, oip.Name(), workqueue.Options{
 				Priority: oip.Priority(),
 			})
 

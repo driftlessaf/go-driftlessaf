@@ -208,57 +208,92 @@ func (r *Reconciler) Reconcile(ctx context.Context, url string) error {
 
 	// Execute the reconciliation
 	err = r.reconcileFunc(ctx, resource, client)
-	if err != nil {
-		// Check if it's a rate limit error from any GitHub API call
-		if rateLimitErr, ok := errors.AsType[*github.RateLimitError](err); ok {
-			// Calculate duration until rate limit resets
-			resetTime := rateLimitErr.Rate.Reset.Time
-			delay := jitter.Add(time.Until(resetTime))
-			clog.WarnContext(ctx, "Rate limited, requeueing after rate limit reset", "reset_at", resetTime)
-			return workqueue.RequeueAfter(delay)
-		}
-
-		// Check if it's an abuse rate limit error
-		if abuseRateLimitErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
-			// GitHub wants us to slow down - use retry after if provided, otherwise use a conservative 1 minute
-			retryAfter := time.Minute
-			if abuseRateLimitErr.RetryAfter != nil {
-				retryAfter = *abuseRateLimitErr.RetryAfter
-			}
-			delay := jitter.Add(retryAfter)
-			clog.WarnContext(ctx, "Abuse rate limit detected, requeueing after retry period", "retry_after", delay)
-			return workqueue.RequeueAfter(delay)
-		}
-
-		// Check if it's a gRPC ResourceExhausted error
-		if status.Code(err) == codes.ResourceExhausted {
-			// Resource exhausted - use a conservative retry delay
-			delay := jitter.Add(grpcRateLimitRetryDuration)
-			clog.WarnContext(ctx, "gRPC ResourceExhausted detected, requeueing after retry period", "retry_after", delay, "error", err)
-			return workqueue.RequeueAfter(delay)
-		}
-
-		// Check if it's a transient host failure from breaker.Transport; its
-		// delay is already jittered, and the floor keeps re-enqueues from
-		// undercutting it.
-		if breakerErr, ok := errors.AsType[*breaker.Error](err); ok {
-			clog.WarnContext(ctx, "Transient host failure, requeueing", "retry_after", breakerErr.RetryAfter)
-			return workqueue.RequeueNotBefore(breakerErr.RetryAfter)
-		}
-
-		// Check if it's a transient failure (e.g. a temporary registry error
-		// or one marked by transient.Retry)
-		if transient.Is(err) {
-			clog.WarnContextf(ctx, "Transient failure, requeueing with jitter: %v", err)
-			return workqueue.RequeueAfterWithJitter(transientRequeueDelay, transientRequeueJitter)
-		}
+	if rq := requeueFor(err); rq != nil {
+		clog.WarnContext(ctx, rq.msg, rq.attrs...)
+		return rq.err
 	}
 	return err
+}
+
+// requeue is the requeue Reconcile answers an error with, and the message and
+// attributes it logs that under.
+type requeue struct {
+	err   error
+	msg   string
+	attrs []any
+}
+
+// requeueFor returns how Reconcile requeues a reconcile function's err when
+// err says to try again later, and nil when it does not.
+func requeueFor(err error) *requeue {
+	if err == nil {
+		return nil
+	}
+
+	// Check if it's a rate limit error from any GitHub API call
+	if rateLimitErr, ok := errors.AsType[*github.RateLimitError](err); ok {
+		// Calculate duration until rate limit resets
+		resetTime := rateLimitErr.Rate.Reset.Time
+		delay := jitter.Add(time.Until(resetTime))
+		return &requeue{err: workqueue.RequeueAfter(delay), msg: "Rate limited, requeueing after rate limit reset", attrs: []any{"reset_at", resetTime}}
+	}
+
+	// Check if it's an abuse rate limit error
+	if abuseRateLimitErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
+		// GitHub wants us to slow down - use retry after if provided, otherwise use a conservative 1 minute
+		retryAfter := time.Minute
+		if abuseRateLimitErr.RetryAfter != nil {
+			retryAfter = *abuseRateLimitErr.RetryAfter
+		}
+		delay := jitter.Add(retryAfter)
+		return &requeue{err: workqueue.RequeueAfter(delay), msg: "Abuse rate limit detected, requeueing after retry period", attrs: []any{"retry_after", delay}}
+	}
+
+	// Check if it's a gRPC ResourceExhausted error
+	if status.Code(err) == codes.ResourceExhausted {
+		// Resource exhausted - use a conservative retry delay
+		delay := jitter.Add(grpcRateLimitRetryDuration)
+		return &requeue{err: workqueue.RequeueAfter(delay), msg: "gRPC ResourceExhausted detected, requeueing after retry period", attrs: []any{"retry_after", delay, "error", err}}
+	}
+
+	// Check if it's a transient host failure from breaker.Transport; its
+	// delay is already jittered, and the floor keeps re-enqueues from
+	// undercutting it.
+	if breakerErr, ok := errors.AsType[*breaker.Error](err); ok {
+		return &requeue{err: workqueue.RequeueNotBefore(breakerErr.RetryAfter), msg: "Transient host failure, requeueing", attrs: []any{"retry_after", breakerErr.RetryAfter}}
+	}
+
+	// Check if it's a transient failure (e.g. a temporary registry error
+	// or one marked by transient.Retry)
+	if transient.Is(err) {
+		return &requeue{err: workqueue.RequeueAfterWithJitter(transientRequeueDelay, transientRequeueJitter), msg: "Transient failure, requeueing with jitter", attrs: []any{"error", err}}
+	}
+	return nil
+}
+
+// Reschedules reports whether Process answers err, returned by a reconcile
+// function, by scheduling the key again (a requeue, or keys to queue) rather
+// than by failing the attempt. A rescheduled key is not dead-lettered, even
+// when the attempt is its last.
+func Reschedules(err error) bool {
+	if requeueFor(err) != nil {
+		return true
+	}
+	if _, _, ok := workqueue.GetRequeueOptions(err); ok {
+		return true
+	}
+	return len(workqueue.GetQueueKeys(err)) > 0
 }
 
 // Process implements the WorkqueueService.Process RPC.
 func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error) {
 	clog.InfoContextf(ctx, "Processing GitHub resource: %s (priority: %d)", req.Key, req.Priority)
+
+	// Carry the dispatch attempt to the reconciler (see workqueue.AttemptFromContext),
+	// so it can tell when a failure is the key's last.
+	if req.GetAttempts() > 0 {
+		ctx = workqueue.WithAttempt(ctx, workqueue.Attempt{Number: int(req.GetAttempts()), Max: int(req.GetMaxAttempts())})
+	}
 
 	// Call the reconciler
 	err := r.Reconcile(ctx, req.Key)

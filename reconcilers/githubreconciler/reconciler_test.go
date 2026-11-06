@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -312,6 +314,104 @@ func TestReconciler_Process_RequeueFloor(t *testing.T) {
 	}
 	if !resp.GetRequeueFloor() {
 		t.Error("RequeueFloor = false, want true for RequeueNotBefore")
+	}
+}
+
+// TestReconciler_Process_Attempt proves Process hands the reconcile function
+// the dispatch attempt from the ProcessRequest. Over gRPC that is the only way
+// the attempt reaches it, and without it a reconciler never sees its last
+// attempt.
+func TestReconciler_Process_Attempt(t *testing.T) {
+	tests := []struct {
+		name   string
+		req    *workqueue.ProcessRequest
+		want   workqueue.Attempt
+		wantOK bool
+	}{{
+		name:   "the last of a bounded run",
+		req:    &workqueue.ProcessRequest{Attempts: 5, MaxAttempts: 5},
+		want:   workqueue.Attempt{Number: 5, Max: 5},
+		wantOK: true,
+	}, {
+		name:   "unbounded retries",
+		req:    &workqueue.ProcessRequest{Attempts: 3},
+		want:   workqueue.Attempt{Number: 3},
+		wantOK: true,
+	}, {
+		name: "the dispatcher reports no attempt",
+		req:  &workqueue.ProcessRequest{},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				got   workqueue.Attempt
+				gotOK bool
+			)
+			r := NewReconciler(NewClientCache(mockTokenSourceFunc), WithReconciler(func(ctx context.Context, _ *Resource, _ *github.Client) error {
+				got, gotOK = workqueue.AttemptFromContext(ctx)
+				return nil
+			}))
+			tt.req.Key = "https://github.com/owner/repo/issues/123"
+			if _, err := r.Process(t.Context(), tt.req); err != nil {
+				t.Fatalf("Process: got err = %v, want nil", err)
+			}
+			if gotOK != tt.wantOK || got != tt.want {
+				t.Errorf("AttemptFromContext: got = %+v, %t, want = %+v, %t", got, gotOK, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestReschedules proves Reschedules agrees with what Process answers: an
+// error it reschedules comes back as a requeue or keys to queue, so the
+// dispatcher does not count it as a failed attempt.
+func TestReschedules(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{{
+		name: "nil",
+	}, {
+		name: "a plain failure",
+		err:  errors.New("push failed"),
+	}, {
+		name: "non-retriable",
+		err:  workqueue.NonRetriableError(errors.New("bad request"), "bad request"),
+	}, {
+		name: "a requeue",
+		err:  fmt.Errorf("upsert PR: %w", workqueue.RequeueAfter(time.Minute)),
+		want: true,
+	}, {
+		name: "a requeue under an infrastructure marker",
+		err:  workqueue.InfrastructureError(workqueue.RequeueAfter(time.Minute), errors.New("model overloaded")),
+		want: true,
+	}, {
+		name: "keys to queue",
+		err:  workqueue.QueueKeys(workqueue.QueueKey{Key: "https://github.com/owner/repo/issues/1"}),
+		want: true,
+	}, {
+		name: "gRPC ResourceExhausted",
+		err:  fmt.Errorf("calling model: %w", status.Error(codes.ResourceExhausted, "quota exceeded")),
+		want: true,
+	}, {
+		name: "a GitHub abuse rate limit",
+		err:  &github.AbuseRateLimitError{Response: &http.Response{Request: &http.Request{Method: http.MethodGet, URL: &url.URL{}}}, Message: "slow down"},
+		want: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Reschedules(tt.err); got != tt.want {
+				t.Errorf("Reschedules: got = %t, want = %t", got, tt.want)
+			}
+			r := NewReconciler(NewClientCache(mockTokenSourceFunc), WithReconciler(func(context.Context, *Resource, *github.Client) error {
+				return tt.err
+			}))
+			resp, _ := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "https://github.com/owner/repo/issues/123"})
+			if rescheduled := resp.GetRequeueAfterSeconds() > 0 || len(resp.GetQueueKeys()) > 0; rescheduled != tt.want {
+				t.Errorf("Process rescheduled: got = %t, want = %t (response %v)", rescheduled, tt.want, resp)
+			}
+		})
 	}
 }
 

@@ -18,6 +18,14 @@ message ProcessRequest {
 
   // The (optional) delay in second to wait before processing the work item.
   int64 delay_seconds = 3;
+
+  // The (optional) number of times the dispatcher has attempted this work
+  // item, this attempt included. Zero when the dispatcher does not report it.
+  int32 attempts = 4;
+
+  // The (optional) attempt count at which a failure dead-letters the work item
+  // instead of retrying it. Zero when retries are unbounded or unreported.
+  int32 max_attempts = 5;
 }
 
 message ProcessResponse {

@@ -23,6 +23,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v88/github"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // errIssueInactive cancels publication without treating discarded agent work as
@@ -413,6 +414,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			}
 			return nil
 		}
+		r.noteRetriesExhausted(ctx, changeSession, revision, err)
 		return fmt.Errorf("upsert PR: %w", err)
 	}
 
@@ -530,6 +532,40 @@ func (r *Reconciler[Req, Resp, CB]) giveUpRevision(ctx context.Context, session 
 	}
 	revision := issueRevision(issue, thread, r.requiredLabel)
 	return revision, thread.HasNote(revision)
+}
+
+// retriesExhaustedNoteTimeout bounds posting the retries-exhausted note, which
+// runs on a context detached from the attempt's: the attempt may have failed
+// because its deadline passed.
+const retriesExhaustedNoteTimeout = 30 * time.Second
+
+// noteRetriesExhausted posts the WithRetriesExhaustedNote note when err ends
+// the workqueue's attempts on the issue. revision is set only when this
+// reconcile ran the agent for an issue with no PR and a give-up comment is
+// configured, the one case the note covers. Failures are logged and swallowed.
+func (r *Reconciler[Req, Resp, CB]) noteRetriesExhausted(ctx context.Context, session *changemanager.Session[PRData[Req]], revision string, err error) {
+	if r.retriesExhausted == nil || r.giveUp == nil || revision == "" {
+		return
+	}
+	// A rescheduled key is retried, and would find the note answering the
+	// issue and stop there.
+	if githubreconciler.Reschedules(err) {
+		return
+	}
+	attempt, _ := workqueue.AttemptFromContext(ctx)
+	if !attempt.Final() && workqueue.GetNonRetriableDetails(err) == nil {
+		return
+	}
+	var traceID string
+	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
+		traceID = sc.TraceID().String()
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retriesExhaustedNoteTimeout)
+	defer cancel()
+	clog.InfoContext(ctx, "Last attempt failed with no PR, posting a note on the issue", "attempt", attempt.Number)
+	if _, err := session.UpsertIssueNote(ctx, r.giveUp.Marker, revision, r.retriesExhausted(attempt.Number, traceID)); err != nil {
+		clog.WarnContext(ctx, "Failed to post retries-exhausted note on issue", "error", err)
+	}
 }
 
 // clearIssueGiveUp drops the give-up notes from the source issue. Finding them

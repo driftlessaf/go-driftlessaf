@@ -83,6 +83,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// WithGiveUpComment.
 	giveUp *changemanager.GiveUpComment
 
+	// retriesExhausted, when set, renders the note posted on the source issue
+	// when the workqueue's last attempt to open the first PR fails. Nil means
+	// disabled. See WithRetriesExhaustedNote.
+	retriesExhausted func(attempts int, traceID string) string
+
 	// startComment, when set, posts a single marker comment on the source issue
 	// the first time the bot reconciles it with no PR yet, announcing that work
 	// has started. Nil means disabled. See WithStartComment.
@@ -206,6 +211,31 @@ func WithCopyIssueLabels[Req promptbuilder.Bindable, Resp Result, CB any]() Opti
 func WithGiveUpComment[Req promptbuilder.Bindable, Resp Result, CB any](marker string, render func(explanation string) string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.giveUp = &changemanager.GiveUpComment{Marker: marker, Render: render}
+	}
+}
+
+// WithRetriesExhaustedNote posts a note on the source issue when an attempt to
+// open its first PR fails and the workqueue will not try again: the attempt is
+// the key's last (see workqueue.Attempt.Final) or the error is non-retriable.
+// Without it the key is dead-lettered or dropped and the filer sees neither a
+// PR nor a comment. The note's body is render(attempts, traceID), where
+// attempts is the failed attempt's number and traceID is empty when the
+// reconcile carries no trace; it must not quote the error, which can carry
+// internal detail.
+//
+// The note goes under the WithGiveUpComment marker, stamped with the revision
+// the attempt ran for, so it answers the issue exactly as a give-up note does:
+// later issue events, its own included, do not run the agent again until a
+// person replies, edits the title or body, re-adds the required label, or
+// reopens the issue, and it is removed once a PR opens. Without
+// WithGiveUpComment the option is a no-op. Off by default.
+//
+// A dispatcher shutdown during the last attempt requeues the key without
+// spending the attempt, so the note can precede a retry that then finds the
+// issue answered; the note asks for the reply that starts another run.
+func WithRetriesExhaustedNote[Req promptbuilder.Bindable, Resp Result, CB any](render func(attempts int, traceID string) string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.retriesExhausted = render
 	}
 }
 
