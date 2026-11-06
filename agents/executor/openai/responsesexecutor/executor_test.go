@@ -6,11 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 package responsesexecutor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +26,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
+	"github.com/chainguard-dev/clog"
 	"github.com/google/go-cmp/cmp"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
@@ -745,5 +748,65 @@ func TestValidatorFailureAbortsWithoutContinuation(t *testing.T) {
 	_, err := e.Execute(t.Context(), request{}, nil)
 	if !errors.Is(err, want) || n != 1 {
 		t.Fatalf("err=%v requests=%d", err, n)
+	}
+}
+
+func emitEvents(w http.ResponseWriter, types ...string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, typ := range types {
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: {\"type\":%q}\n\n", typ, typ)
+	}
+}
+
+// Providers stream event types openai-go does not decode yet; an unknown
+// incremental event must not fail a turn that ends in a valid completion. Each
+// unknown type is logged once, truncated to 128 bytes, and only the first 8
+// distinct types in a stream are logged. Types openai-go decodes, such as the
+// reasoning-text events gpt-5.5-cyber-preview sends, are not logged.
+func TestUnknownStreamEventsAreConsumed(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 200)
+	e := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		emitEvents(w, "response.queued", "response.created",
+			"response.reasoning_text.delta", "response.reasoning_text.delta", "response.reasoning_text.done",
+			"response.output_text.annotation.added", "response.custom_tool_call_input.delta", "response.web_search_call.searching",
+			"response.bogus_keepalive", "response.bogus_keepalive", long,
+			"response.bogus_0", "response.bogus_1", "response.bogus_2", "response.bogus_3", "response.bogus_4", "response.bogus_5", "response.bogus_6")
+		emitEffort(w, "xhigh")
+	}, config(t))
+	logs := new(bytes.Buffer)
+	ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(logs, nil)))
+	if _, err := e.Execute(ctx, request{}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	got := map[string]int{}
+	for line := range strings.Lines(logs.String()) {
+		var rec struct{ Msg, Type string }
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec.Msg == "Consuming unknown Responses stream event type" {
+			got[rec.Type]++
+		}
+	}
+	want := map[string]int{
+		"response.bogus_keepalive": 1, long[:128]: 1,
+		"response.bogus_0": 1, "response.bogus_1": 1, "response.bogus_2": 1, "response.bogus_3": 1,
+		"response.bogus_4": 1, "response.bogus_5": 1,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("unknown event logs (-want, +got):\n%s", diff)
+	}
+}
+
+// Consuming unknown events never stands in for a completion: a stream of only
+// unknown events fails the turn.
+func TestOnlyUnknownStreamEventsFail(t *testing.T) {
+	t.Parallel()
+	e := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		emitEvents(w, "response.bogus_delta", "response.bogus_keepalive")
+	}, config(t))
+	if _, err := e.Execute(t.Context(), request{}, nil); err == nil || !strings.Contains(err.Error(), "ended without a completed response") {
+		t.Fatalf("Execute: got = %v, want = stream ended without a completed response", err)
 	}
 }

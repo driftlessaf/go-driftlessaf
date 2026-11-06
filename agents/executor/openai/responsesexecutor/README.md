@@ -37,7 +37,10 @@ in a parallel batch. Only an accepted, validated submission commits a result.
 - Requests and individual tool results are limited to 8 MiB. Streams are limited
   to 16 MiB and 32,768 events; completed payloads are limited to 8 MiB.
 - A completed response can contain at most 128 function calls. Repeated call IDs
-  and unsupported output/event types fail closed before dispatch.
+  and unsupported output item types fail closed before dispatch.
+- Only `response.completed` is executed. Unknown incremental stream event types
+  are consumed and logged at warn level, once per type and at most 8 types per
+  stream. A stream that ends without `response.completed` fails.
 - Requests set `tool_choice` to `required`, because only function calls
   advance the conversation. Models that the `agents/model` registry marks
   `AutomaticToolChoiceOnly` keep the provider default, `auto`. A turn without a

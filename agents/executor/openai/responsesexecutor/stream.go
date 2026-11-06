@@ -11,9 +11,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"chainguard.dev/driftlessaf/agents/internal/calltiming"
+	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
@@ -83,6 +85,84 @@ func boundWire(req *http.Request, next option.MiddlewareNext) (*http.Response, e
 	return resp, nil
 }
 
+// knownStreamEvents are the non-terminal event types the pinned openai-go
+// decodes in ResponseStreamEventUnion. stream consumes these silently and logs
+// any other type, so add the types a newer openai-go pin decodes.
+var knownStreamEvents = map[string]struct{}{
+	"response.audio.delta":                         {},
+	"response.audio.done":                          {},
+	"response.audio.transcript.delta":              {},
+	"response.audio.transcript.done":               {},
+	"response.code_interpreter_call.completed":     {},
+	"response.code_interpreter_call.in_progress":   {},
+	"response.code_interpreter_call.interpreting":  {},
+	"response.code_interpreter_call_code.delta":    {},
+	"response.code_interpreter_call_code.done":     {},
+	"response.compaction.compacting":               {},
+	"response.content_part.added":                  {},
+	"response.content_part.done":                   {},
+	"response.created":                             {},
+	"response.custom_tool_call_input.delta":        {},
+	"response.custom_tool_call_input.done":         {},
+	"response.file_search_call.completed":          {},
+	"response.file_search_call.in_progress":        {},
+	"response.file_search_call.searching":          {},
+	"response.function_call_arguments.delta":       {},
+	"response.function_call_arguments.done":        {},
+	"response.image_generation_call.completed":     {},
+	"response.image_generation_call.generating":    {},
+	"response.image_generation_call.in_progress":   {},
+	"response.image_generation_call.partial_image": {},
+	"response.in_progress":                         {},
+	"response.mcp_call.completed":                  {},
+	"response.mcp_call.failed":                     {},
+	"response.mcp_call.in_progress":                {},
+	"response.mcp_call_arguments.delta":            {},
+	"response.mcp_call_arguments.done":             {},
+	"response.mcp_list_tools.completed":            {},
+	"response.mcp_list_tools.failed":               {},
+	"response.mcp_list_tools.in_progress":          {},
+	"response.output_item.added":                   {},
+	"response.output_item.done":                    {},
+	"response.output_text.annotation.added":        {},
+	"response.output_text.delta":                   {},
+	"response.output_text.done":                    {},
+	"response.queued":                              {},
+	"response.reasoning_summary_part.added":        {},
+	"response.reasoning_summary_part.done":         {},
+	"response.reasoning_summary_text.delta":        {},
+	"response.reasoning_summary_text.done":         {},
+	"response.reasoning_text.delta":                {},
+	"response.reasoning_text.done":                 {},
+	"response.refusal.delta":                       {},
+	"response.refusal.done":                        {},
+	"response.shell_call_command.added":            {},
+	"response.shell_call_command.delta":            {},
+	"response.shell_call_command.done":             {},
+	"response.shell_call_output_content.delta":     {},
+	"response.shell_call_output_content.done":      {},
+	"response.web_search_call.completed":           {},
+	"response.web_search_call.in_progress":         {},
+	"response.web_search_call.searching":           {},
+}
+
+// maxLoggedUnknownEvents bounds the distinct unknown types logged per stream,
+// so a provider that varies the type on every event cannot flood the log.
+const maxLoggedUnknownEvents = 8
+
+// logUnknownStreamEvent logs typ the first time it appears in a stream.
+// seen holds the types already logged for that stream.
+func logUnknownStreamEvent(ctx context.Context, seen map[string]struct{}, typ string) {
+	if _, ok := seen[typ]; ok || len(seen) >= maxLoggedUnknownEvents {
+		return
+	}
+	seen[typ] = struct{}{}
+	if len(typ) > 128 {
+		typ = typ[:128]
+	}
+	clog.WarnContext(ctx, "Consuming unknown Responses stream event type", "type", typ)
+}
+
 // stream sends one Responses request and returns the completed response.
 // timer measures the request and marks the first streamed delta.
 func (e *executor[Request, Response]) stream(ctx context.Context, params responses.ResponseNewParams, timer *calltiming.Timer) (*responses.Response, error) {
@@ -97,6 +177,7 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 	stream := e.client.NewStreaming(timer.Context(ctx), params, option.WithMaxRetries(0), option.WithMiddleware(boundWire), option.WithResponseInto(&httpResponse))
 	defer stream.Close()
 	events := 0
+	unknown := make(map[string]struct{}, maxLoggedUnknownEvents)
 	responseID := ""
 	for stream.Next() {
 		events++
@@ -116,18 +197,18 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 			return &event.Response, nil
 		case "response.failed", "response.incomplete", "error":
 			return nil, safeStreamFailure(event, httpResponse, responseID)
-		case "response.output_text.delta", "response.function_call_arguments.delta", "response.refusal.delta", "response.reasoning_summary_text.delta":
-			// The first delta of any kind is the first output token. Like the
-			// other incremental events, deltas are consumed but not executed.
-			timer.MarkFirstToken()
-		case "response.created", "response.in_progress", "response.output_item.added", "response.output_item.done",
-			"response.content_part.added", "response.content_part.done", "response.output_text.done",
-			"response.function_call_arguments.done", "response.refusal.done",
-			"response.reasoning_summary_part.added", "response.reasoning_summary_part.done", "response.reasoning_summary_text.done":
-			// Consume incremental events, but execute only the authoritative
-			// completed response. No tool sees an incomplete argument string.
 		default:
-			return nil, errors.New("responses returned unsupported stream event")
+			// Every other event is incremental: consume it, but execute only
+			// the authoritative completed response, so no tool sees an
+			// incomplete argument string. Providers add event types without
+			// notice, so an unknown type is logged, not failed. The first
+			// delta of any kind is the first output token.
+			if strings.HasSuffix(event.Type, ".delta") {
+				timer.MarkFirstToken()
+			}
+			if _, known := knownStreamEvents[event.Type]; !known {
+				logUnknownStreamEvent(ctx, unknown, event.Type)
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {

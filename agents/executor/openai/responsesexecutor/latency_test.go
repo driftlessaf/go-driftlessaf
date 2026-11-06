@@ -65,14 +65,33 @@ func TestTraceRecordsStreamedCallLatency(t *testing.T) {
 	}
 }
 
+// Any *.delta event, known or not, marks the first token.
+func TestTraceMarksFirstTokenOnUnknownDelta(t *testing.T) {
+	t.Parallel()
+	e := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		emitEvents(w, "response.reasoning_text.delta")
+		emitEffort(w, "xhigh")
+	}, config(t))
+	tracer := new(recordingTracer)
+	if _, err := e.Execute(agenttrace.WithTracer[answer](t.Context(), tracer), request{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if l := tracer.trace.Turns[0].Latency; l == nil || l.FirstTokenMS == nil {
+		t.Fatalf("Latency = %+v, want FirstTokenMS set by the unknown delta", l)
+	}
+}
+
 // Only a *.delta event marks the first token: a stream that carries its output
-// in response.completed alone leaves FirstTokenMS unset.
+// in response.completed alone, even after unknown non-delta events, leaves
+// FirstTokenMS unset.
 func TestTraceLeavesFirstTokenUnsetWithoutDeltas(t *testing.T) {
 	t.Parallel()
 	e := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"in_progress\"}}\n\n")
+		emitEvents(w, "keepalive", "response.reasoning_text.done")
 		b, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{
 			"id": "resp_fixture", "status": "completed", "output": []any{submit("submit", "done")},
 			"usage": map[string]any{"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
