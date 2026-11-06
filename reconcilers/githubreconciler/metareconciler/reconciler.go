@@ -88,6 +88,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// disabled. See WithRetriesExhaustedNote.
 	retriesExhausted func(attempts int, traceID string) string
 
+	// retriesExhaustedPR, when set, renders the note posted on the open PR
+	// when the workqueue's last attempt to update it fails. Nil means
+	// disabled. See WithRetriesExhaustedPRNote.
+	retriesExhaustedPR func(attempts int, traceID string) string
+
 	// startComment, when set, posts a single marker comment on the source issue
 	// the first time the bot reconciles it with no PR yet, announcing that work
 	// has started. Nil means disabled. See WithStartComment.
@@ -236,6 +241,25 @@ func WithGiveUpComment[Req promptbuilder.Bindable, Resp Result, CB any](marker s
 func WithRetriesExhaustedNote[Req promptbuilder.Bindable, Resp Result, CB any](render func(attempts int, traceID string) string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.retriesExhausted = render
+	}
+}
+
+// WithRetriesExhaustedPRNote is WithRetriesExhaustedNote for an issue whose PR
+// is already open: when an attempt to update the PR (a findings iteration or a
+// rebuild after a conflict) fails and the workqueue will not try again, it
+// posts render(attempts, traceID) on the PR. Without it the PR keeps its old
+// commits and failing checks, and nothing on it says the bot has stopped.
+//
+// The note goes under the WithGiveUpComment marker, so it replaces any earlier
+// give-up comment on the PR and is removed with it, once the PR is green or the
+// agent pushes. It is a comment only: a label would deliver a pull_request
+// event, and that event would start another round of attempts. Every later PR
+// event (a push, a review, a check completing) still starts one, so the note
+// should say that. Without WithGiveUpComment the option is a no-op. Off by
+// default.
+func WithRetriesExhaustedPRNote[Req promptbuilder.Bindable, Resp Result, CB any](render func(attempts int, traceID string) string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.retriesExhaustedPR = render
 	}
 }
 

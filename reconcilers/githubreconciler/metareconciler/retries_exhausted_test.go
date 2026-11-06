@@ -26,6 +26,17 @@ func withRetriesExhausted() Option[*testRequest, *publishResult, struct{}] {
 	})
 }
 
+// withRetriesExhaustedPR configures the PR note the tests look for.
+func withRetriesExhaustedPR() Option[*testRequest, *publishResult, struct{}] {
+	return WithRetriesExhaustedPRNote[*testRequest, *publishResult, struct{}](func(attempts int, _ string) string {
+		return fmt.Sprintf("stopped updating the PR after %d attempts", attempts)
+	})
+}
+
+// failingCheck is a head commit whose one check run failed, so the PR has a
+// finding to iterate on.
+const failingCheck = `[{"__typename":"CheckRun","databaseId":1,"name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE"}]`
+
 // agentFails is an agent whose run fails, so the reconcile returns an error.
 func agentFails(context.Context) error { return errors.New("model unavailable") }
 
@@ -106,6 +117,11 @@ func TestReconcileIssueRetriesExhaustedNote(t *testing.T) {
 		attempt: &workqueue.Attempt{Number: 5, Max: 5},
 		agent:   agentFails,
 		opts:    []Option[*testRequest, *publishResult, struct{}]{withRetriesExhausted()},
+	}, {
+		name:    "only the PR note is configured",
+		attempt: &workqueue.Attempt{Number: 5, Max: 5},
+		agent:   agentFails,
+		opts:    []Option[*testRequest, *publishResult, struct{}]{withGiveUp(), withRetriesExhaustedPR()},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,5 +163,120 @@ func TestReconcileIssueRetriesExhaustedNoteAnswers(t *testing.T) {
 	h.step(t, "the reply runs the agent, which gives up", noChange, 2, opts...)
 	if n := len(h.notes()); n != 1 {
 		t.Errorf("bot's notes: got = %d, want = 1", n)
+	}
+}
+
+// TestReconcileIssueRetriesExhaustedPRNote proves that when the last attempt
+// to update an open PR fails, the note goes on the PR, where the filer is
+// waiting, and not on the issue; and that an attempt that will be retried
+// posts nothing.
+func TestReconcileIssueRetriesExhaustedPRNote(t *testing.T) {
+	both := []Option[*testRequest, *publishResult, struct{}]{withGiveUp(), withRetriesExhausted(), withRetriesExhaustedPR()}
+	tests := []struct {
+		name       string
+		mergeable  string
+		checks     string
+		attempt    workqueue.Attempt
+		agent      func(context.Context) error
+		opts       []Option[*testRequest, *publishResult, struct{}]
+		wantPRNote string
+	}{{
+		name:       "the last attempt to fix a failing check fails",
+		mergeable:  "MERGEABLE",
+		checks:     failingCheck,
+		attempt:    workqueue.Attempt{Number: 5, Max: 5},
+		agent:      agentFails,
+		opts:       both,
+		wantPRNote: "stopped updating the PR after 5 attempts",
+	}, {
+		name:       "the last attempt to rebuild a conflicting PR fails",
+		mergeable:  "CONFLICTING",
+		checks:     `[]`,
+		attempt:    workqueue.Attempt{Number: 5, Max: 5},
+		agent:      agentFails,
+		opts:       both,
+		wantPRNote: "stopped updating the PR after 5 attempts",
+	}, {
+		name:      "an attempt with retries left fails",
+		mergeable: "MERGEABLE",
+		checks:    failingCheck,
+		attempt:   workqueue.Attempt{Number: 4, Max: 5},
+		agent:     agentFails,
+		opts:      both,
+	}, {
+		name:      "the last attempt asks to requeue",
+		mergeable: "MERGEABLE",
+		checks:    failingCheck,
+		attempt:   workqueue.Attempt{Number: 5, Max: 5},
+		agent: func(context.Context) error {
+			return workqueue.InfrastructureError(workqueue.RequeueAfter(time.Minute), errors.New("model overloaded"))
+		},
+		opts: both,
+	}, {
+		name:      "only the issue note is configured",
+		mergeable: "MERGEABLE",
+		checks:    failingCheck,
+		attempt:   workqueue.Attempt{Number: 5, Max: 5},
+		agent:     agentFails,
+		opts:      []Option[*testRequest, *publishResult, struct{}]{withGiveUp(), withRetriesExhausted()},
+	}, {
+		name:      "no give-up comment to post under",
+		mergeable: "MERGEABLE",
+		checks:    failingCheck,
+		attempt:   workqueue.Attempt{Number: 5, Max: 5},
+		agent:     agentFails,
+		opts:      []Option[*testRequest, *publishResult, struct{}]{withRetriesExhaustedPR()},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newIssueHarness(t)
+			h.openPR(t, tt.mergeable, tt.checks)
+			ctx := workqueue.WithAttempt(t.Context(), tt.attempt)
+			if err := h.reconcileErr(t, ctx, tt.agent, tt.opts...); err == nil {
+				t.Fatal("reconcile: got = nil, want the agent's error")
+			}
+			if h.agentCalls != 1 {
+				t.Errorf("agent calls: got = %d, want = 1", h.agentCalls)
+			}
+			if notes := h.notes(); len(notes) != 0 {
+				t.Errorf("issue notes: got = %q, want none", notes)
+			}
+			notes := h.prNotes()
+			if tt.wantPRNote == "" {
+				if len(notes) != 0 {
+					t.Errorf("PR notes: got = %q, want none", notes)
+				}
+				return
+			}
+			if len(notes) != 1 || !strings.HasSuffix(notes[0], tt.wantPRNote) {
+				t.Errorf("PR notes: got = %q, want one ending %q", notes, tt.wantPRNote)
+			}
+		})
+	}
+}
+
+// TestReconcileIssueRetriesExhaustedPRNoteClears proves the PR note is one
+// comment that a later failed round rewrites rather than repeats, and that it
+// goes once the PR is green, so it never outlives the failure it reports.
+func TestReconcileIssueRetriesExhaustedPRNoteClears(t *testing.T) {
+	opts := []Option[*testRequest, *publishResult, struct{}]{withGiveUp(), withRetriesExhaustedPR()}
+	h := newIssueHarness(t)
+	h.openPR(t, "MERGEABLE", failingCheck)
+
+	for _, attempts := range []int{5, 6} {
+		ctx := workqueue.WithAttempt(t.Context(), workqueue.Attempt{Number: attempts, Max: attempts})
+		if err := h.reconcileErr(t, ctx, agentFails, opts...); err == nil {
+			t.Fatal("reconcile: got = nil, want the agent's error")
+		}
+	}
+	notes := h.prNotes()
+	if want := "stopped updating the PR after 6 attempts"; len(notes) != 1 || !strings.HasSuffix(notes[0], want) {
+		t.Errorf("PR notes after two failed rounds: got = %q, want one ending %q", notes, want)
+	}
+
+	h.setPR("MERGEABLE", `[]`)
+	h.reconcile(t, agentFails, opts...)
+	if notes := h.prNotes(); len(notes) != 0 {
+		t.Errorf("PR notes once the PR is green: got = %q, want none", notes)
 	}
 }

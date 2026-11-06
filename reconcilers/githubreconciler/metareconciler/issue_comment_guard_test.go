@@ -25,6 +25,8 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/google/go-github/v88/github"
 	"golang.org/x/oauth2"
 )
@@ -43,18 +45,29 @@ type timelineEvent struct {
 	at       time.Time
 }
 
+// harnessPR is the fake GitHub's view of the bot's open pull request #456.
+type harnessPR struct {
+	mergeable string // MERGEABLE, CONFLICTING or UNKNOWN
+	checks    string // the head commit's statusCheckRollup nodes, as JSON
+}
+
 // issueHarness drives reconcileIssue against a fake GitHub and a local remote.
 // The issue's comment thread and timeline are stateful: comments the bot posts
 // and deletes change them, so successive reconciles see what earlier ones
-// left, the way the bot's own comment events would deliver them.
+// left, the way the bot's own comment events would deliver them. With no PR
+// opened (see openPR) the session finds none.
 type issueHarness struct {
 	mu sync.Mutex
 
+	remote   *git.Repository
 	issue    *github.Issue
 	comments []*github.IssueComment
 	events   []timelineEvent
 	nextID   int64
 	now      time.Time
+
+	pr         *harnessPR
+	prComments []*github.IssueComment
 
 	// createFails and deleteFails make the bot's comment posts and deletes fail.
 	createFails bool
@@ -68,9 +81,10 @@ func newIssueHarness(t *testing.T) *issueHarness {
 	t.Helper()
 	// SetRepoURLForTesting is process-global, so callers must not run in parallel.
 	t.Setenv("TMPDIR", t.TempDir())
-	remoteDir, _ := publishRepository(t)
+	remoteDir, remote := publishRepository(t)
 	t.Cleanup(clonemanager.SetRepoURLForTesting(func(*githubreconciler.Resource) string { return remoteDir }))
 	h := &issueHarness{
+		remote: remote,
 		issue: &github.Issue{
 			Number:  new(123),
 			Title:   new("Do the thing"),
@@ -84,6 +98,43 @@ func newIssueHarness(t *testing.T) *issueHarness {
 	}
 	h.addEvent("LabeledEvent", requiredLabel)
 	return h
+}
+
+// openPR gives the issue the bot's open PR #456, its branch pushed at the
+// remote's main, with the given mergeability and head-commit checks.
+func (h *issueHarness) openPR(t *testing.T, mergeable, checks string) {
+	t.Helper()
+	head, err := h.remote.Head()
+	if err != nil {
+		t.Fatalf("remote HEAD: %v", err)
+	}
+	if err := h.remote.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("test-bot/issue-123"), head.Hash())); err != nil {
+		t.Fatalf("create PR branch: %v", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pr = &harnessPR{mergeable: mergeable, checks: checks}
+}
+
+// setPR changes the open PR's mergeability and checks.
+func (h *issueHarness) setPR(mergeable, checks string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pr = &harnessPR{mergeable: mergeable, checks: checks}
+}
+
+// prNotes returns the bodies of the PR's comments beginning with the give-up
+// marker, oldest first.
+func (h *issueHarness) prNotes() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var notes []string
+	for _, c := range h.prComments {
+		if strings.HasPrefix(c.GetBody(), giveUpMarker) {
+			notes = append(notes, c.GetBody())
+		}
+	}
+	return notes
 }
 
 // addComment appends a comment by login to the issue's thread.
@@ -248,9 +299,50 @@ func (h *issueHarness) serveGraphQL(t *testing.T, w http.ResponseWriter, r *http
 			"timelineItems": map[string]any{"nodes": items},
 		}}})
 
+	case h.pr != nil:
+		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":"","mergeable":%q,"isDraft":false,"headRefOid":"abc123","labels":{"nodes":[]},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":[]},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.pr.mergeable, h.pr.checks)
+
 	default:
 		reply(map[string]any{"repository": map[string]any{"pullRequests": map[string]any{"nodes": []any{}}}})
 	}
+}
+
+// prCommentID is the path of a REST request on one PR comment, which is how
+// the session edits and deletes the PR's marker comments.
+var prCommentID = regexp.MustCompile(`^/repos/owner/repo/issues/comments/(\d+)$`)
+
+// servePRComment answers an edit or delete of one of the PR's comments, and
+// reports whether r was one. h.mu is held.
+func (h *issueHarness) servePRComment(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	m := prCommentID.FindStringSubmatch(r.URL.Path)
+	if m == nil {
+		return false
+	}
+	id, _ := strconv.ParseInt(m[1], 10, 64)
+	i := slices.IndexFunc(h.prComments, func(c *github.IssueComment) bool { return c.GetID() == id })
+	if i < 0 {
+		t.Errorf("PR comment request: got = %s %s, want = a comment on the PR", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+		return true
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		h.prComments = slices.Delete(h.prComments, i, i+1)
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodPatch:
+		var c github.IssueComment
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+			t.Errorf("decode comment edit: %v", err)
+		}
+		h.prComments[i].Body = c.Body
+		if err := json.NewEncoder(w).Encode(h.prComments[i]); err != nil {
+			t.Errorf("encode comment: %v", err)
+		}
+	default:
+		t.Errorf("PR comment request: got = %s %s, want = PATCH or DELETE", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+	return true
 }
 
 func (h *issueHarness) client(t *testing.T) *github.Client {
@@ -259,6 +351,9 @@ func (h *issueHarness) client(t *testing.T) *github.Client {
 		w.Header().Set("Content-Type", "application/json")
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.servePRComment(t, w, r) {
+			return
+		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			h.serveGraphQL(t, w, r)
@@ -290,7 +385,20 @@ func (h *issueHarness) client(t *testing.T) *github.Client {
 			h.prCreates++
 			fmt.Fprint(w, `{"number":456,"html_url":"https://github.com/owner/repo/pull/456"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/456/comments":
-			fmt.Fprint(w, `[]`)
+			if err := json.NewEncoder(w).Encode(h.prComments); err != nil {
+				t.Errorf("encode PR comments: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/456/comments":
+			var c github.IssueComment
+			if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+				t.Errorf("decode PR comment: %v", err)
+			}
+			pc := &github.IssueComment{ID: new(h.nextID), Body: c.Body, User: &github.User{Login: new(viewerLogin)}}
+			h.nextID++
+			h.prComments = append(h.prComments, pc)
+			if err := json.NewEncoder(w).Encode(pc); err != nil {
+				t.Errorf("encode PR comment: %v", err)
+			}
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/456/labels":
 			fmt.Fprint(w, `[]`)
 		default:
@@ -317,7 +425,8 @@ func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent fun
 	t.Helper()
 	cm, err := changemanager.New[PRData[*testRequest]]("test-bot",
 		template.Must(template.New("title").Parse("Update content")),
-		template.Must(template.New("body").Parse("Resolve #123.")))
+		template.Must(template.New("body").Parse("Resolve #123.")),
+		changemanager.WithFindingsIteration[PRData[*testRequest]]())
 	if err != nil {
 		t.Fatalf("create change manager: %v", err)
 	}

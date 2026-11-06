@@ -414,7 +414,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			}
 			return nil
 		}
-		r.noteRetriesExhausted(ctx, changeSession, revision, err)
+		r.noteRetriesExhausted(ctx, changeSession, state.HasPR(), revision, err)
 		return fmt.Errorf("upsert PR: %w", err)
 	}
 
@@ -539,12 +539,18 @@ func (r *Reconciler[Req, Resp, CB]) giveUpRevision(ctx context.Context, session 
 // because its deadline passed.
 const retriesExhaustedNoteTimeout = 30 * time.Second
 
-// noteRetriesExhausted posts the WithRetriesExhaustedNote note when err ends
-// the workqueue's attempts on the issue. revision is set only when this
-// reconcile ran the agent for an issue with no PR and a give-up comment is
-// configured, the one case the note covers. Failures are logged and swallowed.
-func (r *Reconciler[Req, Resp, CB]) noteRetriesExhausted(ctx context.Context, session *changemanager.Session[PRData[Req]], revision string, err error) {
-	if r.retriesExhausted == nil || r.giveUp == nil || revision == "" {
+// noteRetriesExhausted posts a note when err ends the workqueue's attempts on
+// the issue: the WithRetriesExhaustedPRNote note on the PR when hasPR, and the
+// WithRetriesExhaustedNote note on the issue otherwise. revision is set only
+// when this reconcile ran the agent for an issue with no PR and a give-up
+// comment is configured, the one case the issue note covers. Failures are
+// logged and swallowed.
+func (r *Reconciler[Req, Resp, CB]) noteRetriesExhausted(ctx context.Context, session *changemanager.Session[PRData[Req]], hasPR bool, revision string, err error) {
+	render := r.retriesExhausted
+	if hasPR {
+		render = r.retriesExhaustedPR
+	}
+	if render == nil || r.giveUp == nil || (!hasPR && revision == "") {
 		return
 	}
 	// A rescheduled key is retried, and would find the note answering the
@@ -562,8 +568,16 @@ func (r *Reconciler[Req, Resp, CB]) noteRetriesExhausted(ctx context.Context, se
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retriesExhaustedNoteTimeout)
 	defer cancel()
+	body := render(attempt.Number, traceID)
+	if hasPR {
+		clog.InfoContext(ctx, "Last attempt failed on an open PR, posting a note on the PR", "attempt", attempt.Number, "pr", session.PRNumber())
+		if err := session.UpsertMarkerComment(ctx, r.giveUp.Marker, body); err != nil {
+			clog.WarnContext(ctx, "Failed to post retries-exhausted note on PR", "error", err)
+		}
+		return
+	}
 	clog.InfoContext(ctx, "Last attempt failed with no PR, posting a note on the issue", "attempt", attempt.Number)
-	if _, err := session.UpsertIssueNote(ctx, r.giveUp.Marker, revision, r.retriesExhausted(attempt.Number, traceID)); err != nil {
+	if _, err := session.UpsertIssueNote(ctx, r.giveUp.Marker, revision, body); err != nil {
 		clog.WarnContext(ctx, "Failed to post retries-exhausted note on issue", "error", err)
 	}
 }
