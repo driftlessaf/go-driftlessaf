@@ -291,11 +291,21 @@ func geminiInfo(id string) Info {
 	return info
 }
 
+// geminiThinkingLevelModels are Gemini ids with no version in their name
+// that take the thinkingLevel control.
+var geminiThinkingLevelModels = []string{
+	// A Gemini 3 Pro-family model served on Vertex AI from location global.
+	"gemini-pro-early-exp3",
+}
+
 // geminiThinkingControl reports which generation of thinking knob the model
 // takes: the discrete thinkingLevel enum replaced the thinkingBudget token
 // count with Gemini 3. Ids whose major version cannot be determined fall
-// back to the budget control.
+// back to the budget control unless geminiThinkingLevelModels lists them.
 func geminiThinkingControl(id string) ThinkingControl {
+	if slices.Contains(geminiThinkingLevelModels, id) {
+		return ThinkingControlLevel
+	}
 	rest, ok := strings.CutPrefix(id, "gemini-")
 	if !ok {
 		return ThinkingControlBudget

@@ -184,6 +184,8 @@ func TestResolve(t *testing.T) {
 		{"gemini-2.5-pro", geminiBudget},
 		{"gemini-3-pro-preview", geminiLevel},
 		{"gemini-3.5-flash", geminiLevel},
+		// A versionless id listed as a thinking-level model.
+		{"gemini-pro-early-exp3", geminiLevel},
 		{"gemini-4-argon", gemini4Argon},
 		{"gemini-4-argon-cyber-permissive", gemini4Argon},
 		// An unverified Gemini 4 id takes the family surface but reports an
