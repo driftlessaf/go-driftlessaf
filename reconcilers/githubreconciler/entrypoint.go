@@ -354,6 +354,12 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 			recovery.UnaryServerInterceptor(), // must be last
 		)...),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// d.Shutdown waits only for requests whose client is still there. On
+		// SIGTERM the workqueue dispatcher cancels its calls first, and gRPC's
+		// ServeHTTP returns as soon as the client is gone while the handler
+		// still runs its cleanup (closing a microVM session, say). This makes
+		// d.Shutdown's Stop wait for those handlers too.
+		grpc.WaitForHandlers(true),
 	)
 
 	workqueue.RegisterWorkqueueServiceServer(d.Server, service)
@@ -388,7 +394,16 @@ func Main[T any](ctx context.Context, f Functor[T], opts ...MainOption) error {
 		clog.InfoContext(ctx, "reconciler server draining", "cause", context.Cause(ctx), "deadline", shutdownGrace.String())
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 		defer cancel()
-		if err := d.Shutdown(shutdownCtx); err != nil {
+		// Stop waits for handlers without a deadline, so bound it here.
+		shutdownErr := make(chan error, 1)
+		go func() { shutdownErr <- d.Shutdown(shutdownCtx) }()
+		var err error
+		select {
+		case err = <-shutdownErr:
+		case <-shutdownCtx.Done():
+			err = shutdownCtx.Err()
+		}
+		if err != nil {
 			clog.WarnContext(ctx, "reconciler server shutdown did not finish cleanly", "error", err, "elapsed", time.Since(start).String())
 		} else {
 			clog.InfoContext(ctx, "reconciler server drained", "elapsed", time.Since(start).String())
