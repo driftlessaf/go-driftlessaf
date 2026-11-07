@@ -239,6 +239,41 @@ func (e *executor[Request, Response]) maxTurnsError(
 	return exhausted
 }
 
+// interruptedError is the error a run whose context ended returns: err, the
+// error it stopped with, carrying the conversation as it stood after turn,
+// the last whole turn. A turn that ran is closed on a user message, so the
+// interrupted turn left at most an assistant message whose calls have no
+// results, and that message is dropped. Its calls may have run; the
+// continued conversation asks the model again from the turn before.
+//
+// No turn finished when turn is negative, and the error carries nothing to
+// continue, as it does when the conversation cannot be captured.
+func (e *executor[Request, Response]) interruptedError(
+	ctx context.Context,
+	err error,
+	params anthropic.MessageNewParams,
+	tools map[string]claudetool.Metadata[Response],
+	turn int,
+	traceID string,
+	state loopState,
+) error {
+	interrupted := &agentexecutor.InterruptedError{Err: err}
+	if turn < 0 {
+		return interrupted
+	}
+	if n := len(params.Messages); n > 0 && params.Messages[n-1].Role == anthropic.MessageParamRoleAssistant {
+		params.Messages = params.Messages[:n-1]
+	}
+	env, cerr := e.exhaustedEnvelope(params, tools, turn, traceID, state)
+	if cerr != nil {
+		clog.WarnContext(ctx, "the interrupted conversation could not be captured; it cannot be continued", "error", cerr)
+		return interrupted
+	}
+	env.Reason = checkpoint.ReasonInterrupted
+	interrupted.Continuation = env
+	return interrupted
+}
+
 // exhaustedEnvelope captures an exhausted conversation in the envelope shape
 // Resume reads: the same provider state, loop state and config digest a
 // suspension carries, with no pending call and no remaining budget.

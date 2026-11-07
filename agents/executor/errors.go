@@ -55,6 +55,35 @@ func (e *MaxTurnsError) Unwrap() error {
 	return ErrMaxTurns
 }
 
+// InterruptedError is the error a run returns when its context ended before
+// the run did, from an executor that can say how far the conversation got.
+// It reads as, and unwraps to, the error the run stopped with, so a caller
+// that matches context.Canceled or a cancel cause is unaffected; one that
+// wants to pick the conversation up later extracts it with errors.AsType.
+type InterruptedError struct {
+	// Err is the error the run stopped with.
+	Err error
+
+	// Continuation is the conversation as it stood after its last whole
+	// turn, in the envelope shape a continue reads (see MaxTurnsError): the
+	// interrupted turn is dropped, since its tool calls have no results. It
+	// carries no Deadline; a caller that persists it stamps its own. Nil when
+	// no turn finished, so there is nothing to continue.
+	//
+	// It is excluded from JSON for the reason MaxTurnsError's is.
+	Continuation *checkpoint.Envelope `json:"-"`
+}
+
+// Error reads as the error the run stopped with.
+func (e *InterruptedError) Error() string {
+	return e.Err.Error()
+}
+
+// Unwrap returns the error the run stopped with.
+func (e *InterruptedError) Unwrap() error {
+	return e.Err
+}
+
 // ErrInputTooLarge reports that a model request exceeded the input budget of
 // the model's serving context window and was rejected before the provider was
 // called. Resending the same conversation fails the same way, so callers

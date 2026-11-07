@@ -1262,6 +1262,9 @@ func (e *executor[Request, Response]) runConversation(
 		// done=true on all terminal paths (including errors); || err != nil is a
 		// safety net in case a future path sets err without setting done.
 		if done || err != nil {
+			if _, suspended := checkpoint.AsSuspension(err); err != nil && !suspended && ctx.Err() != nil {
+				err = e.interruptedError(ctx, err, params, tools, turn-1, trace.ID, loopState{TruncatedToolCalls: truncatedToolCalls})
+			}
 			return resp, err
 		}
 	}

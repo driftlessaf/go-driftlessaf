@@ -17,8 +17,9 @@ import (
 )
 
 // Continuer is the capability interface for continuing a conversation that
-// spent its turn budget, instead of starting it over: the Continuation an
-// exhausted run carries on its executor.MaxTurnsError. Like Resumer it is kept
+// spent its turn budget or was interrupted, instead of starting it over: the
+// Continuation an exhausted run carries on its executor.MaxTurnsError, or an
+// interrupted one on its executor.InterruptedError. Like Resumer it is kept
 // off Interface, so existing consumers compile unmodified; a caller that
 // continues type-asserts the Interface returned by New.
 type Continuer[Request promptbuilder.Bindable, Response any] interface {

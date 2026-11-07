@@ -32,6 +32,11 @@ const ReasonAwaitingAnswer = "awaiting answer"
 // conversation at a larger budget.
 const ReasonTurnsExhausted = "turn budget exhausted"
 
+// ReasonInterrupted is the Envelope.Reason for the conversation an executor
+// hands back when a run's context ends before the run does. Like an exhausted
+// run's, it travels on the run's error and is picked up by a continue.
+const ReasonInterrupted = "interrupted"
+
 // ReasonSubmitted is the Envelope.Reason for a suspension an accepted
 // submission triggers under claudeexecutor.WithSuspendOnSubmit. The executor
 // returns the accepted response alongside it, so a wrapper must forward the
