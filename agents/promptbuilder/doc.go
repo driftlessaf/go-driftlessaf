@@ -78,6 +78,10 @@ The package provides multiple binding methods for different data formats:
 	// would break them
 	p, err = p.BindRawFenced("evidence", fileContents)
 
+	// BindEmbed - Places a file compiled in with //go:embed verbatim, for
+	// trusted instructions kept in a file (see Embedded Templates)
+	p, err = p.BindEmbed("skill", skills, "skills/check/SKILL.md")
+
 FenceUntrusted builds the same fence as a string, for a caller that composes
 a prompt section itself, and FenceUntrustedWithPreamble does so with the
 caller's own data-contract line in place of the generic one.
@@ -89,6 +93,7 @@ Each method also has a Must variant that panics on error:
 	p = p.MustBindXML("config", xmlData)
 	p = p.MustBindYAML("settings", yamlData)
 	p = p.MustBindOrderedList("steps", promptbuilder.OrderedList{"Check logs", "Summarise failures"})
+	p = p.MustBindEmbed("skill", skills, "skills/check/SKILL.md")
 
 # Template Syntax
 
@@ -115,6 +120,14 @@ with //go:embed:
 	var prompts embed.FS
 
 	var analyze = promptbuilder.MustNewPromptFromEmbed(prompts, "prompts/analyze.md")
+
+NewPromptFromEmbed parses the file as a template, so a file whose text
+contains placeholder-shaped strings it must keep, such as a skill quoting
+melange's ${{package.version}}, cannot be one. BindEmbed places such a file
+at a placeholder verbatim:
+
+	var system = promptbuilder.MustNewPrompt("ROLE: ...\n\n{{skill}}").
+		MustBindEmbed("skill", skills, "skills/check/SKILL.md")
 
 # Bindable Interface
 
@@ -166,6 +179,7 @@ The package returns errors for:
   - Marshaling failures in BindJSON/BindXML/BindYAML
   - List items containing line breaks in BindUnorderedList/BindOrderedList
   - BindPrompt compositions nested beyond the composition depth limit
+  - Embedded files that NewPromptFromEmbed or BindEmbed cannot read
   - Builds whose rendered output exceeds the build size limit
 
 # Thread Safety

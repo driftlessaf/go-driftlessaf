@@ -56,6 +56,22 @@ func ExampleNewPromptFromEmbed() {
 	// Output: Hello world.
 }
 
+// ExamplePrompt_BindEmbed demonstrates placing an embedded file in a prompt
+// verbatim, placeholder-shaped text included
+func ExamplePrompt_BindEmbed() {
+	ctx := context.Background()
+	// templates is declared with //go:embed testdata/invalid.md, which holds
+	// "Run {{test-case}}."
+	result, err := promptbuilder.MustNewPrompt("Instructions: {{file}}").
+		MustBindEmbed("file", templates, "testdata/invalid.md").
+		Build()
+	if err != nil {
+		clog.FatalContextf(ctx, "%v", err)
+	}
+	fmt.Print(result)
+	// Output: Instructions: Run {{test-case}}.
+}
+
 // ExamplePrompt_BindStringLiteral demonstrates binding literal string values
 func ExamplePrompt_BindStringLiteral() {
 	ctx := context.Background()

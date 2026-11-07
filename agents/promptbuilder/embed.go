@@ -33,3 +33,32 @@ func NewPromptFromEmbed(fsys embed.FS, name string) (*Prompt, error) {
 func MustNewPromptFromEmbed(fsys embed.FS, name string) *Prompt {
 	return Must(NewPromptFromEmbed(fsys, name))
 }
+
+// BindEmbed binds file, read from fsys, to the placeholder name verbatim. Unlike
+// NewPromptFromEmbed, the file is not parsed as a template, so text that
+// looks like a placeholder, such as melange's ${{package.version}}, renders
+// as written. Use it to place trusted instructions kept in a file, such as a
+// skill's SKILL.md, inside a prompt.
+//
+// The file is read once, when the binding is made, so every Build renders the
+// same bytes. As with NewPromptFromEmbed, the embed.FS parameter limits the
+// content to files compiled into the program.
+func (p *Prompt) BindEmbed(name string, fsys embed.FS, file string) (*Prompt, error) {
+	// Check the placeholder before the file so error precedence matches the
+	// other Bind methods.
+	if err := existsAndUnbound(p.bindings, name); err != nil {
+		return nil, err
+	}
+	data, err := fsys.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("reading the embedded file %q: %w", file, err)
+	}
+	return p.bind(name, &literalBinding{val: string(data)})
+}
+
+// MustBindEmbed binds file, read from fsys, to the placeholder name verbatim,
+// and panics on error.
+// This is syntactic sugar for Must(p.BindEmbed(...))
+func (p *Prompt) MustBindEmbed(name string, fsys embed.FS, file string) *Prompt {
+	return Must(p.BindEmbed(name, fsys, file))
+}
