@@ -262,3 +262,40 @@ func TestUpdateMetadataRetriesLostRace(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshWindowKeepsEarliestWakeup(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	for _, tc := range []struct {
+		name      string
+		incoming  time.Time
+		wantPatch bool
+	}{
+		{"later push", at.Add(time.Minute), false},
+		{"same window", at, false},
+		{"due occurrence", at.Add(-30 * time.Second), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeGCS{handler: func(call gcsCall) (int, string) {
+				return http.StatusOK, fmt.Sprintf(`{"name":"queued/schedule","generation":"1","metageneration":"1","metadata":{%q:%q,%q:%q}}`, priorityMetadataKey, noPriority, notBeforeMetadataKey, at.Format(time.RFC3339))
+			}}
+			if err := updateMetadata(t.Context(), newTestClient(t, f), "schedule", map[string]string{priorityMetadataKey: noPriority, notBeforeMetadataKey: tc.incoming.Format(time.RFC3339)}, true); err != nil {
+				t.Fatalf("updateMetadata(schedule, %s) returned %v, expected nil", tc.name, err)
+			}
+			patch, got := findCall(f.recorded(), http.MethodPatch, "queued/schedule")
+			if got != tc.wantPatch {
+				t.Fatalf("updateMetadata(schedule, %s) patched=%t, expected %t", tc.name, got, tc.wantPatch)
+			}
+			if got {
+				var body struct {
+					Metadata map[string]string `json:"metadata"`
+				}
+				if err := json.Unmarshal([]byte(patch.body), &body); err != nil {
+					t.Fatal(err)
+				}
+				if got := body.Metadata[notBeforeMetadataKey]; got != tc.incoming.Format(time.RFC3339) {
+					t.Errorf("updateMetadata(schedule, %s) stored deadline %q, expected %q", tc.name, got, tc.incoming.Format(time.RFC3339))
+				}
+			}
+		})
+	}
+}

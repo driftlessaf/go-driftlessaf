@@ -2022,3 +2022,34 @@ func TestHandleAsync_PassesOwnerCapacityToOwnerAwareQueues(t *testing.T) {
 		t.Errorf("enumeration without an owner limit: owner calls=%d capacity=%d, want 0 and 100", q.ownerCalls, q.capacity)
 	}
 }
+
+func TestHandleAsync_BackoffFloor(t *testing.T) {
+	for _, selected := range []bool{false, true} {
+		t.Run(fmt.Sprint(selected), func(t *testing.T) {
+			next := &mockKey{name: "schedule", attempts: 2}
+			q := &mockQueue{next: []workqueue.QueuedKey{next}}
+			future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error {
+				return errors.New("mirror busy")
+			}, 5, WithBackoffFloor(func(key string) bool { return selected && key == "schedule" }))
+			if err := future(); err != nil {
+				t.Fatalf("HandleAsync(schedule, selected=%t) returned %v, expected nil", selected, err)
+			}
+			got := next.lastReqOpts
+			if got.NotBeforeFloor != selected || got.BackoffDelay < time.Minute || got.Delay != 0 {
+				t.Errorf("HandleAsync(schedule, selected=%t) requeued with %+v, expected floor=%t, backoff >= 1m and no attempt-resetting delay", selected, got, selected)
+			}
+		})
+	}
+}
+
+func TestProtectedBackoffExhaustion(t *testing.T) {
+	next := &mockKey{name: "schedule", attempts: 5}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	future := HandleAsync(t.Context(), q, 1, 0, func(context.Context, string, workqueue.Options) error { return errors.New("mirror busy") }, 5, WithBackoffFloor(func(string) bool { return true }))
+	if err := future(); err != nil {
+		t.Fatalf("HandleAsync(schedule, attempt 5) returned %v, expected nil", err)
+	}
+	if next.dead != 1 || next.requeueOpts != 0 {
+		t.Errorf("HandleAsync(schedule, attempt 5) deadletters=%d, requeues=%d; expected 1, 0", next.dead, next.requeueOpts)
+	}
+}

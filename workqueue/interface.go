@@ -119,7 +119,9 @@ type Options struct {
 	//   - a non-floor enqueue over a floored entry leaves it untouched (neither
 	//     earlier nor later);
 	//   - between two non-floor enqueues the earliest NotBefore wins (the default).
-	// Set via RequeueNotBefore.
+	// A floored requeue also preserves the higher attempt count when merging
+	// into an entry queued while the key was in progress.
+	// Set via RequeueNotBefore or RequeueWithOptions.
 	NotBeforeFloor bool
 }
 

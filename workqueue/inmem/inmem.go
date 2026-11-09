@@ -296,6 +296,9 @@ func (o *inProgressKey) RequeueWithOptions(_ context.Context, opts workqueue.Opt
 		}
 	} else {
 		mergeOptions(&qi.Options, opts)
+		if opts.NotBeforeFloor {
+			qi.attempts = max(qi.attempts, attempts)
+		}
 		o.wq.queue[o.key] = qi
 	}
 

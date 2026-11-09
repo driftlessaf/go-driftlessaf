@@ -87,6 +87,7 @@ type Option func(*config)
 type config struct {
 	errors           errorEmitter
 	backoff          func(attempts int) time.Duration
+	backoffFloor     func(key string) bool
 	dispatchPeriod   time.Duration
 	ownerConcurrency int
 	shuffle          func(n int, swap func(i, j int))
@@ -184,4 +185,10 @@ func applyOptions(opts []Option) config {
 		cfg.settled = func(bool) {}
 	}
 	return cfg
+}
+
+// WithBackoffFloor protects selected keys' failure retries from incoming events.
+// The ordinary backoff curve and retry budget still apply. Nil selects no keys.
+func WithBackoffFloor(selectKey func(string) bool) Option {
+	return func(c *config) { c.backoffFloor = selectKey }
 }

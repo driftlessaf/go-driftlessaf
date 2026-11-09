@@ -1066,6 +1066,79 @@ func TestBackoffDelay(t *testing.T, ctor func(int) workqueue.Interface) {
 		})
 	})
 
+	for _, twin := range []bool{false, true} {
+		ct.scenario(fmt.Sprintf("protected backoff preserves attempts with queued twin=%t", twin), func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+			const key = "protected-backoff"
+			if err := wq.Queue(ctx, key, workqueue.Options{}); err != nil {
+				t.Fatalf("Queue(%q) returned %v, want nil", key, err)
+			}
+			var owned workqueue.OwnedInProgressKey
+			for attempt := range 3 {
+				_, queued := checkQueue(t, wq, ExpectedState{Queued: []string{key}})
+				var err error
+				owned, err = queued[0].Start(ctx)
+				if err != nil {
+					t.Fatalf("Start(%q) returned %v, want nil", key, err)
+				}
+				if got := owned.GetAttempts(); got != attempt+1 {
+					t.Fatalf("GetAttempts(%q) returned %d, want %d", key, got, attempt+1)
+				}
+				if attempt < 2 {
+					if err := owned.Requeue(ctx); err != nil {
+						t.Fatalf("Requeue(%q) returned %v, want nil", key, err)
+					}
+				}
+			}
+			if twin {
+				if err := wq.Queue(ctx, key, workqueue.Options{}); err != nil {
+					t.Fatalf("Queue(%q, during callback) returned %v, want nil", key, err)
+				}
+			}
+			if err := owned.RequeueWithOptions(ctx, workqueue.Options{BackoffDelay: delay, NotBeforeFloor: true}); err != nil {
+				t.Fatalf("RequeueWithOptions(%q, protected backoff) returned %v, want nil", key, err)
+			}
+			before, err := wq.Get(ctx, key)
+			if err != nil || before.GetAttempts() != 3 {
+				t.Fatalf("Get(%q, protected backoff) returned (%v, %v), want attempts=3", key, before, err)
+			}
+			if err := wq.Queue(ctx, key, workqueue.Options{}); err != nil {
+				t.Fatalf("Queue(%q, during backoff) returned %v, want nil", key, err)
+			}
+			after, err := wq.Get(ctx, key)
+			if err != nil || after.GetAttempts() != 3 || after.GetNotBeforeTime() != before.GetNotBeforeTime() {
+				t.Fatalf("Get(%q, after enqueue) returned (%v, %v), want attempts=3 and not-before=%d", key, after, err, before.GetNotBeforeTime())
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, delay+30*time.Second)
+			defer cancel()
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				_, queued, _, err := wq.Enumerate(waitCtx)
+				if err != nil {
+					t.Fatalf("Enumerate(%q, waiting for retry) returned %v, want nil", key, err)
+				}
+				if len(queued) != 0 {
+					owned, err := queued[0].Start(ctx)
+					if err != nil {
+						t.Fatalf("Start(%q, after backoff) returned %v, want nil", key, err)
+					}
+					if got := owned.GetAttempts(); got != 4 {
+						t.Errorf("GetAttempts(%q, after backoff) returned %d, want 4", key, got)
+					}
+					if err := owned.Complete(ctx); err != nil {
+						t.Fatalf("Complete(%q) returned %v, want nil", key, err)
+					}
+					break
+				}
+				select {
+				case <-waitCtx.Done():
+					t.Fatalf("Enumerate(%q, after backoff) returned no key, want eligible retry: %v", key, waitCtx.Err())
+				case <-ticker.C:
+				}
+			}
+		})
+	}
+
 	ct.scenario("an enqueue that cuts a backoff short resets attempts", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
 		// New input for a key backing off from a failure runs it promptly,
 		// and as a fresh start: a key whose events keep arriving would

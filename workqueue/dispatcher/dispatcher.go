@@ -453,9 +453,10 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 							delay += rand.N(jitter) //nolint:gosec // G404: jitter, not security-sensitive
 						}
 					}
+					floor := cfg.backoffFloor != nil && cfg.backoffFloor(oip.Name())
 					infra := workqueue.IsInfrastructureError(err)
-					clog.InfoContextf(ctx, "Key %q failed (attempt %d, infrastructure=%t), requeueing with %v backoff", oip.Name(), attempts, infra, delay)
-					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{BackoffDelay: delay}); err != nil {
+					clog.InfoContextf(ctx, "Key %q failed (attempt %d, infrastructure=%t), requeueing with %v backoff (floor=%t)", oip.Name(), attempts, infra, delay, floor)
+					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{BackoffDelay: delay, NotBeforeFloor: floor}); err != nil {
 						return fmt.Errorf("requeue(after failed callback) = %w", err)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{

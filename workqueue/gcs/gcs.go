@@ -332,6 +332,14 @@ func updateMetadataOnce(ctx context.Context, client ClientInterface, key string,
 		attrs.Metadata[notBeforeMetadataKey] = incomingNB
 		update = true
 	}
+	// A protected retry may meet a follow-up queued while its callback ran.
+	// That event must not erase the failed attempt's retry budget.
+	if !newInput && incomingFloor {
+		if attempts := metadata[attemptsMetadataKey]; parsePriority(attempts) > parsePriority(attrs.Metadata[attemptsMetadataKey]) {
+			attrs.Metadata[attemptsMetadataKey] = attempts
+			update = true
+		}
+	}
 	if newInput && attrs.Metadata[notBeforeMetadataKey] < existingNB && existingNB > time.Now().UTC().Format(time.RFC3339) {
 		if a, ok := attrs.Metadata[attemptsMetadataKey]; ok && a != "0" {
 			// New input cut a pending wait (a failure backoff) short: the key

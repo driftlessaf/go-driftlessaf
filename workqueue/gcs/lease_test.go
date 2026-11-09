@@ -1388,3 +1388,68 @@ func TestEnumerateCountsInProgressByOwner(t *testing.T) {
 		t.Errorf("in-progress by owner unknown = %v, want 1", got)
 	}
 }
+
+func TestProtectedBackoffWithQueuedPush(t *testing.T) {
+	for _, twin := range []bool{false, true} {
+		t.Run(fmt.Sprint(twin), func(t *testing.T) {
+			const name = "schedule"
+			var mu sync.Mutex
+			var metadata map[string]string
+			if twin {
+				metadata = map[string]string{notBeforeMetadataKey: noNotBefore, attemptsMetadataKey: "0"}
+			}
+			f := &fakeGCS{handler: func(call gcsCall) (int, string) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case call.method == http.MethodPost && strings.Contains(call.path, "/rewriteTo/"):
+					if metadata != nil {
+						return http.StatusPreconditionFailed, errorJSON(http.StatusPreconditionFailed)
+					}
+					var body struct {
+						Metadata map[string]string `json:"metadata"`
+					}
+					if err := json.Unmarshal([]byte(call.body), &body); err != nil {
+						return http.StatusBadRequest, errorJSON(http.StatusBadRequest)
+					}
+					metadata = body.Metadata
+					return http.StatusOK, rewriteJSON(queuedPrefix+name, 2)
+				case call.method == http.MethodPost:
+					return http.StatusPreconditionFailed, errorJSON(http.StatusPreconditionFailed)
+				case call.method == http.MethodPatch:
+					var body struct {
+						Metadata map[string]string `json:"metadata"`
+					}
+					if err := json.Unmarshal([]byte(call.body), &body); err != nil {
+						return http.StatusBadRequest, errorJSON(http.StatusBadRequest)
+					}
+					metadata = body.Metadata
+				case call.method == http.MethodDelete:
+					return http.StatusNoContent, ""
+				}
+				raw, _ := json.Marshal(map[string]any{"name": queuedPrefix + name, "bucket": "test-bucket", "generation": "2", "metageneration": "1", "metadata": metadata})
+				return http.StatusOK, string(raw)
+			}}
+			client := newTestClient(t, f)
+			key := newTestKey(t, client, name, 1, 1)
+			key.attrs.Metadata[attemptsMetadataKey] = "3"
+			if err := key.RequeueWithOptions(t.Context(), workqueue.Options{BackoffDelay: 4 * time.Minute, NotBeforeFloor: true}); err != nil {
+				t.Fatalf("RequeueWithOptions(schedule, protected 4m, twin=%t) returned %v, expected nil", twin, err)
+			}
+			mu.Lock()
+			deadline := metadata[notBeforeMetadataKey]
+			mu.Unlock()
+			q := NewWorkQueue(client, 1)
+			for _, delay := range []time.Duration{0, time.Minute, 10 * time.Minute} {
+				if err := q.Queue(t.Context(), name, workqueue.Options{NotBefore: time.Now().Add(delay)}); err != nil {
+					t.Fatalf("Queue(schedule, %v, twin=%t) returned %v, expected nil", delay, twin, err)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if metadata[attemptsMetadataKey] != "3" || metadata[notBeforeMetadataKey] != deadline || metadata[notBeforeFloorMetadataKey] != notBeforeFloorValue {
+				t.Errorf("RequeueWithOptions then Queue(schedule, twin=%t) stored %v, expected attempts=3 and protected deadline=%s", twin, metadata, deadline)
+			}
+		})
+	}
+}
