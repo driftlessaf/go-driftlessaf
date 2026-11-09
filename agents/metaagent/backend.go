@@ -21,8 +21,20 @@ import (
 type BackendOption func(*backendOptions)
 
 type backendOptions struct {
-	systemOne SystemOneAdapter
-	err       error
+	systemOne  SystemOneAdapter
+	vertexFlex bool
+	err        error
+}
+
+// WithVertexFlex makes a Vertex backend request Vertex AI Flex PayGo for its
+// Google Gen AI (Gemini) routes. Flex bills less than Standard PayGo but
+// responds more slowly and throttles more often, so callers must tolerate
+// latency of minutes. Flex serves only the global endpoint: Gemini routes use
+// it whatever region the target names, and the other protocols keep the
+// target's region and run as before. Without this option every call is
+// unchanged. Other backends reject it.
+func WithVertexFlex() BackendOption {
+	return func(options *backendOptions) { options.vertexFlex = true }
 }
 
 // WithSystemOneAdapter adds typed-question serving to a Vertex or Bedrock
@@ -72,7 +84,7 @@ func VertexBackend(name string, cfg VertexConfig, options ...BackendOption) Back
 			if configured.err != nil {
 				return nil, configured.err
 			}
-			return newVertexRouter(cfg.ProjectID, region, configured.systemOne, routes...)
+			return newVertexRouter(cfg.ProjectID, region, configured.systemOne, configured.vertexFlex, routes...)
 		},
 	}
 }
@@ -87,6 +99,9 @@ func BedrockBackend(name string, cfg awsauth.Config, options ...BackendOption) B
 		build: func(region string, routes []modelrouter.Route) (*Router, error) {
 			if configured.err != nil {
 				return nil, configured.err
+			}
+			if configured.vertexFlex {
+				return nil, errors.New("vertex flex requires a Vertex backend")
 			}
 			selected := cfg
 			selected.Region = region

@@ -94,6 +94,30 @@ func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, req
 	}, nil
 }
 
+// vertexFlexRegion is the only location that serves Flex PayGo.
+const vertexFlexRegion = "global"
+
+// newVertexFlexGoogleGenAIAdapter constructs a Vertex AI adapter for the Google
+// Gen AI protocol that requests Flex PayGo on every call. Flex serves only the
+// global endpoint, so the adapter ignores the target's region. The
+// Flex-only header pair bills every request as Flex and skips Provisioned
+// Throughput.
+func newVertexFlexGoogleGenAIAdapter(projectID string, newClient vertexGoogleGenAIClientFactory) (GoogleGenAIAdapter, error) {
+	if newClient == nil {
+		return nil, fmt.Errorf("%w: Vertex Google Gen AI client factory is nil", ErrInvalidAdapter)
+	}
+	return newVertexGoogleGenAIAdapter(projectID, vertexFlexRegion, func(ctx context.Context, config *genai.ClientConfig) (*genai.Client, error) {
+		headers := config.HTTPOptions.Headers.Clone()
+		if headers == nil {
+			headers = http.Header{}
+		}
+		headers.Set("X-Vertex-AI-LLM-Request-Type", "shared")
+		headers.Set("X-Vertex-AI-LLM-Shared-Request-Type", "flex")
+		config.HTTPOptions.Headers = headers
+		return newClient(ctx, config)
+	})
+}
+
 // NewVertexAnthropicMessagesAdapter constructs a Vertex AI adapter for the
 // Anthropic Messages protocol. Application Default Credentials are bound only
 // while constructing the typed Messages service.

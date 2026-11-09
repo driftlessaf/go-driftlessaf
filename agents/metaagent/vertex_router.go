@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
+	"google.golang.org/genai"
 )
 
 // NewVertexRouter constructs a router for explicitly declared Vertex AI routes
@@ -21,10 +22,10 @@ import (
 // Use a separate router for each project/region pair. For mixed-provider routing
 // or custom adapter settings, use NewRouterWithAdapters with typed registrations.
 func NewVertexRouter(projectID, region string, routes ...modelrouter.Route) (*Router, error) {
-	return newVertexRouter(projectID, region, nil, routes...)
+	return newVertexRouter(projectID, region, nil, false, routes...)
 }
 
-func newVertexRouter(projectID, region string, systemOne SystemOneAdapter, routes ...modelrouter.Route) (*Router, error) {
+func newVertexRouter(projectID, region string, systemOne SystemOneAdapter, flex bool, routes ...modelrouter.Route) (*Router, error) {
 	if len(routes) == 0 {
 		return nil, fmt.Errorf("%w: Vertex router requires at least one declared route", ErrInvalidRouter)
 	}
@@ -49,7 +50,12 @@ func newVertexRouter(projectID, region string, systemOne SystemOneAdapter, route
 			if adapters.GoogleGenAI != nil {
 				continue
 			}
-			adapter, err := NewVertexGoogleGenAIAdapter(projectID, region)
+			var adapter GoogleGenAIAdapter
+			if flex {
+				adapter, err = newVertexFlexGoogleGenAIAdapter(projectID, genai.NewClient)
+			} else {
+				adapter, err = NewVertexGoogleGenAIAdapter(projectID, region)
+			}
 			if err != nil {
 				return nil, err
 			}
