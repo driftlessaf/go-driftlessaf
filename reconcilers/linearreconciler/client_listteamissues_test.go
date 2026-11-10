@@ -285,11 +285,7 @@ func TestWithStatePrefix_IgnoresEmpty(t *testing.T) {
 // GetIssue results sees the same field on ListTeamIssues results instead of an
 // always-empty value.
 func TestListTeamIssues_SelectsProject(t *testing.T) {
-	query := captureQuery(t, `{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`, func(c *Client) error {
-		_, err := c.ListTeamIssues(t.Context(), "SEC", ListTeamIssuesOptions{})
-		return err
-	})
-	if !strings.Contains(query, "project { id name }") {
+	if query := listTeamIssuesQuery(t); !strings.Contains(query, "project { id name }") {
 		t.Errorf("ListTeamIssues query does not select the project:\n%s", query)
 	}
 }

@@ -877,45 +877,25 @@ func TestGetDocument_NotFound(t *testing.T) {
 func TestGetIssue_Project(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		project  any
+		project  string // the issue's project field, as JSON
 		wantID   string
 		wantName string
 	}{
-		{name: "in a project", project: map[string]any{"id": "proj-1", "name": "Tidy-Up"}, wantID: "proj-1", wantName: "Tidy-Up"},
-		{name: "no project", project: nil},
+		{name: "in a project", project: `{"id":"proj-1","name":"Tidy-Up"}`, wantID: "proj-1", wantName: "Tidy-Up"},
+		{name: "no project", project: "null"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotQuery string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					Query string `json:"query"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Errorf("decoding request: %v", err)
-				}
-				gotQuery = body.Query
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"data": map[string]any{
-						"issue": map[string]any{
-							"id":         "iss-1",
-							"identifier": "SEC-1",
-							"title":      "t",
-							"team":       map[string]any{"id": "team-1", "key": "SEC", "name": "Security"},
-							"project":    tc.project,
-							"labels":     map[string]any{"nodes": []any{}},
-						},
-					},
-				})
-			}))
-			defer srv.Close()
-
-			issue, err := NewClientWithAPIKey("lin_api_test").WithEndpoint(srv.URL).GetIssue(t.Context(), "iss-1")
-			if err != nil {
-				t.Fatalf("GetIssue: %v", err)
-			}
-			if !strings.Contains(gotQuery, "project { id name }") {
-				t.Errorf("query does not select the project:\n%s", gotQuery)
+			body := `{"data":{"issue":{"id":"iss-1","identifier":"SEC-1","title":"t",` +
+				`"team":{"id":"team-1","key":"SEC","name":"Security"},` +
+				`"project":` + tc.project + `,"labels":{"nodes":[]}}}}`
+			var issue *Issue
+			query := captureQuery(t, body, func(c *Client) error {
+				var err error
+				issue, err = c.GetIssue(t.Context(), "iss-1")
+				return err
+			})
+			if !strings.Contains(query, "project { id name }") {
+				t.Errorf("query does not select the project:\n%s", query)
 			}
 			if issue.Project.ID != tc.wantID || issue.Project.Name != tc.wantName {
 				t.Errorf("project: got = %q/%q, want = %q/%q", issue.Project.ID, issue.Project.Name, tc.wantID, tc.wantName)
