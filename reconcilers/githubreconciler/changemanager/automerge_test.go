@@ -83,3 +83,60 @@ func TestEnableAutoMerge(t *testing.T) {
 		})
 	}
 }
+
+// TestDisableAutoMerge drives DisableAutoMerge against the same double,
+// checking the input it sends and that every refusal is an error.
+func TestDisableAutoMerge(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{{
+		name:     "disarmed",
+		response: `{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"id":"PR_1"}}}}`,
+	}, {
+		name:     "not armed is an error",
+		response: `{"errors":[{"type":"UNPROCESSABLE","message":"Pull request Auto merge is not enabled for this pull request"}]}`,
+		wantErr:  true,
+	}, {
+		name:     "refusal is an error",
+		response: `{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}`,
+		wantErr:  true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var inputs []map[string]any
+			gh, err := github.NewClient(github.WithHTTPClient(&http.Client{Transport: handlerRoundTripper{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Query     string `json:"query"`
+					Variables struct {
+						Input map[string]any `json:"input"`
+					} `json:"variables"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decoding request body: %v", err)
+				}
+				if !strings.Contains(body.Query, "disablePullRequestAutoMerge") {
+					t.Errorf("query: got = %q, want the disablePullRequestAutoMerge mutation", body.Query)
+				}
+				inputs = append(inputs, body.Variables.Input)
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tc.response)
+			})}}))
+			if err != nil {
+				t.Fatalf("creating client: %v", err)
+			}
+
+			err = DisableAutoMerge(t.Context(), gh, githubv4.ID("PR_1"))
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DisableAutoMerge() error = %v, want error: %v", err, tc.wantErr)
+			}
+			want := []map[string]any{{"pullRequestId": "PR_1"}}
+			if diff := gocmp.Diff(want, inputs); diff != "" {
+				t.Errorf("mutation inputs (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

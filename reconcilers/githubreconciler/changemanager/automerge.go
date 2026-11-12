@@ -97,3 +97,23 @@ func EnableAutoMerge(ctx context.Context, gh *github.Client, prID githubv4.ID, m
 		return 0, fmt.Errorf("enable auto-merge: %w", err)
 	}
 }
+
+// DisableAutoMerge cancels auto-merge on the pull request whose GraphQL node
+// ID is prID. It is for a caller that must keep a pull request from merging
+// on GitHub's own trigger, such as an approver whose review would otherwise
+// complete the merge requirements of a pull request another actor armed.
+// Every refusal is returned as an error; GitHub rejects the mutation when
+// auto-merge is not enabled, so callers check the pull request's state
+// first.
+func DisableAutoMerge(ctx context.Context, gh *github.Client, prID githubv4.ID) error {
+	var m struct {
+		DisablePullRequestAutoMerge struct {
+			PullRequest struct{ ID githubv4.ID }
+		} `graphql:"disablePullRequestAutoMerge(input: $input)"`
+	}
+	input := githubv4.DisablePullRequestAutoMergeInput{PullRequestID: prID}
+	if err := graphqlclient.NewGraphQLClient(gh).Mutate(ctx, "DisableAutoMerge", &m, input, nil); err != nil {
+		return fmt.Errorf("disable auto-merge: %w", err)
+	}
+	return nil
+}
