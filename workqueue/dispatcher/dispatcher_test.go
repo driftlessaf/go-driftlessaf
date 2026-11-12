@@ -1214,31 +1214,92 @@ func TestHandleAsync_AppFailure_NotInfrastructure(t *testing.T) {
 	}
 }
 
-// TestHandleAsync_InterruptedByShutdown_DoesNotConsumeAttempt proves a callback
-// that fails after the dispatch context ended (the dispatcher is shutting down)
-// is requeued with attempt-resetting Delay semantics and never dead-lettered,
-// even at the retry limit: the interruption is infrastructure's doing.
-func TestHandleAsync_InterruptedByShutdown_DoesNotConsumeAttempt(t *testing.T) {
-	next := &mockKey{name: "interrupted", attempts: 5}
+// TestHandleAsync_InterruptedByShutdown_ConsumesAttempt proves a callback that
+// fails after the dispatch context ended is requeued with the attempt count
+// kept, so repeated interruptions of one key count toward the retry budget.
+func TestHandleAsync_InterruptedByShutdown_ConsumesAttempt(t *testing.T) {
+	next := &mockKey{name: "interrupted", attempts: 2}
 	q := &mockQueue{next: []workqueue.QueuedKey{next}}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	future := HandleAsync(ctx, q, 1, 0, func(context.Context, string, workqueue.Options) error {
-		cancel() // SIGTERM lands while the callback is in flight.
+		cancel() // The dispatch request is cut while the callback is in flight.
 		return context.Canceled
 	}, 5)
 	if err := future(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if next.dead != 0 {
-		t.Errorf("dead-lettered %d times, want 0: an interrupted attempt must not consume the retry budget", next.dead)
+		t.Errorf("dead-lettered %d times, want 0: the budget is not spent", next.dead)
 	}
 	if next.requeueOpts != 1 {
 		t.Fatalf("RequeueWithOptions calls = %d, want 1", next.requeueOpts)
 	}
-	if next.lastReqOpts.Delay <= 0 || next.lastReqOpts.BackoffDelay != 0 {
-		t.Errorf("requeue options = %+v, want a Delay (attempt reset) and no BackoffDelay", next.lastReqOpts)
+	if next.lastReqOpts.BackoffDelay <= 0 || next.lastReqOpts.Delay != 0 {
+		t.Errorf("requeue options = %+v, want a BackoffDelay (attempt kept) and no Delay", next.lastReqOpts)
+	}
+}
+
+// TestHandleAsync_InterruptedWithoutRetryBudget_RequeuesOnDrainSchedule proves
+// an interrupted key with no retry budget (maxRetry 0) is requeued on the drain
+// schedule and never dead-lettered.
+func TestHandleAsync_InterruptedWithoutRetryBudget_RequeuesOnDrainSchedule(t *testing.T) {
+	next := &mockKey{name: "interrupted", attempts: 9}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	future := HandleAsync(ctx, q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		cancel()
+		return context.Canceled
+	}, 0)
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 0 {
+		t.Errorf("dead-lettered %d times, want 0", next.dead)
+	}
+	if next.requeueOpts != 1 {
+		t.Fatalf("RequeueWithOptions calls = %d, want 1", next.requeueOpts)
+	}
+	lo, hi := workqueue.DrainRequeueDelay, workqueue.DrainRequeueDelay+workqueue.DrainRequeueJitter
+	if got := next.lastReqOpts.BackoffDelay; got < lo || got >= hi {
+		t.Errorf("BackoffDelay = %v, want in [%v, %v)", got, lo, hi)
+	}
+}
+
+// TestHandleAsync_InterruptedAtRetryLimit_DeadLetters proves a key interrupted
+// on its last attempt is dead-lettered rather than requeued forever.
+func TestHandleAsync_InterruptedAtRetryLimit_DeadLetters(t *testing.T) {
+	next := &mockKey{name: "interrupted", attempts: 5}
+	q := &mockQueue{next: []workqueue.QueuedKey{next}}
+	cap := &captureEmitter{}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	future := HandleAsync(ctx, q, 1, 0, func(context.Context, string, workqueue.Options) error {
+		cancel()
+		return context.Canceled
+	}, 5, withCapture(cap))
+	if err := future(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if next.dead != 1 {
+		t.Errorf("dead-lettered %d times, want 1", next.dead)
+	}
+	if next.requeueOpts != 0 {
+		t.Errorf("RequeueWithOptions calls = %d, want 0", next.requeueOpts)
+	}
+	got := cap.result()
+	if got == nil {
+		t.Fatal("error emitter was not called")
+	}
+	if got.Action != ErrorDeadLettered {
+		t.Errorf("action: got = %v, want = %v", got.Action, ErrorDeadLettered)
+	}
+	if !got.Infrastructure {
+		t.Error("infrastructure: got = false, want = true (the interruption caused the dead-letter)")
 	}
 }
 

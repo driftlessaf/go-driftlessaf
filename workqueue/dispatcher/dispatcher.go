@@ -351,17 +351,19 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 				clog.WarnContextf(ctx, "Failed callback for key %q: %v", oip.Name(), err)
 				attempts := oip.GetAttempts()
 
-				if ctx.Err() != nil {
+				if ctx.Err() != nil && (maxRetry <= 0 || attempts < maxRetry) {
 					// The dispatch context ended while the callback ran: the
 					// dispatcher is shutting down or its dispatch request was cut,
-					// so the callback was interrupted rather than failed. That is
-					// infrastructure's doing and must not consume the key's
-					// dead-letter budget. Requeue with Delay semantics, which reset
-					// the attempt count, on the drain schedule so the key returns
-					// shortly on a live dispatcher.
+					// so the callback was interrupted rather than failed. Requeue
+					// on the drain schedule so the key returns shortly on a live
+					// dispatcher, but keep the attempt count (BackoffDelay, not
+					// Delay): a key whose work repeatedly outlives its dispatcher
+					// would otherwise reset to zero each time and never reach the
+					// dead-letter budget. At the budget the interruption falls
+					// through to the dead-letter below.
 					delay := interruptionDelay()
-					clog.InfoContextf(ctx, "Key %q interrupted by dispatcher shutdown (attempt %d), requeueing in %v without consuming an attempt", oip.Name(), attempts, delay)
-					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{Priority: oip.Priority(), Delay: delay}); err != nil {
+					clog.InfoContextf(ctx, "Key %q interrupted by dispatcher shutdown (attempt %d), requeueing in %v", oip.Name(), attempts, delay)
+					if err := oip.RequeueWithOptions(cleanupCtx, workqueue.Options{Priority: oip.Priority(), BackoffDelay: delay}); err != nil {
 						return fmt.Errorf("requeue(after interrupted callback) = %w", err)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{
@@ -389,11 +391,14 @@ func handleAsync(ctx context.Context, wq workqueue.Interface, concurrency, batch
 						return fmt.Errorf("fail(after reaching max retries) = %w", err)
 					}
 					cfg.errors.emit(cleanupCtx, ErrorContext{
-						Key:            oip.Name(),
-						Err:            err,
-						Attempts:       attempts,
-						Action:         ErrorDeadLettered,
-						Infrastructure: workqueue.IsInfrastructureError(err),
+						Key:      oip.Name(),
+						Err:      err,
+						Attempts: attempts,
+						Action:   ErrorDeadLettered,
+						// A callback cut off by the dispatch context is
+						// infrastructure's doing even though a bare
+						// context.Canceled does not classify as such.
+						Infrastructure: ctx.Err() != nil || workqueue.IsInfrastructureError(err),
 					})
 				} else if d := workqueue.GetDeadLetterDetails(err); d != nil {
 					// Checked BEFORE the plain non-retriable branch: a
