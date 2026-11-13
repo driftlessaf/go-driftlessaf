@@ -24,6 +24,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/commitscope"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -31,13 +32,28 @@ import (
 	"golang.org/x/oauth2"
 )
 
-type publishResult struct{}
+type publishResult struct {
+	dropped []commitscope.Dropped
+}
 
 func (*publishResult) GetCommitMessage() string { return "Update content" }
 
 // Keep an explanation present so an inactive issue incorrectly routed through
-// ErrNoChanges would attempt to post a give-up comment.
-func (*publishResult) GetNoChangeExplanation() string { return "Nothing remains to do." }
+// ErrNoChanges would attempt to post a give-up comment. It names the paths the
+// commit guard dropped, when the reconciler reported any through SetDropped.
+func (r *publishResult) GetNoChangeExplanation() string {
+	if len(r.dropped) == 0 {
+		return "Nothing remains to do."
+	}
+	paths := make([]string, 0, len(r.dropped))
+	for _, d := range r.dropped {
+		paths = append(paths, d.Path)
+	}
+	return "Dropped: " + strings.Join(paths, ", ")
+}
+
+// SetDropped records the guard's drops for GetNoChangeExplanation.
+func (r *publishResult) SetDropped(dropped []commitscope.Dropped) { r.dropped = dropped }
 
 type publishAgent struct {
 	execute func(context.Context) error
