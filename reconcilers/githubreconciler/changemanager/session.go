@@ -615,7 +615,10 @@ func (s *Session[T]) ReplaceLabels(ctx context.Context, labels []string, prefixe
 	return errors.Join(errs...)
 }
 
-// CloseAnyOutstanding closes the existing PR if one exists.
+// CloseAnyOutstanding closes the existing PR if one exists, then deletes its
+// head branch unless WithDeleteBranchOnClose(false) is set, the PR carries the
+// skip label, or its head is not this session's branch in this repository. A
+// failed branch deletion is logged, not returned.
 // If message is non-empty, it posts the message as a comment before closing.
 // This is a no-op if no PR exists.
 func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) error {
@@ -634,14 +637,65 @@ func (s *Session[T]) CloseAnyOutstanding(ctx context.Context, message string) er
 		}
 	}
 
-	_, _, err := s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{
+	pr, _, err := s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{
 		State: new("closed"),
 	})
 	if err != nil {
 		return fmt.Errorf("closing pull request: %w", err)
 	}
 
+	if s.manager.deleteBranchOnClose {
+		s.deleteClosedHeadBranch(ctx, pr)
+	}
 	return nil
+}
+
+// deleteClosedHeadBranch deletes the head branch of pr, which has just been
+// closed. GitHub's automatic head-branch deletion acts only on merge, so
+// without this every PR the automation closes leaves its branch behind.
+//
+// Best effort: the PR is already closed, and a retry could not finish the job
+// because NewSession finds only open PRs.
+func (s *Session[T]) deleteClosedHeadBranch(ctx context.Context, pr *github.PullRequest) {
+	// pr is GitHub's response to the close, so its labels include a skip label
+	// applied after NewSession read them.
+	skipLabel := s.skipLabel()
+	if slices.ContainsFunc(pr.Labels, func(l *github.Label) bool { return l.GetName() == skipLabel }) {
+		clog.InfoContextf(ctx, "PR #%d has the %s label, keeping branch %s", s.prNumber, skipLabel, s.branchName)
+		return
+	}
+	// A fork PR's head lives in the fork, so a same-named branch in this
+	// repository is not part of that PR.
+	head := pr.GetHead()
+	if head.GetRef() != s.branchName || !strings.EqualFold(head.GetRepo().GetFullName(), s.owner+"/"+s.repo) {
+		clog.InfoContextf(ctx, "PR #%d head %s:%s is not branch %s, keeping it", s.prNumber, head.GetRepo().GetFullName(), head.GetRef(), s.branchName)
+		return
+	}
+	// The PR is already closed and NewSession will not find it again, so a
+	// canceled reconcile must not abandon the delete.
+	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if _, err := s.client.Git.DeleteRef(delCtx, s.owner, s.repo, "heads/"+s.branchName); err != nil {
+		if refAlreadyGone(err) {
+			clog.InfoContextf(ctx, "Branch %s of closed PR #%d is already gone", s.branchName, s.prNumber)
+			return
+		}
+		clog.WarnContextf(ctx, "Closed PR #%d but failed to delete branch %s: %v", s.prNumber, s.branchName, err)
+		return
+	}
+	clog.InfoContextf(ctx, "Deleted branch %s of closed PR #%d", s.branchName, s.prNumber)
+}
+
+// refAlreadyGone reports whether a DeleteRef error means the ref does not
+// exist. GitHub answers a delete of a missing ref with 422 and the message
+// "Reference does not exist", so checking for 404 alone would miss it.
+func refAlreadyGone(err error) bool {
+	ge, ok := errors.AsType[*github.ErrorResponse](err)
+	if !ok || ge.Response == nil {
+		return false
+	}
+	return ge.Response.StatusCode == http.StatusNotFound ||
+		(ge.Response.StatusCode == http.StatusUnprocessableEntity && strings.Contains(ge.Message, "Reference does not exist"))
 }
 
 // AddAssignees adds the given logins as assignees on the existing PR.

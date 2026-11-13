@@ -248,6 +248,14 @@ func WithCloseOnEmptyDiff[T any](close bool) Option[T] {
 	}
 }
 
+// WithDeleteBranchOnClose controls whether CloseAnyOutstanding deletes the
+// closed PR's head branch. Default true.
+func WithDeleteBranchOnClose[T any](del bool) Option[T] {
+	return func(cm *CM[T]) {
+		cm.deleteBranchOnClose = del
+	}
+}
+
 // WithTrustedReviewAuthors extends the trusted set with GitHub login names
 // whose review comments and review bodies are consumed regardless of author
 // association. A comment or review is trusted when its association is one of
@@ -359,6 +367,7 @@ type CM[T any] struct {
 	dynamicCommitBudget           bool
 	maxBudgetResets               int
 	closeOnEmptyDiff              bool
+	deleteBranchOnClose           bool
 	managedLabels                 []string
 	traceDashboardURL             string
 	// trustedReviewAuthors are GitHub login names trusted regardless of
@@ -625,11 +634,12 @@ func New[T any](identity string, titleTemplate *template.Template, bodyTemplate 
 	}
 
 	cm := &CM[T]{
-		identity:         identity,
-		titleTemplate:    titleTemplate,
-		bodyTemplate:     bodyTemplate,
-		templateExecutor: templateExecutor,
-		closeOnEmptyDiff: true,
+		identity:            identity,
+		titleTemplate:       titleTemplate,
+		bodyTemplate:        bodyTemplate,
+		templateExecutor:    templateExecutor,
+		closeOnEmptyDiff:    true,
+		deleteBranchOnClose: true,
 	}
 
 	for _, opt := range opts {
