@@ -46,15 +46,6 @@ const resetTimeout = 2 * time.Minute
 // can use the standard no-changes protocol.
 var ErrNothingToCommit = errors.New("nothing to commit: working tree is clean")
 
-// ErrUnguardedWorkflowEdit is returned by MakeAndPushChanges when the commit
-// guard denies workflow edits, the run's commit scope is inactive, and the
-// worktree holds a changed GitHub workflow or action. The denylist runs only on
-// the scoped staging path, so an inactive scope cannot drop the change; rather
-// than carry it into the commit through whole-tree staging, the commit is
-// refused. The caller either marks its scope active (see
-// [commitscope.Scope.MarkActive]) or declares the edit.
-var ErrUnguardedWorkflowEdit = errors.New("commit guard: workflow edit in a run without an active commit scope")
-
 // LeaseOption configures optional parameters for LeaseRef.
 type LeaseOption func(*leaseOptions)
 
@@ -662,9 +653,7 @@ func (l *Lease) createFreshBranch(branchName string) (plumbing.ReferenceName, er
 // commit-scope guard is enabled and the run used the managed edit-tool callback
 // layer, it stages only the paths those tools recorded plus modifications to
 // tracked files, minus the denylist, leaving gate artifacts uncommitted;
-// otherwise it stages every change in the worktree, except that a guard which
-// denies workflow edits refuses the commit outright when the worktree holds one
-// (see [ErrUnguardedWorkflowEdit]), because this path cannot drop it.
+// otherwise it stages every change in the worktree.
 //
 // Staging runs once here, single-threaded, just before the commit. WorktreeCallbacks
 // deliberately does not stage per write: the executor may run a turn's tool
@@ -676,9 +665,6 @@ func (l *Lease) createFreshBranch(branchName string) (plumbing.ReferenceName, er
 // worktree against it. It is nil on the fallback path, which does not use it.
 func (m *Manager) stageForCommit(ctx context.Context, worktree *git.Worktree, scope *commitscope.Scope, baseTree *object.Tree) error {
 	if m.commitGuard == nil || !scope.Active() {
-		if err := m.refuseUnguardedWorkflowEdits(worktree, scope); err != nil {
-			return err
-		}
 		if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
 			return fmt.Errorf("staging changes: %w", err)
 		}
@@ -692,44 +678,6 @@ func (m *Manager) stageForCommit(ctx context.Context, worktree *git.Worktree, sc
 	if len(res.Staged) == 0 {
 		// Every change was an artifact or otherwise denied: nothing to commit.
 		return ErrNothingToCommit
-	}
-	return nil
-}
-
-// refuseUnguardedWorkflowEdits fails closed on the whole-tree staging path: when
-// the guard denies workflow edits and the run did not declare one, a changed
-// workflow or action in the worktree refuses the commit instead of riding into
-// it unchecked. Deletions pass, as they do under the denylist: a changed path
-// is a deletion only when the file is gone from disk, which is what the
-// whole-tree add commits; a staged deletion whose file is back on disk would be
-// committed as content, so it is refused.
-func (m *Manager) refuseUnguardedWorkflowEdits(worktree *git.Worktree, scope *commitscope.Scope) error {
-	if m.commitGuard == nil || !m.commitGuard.DenyWorkflowEdits || scope.WorkflowEditDeclared() {
-		return nil
-	}
-	status, err := worktree.Status()
-	if err != nil {
-		return fmt.Errorf("reading worktree status: %w", err)
-	}
-	// Stat through the confined root, so a status path that escapes the
-	// worktree cannot redirect the check; such a path fails to stat with an
-	// error other than not-exist and is refused.
-	root, err := os.OpenRoot(worktree.Filesystem.Root())
-	if err != nil {
-		return fmt.Errorf("opening worktree root: %w", err)
-	}
-	defer root.Close()
-	for p, st := range status {
-		if st.Staging == git.Unmodified && st.Worktree == git.Unmodified {
-			continue
-		}
-		if !commitscope.IsWorkflowPath(filepath.ToSlash(p)) {
-			continue
-		}
-		if _, err := root.Lstat(filepath.FromSlash(p)); errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		return fmt.Errorf("%w: %s", ErrUnguardedWorkflowEdit, p)
 	}
 	return nil
 }

@@ -6,11 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 package commitscope
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -147,71 +145,6 @@ func TestStageLockUpdateDeclared(t *testing.T) {
 	}
 	if !slices.Contains(stagedPaths(res), ".terraform.lock.hcl") {
 		t.Errorf("declared lock update not staged: %v", stagedPaths(res))
-	}
-}
-
-// TestStageWorkflowEdits proves the opt-in workflow rule end to end: with
-// DenyWorkflowEdits set, an edit tool's workflow write is dropped and recorded
-// on the scope for the run's driver to report, while a source edit in the same
-// run is staged; a run that declares a workflow edit stages the workflow too.
-func TestStageWorkflowEdits(t *testing.T) {
-	dl := DefaultDenylist()
-	dl.DenyWorkflowEdits = true
-
-	for _, declared := range []bool{false, true} {
-		t.Run(fmt.Sprintf("declared=%v", declared), func(t *testing.T) {
-			repo, wt, root := initRepo(t, map[string]string{"keep.go": "package keep\n", ".github/workflows/ci.yaml": "on: push\n"})
-			commitAll(t, wt)
-			base := headTree(t, repo)
-
-			writeFileAt(t, root, "fix.go", "package fix\n")
-			writeFileAt(t, root, ".github/workflows/ci.yaml", "on: pull_request\n")
-			writeFileAt(t, root, ".github/actions/setup/action.yml", "runs: {}\n")
-			scope := NewScope()
-			scope.Touch("fix.go", ".github/workflows/ci.yaml", ".github/actions/setup/action.yml")
-			if declared {
-				scope.DeclareWorkflowEdit()
-			}
-
-			res, err := Stage(t.Context(), wt, base, scope, dl)
-			if err != nil {
-				t.Fatalf("Stage: %v", err)
-			}
-			wantStaged := []string{"fix.go"}
-			if declared {
-				wantStaged = []string{".github/actions/setup/action.yml", ".github/workflows/ci.yaml", "fix.go"}
-			}
-			if got := stagedPaths(res); slices.Compare(got, wantStaged) != 0 {
-				t.Errorf("staged: got = %v, want = %v", got, wantStaged)
-			}
-
-			var wantDropped []string
-			if !declared {
-				wantDropped = []string{".github/actions/setup/action.yml", ".github/workflows/ci.yaml"}
-			}
-			got := make([]string, 0, len(res.Dropped))
-			for _, d := range res.Dropped {
-				got = append(got, d.Path)
-				if !IsWorkflowPath(d.Path) || !strings.Contains(d.Reason, "workflow") {
-					t.Errorf("dropped %q with reason %q, want a workflow drop", d.Path, d.Reason)
-				}
-			}
-			slices.Sort(got)
-			if slices.Compare(got, wantDropped) != 0 {
-				t.Errorf("dropped: got = %v, want = %v", got, wantDropped)
-			}
-
-			// The scope carries the same drops for the caller that drove the run.
-			recorded := scope.Dropped()
-			if len(recorded) != len(res.Dropped) {
-				t.Fatalf("scope.Dropped() = %v, want the %d drops Stage returned", recorded, len(res.Dropped))
-			}
-			for i := range recorded {
-				if recorded[i] != res.Dropped[i] {
-					t.Errorf("scope.Dropped()[%d] = %+v, want %+v", i, recorded[i], res.Dropped[i])
-				}
-			}
-		})
 	}
 }
 

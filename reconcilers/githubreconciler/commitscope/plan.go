@@ -90,9 +90,3 @@ func Plan(changes []Change, d Denylist) Result {
 	}
 	return res
 }
-
-// DeniedWorkflowEdit reports whether the workflow rule
-// ([Denylist.DenyWorkflowEdits]) is what dropped this change, as opposed to
-// another rule or the intent check. Only such a drop is one that declaring a
-// workflow edit would have committed.
-func (d Dropped) DeniedWorkflowEdit() bool { return d.Reason == WorkflowEditDeniedReason }

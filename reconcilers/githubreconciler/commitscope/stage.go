@@ -26,8 +26,7 @@ const maxLoggedDrops = 100
 // the git index. It reads the worktree status, classifies each change against the
 // scope (the intended paths) and the denylist, stages the kept paths (additions,
 // modifications, and intended deletions), logs the dropped paths at Info with a
-// bounded count, and returns what it kept and dropped. The dropped set is also
-// recorded on the scope (see [Scope.Dropped]) for the caller that drove the run.
+// bounded count, and returns what it kept and dropped.
 //
 // Stage fails closed: any error reading worktree status aborts without staging,
 // and a path it cannot classify is dropped rather than staged, so a commit built
@@ -49,7 +48,6 @@ func Stage(ctx context.Context, wt *gogit.Worktree, baseTree *object.Tree, scope
 	defer root.Close()
 
 	d.AllowLockUpdate = d.AllowLockUpdate || scope.LockUpdateDeclared()
-	d.DenyWorkflowEdits = d.DenyWorkflowEdits && !scope.WorkflowEditDeclared()
 
 	changes := make([]Change, 0, len(status))
 	var inspectDrops []Dropped
@@ -78,7 +76,6 @@ func Stage(ctx context.Context, wt *gogit.Worktree, baseTree *object.Tree, scope
 
 	res := Plan(changes, d)
 	res.Dropped = append(res.Dropped, inspectDrops...)
-	scope.recordDropped(res.Dropped)
 
 	// Stage the kept paths. Stage runs once, single-threaded, before the commit,
 	// so go-git's non-atomic index writes do not race.

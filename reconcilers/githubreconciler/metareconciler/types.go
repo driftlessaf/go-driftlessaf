@@ -10,7 +10,6 @@ import (
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
-	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/commitscope"
 	"github.com/google/go-github/v88/github"
 )
 
@@ -27,15 +26,6 @@ type Result interface {
 // compatible.
 type worktreeRootSetter interface {
 	SetWorktreeRoot(root string)
-}
-
-// droppedSetter is an optional capability a result may implement to learn
-// which worktree changes the commit guard left out of the commit, after the
-// commit was attempted. It lets a result's no-change explanation name a
-// dropped path instead of guessing at the reason. A result that does not
-// implement it is unaffected.
-type droppedSetter interface {
-	SetDropped(dropped []commitscope.Dropped)
 }
 
 // RequestBuilder builds an agent request from an issue and session.
@@ -83,14 +73,6 @@ type PRData[Req any] struct {
 	// template that uses it needs an {{if}} guard. It is excluded from JSON,
 	// so it never takes part in change detection.
 	VariantSummary string `json:"-"`
-
-	// Dropped lists the worktree changes the commit guard left out of this
-	// run's commit, with reasons, so a body template can tell the reader what
-	// the agent changed that the PR does not carry (a workflow edit the issue
-	// did not opt in to, say). It is empty when the clone manager has no commit
-	// guard, when the agent did not run, and when every change was committed.
-	// It is excluded from JSON, so it never takes part in change detection.
-	Dropped []commitscope.Dropped `json:"-"`
 }
 
 // PRRender holds the render-only PR fields that a bot gets from an agent
