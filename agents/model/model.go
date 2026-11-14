@@ -62,6 +62,9 @@ type Info struct {
 	// ExtendedThinkingBudget reports whether the Claude thinking.budget_tokens
 	// parameter is accepted.
 	ExtendedThinkingBudget bool
+	// AdaptiveThinking reports whether the Claude thinking.type="adaptive"
+	// parameter is accepted. Models that predate it return a 400.
+	AdaptiveThinking bool
 	// AutomaticToolChoiceOnly reports that tool use cannot be forced to a
 	// specific tool (or to any tool). Callers must prompt with auto selection.
 	AutomaticToolChoiceOnly bool
@@ -171,6 +174,15 @@ var samplingParamsRemovedPrefixes = []string{
 	"claude-mythos-5",
 }
 
+// adaptiveThinkingBudgetPrefixes lists Claude id prefixes that accept both
+// adaptive thinking and the extended-thinking budget. Models outside
+// samplingParamsRemovedPrefixes and this list take the budget only.
+// See: https://platform.claude.com/docs/en/build-with-claude/thinking
+var adaptiveThinkingBudgetPrefixes = []string{
+	"claude-opus-4-6",
+	"claude-sonnet-4-6",
+}
+
 // omitToolReasoningModels are the Claude base ids (the part before any "@"
 // suffix) that set Info.OmitToolReasoning.
 var omitToolReasoningModels = []string{
@@ -270,6 +282,7 @@ func claudeInfo(id string) Info {
 		info.SamplingParams = true
 		info.ExtendedThinkingBudget = true
 	}
+	info.AdaptiveThinking = !info.ExtendedThinkingBudget || hasAnyPrefix(id, adaptiveThinkingBudgetPrefixes)
 	switch {
 	case hasAnyPrefix(id, noEffortModelPrefixes):
 		// The API rejects the effort parameter; Efforts stays empty.

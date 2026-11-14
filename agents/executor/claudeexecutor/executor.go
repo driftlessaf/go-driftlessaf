@@ -147,6 +147,15 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// omitToolReasoning is toolReasoning resolved against the model in New.
 	omitToolReasoning bool
 
+	// thinkingSummaries, when non-nil, overrides whether requests ask for
+	// summarized adaptive thinking. Nil takes the model's default: on when
+	// model.Resolve reports OmitToolReasoning. Set via WithThinkingSummaries.
+	thinkingSummaries *bool
+
+	// summarizeThinking is thinkingSummaries resolved against the model and
+	// WithThinking in New.
+	summarizeThinking bool
+
 	// promptTokensBeforeFinalize, when greater than zero, asks the model to
 	// submit on every tool turn whose next request, before its tool results,
 	// reaches this many tokens. Zero disables it.
@@ -325,14 +334,23 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 			return nil, err
 		}
 	}
-	// Resolved after options so WithModel, WithRoutedModel and
-	// WithToolReasoning may come in any order.
+	// Resolved after options so WithModel, WithRoutedModel,
+	// WithToolReasoning, WithThinkingSummaries and WithThinking may come in
+	// any order.
 	e.omitToolReasoning = model.Resolve(e.capabilityModelName).OmitToolReasoning
 	if e.toolReasoning != nil {
 		e.omitToolReasoning = !*e.toolReasoning
 	}
 	if e.omitToolReasoning && e.submitTool.NoReasoning != nil {
 		e.submitTool = *e.submitTool.NoReasoning
+	}
+	e.summarizeThinking = model.Resolve(e.capabilityModelName).OmitToolReasoning
+	if e.thinkingSummaries != nil {
+		e.summarizeThinking = *e.thinkingSummaries
+	}
+	e.summarizeThinking = e.summarizeThinking && e.thinkingBudgetTokens == nil
+	if info := model.Resolve(e.capabilityModelName); e.summarizeThinking && info.Backend == model.BackendClaude && !info.AdaptiveThinking {
+		return nil, fmt.Errorf("WithThinkingSummaries: model %q does not accept adaptive thinking", e.capabilityModelName)
 	}
 
 	if e.suspendOnSubmit && e.submitTool.Handler == nil {
@@ -1436,8 +1454,8 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// See: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7#sampling-parameters-removed
 	dropTemperatureWarn := false
 	switch {
-	case supportsSamplingParams(e.capabilityModelName) && e.thinkingBudgetTokens != nil:
-		// Extended thinking requires temperature=1.0. This protocol constraint
+	case supportsSamplingParams(e.capabilityModelName) && (e.thinkingBudgetTokens != nil || e.summarizeThinking):
+		// Thinking requires temperature=1.0. This protocol constraint
 		// still applies when an explicit route narrows caller-configurable
 		// sampling parameters out.
 		// See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
@@ -1446,6 +1464,17 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 		params.Temperature = anthropic.Float(e.temperature)
 	case e.temperatureSet:
 		dropTemperatureWarn = true
+	}
+
+	// Summarized adaptive thinking sets only the display. A forced tool_choice
+	// stays valid with it: the API accepts the pair and skips thinking on the
+	// forced turn, unlike the extended-thinking budget WithThinking sends.
+	if e.summarizeThinking {
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
+				Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
+			},
+		}
 	}
 
 	// Reasoning effort (output_config.effort) controls thinking depth and overall

@@ -71,6 +71,9 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithToolReasoning: Send or leave out the injected tool reasoning parameter
 //     (left out by default for models whose provider facts set OmitToolReasoning)
 //   - WithSystemInstructions: Provide system-level instructions
+//   - WithThinkingSummaries: Ask for summarized adaptive thinking, recorded in
+//     trace.Reasoning (on by default for models whose provider facts set
+//     OmitToolReasoning)
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)
 //   - WithCacheTTL: Set the cache breakpoint lifetime to 5 minutes (default) or 1 hour

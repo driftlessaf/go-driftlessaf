@@ -31,9 +31,14 @@ func TestResolve(t *testing.T) {
 		SamplingParams:         true,
 		ExtendedThinkingBudget: true,
 	}
+	// claudeAdaptiveBudget is the Claude 4.6 surface, which takes both
+	// adaptive thinking and the extended-thinking budget.
+	claudeAdaptiveBudget := claudePreXHigh
+	claudeAdaptiveBudget.AdaptiveThinking = true
 	claudeAdaptive := model.Info{
-		Backend: model.BackendClaude,
-		Efforts: fullScale,
+		Backend:          model.BackendClaude,
+		Efforts:          fullScale,
+		AdaptiveThinking: true,
 	}
 	// claudeAutoToolChoice is the adaptive surface for models that also reject
 	// a forced tool_choice: Fable 5.1, Mythos 5.2, Opus 5.5, and Sonnet 5.5.
@@ -116,7 +121,7 @@ func TestResolve(t *testing.T) {
 		{"claude-sonnet-5-5@default", claudeNoToolReasoning},
 		{"anthropic.claude-sonnet-5-5", claudeNoToolReasoning},
 		{"anthropic.claude-sonnet-5", claudeAdaptive},
-		{"anthropic.claude-sonnet-4-6", claudePreXHigh},
+		{"anthropic.claude-sonnet-4-6", claudeAdaptiveBudget},
 		{"meta/llama-3.3-70b-instruct-maas", openAICompat},
 		{"mistralai/mistral-large", openAICompat},
 		{"google/gemini-3.5-flash", openAICompat},
@@ -169,11 +174,11 @@ func TestResolve(t *testing.T) {
 		{"anthropic.claude-sonnet-4-20250514-v1:0", claudeNoEffort},
 		{"anthropic.claude-opus-4-20250514-v1:0", claudeNoEffort},
 		// Claude ids that take effort but predate the xhigh level.
-		{"claude-sonnet-4-6", claudePreXHigh},
-		{"claude-sonnet-4-6@default", claudePreXHigh},
+		{"claude-sonnet-4-6", claudeAdaptiveBudget},
+		{"claude-sonnet-4-6@default", claudeAdaptiveBudget},
 		{"claude-opus-4-5", claudePreXHigh},
 		{"claude-opus-4-5@20251101", claudePreXHigh},
-		{"claude-opus-4-6@default", claudePreXHigh},
+		{"claude-opus-4-6@default", claudeAdaptiveBudget},
 		// Claude ids with the Opus 4.7 surface: full effort scale, sampling
 		// params and extended-thinking budget removed.
 		{"claude-opus-4-7", claudeAdaptive},

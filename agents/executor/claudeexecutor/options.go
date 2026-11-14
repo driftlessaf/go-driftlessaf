@@ -87,6 +87,23 @@ func WithToolReasoning[Request promptbuilder.Bindable, Response any](include boo
 	}
 }
 
+// WithThinkingSummaries sets whether requests ask for summarized adaptive
+// thinking, which lands in trace.Reasoning when agenttrace.WithPayloadsEnabled
+// is set on the context. Without this option it is on for models whose
+// provider facts set model.Info.OmitToolReasoning, whose tools carry no
+// reasoning parameter to record why the model acted. The default
+// follows the provider facts even when WithToolReasoning overrides them, so an
+// older model is never sent adaptive thinking it was not verified to take.
+// WithThinking configures thinking itself and takes precedence. Turning it on
+// for a Claude model that does not accept adaptive thinking
+// (model.Info.AdaptiveThinking) is an error in New.
+func WithThinkingSummaries[Request promptbuilder.Bindable, Response any](enable bool) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.thinkingSummaries = &enable
+		return nil
+	}
+}
+
 // WithoutTemperature omits sampling temperature from provider requests.
 // Explicit routes use this when their effective capabilities narrow sampling
 // parameters out, even if the logical model family normally supports them.
