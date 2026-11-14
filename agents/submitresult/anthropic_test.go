@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package submitresult
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -77,5 +78,46 @@ func TestClaudeToolHandler(t *testing.T) {
 	}
 	if got, want := outcome.Reasoning, "done"; got != want {
 		t.Errorf("reasoning: got = %q, want = %q", got, want)
+	}
+}
+
+func TestClaudeToolNoReasoning(t *testing.T) {
+	meta, err := ClaudeTool(OptionsForResponse[*sampleResult]())
+	if err != nil {
+		t.Fatalf("ClaudeTool returned error: %v", err)
+	}
+	if meta.NoReasoning == nil {
+		t.Fatal("NoReasoning: got = nil, want = a variant")
+	}
+	variant := *meta.NoReasoning
+	if variant.NoReasoning != nil {
+		t.Error("NoReasoning.NoReasoning: got = a variant, want = nil")
+	}
+	props, _ := variant.Definition.InputSchema.Properties.(map[string]any)
+	if _, ok := props["reasoning"]; ok {
+		t.Error("variant properties: got = reasoning, want = none")
+	}
+	if slices.Contains(variant.Definition.InputSchema.Required, "reasoning") {
+		t.Error("variant required: got = reasoning, want = none")
+	}
+
+	trace, _ := agenttrace.StartTrace[*sampleResult](t.Context(), "prompt")
+	outcome := variant.Handler(t.Context(), anthropic.ToolUseBlock{
+		ID:    "tool-1",
+		Name:  variant.Definition.Name,
+		Input: mustMarshal(t, map[string]any{"analysis": map[string]any{"summary": "all good"}}),
+	}, trace)
+	if !outcome.Accepted {
+		t.Fatalf("payload without reasoning: got = rejected (%#v), want = accepted", outcome.ToolResult)
+	}
+
+	opts := OptionsForResponse[*sampleResult]()
+	opts.OmitReasoning = true
+	omitted, err := ClaudeTool(opts)
+	if err != nil {
+		t.Fatalf("ClaudeTool with OmitReasoning returned error: %v", err)
+	}
+	if omitted.NoReasoning != nil {
+		t.Error("NoReasoning under OmitReasoning: got = a variant, want = nil")
 	}
 }

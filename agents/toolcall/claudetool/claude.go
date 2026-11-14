@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -38,6 +39,33 @@ type Metadata[Response any] struct {
 	// executor runs the tool's calls after the turn's other calls, before
 	// its submit.
 	AfterSiblings bool
+
+	// InjectedReasoning reports that Definition carries the reasoning
+	// parameter FromTool injects, which WithoutReasoning removes.
+	InjectedReasoning bool
+}
+
+// WithoutReasoning returns m with the injected reasoning parameter removed
+// from its definition. Metadata without one is returned unchanged, so a
+// hand-built tool's own reasoning parameter is never dropped. The handler is
+// unchanged: tool handlers do not read the injected parameter.
+func (m Metadata[Response]) WithoutReasoning() Metadata[Response] {
+	if !m.InjectedReasoning {
+		return m
+	}
+	props, _ := m.Definition.InputSchema.Properties.(map[string]any)
+	stripped := make(map[string]any, len(props))
+	for k, v := range props {
+		if k != "reasoning" {
+			stripped[k] = v
+		}
+	}
+	m.Definition.InputSchema.Properties = stripped
+	m.Definition.InputSchema.Required = slices.DeleteFunc(slices.Clone(m.Definition.InputSchema.Required), func(r string) bool {
+		return r == "reasoning"
+	})
+	m.InjectedReasoning = false
+	return m
 }
 
 // SubmitMetadata describes the terminal submit tool for the Claude executor.
@@ -59,6 +87,12 @@ type SubmitMetadata[Response any] struct {
 		toolUse anthropic.ToolUseBlock,
 		trace *agenttrace.Trace[Response],
 	) toolcall.SubmitOutcome[Response]
+
+	// NoReasoning is the same submit tool without its reasoning parameter,
+	// for models whose provider facts set OmitToolReasoning. Nil when the
+	// tool has no reasoning parameter or has no such variant; the executor
+	// then sends Definition as it is.
+	NoReasoning *SubmitMetadata[Response]
 }
 
 // Error creates an error response map for Claude tool calls
@@ -69,10 +103,11 @@ func Error(format string, args ...any) map[string]any {
 // FromTool converts a unified tool to Claude-specific metadata.
 func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
 	return Metadata[Resp]{
-		Definition:    toolParam(t.Def),
-		Handler:       handler(t),
-		LogPolicy:     t.Def.LogPolicy,
-		AfterSiblings: t.Def.AfterSiblings,
+		Definition:        toolParam(t.Def),
+		Handler:           handler(t),
+		LogPolicy:         t.Def.LogPolicy,
+		AfterSiblings:     t.Def.AfterSiblings,
+		InjectedReasoning: true,
 	}
 }
 

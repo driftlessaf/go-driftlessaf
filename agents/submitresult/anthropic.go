@@ -18,8 +18,24 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 )
 
-// ClaudeTool constructs the Claude executor metadata for the submit_result tool.
+// ClaudeTool constructs the Claude executor metadata for the submit_result
+// tool. Unless opts omits reasoning already, the metadata carries a
+// NoReasoning variant built with OmitReasoning set.
 func ClaudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata[Response], error) {
+	meta, err := claudeTool(opts)
+	if err != nil || opts.OmitReasoning {
+		return meta, err
+	}
+	opts.OmitReasoning = true
+	unreasoned, err := claudeTool(opts)
+	if err != nil {
+		return claudetool.SubmitMetadata[Response]{}, err
+	}
+	meta.NoReasoning = &unreasoned
+	return meta, nil
+}
+
+func claudeTool[Response any](opts Options[Response]) (claudetool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
 	props, required, flat, err := toolParameters(opts, schemaToAny)

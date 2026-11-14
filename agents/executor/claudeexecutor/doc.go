@@ -68,6 +68,8 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithMaxTokens: Set maximum response tokens (defaults to 8192, max 128000)
 //   - WithTemperature: Set response temperature (defaults to 0.1)
 //   - WithoutTemperature: Omit temperature when an explicit route disallows sampling parameters
+//   - WithToolReasoning: Send or leave out the injected tool reasoning parameter
+//     (left out by default for models whose provider facts set OmitToolReasoning)
 //   - WithSystemInstructions: Provide system-level instructions
 //   - WithThinking: Enable extended thinking mode with a token budget
 //   - WithCacheFirstUserBlock: Also cache the first user message (off by default)

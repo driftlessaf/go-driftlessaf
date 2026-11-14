@@ -39,8 +39,14 @@ func TestResolve(t *testing.T) {
 	// a forced tool_choice: Fable 5.1, Opus 5.5, and Sonnet 5.5.
 	claudeAutoToolChoice := claudeAdaptive
 	claudeAutoToolChoice.AutomaticToolChoiceOnly = true
-	claudeOpus55 := claudeAutoToolChoice
+	// claudeNoToolReasoning is the auto-tool-choice surface for the 5.5
+	// models, which also leave the injected tool reasoning parameter out.
+	claudeNoToolReasoning := claudeAutoToolChoice
+	claudeNoToolReasoning.OmitToolReasoning = true
+	claudeOpus55 := claudeNoToolReasoning
 	claudeOpus55.ContextWindow = 1_000_000
+	claudeFable52 := claudeAdaptive
+	claudeFable52.OmitToolReasoning = true
 	// Mythos 5.1 is Fable 5.1 under another id, with its window listed.
 	claudeMythos51 := claudeAutoToolChoice
 	claudeMythos51.ContextWindow = 1_000_000
@@ -48,6 +54,7 @@ func TestResolve(t *testing.T) {
 	claudeOpus48.ContextWindow = 1_000_000
 	claudeHaiku55 := claudeAdaptive
 	claudeHaiku55.ContextWindow = 1_000_000
+	claudeHaiku55.OmitToolReasoning = true
 	geminiBudget := model.Info{
 		Backend:         model.BackendGemini,
 		Efforts:         fullScale,
@@ -94,12 +101,19 @@ func TestResolve(t *testing.T) {
 		{"claude-fable-5-1@default", claudeAutoToolChoice},
 		{"anthropic.claude-fable-5-1", claudeAutoToolChoice},
 		{"claude-fable-5-10", claudeAdaptive},
+		{"claude-fable-5-2", claudeFable52},
+		{"claude-fable-5-2@default", claudeFable52},
+		{"anthropic.claude-fable-5-2", claudeFable52},
+		{"claude-fable-5-20", claudeAdaptive},
+		{"claude-mythos-5-2", claudeFable52},
+		{"claude-mythos-5-2@default", claudeFable52},
+		{"anthropic.claude-mythos-5-2", claudeFable52},
 		{"claude-opus-5-5", claudeOpus55},
 		{"claude-opus-5-5@default", claudeOpus55},
 		{"claude-opus-5", claudeAdaptive},
-		{"claude-sonnet-5-5", claudeAutoToolChoice},
-		{"claude-sonnet-5-5@default", claudeAutoToolChoice},
-		{"anthropic.claude-sonnet-5-5", claudeAutoToolChoice},
+		{"claude-sonnet-5-5", claudeNoToolReasoning},
+		{"claude-sonnet-5-5@default", claudeNoToolReasoning},
+		{"anthropic.claude-sonnet-5-5", claudeNoToolReasoning},
 		{"anthropic.claude-sonnet-5", claudeAdaptive},
 		{"anthropic.claude-sonnet-4-6", claudePreXHigh},
 		{"meta/llama-3.3-70b-instruct-maas", openAICompat},

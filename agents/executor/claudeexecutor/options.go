@@ -73,6 +73,20 @@ func WithTemperature[Request promptbuilder.Bindable, Response any](temp float64)
 	}
 }
 
+// WithToolReasoning sets whether tools carry the reasoning parameter that
+// claudetool.FromTool injects and the submit tool's reasoning parameter.
+// Without this option the model decides: the parameters are left out for
+// models whose provider facts set model.Info.OmitToolReasoning, because
+// asking for reasoning in a tool input draws reasoning_extraction refusals
+// on them. Only tools built by FromTool and submit tools from submitresult
+// lose the parameter; a hand-built tool is sent as defined.
+func WithToolReasoning[Request promptbuilder.Bindable, Response any](include bool) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.toolReasoning = &include
+		return nil
+	}
+}
+
 // WithoutTemperature omits sampling temperature from provider requests.
 // Explicit routes use this when their effective capabilities narrow sampling
 // parameters out, even if the logical model family normally supports them.

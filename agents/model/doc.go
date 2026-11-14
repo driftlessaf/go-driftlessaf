@@ -13,7 +13,8 @@ SPDX-License-Identifier: Apache-2.0
 // parameter is accepted, and which generation of Gemini thinking knob
 // applies. Gemini 4 ids also report the parameters that generation rejects
 // (thinkingBudget, explicit context caches) and its long-decode output
-// limit. Jev ids ("jev-") and Hopper resolve to a backend with
+// limit. Claude ids whose tool inputs must not ask for reasoning report
+// OmitToolReasoning. Jev ids ("jev-") and Hopper resolve to a backend with
 // no parameter surface at all, since those models take typed questions rather
 // than a conversation.
 //

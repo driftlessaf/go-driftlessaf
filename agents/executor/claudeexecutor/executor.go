@@ -138,6 +138,15 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// where maxTurns would abort; zero disables it.
 	maxToolCallsBeforeFinalize int
 
+	// toolReasoning, when non-nil, overrides whether tools carry the reasoning
+	// parameter claudetool injects. Nil takes the model's default: the
+	// parameter is left out when model.Resolve reports OmitToolReasoning.
+	// Set via WithToolReasoning.
+	toolReasoning *bool
+
+	// omitToolReasoning is toolReasoning resolved against the model in New.
+	omitToolReasoning bool
+
 	// promptTokensBeforeFinalize, when greater than zero, asks the model to
 	// submit on every tool turn whose next request, before its tool results,
 	// reaches this many tokens. Zero disables it.
@@ -316,6 +325,16 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 			return nil, err
 		}
 	}
+	// Resolved after options so WithModel, WithRoutedModel and
+	// WithToolReasoning may come in any order.
+	e.omitToolReasoning = model.Resolve(e.capabilityModelName).OmitToolReasoning
+	if e.toolReasoning != nil {
+		e.omitToolReasoning = !*e.toolReasoning
+	}
+	if e.omitToolReasoning && e.submitTool.NoReasoning != nil {
+		e.submitTool = *e.submitTool.NoReasoning
+	}
+
 	if e.suspendOnSubmit && e.submitTool.Handler == nil {
 		return nil, errors.New("WithSuspendOnSubmit requires a submit tool (WithSubmitResultProvider)")
 	}
@@ -1330,6 +1349,9 @@ func (e *executor[Request, Response]) buildStaticParams(tools map[string]claudet
 	// changed. Sorting by name ensures a stable hash across turns and executions.
 	toolDefs := make([]anthropic.ToolUnionParam, 0, len(tools)+1)
 	for _, meta := range tools {
+		if e.omitToolReasoning {
+			meta = meta.WithoutReasoning()
+		}
 		toolDefs = append(toolDefs, anthropic.ToolUnionParam{
 			OfTool: &meta.Definition,
 		})

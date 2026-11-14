@@ -91,6 +91,12 @@ type Info struct {
 	// per-request output cap across requests, linked by a continuation token,
 	// up to MaxOutputTokens.
 	LongDecode bool
+	// OmitToolReasoning reports that Claude tool schemas should leave out the
+	// reasoning parameter driftlessaf injects into every tool. Asking for
+	// reasoning in a tool input draws reasoning_extraction refusals on these
+	// models, a category with no fallback model.
+	// See: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
+	OmitToolReasoning bool
 }
 
 // SupportsEffort reports whether the provider accepts the effort level
@@ -162,6 +168,16 @@ var samplingParamsRemovedPrefixes = []string{
 	// Verified 2026-09-07 against Vertex (us): claude-mythos-5-1 returns
 	// "`temperature` is deprecated for this model"; output_config.effort works.
 	"claude-mythos-5",
+}
+
+// omitToolReasoningModels are the Claude base ids (the part before any "@"
+// suffix) that set Info.OmitToolReasoning.
+var omitToolReasoningModels = []string{
+	"claude-opus-5-5",
+	"claude-sonnet-5-5",
+	"claude-haiku-5-5",
+	"claude-fable-5-2",
+	"claude-mythos-5-2",
 }
 
 // noEffortModelPrefixes lists Claude id prefixes that predate the effort
@@ -248,6 +264,7 @@ func claudeInfo(id string) Info {
 	// Forced tool_choice (any or a named tool) is rejected with a 400.
 	info.AutomaticToolChoiceOnly = slices.Contains(automaticToolChoiceOnlyModels, base)
 	info.ContextWindow = contextWindows[base]
+	info.OmitToolReasoning = slices.Contains(omitToolReasoningModels, base)
 	if !hasAnyPrefix(id, samplingParamsRemovedPrefixes) {
 		info.SamplingParams = true
 		info.ExtendedThinkingBudget = true

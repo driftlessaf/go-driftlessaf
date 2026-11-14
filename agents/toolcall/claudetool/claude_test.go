@@ -7,10 +7,13 @@ package claudetool
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -118,5 +121,48 @@ func TestErrorConcurrent(t *testing.T) {
 	// Wait for all goroutines to complete
 	for range 10 {
 		<-done
+	}
+}
+
+func TestWithoutReasoning(t *testing.T) {
+	meta := FromTool(toolcall.Tool[struct{}]{Def: toolcall.Definition{
+		Name:       "lookup",
+		Parameters: []toolcall.Parameter{{Name: "key", Type: "string", Required: true}},
+	}})
+	if !meta.InjectedReasoning {
+		t.Fatal("FromTool InjectedReasoning: got = false, want = true")
+	}
+
+	got := meta.WithoutReasoning()
+	if got.InjectedReasoning {
+		t.Error("InjectedReasoning: got = true, want = false")
+	}
+	props, _ := got.Definition.InputSchema.Properties.(map[string]any)
+	if diff := cmp.Diff([]string{"key"}, slices.Sorted(maps.Keys(props))); diff != "" {
+		t.Errorf("properties (-want, +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"key"}, got.Definition.InputSchema.Required); diff != "" {
+		t.Errorf("required (-want, +got):\n%s", diff)
+	}
+
+	// The original keeps its parameter: the definition is copied, not edited.
+	orig, _ := meta.Definition.InputSchema.Properties.(map[string]any)
+	if _, ok := orig["reasoning"]; !ok {
+		t.Error("original properties: got = no reasoning, want = reasoning")
+	}
+	if diff := cmp.Diff([]string{"reasoning", "key"}, meta.Definition.InputSchema.Required); diff != "" {
+		t.Errorf("original required (-want, +got):\n%s", diff)
+	}
+
+	// A hand-built tool's own reasoning parameter is left alone.
+	handmade := Metadata[struct{}]{Definition: anthropic.ToolParam{
+		Name: "handmade",
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{"reasoning": map[string]any{"type": "string"}},
+			Required:   []string{"reasoning"},
+		},
+	}}
+	if diff := cmp.Diff([]string{"reasoning"}, handmade.WithoutReasoning().Definition.InputSchema.Required); diff != "" {
+		t.Errorf("hand-built required (-want, +got):\n%s", diff)
 	}
 }

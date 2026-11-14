@@ -20,6 +20,9 @@ SPDX-License-Identifier: Apache-2.0
 //
 // Each converted tool automatically injects a "reasoning" parameter that the
 // model must fill in to explain its intent before making the call.
+// [Metadata.WithoutReasoning] removes it again. The [claudeexecutor] does that
+// for models whose provider facts set OmitToolReasoning, and sends a submit
+// tool's [SubmitMetadata.NoReasoning] variant in place of the tool.
 //
 // # Error Formatting
 //
