@@ -41,18 +41,17 @@ func TestResolve(t *testing.T) {
 		AdaptiveThinking: true,
 	}
 	// claudeAutoToolChoice is the adaptive surface for models that also reject
-	// a forced tool_choice: Fable 5.1, Mythos 5.2, Opus 5.5, and Sonnet 5.5.
+	// a forced tool_choice: Fable 5.1 and 5.2, Mythos 5.2, Opus 5.5, and
+	// Sonnet 5.5.
 	claudeAutoToolChoice := claudeAdaptive
 	claudeAutoToolChoice.AutomaticToolChoiceOnly = true
-	// claudeNoToolReasoning is the auto-tool-choice surface for Mythos 5.2 and
-	// the 5.5 models, which also leave the injected tool reasoning parameter
-	// out.
+	// claudeNoToolReasoning is the auto-tool-choice surface for Fable 5.2,
+	// Mythos 5.2 and the 5.5 models, which also leave the injected tool
+	// reasoning parameter out.
 	claudeNoToolReasoning := claudeAutoToolChoice
 	claudeNoToolReasoning.OmitToolReasoning = true
 	claudeOpus55 := claudeNoToolReasoning
 	claudeOpus55.ContextWindow = 1_000_000
-	claudeFable52 := claudeAdaptive
-	claudeFable52.OmitToolReasoning = true
 	// Mythos 5.1 is Fable 5.1 under another id, with its window listed.
 	claudeMythos51 := claudeAutoToolChoice
 	claudeMythos51.ContextWindow = 1_000_000
@@ -107,9 +106,9 @@ func TestResolve(t *testing.T) {
 		{"claude-fable-5-1@default", claudeAutoToolChoice},
 		{"anthropic.claude-fable-5-1", claudeAutoToolChoice},
 		{"claude-fable-5-10", claudeAdaptive},
-		{"claude-fable-5-2", claudeFable52},
-		{"claude-fable-5-2@default", claudeFable52},
-		{"anthropic.claude-fable-5-2", claudeFable52},
+		{"claude-fable-5-2", claudeNoToolReasoning},
+		{"claude-fable-5-2@default", claudeNoToolReasoning},
+		{"anthropic.claude-fable-5-2", claudeNoToolReasoning},
 		{"claude-fable-5-20", claudeAdaptive},
 		{"claude-mythos-5-2", claudeNoToolReasoning},
 		{"claude-mythos-5-2@default", claudeNoToolReasoning},

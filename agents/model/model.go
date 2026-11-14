@@ -141,6 +141,8 @@ var automaticToolChoiceOnlyModels = []string{
 	"claude-fable-5-1",
 	// The same model as Fable 5.1 under the Project Glasswing id.
 	"claude-mythos-5-1",
+	"claude-fable-5-2",
+	// The same model as Fable 5.2 under the Project Glasswing id.
 	"claude-mythos-5-2",
 	"claude-opus-5-5",
 	"claude-sonnet-5-5",
