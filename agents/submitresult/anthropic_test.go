@@ -6,11 +6,42 @@ SPDX-License-Identifier: Apache-2.0
 package submitresult
 
 import (
+	"strings"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// TestClaudeToolReasoningDoesNotAskForReasoning guards the wording of the
+// reasoning parameter on Claude's submit tool. Claude's reasoning_extraction
+// safety classifier can refuse a turn of a tool loop whose tools ask the
+// model to put its reasoning in a tool input, so the description may ask for
+// a short explanation and the evidence, never for why or how the model
+// thought.
+func TestClaudeToolReasoningDoesNotAskForReasoning(t *testing.T) {
+	meta, err := ClaudeTool(OptionsForResponse[*sampleResult]())
+	if err != nil {
+		t.Fatalf("ClaudeTool returned error: %v", err)
+	}
+	props, ok := meta.Definition.InputSchema.Properties.(map[string]any)
+	if !ok {
+		t.Fatalf("properties: got = %T, want = map[string]any", meta.Definition.InputSchema.Properties)
+	}
+	reasoning, ok := props["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning parameter: got = %v, want = a schema", props["reasoning"])
+	}
+	description, _ := reasoning["description"].(string)
+	if description == "" {
+		t.Fatal("reasoning description: got = empty, want = a request for a short explanation")
+	}
+	for _, phrase := range []string{"why", "reasoning", "thinking", "thought", "step by step"} {
+		if strings.Contains(strings.ToLower(description), phrase) {
+			t.Errorf("reasoning description %q contains %q: it must ask for a short explanation and the evidence, not for the model's reasoning", description, phrase)
+		}
+	}
+}
 
 func TestClaudeToolHandler(t *testing.T) {
 	meta, err := ClaudeTool(OptionsForResponse[*sampleResult]())

@@ -73,6 +73,16 @@ type issueHarness struct {
 	createFails bool
 	deleteFails bool
 
+	// cloneOpts configure the clone manager the reconciler leases from, for a
+	// test that needs the commit-scope guard.
+	cloneOpts []clonemanager.Option
+
+	// prBody, when set, replaces the harness's fixed PR body template, for a
+	// test that checks what the rendered body carries; prBodies records the
+	// body of every PR the reconciler created.
+	prBody   string
+	prBodies []string
+
 	agentCalls int
 	prCreates  int
 }
@@ -383,6 +393,13 @@ func (h *issueHarness) client(t *testing.T) *github.Client {
 			fmt.Fprint(w, `{"files":[{"filename":"content.txt"}]}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls":
 			h.prCreates++
+			var pr struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+				t.Errorf("decode pull request: %v", err)
+			}
+			h.prBodies = append(h.prBodies, pr.Body)
 			fmt.Fprint(w, `{"number":456,"html_url":"https://github.com/owner/repo/pull/456"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/456/comments":
 			if err := json.NewEncoder(w).Encode(h.prComments); err != nil {
@@ -423,9 +440,13 @@ func (h *issueHarness) reconcile(t *testing.T, agent func(context.Context) error
 // reconcileErr is reconcile under ctx, returning the reconcile's error.
 func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent func(context.Context) error, opts ...Option[*testRequest, *publishResult, struct{}]) error {
 	t.Helper()
+	body := "Resolve #123."
+	if h.prBody != "" {
+		body = h.prBody
+	}
 	cm, err := changemanager.New[PRData[*testRequest]]("test-bot",
 		template.Must(template.New("title").Parse("Update content")),
-		template.Must(template.New("body").Parse("Resolve #123.")),
+		template.Must(template.New("body").Parse(body)),
 		changemanager.WithFindingsIteration[PRData[*testRequest]]())
 	if err != nil {
 		t.Fatalf("create change manager: %v", err)
@@ -433,7 +454,7 @@ func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent fun
 	rec := New("test-bot", cm,
 		clonemanager.NewMeta(t.Context(), func(context.Context, string, string) (oauth2.TokenSource, error) {
 			return clonemanager.StaticTokenSource(""), nil
-		}, "test-bot", nil),
+		}, "test-bot", nil, h.cloneOpts...),
 		[]string{requiredLabel},
 		&publishAgent{execute: func(ctx context.Context) error {
 			h.mu.Lock()

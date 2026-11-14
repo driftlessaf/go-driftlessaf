@@ -7,10 +7,41 @@ package claudetool
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/google/go-cmp/cmp"
 )
+
+// TestReasoningParameterDoesNotAskForReasoning guards the wording of the
+// reasoning parameter injected into every tool. Claude's reasoning_extraction
+// safety classifier can refuse a turn of a tool loop whose tools ask the
+// model to put its reasoning in a tool input, so the description may ask
+// what the call is for, never for why or how the model thought.
+func TestReasoningParameterDoesNotAskForReasoning(t *testing.T) {
+	param := toolParam(toolcall.Definition{
+		Name:       "lookup",
+		Parameters: []toolcall.Parameter{{Name: "key", Type: "string", Required: true}},
+	})
+	props, ok := param.InputSchema.Properties.(map[string]any)
+	if !ok {
+		t.Fatalf("properties: got = %T, want = map[string]any", param.InputSchema.Properties)
+	}
+	reasoning, ok := props["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning parameter: got = %v, want = a schema", props["reasoning"])
+	}
+	description, _ := reasoning["description"].(string)
+	if description == "" {
+		t.Fatal("reasoning description: got = empty, want = a request for a short note")
+	}
+	for _, phrase := range []string{"why", "reasoning", "thinking", "thought", "step by step"} {
+		if strings.Contains(strings.ToLower(description), phrase) {
+			t.Errorf("reasoning description %q contains %q: it must ask for a short note on the call, not for the model's reasoning", description, phrase)
+		}
+	}
+}
 
 // TestError tests the Error function with various input scenarios
 func TestError(t *testing.T) {

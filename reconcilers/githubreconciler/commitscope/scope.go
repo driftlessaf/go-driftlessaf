@@ -9,11 +9,15 @@ import (
 	"context"
 	"path"
 	"path/filepath"
+	"slices"
 	"sync"
 )
 
 // Scope records the repo-relative paths an edit tool intentionally changed
-// during one run, plus whether the run declared a Terraform lock-file update.
+// during one run, plus the declarations that lift a denylist rule for that run
+// (a Terraform lock-file update, a workflow edit). Once [Stage] has run, it
+// also carries the changes the guard dropped, so the caller that drove the run
+// can report them without a return path through the commit.
 //
 // Scope is safe for concurrent use: an executor may dispatch a turn's edit-tool
 // callbacks in parallel, and each records into the same Scope.
@@ -21,10 +25,12 @@ import (
 // A nil *Scope is usable: every method is a no-op or reports the zero value, so
 // callback code can record unconditionally.
 type Scope struct {
-	mu         sync.Mutex
-	active     bool
-	lockUpdate bool
-	touched    map[string]struct{}
+	mu           sync.Mutex
+	active       bool
+	lockUpdate   bool
+	workflowEdit bool
+	touched      map[string]struct{}
+	dropped      []Dropped
 }
 
 // NewScope returns an empty Scope.
@@ -89,6 +95,51 @@ func (s *Scope) LockUpdateDeclared() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lockUpdate
+}
+
+// DeclareWorkflowEdit records that this run intentionally changes a GitHub
+// workflow or action, so a guard configured with [Denylist.DenyWorkflowEdits]
+// does not refuse it. The declaration lasts for this run only.
+func (s *Scope) DeclareWorkflowEdit() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.workflowEdit = true
+	s.mu.Unlock()
+}
+
+// WorkflowEditDeclared reports whether the run declared a workflow edit.
+func (s *Scope) WorkflowEditDeclared() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workflowEdit
+}
+
+// recordDropped keeps the changes [Stage] left out of the commit, replacing any
+// earlier record, so the run's driver can read them back with Dropped.
+func (s *Scope) recordDropped(dropped []Dropped) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.dropped = slices.Clone(dropped)
+	s.mu.Unlock()
+}
+
+// Dropped returns the changes the guard left out of the commit on this run, with
+// reasons, in the order [Stage] recorded them. It is empty until Stage has run,
+// and empty for a run that committed every change.
+func (s *Scope) Dropped() []Dropped {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.dropped)
 }
 
 // Contains reports whether an edit tool touched the given path this run.

@@ -62,7 +62,7 @@ func claudeInputSchema(properties map[string]any, required []string, omitReasoni
 	if !omitReasoning {
 		properties["reasoning"] = map[string]any{
 			"type":        "string",
-			"description": reasoningDescription,
+			"description": claudeReasoningDescription,
 		}
 		input.Required = append([]string{"reasoning"}, required...)
 	}

@@ -45,6 +45,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// PR out of draft afterward.
 	draftLabel string
 
+	// workflowEditLabel, when set and present on the issue, declares a workflow
+	// edit on the run's commit scope, so a clone manager whose guard denies
+	// GitHub workflow and action edits commits them for that run. Empty (the
+	// default) never declares one. See WithWorkflowEditLabel.
+	workflowEditLabel string
+
 	// prLabelsFromResult derives extra labels to stamp on the generated PR from
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
@@ -145,6 +151,23 @@ func WithTrustedIssueAuthors[Req promptbuilder.Bindable, Resp Result, CB any](lo
 func WithDraftLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.draftLabel = label
+	}
+}
+
+// WithWorkflowEditLabel lets the source issue lift the commit guard's workflow
+// rule for its runs: when the issue carries the given label, the reconciler
+// declares a workflow edit on the run's commit scope (see
+// commitscope.Scope.DeclareWorkflowEdit), so a clone manager configured with
+// commitscope.Denylist.DenyWorkflowEdits commits that run's workflow and action
+// changes (see commitscope.IsWorkflowPath). The label is read from the issue as
+// refreshed just before the commit, after the agent has run, so its state at
+// that moment decides. Without the label those changes are dropped at commit
+// time and reported through PRData.Dropped. Off by default (empty label): no
+// run declares a workflow edit, and a clone manager without the rule is
+// unaffected either way.
+func WithWorkflowEditLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.workflowEditLabel = label
 	}
 }
 

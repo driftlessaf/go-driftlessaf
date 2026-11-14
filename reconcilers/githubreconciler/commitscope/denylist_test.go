@@ -5,7 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 package commitscope
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestDeniedRules(t *testing.T) {
 	dl := DefaultDenylist()
@@ -219,6 +222,11 @@ func TestDeniedRules(t *testing.T) {
 			change:   Change{Path: "rebuild/x.go", Type: Added},
 			wantDeny: false,
 		},
+		{
+			name:     "workflow kept by default (consumer has not opted in)",
+			change:   Change{Path: ".github/workflows/ci.yaml", Type: Added},
+			wantDeny: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,6 +253,211 @@ func TestDeniedLockUpdateAllowed(t *testing.T) {
 	c.BaseIsSymlink = true
 	if deny, _ := dl.Denied(c); !deny {
 		t.Errorf("Denied de-symlinked lock with intent: got deny = false, want true")
+	}
+}
+
+// TestDeniedWorkflowEdits covers the opt-in workflow rule: with
+// DenyWorkflowEdits set, additions and modifications under the root
+// .github/workflows and .github/actions directories are refused, deletions and
+// every other .github path stay allowed, and a nested .github tree (which GitHub
+// never runs) is not matched.
+func TestDeniedWorkflowEdits(t *testing.T) {
+	dl := DefaultDenylist()
+	dl.DenyWorkflowEdits = true
+	tests := []struct {
+		name     string
+		change   Change
+		wantDeny bool
+	}{
+		{
+			name:     "new workflow refused",
+			change:   Change{Path: ".github/workflows/ci.yaml", Type: Added},
+			wantDeny: true,
+		},
+		{
+			name:     "tracked workflow modification refused",
+			change:   Change{Path: ".github/workflows/release.yml", Type: Modified, TrackedAtBase: true},
+			wantDeny: true,
+		},
+		{
+			name:     "workflow in a subdirectory refused",
+			change:   Change{Path: ".github/workflows/reusable/build.yaml", Type: Added},
+			wantDeny: true,
+		},
+		{
+			name:     "new local action refused",
+			change:   Change{Path: ".github/actions/setup/action.yml", Type: Added},
+			wantDeny: true,
+		},
+		{
+			name:     "action script refused",
+			change:   Change{Path: ".github/actions/setup/run.sh", Type: Modified, TrackedAtBase: true},
+			wantDeny: true,
+		},
+		{
+			name:     "local action manifest outside .github refused",
+			change:   Change{Path: "ci/setup/action.yml", Type: Modified, TrackedAtBase: true},
+			wantDeny: true,
+		},
+		{
+			name:     "new local action manifest with .yaml refused",
+			change:   Change{Path: "tools/release/action.yaml", Type: Added},
+			wantDeny: true,
+		},
+		{
+			name:     "root action manifest refused",
+			change:   Change{Path: "action.yml", Type: Modified, TrackedAtBase: true},
+			wantDeny: true,
+		},
+		{
+			name:     "script a local action runs kept (documented limit)",
+			change:   Change{Path: "ci/setup/entrypoint.sh", Type: Modified, TrackedAtBase: true},
+			wantDeny: false,
+		},
+		{
+			name:     "manifest-named lookalike kept",
+			change:   Change{Path: "ci/setup/action.yml.tmpl", Type: Added},
+			wantDeny: false,
+		},
+		{
+			name:     "file or link at the workflows path itself refused",
+			change:   Change{Path: ".github/workflows", Type: Added, CurrentIsSymlink: true},
+			wantDeny: true,
+		},
+		{
+			name:     "workflow deletion kept",
+			change:   Change{Path: ".github/workflows/old.yaml", Type: Deleted, TrackedAtBase: true},
+			wantDeny: false,
+		},
+		{
+			name:     "other .github file kept",
+			change:   Change{Path: ".github/dependabot.yml", Type: Modified, TrackedAtBase: true},
+			wantDeny: false,
+		},
+		{
+			name:     "codeowners kept",
+			change:   Change{Path: ".github/CODEOWNERS", Type: Modified, TrackedAtBase: true},
+			wantDeny: false,
+		},
+		{
+			name:     "issue template kept",
+			change:   Change{Path: ".github/ISSUE_TEMPLATE/bug.md", Type: Added},
+			wantDeny: false,
+		},
+		{
+			name:     "directory with workflows as a prefix kept",
+			change:   Change{Path: ".github/workflows-docs/README.md", Type: Added},
+			wantDeny: false,
+		},
+		{
+			name:     "nested .github tree kept",
+			change:   Change{Path: "services/api/.github/workflows/ci.yaml", Type: Added},
+			wantDeny: false,
+		},
+		{
+			name:     "plain source file kept",
+			change:   Change{Path: "internal/foo/bar.go", Type: Added},
+			wantDeny: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotDeny, reason := dl.Denied(tc.change)
+			if gotDeny != tc.wantDeny {
+				t.Errorf("Denied(%+v): got deny = %v (%q), want %v", tc.change, gotDeny, reason, tc.wantDeny)
+			}
+			if gotDeny && reason == "" {
+				t.Errorf("Denied(%+v): denied with empty reason", tc.change)
+			}
+		})
+	}
+}
+
+func TestDeniedWorkflowEditAllowed(t *testing.T) {
+	// The rule lifted (the run declared a workflow edit, see Stage): a workflow
+	// change is an ordinary change again.
+	dl := Denylist{MaxFileSize: defaultMaxFileSize, DenyWorkflowEdits: false}
+	c := Change{Path: ".github/workflows/ci.yaml", Type: Added}
+	if deny, reason := dl.Denied(c); deny {
+		t.Errorf("Denied workflow with rule lifted: got deny = true (%q), want false", reason)
+	}
+	// The other rules still apply to a workflow path: a binary under
+	// .github/actions is refused as binary content, declared or not.
+	c = Change{Path: ".github/actions/setup/tool", Type: Added, IsBinary: true}
+	if deny, _ := dl.Denied(c); !deny {
+		t.Error("Denied binary action file with rule lifted: got deny = false, want true")
+	}
+}
+
+// TestDeniedWorkflowEditReasonIsLast proves the workflow rule yields to every
+// other rule: a workflow path that is also binary or oversized is refused for
+// that reason, so a consumer never blames the missing declaration for a drop
+// the declaration would not lift.
+func TestDeniedWorkflowEditReasonIsLast(t *testing.T) {
+	dl := DefaultDenylist()
+	dl.DenyWorkflowEdits = true
+	tests := []struct {
+		name       string
+		change     Change
+		wantReason string
+	}{
+		{
+			name:       "binary workflow carries the binary reason",
+			change:     Change{Path: ".github/workflows/ci.yaml", Type: Added, IsBinary: true},
+			wantReason: "binary content",
+		},
+		{
+			name:       "oversized action manifest carries the size reason",
+			change:     Change{Path: "ci/setup/action.yml", Type: Added, Size: dl.MaxFileSize + 1},
+			wantReason: fmt.Sprintf("file size %d exceeds limit %d bytes", dl.MaxFileSize+1, dl.MaxFileSize),
+		},
+		{
+			name:       "plain workflow carries the workflow reason",
+			change:     Change{Path: ".github/workflows/ci.yaml", Type: Added, Size: 10},
+			wantReason: WorkflowEditDeniedReason,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deny, reason := dl.Denied(tc.change)
+			if !deny {
+				t.Fatalf("Denied(%q): got deny = false, want true", tc.change.Path)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("Denied(%q) reason: got = %q, want = %q", tc.change.Path, reason, tc.wantReason)
+			}
+			if got, want := (Dropped{Path: tc.change.Path, Reason: reason}).DeniedWorkflowEdit(), tc.wantReason == WorkflowEditDeniedReason; got != want {
+				t.Errorf("DeniedWorkflowEdit(): got = %v, want = %v", got, want)
+			}
+		})
+	}
+}
+
+func TestIsWorkflowPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{".github/workflows/ci.yaml", true},
+		{".github/workflows", true},
+		{".github/actions/setup/action.yml", true},
+		{".github/actions", true},
+		{"ci/setup/action.yml", true},
+		{"tools/release/action.yaml", true},
+		{"action.yml", true},
+		{"ci/setup/entrypoint.sh", false},
+		{"ci/setup/actions.yml", false},
+		{"docs/action.md", false},
+		{".github/workflows-docs/x.md", false},
+		{".github/dependabot.yml", false},
+		{"services/.github/workflows/ci.yaml", false},
+		{"github/workflows/ci.yaml", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := IsWorkflowPath(tc.path); got != tc.want {
+			t.Errorf("IsWorkflowPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }
 

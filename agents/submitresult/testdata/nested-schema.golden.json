@@ -4,7 +4,7 @@
       "input_schema": {
         "properties": {
           "reasoning": {
-            "description": "Explain why you are confident this result is complete and accurate.",
+            "description": "Give a short explanation of this result and the evidence behind it.",
             "type": "string"
           },
           "verdict": {

@@ -23,8 +23,10 @@ SPDX-License-Identifier: Apache-2.0
 //  2. Denylist. Regardless of who touched a file, [Denylist] refuses binary
 //     content, a set of artifact path patterns, a symlink replaced by a regular
 //     file, a Terraform lock file (unless the run declares a lock-file update),
-//     and files above a size ceiling. A denied path is dropped even when an edit
-//     tool wrote it; a run whose only changes are denied produces no commit.
+//     files above a size ceiling, and, for a consumer that opts in, GitHub
+//     workflows and action manifests (unless the run declares a workflow edit). A denied
+//     path is dropped even when an edit tool wrote it; a run whose only changes
+//     are denied produces no commit.
 //
 // Limitation of intent staging: the second half of the commit set, "modifications
 // to files tracked at the base," cannot tell a finalizer that deliberately

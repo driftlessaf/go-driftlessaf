@@ -85,6 +85,13 @@ func Map[Resp any](tools map[string]toolcall.Tool[Resp]) map[string]Metadata[Res
 	return m
 }
 
+// reasoningDescription documents the reasoning parameter injected into every
+// tool. It asks for a short note on the call, not for the model's reasoning:
+// Claude's reasoning_extraction safety classifier can refuse a turn of a tool
+// loop whose tools ask the model to explain its reasoning in a tool input.
+// See https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
+const reasoningDescription = "In one short sentence, say what this call is for."
+
 func toolParam(def toolcall.Definition) anthropic.ToolParam {
 	props := make(map[string]any, len(def.Parameters)+1)
 	required := []string{"reasoning"}
@@ -92,7 +99,7 @@ func toolParam(def toolcall.Definition) anthropic.ToolParam {
 	// Auto-inject reasoning as the first parameter.
 	props["reasoning"] = map[string]any{
 		"type":        "string",
-		"description": "Explain why you are making this tool call and what you hope to accomplish.",
+		"description": reasoningDescription,
 	}
 
 	for _, p := range def.Parameters {

@@ -22,9 +22,17 @@ import (
 	"github.com/chainguard-dev/clog"
 )
 
-// reasoningDescription documents the reasoning parameter in every provider's
-// submit tool schema.
+// reasoningDescription documents the reasoning parameter in the Google and
+// OpenAI submit tool schemas. Claude's is claudeReasoningDescription.
 const reasoningDescription = "Explain why you are confident this result is complete and accurate."
+
+// claudeReasoningDescription documents the reasoning parameter in Claude's
+// submit tool schema. It asks for a short explanation of the result and the
+// evidence behind it, not for the model's reasoning: Claude's
+// reasoning_extraction safety classifier can refuse a turn of a tool loop
+// whose tools ask the model to put its reasoning in a tool input.
+// See https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
+const claudeReasoningDescription = "Give a short explanation of this result and the evidence behind it."
 
 // ErrParameter marks a submit rejected before its payload could be parsed, for
 // one of four causes: the arguments did not decode as JSON, a required

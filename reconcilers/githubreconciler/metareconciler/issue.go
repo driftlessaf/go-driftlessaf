@@ -18,6 +18,7 @@ import (
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/commitscope"
 	"chainguard.dev/driftlessaf/reconcilers/statemachine"
 	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
@@ -316,8 +317,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			}
 		}()
 
-		// Run the agent and push changes
-		return lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
+		// Run the agent and push changes. The commit scope the lease installs on
+		// the update context is captured here, because the commit runs after the
+		// update function returns and the scope is where the guard records what
+		// it left out (see commitscope.Scope.Dropped).
+		var scope *commitscope.Scope
+		err = lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
+			scope, _ = commitscope.ScopeFromContext(ctx)
+
 			cbs, err := r.buildCallbacks(ctx, changeSession, lease)
 			if err != nil {
 				return "", fmt.Errorf("build callbacks: %w", err)
@@ -367,11 +374,28 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 				return "", errIssueInactive
 			}
 
+			// The workflow-edit declaration is read from the same fresh copy, at
+			// the moment the rule applies: a label removed while the agent ran
+			// does not lift it, and one added meanwhile does.
+			r.declareWorkflowEdit(freshIssue, scope)
+
 			// A commit is certain, so the regenerated body persists the
 			// headline for the runs that stack fix-up commits on this one.
 			changeSession.SetHeadline(prData.Headline)
 			return result.GetCommitMessage(), nil
 		})
+		// Whatever the commit's outcome, the guard's drops are known now: the
+		// body template renders them on a PR that carries the rest of the
+		// change, and the result can name them in its no-change explanation
+		// when nothing was left to commit. A nil scope (guard off) reports
+		// none.
+		prData.Dropped = scope.Dropped()
+		if agentRan {
+			if s, ok := any(result).(droppedSetter); ok {
+				s.SetDropped(prData.Dropped)
+			}
+		}
+		return err
 	})
 	if err != nil {
 		if errors.Is(err, errIssueInactive) {
@@ -498,6 +522,17 @@ func (r *Reconciler[Req, Resp, CB]) prLabelsForIssue(issue *github.Issue) []stri
 		}
 	}
 	return labels
+}
+
+// declareWorkflowEdit lifts the commit guard's workflow rule for this run when
+// the reconciler has a workflow-edit label and the issue carries it. It is
+// called with the issue as refreshed just before the commit, the point where
+// the rule applies, so the label's state while the agent ran does not matter.
+// A nil scope (guard off) is a no-op.
+func (r *Reconciler[Req, Resp, CB]) declareWorkflowEdit(issue *github.Issue, scope *commitscope.Scope) {
+	if r.workflowEditLabel != "" && hasLabel(issue, r.workflowEditLabel) {
+		scope.DeclareWorkflowEdit()
+	}
 }
 
 // draftForIssue reports whether the generated PR should open as a draft: only
