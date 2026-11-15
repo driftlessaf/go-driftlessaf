@@ -84,6 +84,10 @@ SPDX-License-Identifier: Apache-2.0
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //   - WithTruncatedToolCallRetries: Bound the retries when the output-token cap
 //     cuts off a tool call (defaults to 1)
+//   - WithRefusalNudge: Retry a turn the safety classifier refused with a
+//     nudge to continue through a tool call (off by default)
+//   - WithRefusalFallback: Retry a refused turn on another model, which then
+//     serves the rest of the call (off by default)
 //   - WithInputBudget: Keep every request inside the model's context window
 //     (off by default; see Input Budget)
 //   - WithInputBudgetNoReduction: Reject an over-budget turn at once instead

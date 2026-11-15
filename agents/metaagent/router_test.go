@@ -354,6 +354,14 @@ func TestRequirementsForConfig(t *testing.T) {
 			},
 			want: modelrouter.Requirements{ToolCalling: true, TerminalSubmission: true, RefusalRecovery: true},
 		},
+		{
+			name:     "refusal fallback",
+			protocol: modelrouter.ProtocolAnthropicMessages,
+			mutate: func(config *Config[*basetenTestResponse, toolcall.EmptyTools]) {
+				config.RefusalFallbackModel = "claude-opus-5-5"
+			},
+			want: modelrouter.Requirements{ToolCalling: true, TerminalSubmission: true, RefusalRecovery: true},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

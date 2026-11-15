@@ -148,3 +148,28 @@ func ExampleWithCacheTTL() {
 	// true
 	// true
 }
+
+// ExampleWithRefusalFallback demonstrates retrying a turn the safety
+// classifier refused on another model, served here by the same client, before
+// nudging the model on a refusal the fallback model returns too.
+func ExampleWithRefusalFallback() {
+	prompt, err := promptbuilder.NewPrompt("Respond to the request.")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	messages := anthropic.NewClient(option.WithAPIKey("example")).Messages
+	executor, err := claudeexecutor.NewWithMessages[promptbuilder.Noop, *struct{}](
+		messages,
+		prompt,
+		claudeexecutor.WithModel[promptbuilder.Noop, *struct{}]("claude-sonnet-5-5"),
+		claudeexecutor.WithRefusalFallback[promptbuilder.Noop, *struct{}](claudeexecutor.RefusalFallback{
+			Messages:        messages,
+			ProviderModelID: "claude-opus-5-5",
+		}),
+		claudeexecutor.WithRefusalNudge[promptbuilder.Noop, *struct{}](2),
+	)
+	fmt.Println(executor != nil && err == nil)
+	// Output: true
+}

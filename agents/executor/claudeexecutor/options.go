@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package claudeexecutor
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"strings"
@@ -568,6 +569,60 @@ func WithRefusalNudge[Request promptbuilder.Bindable, Response any](maxRetries i
 			return fmt.Errorf("refusal nudge max retries must be at least 1, got %d", maxRetries)
 		}
 		e.refusalNudgeMaxRetries = maxRetries
+		return nil
+	}
+}
+
+// WithRefusalFallback retries a turn refused by Anthropic's safety classifier
+// (Message.StopReason == "refusal") on another model before any nudge
+// WithRefusalNudge sends: the refused request goes to fallback unchanged. Once
+// a turn has fallen back, the rest of the call (Execute, Resume or Continue)
+// stays on the fallback, as Anthropic recommends, rather than sending each
+// later turn back to a model that refused the context it extends. The next
+// call starts on the configured model again. A refusal on the fallback is
+// handled as one without it: nudged under WithRefusalNudge, fatal otherwise.
+// So is the refused turn when the fallback's retry of it fails outright (an
+// API error, exhausted retries, a dropped stream): the call goes back to the
+// configured model, and the nudge gets the turn it would have had.
+//
+// The conversation's earlier thinking blocks are sent to the fallback
+// unchanged; the API drops, unbilled, any block the fallback model cannot
+// read, so a cross-model retry needs no stripping.
+//
+// The refused turn stays in the trace with the refusal among its errors, and
+// every turn sent to the fallback is traced and metered under the fallback's
+// model, so refusals stay countable and each model's tokens are its own.
+//
+// The fallback must accept the request built for the configured model: New
+// fails when the fallback rejects the sampling parameters, thinking
+// configuration or forced tool choice that request can carry, resolves the
+// effort to another level, needs tool schemas without the reasoning parameter
+// the request's tools carry, or has a smaller context window than the one
+// WithInputBudget measures against. It also fails on a zero Messages.
+func WithRefusalFallback[Request promptbuilder.Bindable, Response any](fallback RefusalFallback) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		// A constructed service always carries its client's options; the
+		// zero value has no endpoint or credentials, and would fail only on
+		// the first refusal.
+		if len(fallback.Messages.Options) == 0 {
+			return errors.New("refusal fallback: Messages is the zero value; pass the service that serves the fallback model")
+		}
+		if strings.TrimSpace(fallback.ProviderModelID) == "" {
+			return errors.New("refusal fallback: provider model ID cannot be empty")
+		}
+		if strings.TrimSpace(fallback.ProviderModelID) != fallback.ProviderModelID {
+			return fmt.Errorf("refusal fallback: provider model ID %q cannot have leading or trailing whitespace", fallback.ProviderModelID)
+		}
+		fallback.LogicalModelID = cmp.Or(fallback.LogicalModelID, fallback.ProviderModelID)
+		if model.Resolve(fallback.LogicalModelID).Backend != model.BackendClaude {
+			return fmt.Errorf("refusal fallback: logical model %q does not identify a Claude capability family", fallback.LogicalModelID)
+		}
+		if fallback.Attribution != (agenttrace.Attribution{}) {
+			if err := fallback.Attribution.Validate(); err != nil {
+				return fmt.Errorf("refusal fallback: invalid attribution: %w", err)
+			}
+		}
+		e.refusalFallback = &fallback
 		return nil
 	}
 }

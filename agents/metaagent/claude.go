@@ -92,24 +92,43 @@ type claudeAgentConstruction struct {
 	applyTemperature bool
 	resourceLabels   map[string]string
 	attribution      *agenttrace.Attribution
+	refusalFallback  *claudeexecutor.RefusalFallback
 }
 
+// newRoutedClaudeAgent builds the agent binding serves, retrying refused
+// turns on fallback when it is not nil.
 func newRoutedClaudeAgent[Req promptbuilder.Bindable, Resp, CB any](
 	binding AnthropicMessagesBinding,
+	fallback *AnthropicMessagesBinding,
 	config Config[Resp, CB],
 ) (Agent[Req, Resp, CB], error) {
 	plan := binding.Plan()
-	attribution := routedAttribution(plan)
-	attribution.Serving.Location = binding.ResourceLabels()["region"]
-	return newClaudeAgentWithMessages[Req, Resp, CB](claudeAgentConstruction{
+	construction := claudeAgentConstruction{
 		messages:         binding.Messages(),
 		providerModelID:  plan.ProviderModelID(),
 		logicalModelID:   plan.LogicalModel(),
 		routed:           true,
 		applyTemperature: plan.Capabilities().SamplingParameters,
 		resourceLabels:   binding.ResourceLabels(),
-		attribution:      &attribution,
-	}, config)
+		attribution:      new(bindingAttribution(binding)),
+	}
+	if fallback != nil {
+		construction.refusalFallback = &claudeexecutor.RefusalFallback{
+			Messages:        fallback.Messages(),
+			ProviderModelID: fallback.Plan().ProviderModelID(),
+			LogicalModelID:  fallback.Plan().LogicalModel(),
+			Attribution:     bindingAttribution(*fallback),
+			ResourceLabels:  fallback.ResourceLabels(),
+		}
+	}
+	return newClaudeAgentWithMessages[Req, Resp, CB](construction, config)
+}
+
+// bindingAttribution is the attribution of the turns binding serves.
+func bindingAttribution(binding AnthropicMessagesBinding) agenttrace.Attribution {
+	attribution := routedAttribution(binding.Plan())
+	attribution.Serving.Location = binding.ResourceLabels()["region"]
+	return attribution
 }
 
 func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
@@ -176,6 +195,10 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 
 	if config.RefusalNudgeMaxRetries > 0 {
 		executorOpts = append(executorOpts, claudeexecutor.WithRefusalNudge[Req, Resp](config.RefusalNudgeMaxRetries))
+	}
+
+	if construction.refusalFallback != nil {
+		executorOpts = append(executorOpts, claudeexecutor.WithRefusalFallback[Req, Resp](*construction.refusalFallback))
 	}
 
 	if config.MaxToolCallsBeforeFinalize != 0 {

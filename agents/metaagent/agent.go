@@ -7,6 +7,7 @@ package metaagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -43,6 +44,9 @@ func New[Req promptbuilder.Bindable, Resp, CB any](
 	}
 	if config.ClaudeRequestTimeout != 0 && info.Backend != model.BackendClaude {
 		return nil, fmt.Errorf("ClaudeRequestTimeout requires the Claude backend")
+	}
+	if config.RefusalFallbackModel != "" {
+		return nil, errors.New("RefusalFallbackModel requires routed construction; use NewWithTarget or NewRouted")
 	}
 	switch info.Backend {
 	case model.BackendGemini:

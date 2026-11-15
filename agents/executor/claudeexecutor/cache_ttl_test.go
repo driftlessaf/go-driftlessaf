@@ -262,7 +262,7 @@ func TestServingAttributionCacheTTL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newTestExecutor(t, tc.opts...)
-			got := e.servingAttribution().Serving.CacheTTLSeconds
+			got := e.servingAttribution(e.attribution).Serving.CacheTTLSeconds
 			switch {
 			case tc.want == nil && got != nil:
 				t.Errorf("CacheTTLSeconds: got = %d, want = nil", *got)

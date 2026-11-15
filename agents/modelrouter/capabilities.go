@@ -43,7 +43,8 @@ type Capabilities struct {
 	// MaximumOutputTokens reports whether the executor accepts an explicit
 	// output-token limit.
 	MaximumOutputTokens bool
-	// RefusalRecovery reports whether the executor implements refusal nudges.
+	// RefusalRecovery reports whether the executor recovers from refused turns:
+	// a refusal nudge, and a retry on a refusal fallback model.
 	RefusalRecovery bool
 }
 

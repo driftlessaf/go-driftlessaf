@@ -266,7 +266,13 @@ func NewRouted[Req promptbuilder.Bindable, Resp, CB any](
 		if err != nil {
 			return nil, err
 		}
-		return newRoutedClaudeAgent[Req, Resp, CB](binding, config)
+		var fallback *AnthropicMessagesBinding
+		if config.RefusalFallbackModel != "" {
+			if fallback, err = bindRefusalFallback(ctx, router, plan, requirements, config.RefusalFallbackModel); err != nil {
+				return nil, err
+			}
+		}
+		return newRoutedClaudeAgent[Req, Resp, CB](binding, fallback, config)
 
 	case modelrouter.ProtocolOpenAIChatCompletions:
 		binding, err := resolution.bindOpenAIChatCompletions(ctx, requirements)
@@ -300,8 +306,33 @@ func requirementsForConfig[Resp, CB any](protocol modelrouter.Protocol, config C
 		TerminalSubmission:  true,
 		SuspendResume:       config.SuspendToolName != "" || config.SuspendOnSubmit,
 		MaximumOutputTokens: config.MaxTokens != 0,
-		RefusalRecovery:     config.RefusalNudgeMaxRetries != 0,
+		RefusalRecovery:     config.RefusalNudgeMaxRetries != 0 || config.RefusalFallbackModel != "",
 	}
+}
+
+// bindRefusalFallback resolves logicalModel on router, on the provider plan
+// was selected for, and binds it as the refusal fallback of plan's agent. The
+// fallback must serve the Anthropic Messages protocol and every requirement
+// the agent's own route serves.
+func bindRefusalFallback(ctx context.Context, router *Router, plan modelrouter.Plan, requirements modelrouter.Requirements, logicalModel string) (*AnthropicMessagesBinding, error) {
+	if logicalModel == plan.LogicalModel() {
+		return nil, fmt.Errorf("creating routed meta-agent: RefusalFallbackModel %q is the selected model", logicalModel)
+	}
+	resolution, err := router.Resolve(modelrouter.Selection{Provider: plan.Provider(), LogicalModel: logicalModel})
+	if err != nil {
+		return nil, fmt.Errorf("creating routed meta-agent: refusal fallback: %w", err)
+	}
+	// The agent sends a temperature when the selected route allows sampling
+	// parameters; Requirements carries no sampling field, so the fallback's
+	// route is held to it here.
+	if plan.Capabilities().SamplingParameters && !resolution.Plan().Capabilities().SamplingParameters {
+		return nil, fmt.Errorf("creating routed meta-agent: refusal fallback %q: its route does not take the sampling parameters the selected route sends", logicalModel)
+	}
+	binding, err := resolution.BindAnthropicMessages(ctx, requirements)
+	if err != nil {
+		return nil, fmt.Errorf("creating routed meta-agent: refusal fallback %q: %w", logicalModel, err)
+	}
+	return &binding, nil
 }
 
 func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
@@ -370,6 +401,9 @@ func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol
 	}
 	if config.CacheTTL != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: CacheTTL is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
+	if config.RefusalFallbackModel != "" && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: RefusalFallbackModel is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}
 	switch protocol {
 	case modelrouter.ProtocolGoogleGenAI:

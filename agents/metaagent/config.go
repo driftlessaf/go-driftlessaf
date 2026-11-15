@@ -138,6 +138,16 @@ type Config[Resp, CB any] struct {
 	// route supports refusal recovery. See claudeexecutor.WithRefusalNudge.
 	RefusalNudgeMaxRetries int
 
+	// RefusalFallbackModel, when set, names the logical model a turn refused
+	// by Anthropic's safety classifier is retried on before any nudge; the
+	// fallback then serves the rest of the call. It is resolved and bound
+	// through the same Router, on the selected route's provider, and must
+	// support every capability this Config requires and take the sampling
+	// parameters the selected route sends. Routed construction on
+	// the Anthropic Messages protocol only: the compatibility New path and
+	// other protocols reject it. See claudeexecutor.WithRefusalFallback.
+	RefusalFallbackModel string
+
 	// MaxToolCallsBeforeFinalize, when positive, asks the model once to call its
 	// submit tool after this many investigative tool calls, forcing it where the
 	// model allows, unless an earlier finalize nudge was sent; a run that would

@@ -148,7 +148,8 @@ func TestRefusalNudgeRetriesThenSucceeds(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	resp, execErr := exec.Execute(t.Context(), errCapRequest{}, nil)
+	tracer := &recordingTracer{}
+	resp, execErr := exec.Execute(agenttrace.WithTracer[errCapResponse](t.Context(), tracer), errCapRequest{}, nil)
 	if execErr != nil {
 		t.Fatalf("Execute: %v", execErr)
 	}
@@ -159,6 +160,16 @@ func TestRefusalNudgeRetriesThenSucceeds(t *testing.T) {
 	reqs := requests()
 	if got := len(reqs); got != 2 {
 		t.Fatalf("HTTP requests: got = %d, want = 2 (one refusal, one retry)", got)
+	}
+
+	// The refusal the nudge recovered from stays on its turn, which did not
+	// fail, so the trace still counts it.
+	if len(tracer.traces) != 1 || len(tracer.traces[0].Turns) != 2 {
+		t.Fatalf("trace turns: got %d traces, want one with 2 turns", len(tracer.traces))
+	}
+	refused := tracer.traces[0].Turns[0]
+	if refused.Failed || len(refused.Errors) != 1 || !strings.Contains(refused.Errors[0], "category: cyber") || !strings.Contains(refused.Errors[0], "retried with a nudge") {
+		t.Errorf("the refused turn: got failed = %t, errors = %q, want the refusal and its nudge recorded on a turn that did not fail", refused.Failed, refused.Errors)
 	}
 
 	msgs := requestMessages(t, reqs[1])

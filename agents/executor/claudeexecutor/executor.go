@@ -205,6 +205,12 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// refusal.go.
 	refusalNudgeMaxRetries int
 
+	// refusalFallback is the model a refused turn is retried on, as
+	// WithRefusalFallback set it; nil disables the fallback. fallback is
+	// where its turns are sent, built from it in New. See refusal.go.
+	refusalFallback *RefusalFallback
+	fallback        *servingModel
+
 	// truncatedToolCallRetries bounds how many turns per run cut off at
 	// max_tokens mid tool call are answered with an error tool_result and
 	// retried before the run fails with a *TruncatedToolCallError. Set via
@@ -357,24 +363,92 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 		return nil, errors.New("WithSuspendOnSubmit requires a submit tool (WithSubmitResultProvider)")
 	}
 
-	// Claude on Vertex AI forwards request labels to Cloud Billing only from
-	// the X-Vertex-AI-Labels header, as base64-encoded JSON. The attribution
-	// names the serving provider for both WithProvider and routed models.
-	if e.attribution.ProviderName == ProviderVertex.metricName() {
-		if labels := vertexBillingLabels(e.resourceLabels); len(labels) > 0 {
-			encoded, err := json.Marshal(labels)
-			if err != nil {
-				return nil, fmt.Errorf("encoding Vertex AI billing labels: %w", err)
-			}
-			e.requestOptions = append(e.requestOptions, option.WithHeader("X-Vertex-AI-Labels", base64.StdEncoding.EncodeToString(encoded)))
-		}
+	labelOptions, err := vertexLabelOptions(e.attribution, e.resourceLabels)
+	if err != nil {
+		return nil, err
 	}
+	e.requestOptions = append(e.requestOptions, labelOptions...)
 
 	// The recorder is built after options so it captures the final model,
 	// provider, and resource labels.
 	e.telemetry = telemetry.NewRecorder(genaiMetrics, e.modelName, e.attribution.LogicalModel, e.attribution.ProviderName, e.resourceLabels, responseCodeFromError)
 
+	// Built last: the check reads the resolved thinking and input budget.
+	if e.refusalFallback != nil {
+		if e.fallback, err = e.buildFallback(genaiMetrics); err != nil {
+			return nil, err
+		}
+	}
+
 	return e, nil
+}
+
+// vertexLabelOptions returns the request option that carries labels to Cloud
+// Billing when attribution names Vertex AI, which forwards request labels only
+// from the X-Vertex-AI-Labels header, as base64-encoded JSON. The attribution
+// names the serving provider for both WithProvider and routed models.
+func vertexLabelOptions(attribution agenttrace.Attribution, labels map[string]string) ([]option.RequestOption, error) {
+	if attribution.ProviderName != ProviderVertex.metricName() {
+		return nil, nil
+	}
+	labels = vertexBillingLabels(labels)
+	if len(labels) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return nil, fmt.Errorf("encoding Vertex AI billing labels: %w", err)
+	}
+	return []option.RequestOption{option.WithHeader("X-Vertex-AI-Labels", base64.StdEncoding.EncodeToString(encoded))}, nil
+}
+
+// buildFallback checks e's refusal fallback against the request e builds for
+// its configured model and returns where the fallback's turns are sent.
+func (e *executor[Request, Response]) buildFallback(genaiMetrics *metrics.GenAI) (*servingModel, error) {
+	f := e.refusalFallback
+	if f.ProviderModelID == e.modelName || f.LogicalModelID == e.capabilityModelName {
+		return nil, fmt.Errorf("refusal fallback %q is the configured model", f.LogicalModelID)
+	}
+	if why := e.fallbackMismatch(f.LogicalModelID); why != "" {
+		return nil, fmt.Errorf("refusal fallback %q cannot take the request built for %q: %s", f.LogicalModelID, e.capabilityModelName, why)
+	}
+	attribution := f.Attribution
+	if attribution == (agenttrace.Attribution{}) {
+		attribution = e.attribution
+		if attribution.LogicalModel != "" {
+			attribution.LogicalModel = f.LogicalModelID
+		}
+	}
+	labels := e.resourceLabels
+	if f.ResourceLabels != nil {
+		labels = execshared.DefaultResourceLabels(f.ResourceLabels)
+	}
+	labelOptions, err := vertexLabelOptions(attribution, labels)
+	if err != nil {
+		return nil, fmt.Errorf("refusal fallback: %w", err)
+	}
+	return &servingModel{
+		messages:       f.Messages,
+		modelName:      f.ProviderModelID,
+		attribution:    attribution,
+		requestOptions: labelOptions,
+		telemetry:      telemetry.NewRecorder(genaiMetrics, f.ProviderModelID, attribution.LogicalModel, attribution.ProviderName, labels, responseCodeFromError),
+	}, nil
+}
+
+// serving returns where a turn is sent: the refusal fallback once the call
+// has fallen back, the configured model otherwise.
+func (e *executor[Request, Response]) serving(fallenBack bool) servingModel {
+	if fallenBack {
+		return *e.fallback
+	}
+	return servingModel{
+		messages:       e.messages,
+		modelName:      e.modelName,
+		attribution:    e.attribution,
+		requestOptions: e.requestOptions,
+		telemetry:      e.telemetry,
+	}
 }
 
 // Execute runs the agent conversation with the given request and tools
@@ -549,6 +623,15 @@ func (e *executor[Request, Response]) runConversation(
 	// Zero when the option is unset, since the bound itself is zero and no
 	// retry is ever attempted.
 	refusalRetries := 0
+	// fallenBack records that a refused turn was retried on the refusal
+	// fallback (see WithRefusalFallback), which serves every later turn of
+	// this call. A suspension does not carry it: the next call starts on the
+	// configured model, and the envelope names that model's request.
+	fallenBack := false
+	// fallbackRetry is the refusal the next turn retries on the fallback; the
+	// turn takes it and clears it. A retry that fails outright hands the
+	// refusal back to the nudge (see executeTurn).
+	var fallbackRetry *RefusalError
 	// truncatedToolCalls counts the run's turns the output cap cut off mid
 	// tool call, bounded by truncatedToolCallRetries (see
 	// WithTruncatedToolCallRetries). It never resets: a suspension carries it
@@ -744,12 +827,51 @@ func (e *executor[Request, Response]) runConversation(
 		})
 	}
 
+	// nudge schedules a nudge after a refused turn of category, while
+	// WithRefusalNudge allows another and the loop has a turn left (turnLeft)
+	// to send it on, and reports whether it did. A nudge appended on the
+	// final turn would never be sent: the loop would exit and report the
+	// generic max-turns error instead of the typed refusal.
+	nudge := func(category string, turnLeft bool) bool {
+		if refusalRetries >= e.refusalNudgeMaxRetries || !turnLeft {
+			return false
+		}
+		refusalRetries++
+		e.telemetry.RecordToolCall(ctx, "refusal_nudge")
+		// The refused message's content is empty, so message.ToParam() cannot
+		// stand in for the assistant's turn here — an assistant message with
+		// zero content blocks is itself an invalid request, which is exactly
+		// why the "no content" fallback in executeTurn never appends it
+		// either. A placeholder assistant turn takes its place so the nudge
+		// that follows lands as a proper user turn, preserving the API's
+		// required user/assistant alternation, rather than landing right
+		// after the previous user turn with nothing in between.
+		params.Messages = append(params.Messages,
+			anthropic.MessageParam{
+				Role: anthropic.MessageParamRoleAssistant,
+				Content: []anthropic.ContentBlockParamUnion{
+					anthropic.NewTextBlock(refusedTurnPlaceholder),
+				},
+			},
+			anthropic.MessageParam{
+				Role: anthropic.MessageParamRoleUser,
+				Content: []anthropic.ContentBlockParamUnion{
+					anthropic.NewTextBlock(refusalNudgeText(category)),
+				},
+			},
+		)
+		return true
+	}
+
 	// The named err return is load-bearing: the deferred Fail call below reads
 	// it at function exit. Every error path must use `return ..., err` (or set
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
-		llmTurn := trace.BeginTurnWithAttribution(turn, e.modelName, e.servingAttribution())
+		retrying := fallbackRetry
+		fallbackRetry = nil
+		srv := e.serving(fallenBack)
+		llmTurn := trace.BeginTurnWithAttribution(turn, srv.modelName, e.servingAttribution(srv.attribution))
 		defer func() {
 			// A suspension is an intentional halt, not a failure: the shared
 			// carve-out keeps the turn from being marked Failed (the trace-level
@@ -774,7 +896,7 @@ func (e *executor[Request, Response]) runConversation(
 		// attempt is counted after RetryWithBackoff returns below.
 		turnCfg := e.retryConfig
 		turnCfg.OnAttemptError = llmTurn.RecordError
-		turnCfg = e.telemetry.WithAPIRequestCounter(ctx, turnCfg)
+		turnCfg = srv.telemetry.WithAPIRequestCounter(ctx, turnCfg)
 
 		// The budget runs after the tail advance and before RecordRequest so
 		// the request counted, the request traced and the request sent are
@@ -796,6 +918,12 @@ func (e *executor[Request, Response]) runConversation(
 			clog.WarnContext(ctx, "failed to record llm prompt payload", "error", err)
 		}
 
+		// The conversation's params always name the configured model, so a
+		// suspension captures its request; the turn names the model it is
+		// sent to.
+		request := params
+		request.Model = srv.modelName
+
 		// Stream response with retry for transient errors. Each attempt gets a
 		// fresh timer, so the latency recorded below is the answering attempt's.
 		var timer *calltiming.Timer
@@ -803,7 +931,7 @@ func (e *executor[Request, Response]) runConversation(
 			attemptCtx, cancel := e.attemptContext(ctx)
 			defer cancel()
 			timer = new(calltiming.Timer)
-			stream := e.messages.NewStreaming(timer.Context(attemptCtx), params, e.requestOptions...)
+			stream := srv.messages.NewStreaming(timer.Context(attemptCtx), request, srv.requestOptions...)
 			defer stream.Close()
 			var msg anthropic.Message
 			for stream.Next() {
@@ -835,17 +963,33 @@ func (e *executor[Request, Response]) runConversation(
 				// sets, it does not add). An error before message_start has
 				// no usage, and records nothing.
 				if msg.Usage.InputTokens > 0 || msg.Usage.OutputTokens > 0 {
-					e.telemetry.RecordTokens(ctx, msg.Usage.InputTokens, msg.Usage.OutputTokens)
+					srv.telemetry.RecordTokens(ctx, msg.Usage.InputTokens, msg.Usage.OutputTokens)
 				}
 				if e.cacheControl && (msg.Usage.CacheReadInputTokens > 0 || msg.Usage.CacheCreationInputTokens > 0) {
-					e.telemetry.RecordCacheTokens(ctx, msg.Usage.CacheReadInputTokens, msg.Usage.CacheCreationInputTokens)
+					srv.telemetry.RecordCacheTokens(ctx, msg.Usage.CacheReadInputTokens, msg.Usage.CacheCreationInputTokens)
 				}
 				return msg, err
 			}
 			return msg, nil
 		})
-		e.telemetry.RecordAPIRequest(ctx, err)
+		srv.telemetry.RecordAPIRequest(ctx, err)
 		if err != nil {
+			// The fallback's retry of a refused turn failed outright (an API
+			// error, retries exhausted, a dropped stream): the refused turn is
+			// handled as it would be without a fallback, on the configured
+			// model, so a fallback that cannot serve costs no recovery the
+			// nudge would have made. Its refusal stays on the refused turn.
+			if retrying != nil && ctx.Err() == nil {
+				fallenBack = false
+				clog.WarnContext(ctx, "The refusal fallback failed; handling the refused turn without it",
+					"fallback", srv.modelName, "turn", turn, "error", err)
+				if nudge(retrying.Category, turn+1 < startTurn+turnBudget) {
+					llmTurn.RecordError(fmt.Errorf("refusal fallback %s failed: %w; retried with a nudge on %s", srv.modelName, err, e.modelName))
+					return response, false, nil
+				}
+				llmTurn.RecordError(fmt.Errorf("refusal fallback %s failed: %w", srv.modelName, err))
+				return response, true, retrying
+			}
 			// A stream the transport dropped on every attempt fails the item
 			// as infrastructure WITHOUT a requeue marker. A Delay requeue
 			// resets the dispatcher's attempt count, and a drop can repeat for
@@ -873,7 +1017,7 @@ func (e *executor[Request, Response]) runConversation(
 		// token totals are derived from turns[] in downstream consumers — see
 		// agent_trace_costs.sql.
 		if message.Usage.InputTokens > 0 || message.Usage.OutputTokens > 0 {
-			e.telemetry.RecordTokens(ctx, message.Usage.InputTokens, message.Usage.OutputTokens)
+			srv.telemetry.RecordTokens(ctx, message.Usage.InputTokens, message.Usage.OutputTokens)
 			llmTurn.RecordTokens(message.Usage.InputTokens, message.Usage.OutputTokens)
 		}
 
@@ -896,7 +1040,7 @@ func (e *executor[Request, Response]) runConversation(
 			cacheRead := message.Usage.CacheReadInputTokens
 			cacheCreation := message.Usage.CacheCreationInputTokens
 			if cacheRead > 0 || cacheCreation > 0 {
-				e.telemetry.RecordCacheTokens(ctx, cacheRead, cacheCreation)
+				srv.telemetry.RecordCacheTokens(ctx, cacheRead, cacheCreation)
 				llmTurn.RecordCacheTokens(cacheRead, cacheCreation)
 				clog.DebugContext(ctx, "Prompt cache metrics",
 					"cache_read_tokens", cacheRead,
@@ -909,47 +1053,40 @@ func (e *executor[Request, Response]) runConversation(
 		// A refusal means Anthropic's safety classifier intervened, not that
 		// the model chose to produce no content — message.Content is always
 		// empty on this path, so it must be handled before the "no content"
-		// fallback below, which cannot distinguish the two. Without
-		// WithRefusalNudge (refusalNudgeMaxRetries == 0) this fails the run
-		// immediately, same as before, just with a *RefusalError carrying the
-		// category instead of the generic message. With the option enabled,
-		// up to refusalNudgeMaxRetries consecutive refused turns are retried
-		// with a nudge first; a turn that completes resets the count.
+		// fallback below, which cannot distinguish the two. With
+		// WithRefusalFallback, the first refused turn of the call is sent
+		// again, unchanged, to the fallback model, which serves the rest of
+		// the call. With WithRefusalNudge, up to refusalNudgeMaxRetries
+		// consecutive refused turns are then retried with a nudge; a turn
+		// that completes resets the count. Without either, the run fails at
+		// once with a *RefusalError carrying the category. A refusal that is
+		// retried stays on its turn's errors, so the trace counts it.
 		if message.StopReason == anthropic.StopReasonRefusal {
 			refErr := refusalError(message.StopDetails)
 			clog.WarnContext(ctx, "Claude's safety classifier refused to respond",
-				"category", refErr.Category, "explanation", refErr.Explanation,
+				"category", refErr.Category, "explanation", refErr.Explanation, "model", srv.modelName,
 				"turn", turn, "retry", refusalRetries, "max_retries", e.refusalNudgeMaxRetries)
 
 			// A retry is scheduled only while the loop has a turn left to
-			// send it on. A nudge appended on the final turn would never be
-			// sent: the loop would exit and report the generic max-turns
-			// error instead of the typed refusal returned below.
-			if refusalRetries < e.refusalNudgeMaxRetries && turn+1 < startTurn+turnBudget {
-				refusalRetries++
-				e.telemetry.RecordToolCall(ctx, "refusal_nudge")
-				// message.Content is empty, so message.ToParam() cannot stand in
-				// for the assistant's turn here — an assistant message with zero
-				// content blocks is itself an invalid request, which is exactly
-				// why the "no content" fallback below never appends it either.
-				// A placeholder assistant turn takes its place so the nudge that
-				// follows lands as a proper user turn, preserving the API's
-				// required user/assistant alternation, rather than landing right
-				// after the previous user turn with nothing in between.
-				params.Messages = append(params.Messages,
-					anthropic.MessageParam{
-						Role: anthropic.MessageParamRoleAssistant,
-						Content: []anthropic.ContentBlockParamUnion{
-							anthropic.NewTextBlock(refusedTurnPlaceholder),
-						},
-					},
-					anthropic.MessageParam{
-						Role: anthropic.MessageParamRoleUser,
-						Content: []anthropic.ContentBlockParamUnion{
-							anthropic.NewTextBlock(refusalNudgeText(refErr.Category)),
-						},
-					},
-				)
+			// send it on; on the final turn the refusal fails the run.
+			turnLeft := turn+1 < startTurn+turnBudget
+			if e.fallback != nil && !fallenBack && turnLeft {
+				// Nothing is appended: the next turn sends this turn's
+				// request to the fallback, and a partial response the
+				// classifier cut off mid-stream is discarded. The
+				// conversation's earlier thinking blocks go with it
+				// unchanged; the API drops, unbilled, any block the
+				// fallback model cannot read.
+				fallenBack = true
+				fallbackRetry = refErr
+				e.telemetry.RecordToolCall(ctx, "refusal_fallback")
+				llmTurn.RecordError(fmt.Errorf("%w; retried on %s", refErr, e.fallback.modelName))
+				clog.WarnContext(ctx, "Retrying the refused turn on the refusal fallback model",
+					"model", srv.modelName, "fallback", e.fallback.modelName, "turn", turn)
+				return response, false, nil
+			}
+			if nudge(refErr.Category, turnLeft) {
+				llmTurn.RecordError(fmt.Errorf("%w; retried with a nudge", refErr))
 				return response, false, nil
 			}
 			return response, true, refErr
@@ -1319,12 +1456,11 @@ func (e *executor[Request, Response]) attemptContext(ctx context.Context) (conte
 	return context.WithCancel(ctx)
 }
 
-// servingAttribution returns the route attribution for one turn, stamped with
-// the lifetime of the cache breakpoints the request carries so the cost view
-// can price the turn's cache writes. Without caching there is no TTL to
-// record.
-func (e *executor[Request, Response]) servingAttribution() agenttrace.Attribution {
-	attribution := e.attribution
+// servingAttribution returns attribution, the route attribution of the model
+// one turn is sent to, stamped with the lifetime of the cache breakpoints the
+// request carries so the cost view can price the turn's cache writes. Without
+// caching there is no TTL to record.
+func (e *executor[Request, Response]) servingAttribution(attribution agenttrace.Attribution) agenttrace.Attribution {
 	if e.cacheControl {
 		attribution.Serving.CacheTTLSeconds = new(cacheTTLSeconds(e.cacheTTL))
 	}
