@@ -55,6 +55,24 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	case state.NeedsRebase():
 		clog.InfoContext(ctx, "PR needs rebase, starting fresh from default branch")
 
+	// A final allowed commit can still pass CI. Observe its outcome before
+	// stopping further iteration at the commit limit.
+	case !state.HasFindings() && state.HasPendingChecks():
+		log.With("pending_checks", session.PendingChecks()).Info("PR has pending checks, skipping")
+		return nil
+
+	case !state.HasFindings() && state.HasNoConflicts():
+		log.Info("PR is green, leaving it for human review")
+		if _, err := session.ApplyReadyForReview(ctx); err != nil {
+			return fmt.Errorf("apply ready-for-review: %w", err)
+		}
+		// The PR is green: drop any give-up comment from a prior iteration, since
+		// the PR recovered (e.g. a blocking dependency landed elsewhere) without
+		// the agent needing to push a fix. Clear is a no-op when no comment
+		// exists, so this is safe to run on every green pass.
+		r.giveUp.Clear(ctx, session)
+		return nil
+
 	case state.HitMaxCommits():
 		// Unresolved review feedback grants a fresh commit budget (a no-op
 		// unless WithDynamicCommitBudget is enabled). If the limit is still
@@ -74,10 +92,6 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 		log.With("findings", len(session.Findings())).Info("PR has CI findings, iterating")
 		usePRBranch = true
 
-	case state.HasPendingChecks():
-		log.With("pending_checks", session.PendingChecks()).Info("PR has pending checks, skipping")
-		return nil
-
 	// Mergeability not yet computed, with nothing else to act on (findings and
 	// pending checks handled above). Requeue to re-check rather than resetting
 	// the PR from the default branch, which would discard the agent's commits.
@@ -85,18 +99,6 @@ func (r *PRReconciler[Req, Resp, CB]) reconcilePath(ctx context.Context, res *gi
 	case state.IsUnknown() && r.unknownMergeabilityRequeueAfter > 0:
 		log.With("after", r.unknownMergeabilityRequeueAfter).Info("PR mergeability still being computed by GitHub, requeuing")
 		return workqueue.RequeueAfter(r.unknownMergeabilityRequeueAfter)
-
-	case state.HasNoConflicts():
-		log.Info("PR is green, leaving it for human review")
-		if _, err := session.ApplyReadyForReview(ctx); err != nil {
-			return fmt.Errorf("apply ready-for-review: %w", err)
-		}
-		// The PR is green: drop any give-up comment from a prior iteration, since
-		// the PR recovered (e.g. a blocking dependency landed elsewhere) without
-		// the agent needing to push a fix. Clear is a no-op when no comment
-		// exists, so this is safe to run on every green pass.
-		r.giveUp.Clear(ctx, session)
-		return nil
 
 	case !state.HasPR():
 		log.Info("No existing PR, creating from scratch")
