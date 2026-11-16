@@ -120,7 +120,7 @@ func TestForcePushUsesTrustedRemoteURLNotGitConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Head: %v", err)
 	}
-	_ = m.forcePushBranch(ctx, repo, head.Name(), trustedURL)
+	_ = m.forcePushBranch(ctx, repo, head.Name(), trustedURL, plumbing.ZeroHash)
 
 	// The token must NOT have reached the attacker host named by the rewritten
 	// .git/config...

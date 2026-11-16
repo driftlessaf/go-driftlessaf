@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -351,6 +352,1183 @@ func testMakeAndPushChangesNothingToCommit(t *testing.T, opts ...Option) {
 	if !errors.Is(err, ErrNothingToCommit) {
 		t.Errorf("MakeAndPushChanges with no changes: got = %v, wanted = ErrNothingToCommit", err)
 	}
+}
+
+// TestMakeAndPushChanges_RefusesOverwritingHumanCommit verifies a human's
+// commit to the PR branch, added while updateFn is still running, survives
+// the eventual force push.
+func TestMakeAndPushChanges_RefusesOverwritingHumanCommit(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRefusesOverwritingHumanCommit)
+}
+
+func testMakeAndPushChangesRefusesOverwritingHumanCommit(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Lease the PR branch itself (not the default branch), matching how
+	// metapathreconciler leases an existing PR's head branch for iteration.
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	// A human pushes to the branch while the agent's updateFn below is
+	// (conceptually) still running.
+	humanCommit := commitToTestRepoAs(t, repoDir, "human.yaml", "A Human", "human@example.com")
+	// A non-bare origin refuses a push to whichever branch its own worktree
+	// has checked out; switch off it, as a real bare GitHub remote would
+	// never have this restriction in the first place.
+	checkoutBranch(t, repoDir, "master")
+
+	err = lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+			return "", fmt.Errorf("WriteFile: %w", err)
+		}
+		if _, err := wt.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+			return "", fmt.Errorf("Add: %w", err)
+		}
+		return "agent change", nil
+	})
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("MakeAndPushChanges over a human commit: got = %v, wanted = ErrBranchMoved", err)
+	}
+
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen origin: %v", err)
+	}
+	branchRef, err := origin.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		t.Fatalf("Reference lookup: %v", err)
+	}
+	if branchRef.Hash() != humanCommit {
+		t.Errorf("branch tip after refused push: got %s, want the preserved human commit %s", branchRef.Hash(), humanCommit)
+	}
+}
+
+// TestMakeAndPushChanges_RefusesOverwritingHumanCommit_FullyQualifiedLease is
+// TestMakeAndPushChanges_RefusesOverwritingHumanCommit with the lease taken
+// against the fully qualified ref ("refs/heads/...") while MakeAndPushChanges
+// is called with the bare branch name: the guard must compare canonical ref
+// names, since comparing raw strings would never match these two forms,
+// silently disabling it.
+func TestMakeAndPushChanges_RefusesOverwritingHumanCommit_FullyQualifiedLease(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRefusesOverwritingHumanCommitFullyQualifiedLease)
+}
+
+func testMakeAndPushChangesRefusesOverwritingHumanCommitFullyQualifiedLease(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Lease the fully qualified ref; MakeAndPushChanges below is called with
+	// the bare branch name for the same branch.
+	lease, err := mgr.LeaseRef(ctx, res, "refs/heads/"+branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	humanCommit := commitToTestRepoAs(t, repoDir, "human.yaml", "A Human", "human@example.com")
+	checkoutBranch(t, repoDir, "master")
+
+	err = lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+			return "", fmt.Errorf("WriteFile: %w", err)
+		}
+		if _, err := wt.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+			return "", fmt.Errorf("Add: %w", err)
+		}
+		return "agent change", nil
+	})
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("MakeAndPushChanges over a human commit (fully qualified lease ref): got = %v, wanted = ErrBranchMoved", err)
+	}
+
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen origin: %v", err)
+	}
+	branchRef, err := origin.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		t.Fatalf("Reference lookup: %v", err)
+	}
+	if branchRef.Hash() != humanCommit {
+		t.Errorf("branch tip after refused push: got %s, want the preserved human commit %s", branchRef.Hash(), humanCommit)
+	}
+}
+
+// TestMakeAndPushChanges_GuardMatchesActualPushTarget covers the mix the
+// fully-qualified-lease test above doesn't: lease and branchName both already
+// fully qualified ("refs/heads/..."). refuseIfOverwritesOthers must decide
+// using the same ref createFreshBranch is about to push to, not a value it
+// resolves from branchName independently: createFreshBranch always treats
+// branchName as a bare name (plumbing.NewBranchReferenceName prepends
+// "refs/heads/" unconditionally, pre-existing and out of scope here), so for
+// this input the two disagree. Deciding from branchName would match the
+// lease, require a ref that can never exist, and permanently misreport
+// ErrBranchMoved; deciding from the actual push target correctly treats it
+// as unprotected instead, same as leasing some other ref entirely.
+func TestMakeAndPushChanges_GuardMatchesActualPushTarget(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesGuardMatchesActualPushTarget)
+}
+
+func testMakeAndPushChangesGuardMatchesActualPushTarget(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	qualified := "refs/heads/" + branchName
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	// Lease and push both use the fully qualified form.
+	lease, err := mgr.LeaseRef(ctx, res, qualified)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	if err := lease.MakeAndPushChanges(ctx, qualified, func(_ context.Context, wt *git.Worktree) (string, error) {
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+			return "", fmt.Errorf("WriteFile: %w", err)
+		}
+		if _, err := wt.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+			return "", fmt.Errorf("Add: %w", err)
+		}
+		return "agent change", nil
+	}); err != nil {
+		t.Fatalf("MakeAndPushChanges with a fully qualified branchName matching the lease: got %v, want nil (no drift occurred)", err)
+	}
+}
+
+// TestMakeAndPushChanges_RefusesOverwritingOwnPriorCommit verifies the guard
+// refuses even when the branch moved under the manager's own identity (e.g.
+// an overlapping run of the same bot), not just a human's. Under this
+// package's exclusive-lease model that should not happen legitimately, so
+// there is no special case for it: any drift at all is refused, which is
+// both simpler and safer than trying to distinguish whose commit it is.
+func TestMakeAndPushChanges_RefusesOverwritingOwnPriorCommit(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRefusesOverwritingOwnPriorCommit)
+}
+
+func testMakeAndPushChangesRefusesOverwritingOwnPriorCommit(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	identity := "clonemanager-test"
+	mgr, err := New(ctx, staticTokenSource(""), identity, nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	priorCommit := commitToTestRepoAs(t, repoDir, "other-run.yaml", identity, identity+"@chainguard.dev")
+	checkoutBranch(t, repoDir, "master")
+
+	err = lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+			return "", fmt.Errorf("WriteFile: %w", err)
+		}
+		if _, err := wt.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+			return "", fmt.Errorf("Add: %w", err)
+		}
+		return "agent change", nil
+	})
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("MakeAndPushChanges over the bot's own prior commit: got = %v, wanted = ErrBranchMoved", err)
+	}
+
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen origin: %v", err)
+	}
+	branchRef, err := origin.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		t.Fatalf("Reference lookup: %v", err)
+	}
+	if branchRef.Hash() != priorCommit {
+		t.Errorf("branch tip after refused push: got %s, want the preserved prior commit %s", branchRef.Hash(), priorCommit)
+	}
+}
+
+// TestMakeAndPushChanges_PRIterationNoDrift covers the case
+// TestMakeAndPushChanges never did: leasing the exact branch being pushed
+// back to (branchName == leasedRef), the same shape metapathreconciler uses
+// to iterate on an existing PR. With no drift, the RequireRemoteRefs
+// constraint refuseIfOverwritesOthers returns must match the actual remote
+// state and let the push through, and the recheck fetch must not count
+// toward the clone's fetch bound: its destination ref is always deleted and
+// recreated, so backend.fetch's grew signal is always true there regardless
+// of whether a pack actually transferred.
+func TestMakeAndPushChanges_PRIterationNoDrift(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesPRIterationNoDrift)
+}
+
+func testMakeAndPushChangesPRIterationNoDrift(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	fetchesBeforePush := lease.clone.fetches
+
+	if err := lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+			return "", fmt.Errorf("WriteFile: %w", err)
+		}
+		if _, err := wt.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+			return "", fmt.Errorf("Add: %w", err)
+		}
+		return "agent change", nil
+	}); err != nil {
+		t.Fatalf("MakeAndPushChanges with no drift: %v", err)
+	}
+
+	if lease.clone.fetches != fetchesBeforePush {
+		t.Errorf("clone.fetches after recheck fetch: got %d, want %d (recheck fetch must not count toward the fetch bound)", lease.clone.fetches, fetchesBeforePush)
+	}
+
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen origin: %v", err)
+	}
+	branchRef, err := origin.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		t.Fatalf("Reference lookup: %v", err)
+	}
+	if branchRef.Hash().String() == headHash {
+		t.Errorf("branch tip after push: still at %s, want it to have advanced", headHash)
+	}
+	pushedCommit, err := origin.CommitObject(branchRef.Hash())
+	if err != nil {
+		t.Fatalf("load pushed commit: %v", err)
+	}
+	if _, err := pushedCommit.File(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Errorf("pushed commit missing bot.yaml: %v", err)
+	}
+}
+
+// TestMakeAndPushChanges_RefusesPushTimeLeaseRejection exercises the half of
+// the TOCTOU guard the other refuse tests above cannot reach: they land the
+// drift before MakeAndPushChanges starts, so refuseIfOverwritesOthers' own
+// recheck fetch catches it locally. This test lands the drift after that
+// recheck but before forcePushBranch runs.
+//
+// The resulting rejection is go-git's own client-side RequireRemoteRefs check
+// against a fresh advertisement, not a round trip to a real git-receive-pack
+// -- go-git offers no way to narrow the window further. It still proves a
+// real TOCTOU gap end to end, and is the only test here that drives
+// isRemoteRefLeaseRejected's "required to be" marker against a real error;
+// the other two, server-only markers are covered synthetically by
+// TestIsRemoteRefLeaseRejected.
+func TestMakeAndPushChanges_RefusesPushTimeLeaseRejection(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRefusesPushTimeLeaseRejection)
+}
+
+func testMakeAndPushChangesRefusesPushTimeLeaseRejection(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	ref, err := lease.createFreshBranch(branchName)
+	if err != nil {
+		t.Fatalf("createFreshBranch: %v", err)
+	}
+	worktree, err := lease.clone.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := worktree.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := lease.manager.commitChanges(ctx, lease.clone.repo, nil, nil, "agent change"); err != nil {
+		t.Fatalf("commitChanges: %v", err)
+	}
+
+	// The recheck fetch runs here, against the remote as it stands right now
+	// -- no drift yet, so this succeeds and returns the SHA the push below
+	// must require the remote to still be at.
+	requireRemote, err := lease.refuseIfOverwritesOthers(ctx, ref)
+	if err != nil {
+		t.Fatalf("refuseIfOverwritesOthers before drift: %v", err)
+	}
+
+	// Land the drift in the window the local recheck already passed: a human
+	// pushes to the branch after refuseIfOverwritesOthers observed it, but
+	// before forcePushBranch's push reaches the remote.
+	checkoutBranch(t, repoDir, branchName)
+	humanCommit := commitToTestRepoAs(t, repoDir, "human.yaml", "A Human", "human@example.com")
+	checkoutBranch(t, repoDir, "master")
+
+	err = lease.manager.forcePushBranch(ctx, lease.clone.repo, ref, lease.remoteURL, requireRemote)
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("forcePushBranch over a lease rejected at push time: got = %v, wanted = ErrBranchMoved", err)
+	}
+
+	origin, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen origin: %v", err)
+	}
+	branchRef, err := origin.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		t.Fatalf("Reference lookup: %v", err)
+	}
+	if branchRef.Hash() != humanCommit {
+		t.Errorf("branch tip after rejected push: got %s, want the preserved human commit %s", branchRef.Hash(), humanCommit)
+	}
+}
+
+// TestIsRemoteRefLeaseRejected covers the two markers
+// TestMakeAndPushChanges_RefusesPushTimeLeaseRejection cannot reach end to
+// end: "incorrect old value provided" and "cannot lock ref" come from a real
+// git-receive-pack's ref-transaction hook, not from go-git's own client-side
+// RequireRemoteRefs check, and this test suite has no way to drive an actual
+// server into producing them. These are synthetic error strings instead.
+func TestIsRemoteRefLeaseRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unrelated error", errors.New("connection reset by peer"), false},
+		{"required to be (go-git client-side check)", errors.New(`remote ref refs/heads/foo required to be abc123 but is def456`), true},
+		{"incorrect old value provided (git-receive-pack)", errors.New(`! [remote rejected] foo -> foo (failed to update ref: incorrect old value provided)`), true},
+		{"cannot lock ref (git-receive-pack)", errors.New(`! [remote rejected] foo -> foo (cannot lock ref 'refs/heads/foo': is at abc123 but expected def456)`), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRemoteRefLeaseRejected(tt.err); got != tt.want {
+				t.Errorf("isRemoteRefLeaseRejected(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyPushError covers the requireRemote gate directly, for the same
+// reason TestIsRemoteRefLeaseRejected covers its markers synthetically: a
+// fresh branch's push (requireRemote zero) never carries a RequireRemoteRefs
+// constraint, so this suite has no way to make a real push produce a
+// lease-marker error under that condition to exercise end to end.
+func TestClassifyPushError(t *testing.T) {
+	leaseErr := errors.New(`! [remote rejected] foo -> foo (cannot lock ref 'refs/heads/foo': is at abc123 but expected def456)`)
+
+	t.Run("lease conflict", func(t *testing.T) {
+		got := classifyPushError(plumbing.NewHash("abc123"), leaseErr)
+		if !errors.Is(got, ErrBranchMoved) {
+			t.Errorf("classifyPushError with requireRemote set = %v, want ErrBranchMoved", got)
+		}
+	})
+
+	t.Run("fresh branch, same marker text", func(t *testing.T) {
+		got := classifyPushError(plumbing.ZeroHash, leaseErr)
+		if errors.Is(got, ErrBranchMoved) {
+			t.Errorf("classifyPushError with requireRemote zero = %v, want anything but ErrBranchMoved: a fresh branch has no lease constraint to violate", got)
+		}
+	})
+}
+
+// TestMakeAndPushChanges_RecheckRefEscapeIsRefused verifies
+// refuseIfOverwritesOthers' recheck fetch cannot be redirected outside the
+// clone: updateFn runs on untrusted worktree content before this fetch, and
+// could replace .git/refs/clonemanager-recheck with a symlink to write the
+// fetched ref somewhere else on the host. os.Root confines the symlink
+// removal that precedes the fetch, so the escaping symlink is cleared rather
+// than followed, and the external target is left untouched.
+func TestMakeAndPushChanges_RecheckRefEscapeIsRefused(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRecheckRefEscapeIsRefused)
+}
+
+func testMakeAndPushChangesRecheckRefEscapeIsRefused(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Return(ctx); err != nil {
+			t.Fatalf("Return: %v", err)
+		}
+	})
+
+	// An external directory the escaping symlink would target, standing in
+	// for an arbitrary host path outside the clone.
+	external := t.TempDir()
+
+	err = lease.MakeAndPushChanges(ctx, branchName, func(_ context.Context, wt *git.Worktree) (string, error) {
+		// Simulate updateFn's untrusted content replacing the recheck ref
+		// path with a symlink before refuseIfOverwritesOthers' fetch runs.
+		recheck := filepath.Join(lease.WorkingTree(), ".git", "refs", "clonemanager-recheck")
+		if err := os.MkdirAll(filepath.Dir(recheck), 0o755); err != nil {
+			return "", fmt.Errorf("MkdirAll: %w", err)
+		}
+		if err := os.Symlink(external, recheck); err != nil {
+			return "", fmt.Errorf("Symlink: %w", err)
+		}
+
+		if err := os.WriteFile(filepath.Join(wt.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+			return "", fmt.Errorf("WriteFile: %w", err)
+		}
+		if _, err := wt.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+			return "", fmt.Errorf("Add: %w", err)
+		}
+		return "agent change", nil
+	})
+	if err != nil {
+		t.Fatalf("MakeAndPushChanges with a symlinked recheck ref path: %v", err)
+	}
+
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatalf("ReadDir external: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("external directory after push: got %d entr(y/ies), want empty; the recheck fetch wrote through the symlink instead of it being cleared", len(entries))
+	}
+}
+
+// TestMakeAndPushChanges_RecheckRefParentEscapeIsRefused covers the case
+// TestMakeAndPushChanges_RecheckRefEscapeIsRefused doesn't: .git/refs itself
+// (a parent of the recheck ref, not the leaf) replaced with a symlink. The
+// guard must clear the whole path with Remove, not just check the leaf for a
+// symlink: an escaping parent surfaces as a non-ErrNotExist error from
+// Remove, which only a path-wide clear can catch.
+func TestMakeAndPushChanges_RecheckRefParentEscapeIsRefused(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRecheckRefParentEscapeIsRefused)
+}
+
+func testMakeAndPushChangesRecheckRefParentEscapeIsRefused(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		// The test corrupts .git/refs below; Return's own reset over that
+		// state can legitimately fail, but Return already discards the
+		// clone whenever reset fails, so there's nothing left to leak.
+		_ = lease.Return(ctx)
+	})
+
+	// Drive commitChanges directly rather than through the full
+	// MakeAndPushChanges/updateFn path: go-git's own worktree confinement
+	// already refuses a commit that has to update a branch ref through a
+	// symlinked .git/refs, so updateFn planting that symlink itself would
+	// never reach refuseIfOverwritesOthers at all. Committing first and
+	// corrupting refs after isolates the guard this test targets.
+	ref, err := lease.createFreshBranch(branchName)
+	if err != nil {
+		t.Fatalf("createFreshBranch: %v", err)
+	}
+	worktree, err := lease.clone.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := worktree.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := lease.manager.commitChanges(ctx, lease.clone.repo, nil, nil, "agent change"); err != nil {
+		t.Fatalf("commitChanges: %v", err)
+	}
+
+	// An external directory standing in for an arbitrary host path outside
+	// the clone.
+	external := t.TempDir()
+	refsDir := filepath.Join(lease.WorkingTree(), ".git", "refs")
+	if err := os.RemoveAll(refsDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.Symlink(external, refsDir); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	if _, err := lease.refuseIfOverwritesOthers(ctx, ref); err == nil || !strings.Contains(err.Error(), "clearing recheck ref path") {
+		t.Fatalf("refuseIfOverwritesOthers with a symlinked .git/refs: got %v, want an error clearing the recheck ref path", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(external, "clonemanager-recheck")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("external directory after push: clonemanager-recheck exists (err=%v), want absent; the recheck fetch wrote through the symlinked parent instead of the escape being refused", err)
+	}
+}
+
+// TestMakeAndPushChanges_RecheckFetchObjectEscapeIsRefused covers a
+// different write than the recheck ref: the fetch's received objects.
+// .git/objects is a real directory the clone depends on (unlike the
+// throwaway recheck ref), so the guard must clear only an actual symlink
+// there and replace it with a real, empty directory rather than leaving it
+// absent: a missing .git/objects makes git itself refuse the clone as "not a
+// git repository". Drift is real here (not just asserted by the test) so
+// the fetch has a new commit's objects to write, exercising the path a
+// no-drift fetch would skip.
+func TestMakeAndPushChanges_RecheckFetchObjectEscapeIsRefused(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRecheckFetchObjectEscapeIsRefused)
+}
+
+func testMakeAndPushChangesRecheckFetchObjectEscapeIsRefused(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		// The test corrupts .git/objects below; Return's own reset over that
+		// state can legitimately fail, but Return already discards the
+		// clone whenever reset fails, so there's nothing left to leak.
+		_ = lease.Return(ctx)
+	})
+
+	ref, err := lease.createFreshBranch(branchName)
+	if err != nil {
+		t.Fatalf("createFreshBranch: %v", err)
+	}
+	worktree, err := lease.clone.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := worktree.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := lease.manager.commitChanges(ctx, lease.clone.repo, nil, nil, "agent change"); err != nil {
+		t.Fatalf("commitChanges: %v", err)
+	}
+
+	// Land real drift: a human commit the recheck fetch must actually
+	// download, not just a hash the test asserts differs.
+	checkoutBranch(t, repoDir, branchName)
+	commitToTestRepoAs(t, repoDir, "human.yaml", "A Human", "human@example.com")
+	checkoutBranch(t, repoDir, "master")
+
+	// An external directory standing in for an arbitrary host path outside
+	// the clone.
+	external := t.TempDir()
+	objectsDir := filepath.Join(lease.WorkingTree(), ".git", "objects")
+	if err := os.RemoveAll(objectsDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.Symlink(external, objectsDir); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	_, err = lease.refuseIfOverwritesOthers(ctx, ref)
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("refuseIfOverwritesOthers with symlinked .git/objects: got %v, want ErrBranchMoved (the human commit is real drift)", err)
+	}
+
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatalf("ReadDir external: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("external directory after push: got %d entr(y/ies), want empty; the recheck fetch wrote objects through the symlink instead of it being cleared", len(entries))
+	}
+}
+
+// TestMakeAndPushChanges_RecheckFetchPackEscapeIsRefused covers the case
+// TestMakeAndPushChanges_RecheckFetchObjectEscapeIsRefused doesn't:
+// .git/objects/pack alone replaced with a symlink while .git/objects itself
+// stays a real, legitimate directory. The guard must check this path
+// directly, not rely on .git/objects alone being real: the two are checked
+// independently, and a parent being fine says nothing about a child.
+func TestMakeAndPushChanges_RecheckFetchPackEscapeIsRefused(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRecheckFetchPackEscapeIsRefused)
+}
+
+func testMakeAndPushChangesRecheckFetchPackEscapeIsRefused(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		// The test corrupts .git/objects/pack below; Return's own reset over
+		// that state can legitimately fail, but Return already discards the
+		// clone whenever reset fails, so there's nothing left to leak.
+		_ = lease.Return(ctx)
+	})
+
+	ref, err := lease.createFreshBranch(branchName)
+	if err != nil {
+		t.Fatalf("createFreshBranch: %v", err)
+	}
+	worktree, err := lease.clone.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := worktree.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := lease.manager.commitChanges(ctx, lease.clone.repo, nil, nil, "agent change"); err != nil {
+		t.Fatalf("commitChanges: %v", err)
+	}
+
+	// Land drift large enough that git's own default (transfer.unpackLimit
+	// 100) keeps it as a pack instead of unpacking into loose objects under
+	// .git/objects/<xx>/: a single small commit would never touch
+	// .git/objects/pack/ at all, so this is what makes the test actually
+	// exercise the path it targets for the CLI backend, rather than passing
+	// by the unrelated accident of a small drift. The clone's own .git/config
+	// can't be used to force this instead (every git invocation here resets
+	// it to a fixed minimal config first; see resetGitConfig).
+	checkoutBranch(t, repoDir, branchName)
+	driftRepo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	driftWT, err := driftRepo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	for i := range 150 {
+		name := filepath.ToSlash(filepath.Join("packages", fmt.Sprintf("drift-%d.yaml", i)))
+		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(fmt.Sprintf("name: drift-%d", i)), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		if _, err := driftWT.Add(name); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	if _, err := driftWT.Commit("land drift", &git.CommitOptions{
+		Author: &object.Signature{Name: "A Human", Email: "human@example.com", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	checkoutBranch(t, repoDir, "master")
+
+	// An external directory standing in for an arbitrary host path outside
+	// the clone. .git/objects itself is left alone, real and already
+	// populated by the initial clone; only the pack subdirectory is replaced.
+	external := t.TempDir()
+	packDir := filepath.Join(lease.WorkingTree(), ".git", "objects", "pack")
+	if err := os.RemoveAll(packDir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.Symlink(external, packDir); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	_, err = lease.refuseIfOverwritesOthers(ctx, ref)
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("refuseIfOverwritesOthers with symlinked .git/objects/pack: got %v, want ErrBranchMoved (the human commit is real drift)", err)
+	}
+
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatalf("ReadDir external: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("external directory after push: got %d entr(y/ies), want empty; the recheck fetch wrote a pack through the symlink instead of it being cleared", len(entries))
+	}
+}
+
+// TestMakeAndPushChanges_RecheckFetchFanoutEscapeIsRefused covers a loose
+// object landing through a fan-out bucket (.git/objects/<xx>) rather than
+// .git/objects or .git/objects/pack themselves: a bucket only exists once
+// some object has hashed into it, so updateFn can symlink one, or all 256,
+// to a host path before any real object lands there -- a path the earlier
+// two tests, which only check .git/objects and .git/objects/pack by name,
+// don't exercise.
+func TestMakeAndPushChanges_RecheckFetchFanoutEscapeIsRefused(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRecheckFetchFanoutEscapeIsRefused)
+}
+
+func testMakeAndPushChangesRecheckFetchFanoutEscapeIsRefused(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		// The test corrupts .git/objects/<xx> below; Return's own reset over
+		// that state can legitimately fail, but Return already discards the
+		// clone whenever reset fails, so there's nothing left to leak.
+		_ = lease.Return(ctx)
+	})
+
+	ref, err := lease.createFreshBranch(branchName)
+	if err != nil {
+		t.Fatalf("createFreshBranch: %v", err)
+	}
+	worktree, err := lease.clone.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := worktree.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := lease.manager.commitChanges(ctx, lease.clone.repo, nil, nil, "agent change"); err != nil {
+		t.Fatalf("commitChanges: %v", err)
+	}
+
+	// A single small commit, unlike the pack test's 150 files: it stays
+	// under git's transfer.unpackLimit default (100) and is unpacked into a
+	// loose object under some .git/objects/<xx>/, which is what this test
+	// needs to land through a fan-out bucket rather than a pack.
+	checkoutBranch(t, repoDir, branchName)
+	commitToTestRepoAs(t, repoDir, "human.yaml", "A Human", "human@example.com")
+	checkoutBranch(t, repoDir, "master")
+
+	// An external directory standing in for an arbitrary host path outside
+	// the clone. Every possible fan-out bucket is symlinked to it, since a
+	// bucket only exists once an object hashes into it and the drift's
+	// object hash isn't known ahead of time; .git/objects itself is left
+	// alone, real and already populated by the initial clone.
+	external := t.TempDir()
+	objectsDir := filepath.Join(lease.WorkingTree(), ".git", "objects")
+	for i := range 256 {
+		bucket := fmt.Sprintf("%02x", i)
+		p := filepath.Join(objectsDir, bucket)
+		if err := os.RemoveAll(p); err != nil {
+			t.Fatalf("RemoveAll: %v", err)
+		}
+		if err := os.Symlink(external, p); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+	}
+
+	_, err = lease.refuseIfOverwritesOthers(ctx, ref)
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("refuseIfOverwritesOthers with symlinked .git/objects/<xx>: got %v, want ErrBranchMoved (the human commit is real drift)", err)
+	}
+
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatalf("ReadDir external: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("external directory after push: got %d entr(y/ies), want empty; the recheck fetch wrote a loose object through a fan-out bucket symlink instead of it being cleared", len(entries))
+	}
+}
+
+// TestMakeAndPushChanges_RecheckFetchHeadEscapeIsRefused covers a write the
+// object-store hardening above doesn't reach: git fetch's own write to
+// .git/FETCH_HEAD. Unlike .git/objects, nothing in this package reads
+// FETCH_HEAD and the clone doesn't depend on it existing, so the fix is
+// suppressing the write outright (--no-write-fetch-head) rather than
+// detecting and clearing a symlink beforehand.
+func TestMakeAndPushChanges_RecheckFetchHeadEscapeIsRefused(t *testing.T) {
+	forEachBackend(t, testMakeAndPushChangesRecheckFetchHeadEscapeIsRefused)
+}
+
+func testMakeAndPushChangesRecheckFetchHeadEscapeIsRefused(t *testing.T, opts ...Option) {
+	ctx := t.Context()
+
+	mgr, err := New(ctx, staticTokenSource(""), "clonemanager-test", nil, opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	repoDir, headHash := initTestRepo(t)
+	branchName := "clonemanager/pr-branch"
+	checkoutTestBranch(t, repoDir, headHash)
+	checkoutBranch(t, repoDir, "master")
+
+	res := &githubreconciler.Resource{
+		Owner: "tests",
+		Repo:  repoDir,
+		Path:  filepath.ToSlash(filepath.Join("packages", "foo.yaml")),
+		Type:  githubreconciler.ResourceTypePath,
+	}
+
+	repoURL = func(*githubreconciler.Resource) string { return repoDir }
+	t.Cleanup(func() { repoURL = defaultRemoteURL })
+
+	lease, err := mgr.LeaseRef(ctx, res, branchName)
+	if err != nil {
+		t.Fatalf("LeaseRef: %v", err)
+	}
+	t.Cleanup(func() {
+		// The test corrupts .git/FETCH_HEAD below; Return's own reset over
+		// that state can legitimately fail, but Return already discards the
+		// clone whenever reset fails, so there's nothing left to leak.
+		_ = lease.Return(ctx)
+	})
+
+	ref, err := lease.createFreshBranch(branchName)
+	if err != nil {
+		t.Fatalf("createFreshBranch: %v", err)
+	}
+	worktree, err := lease.clone.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree.Filesystem.Root(), "packages", "bot.yaml"), []byte("name: bot"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := worktree.Add(filepath.ToSlash(filepath.Join("packages", "bot.yaml"))); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := lease.manager.commitChanges(ctx, lease.clone.repo, nil, nil, "agent change"); err != nil {
+		t.Fatalf("commitChanges: %v", err)
+	}
+
+	checkoutBranch(t, repoDir, branchName)
+	commitToTestRepoAs(t, repoDir, "human.yaml", "A Human", "human@example.com")
+	checkoutBranch(t, repoDir, "master")
+
+	// An external file standing in for an arbitrary host path outside the
+	// clone, pre-populated so a silent overwrite is detectable: FETCH_HEAD is
+	// a single file, not a directory the clone must find real afterward, so
+	// unlike the object-store tests above there's no empty-replacement to
+	// check for, only whether the write happened at all.
+	external := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(external, []byte("untouched"), 0o644); err != nil {
+		t.Fatalf("WriteFile external: %v", err)
+	}
+	fetchHead := filepath.Join(lease.WorkingTree(), ".git", "FETCH_HEAD")
+	if err := os.RemoveAll(fetchHead); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.Symlink(external, fetchHead); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	_, err = lease.refuseIfOverwritesOthers(ctx, ref)
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("refuseIfOverwritesOthers with symlinked .git/FETCH_HEAD: got %v, want ErrBranchMoved (the human commit is real drift)", err)
+	}
+
+	got, err := os.ReadFile(external)
+	if err != nil {
+		t.Fatalf("ReadFile external: %v", err)
+	}
+	if string(got) != "untouched" {
+		t.Errorf("external file after push: got %q, want %q; the recheck fetch wrote FETCH_HEAD through the symlink", got, "untouched")
+	}
+}
+
+// checkoutTestBranch creates the shared test PR branch in the origin repo
+// pointing at sha and checks it out, so a subsequent commit helper lands on
+// that branch rather than the repo's default branch.
+func checkoutTestBranch(t *testing.T, repoDir, sha string) {
+	t.Helper()
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	ref := plumbing.NewBranchReferenceName("clonemanager/pr-branch")
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(ref, plumbing.NewHash(sha))); err != nil {
+		t.Fatalf("SetReference: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Branch: ref}); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+}
+
+// checkoutBranch checks out an existing branch in the origin repo.
+func checkoutBranch(t *testing.T, repoDir, branchName string) {
+	t.Helper()
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(branchName)}); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+}
+
+// commitToTestRepoAs commits name to the origin repo's current branch (see
+// checkoutTestBranch) with the given author identity, returning the new
+// commit's hash.
+func commitToTestRepoAs(t *testing.T, repoDir, name, authorName, authorEmail string) plumbing.Hash {
+	t.Helper()
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	rel := filepath.ToSlash(filepath.Join("packages", name))
+	if err := os.WriteFile(filepath.Join(repoDir, rel), []byte("name: "+name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := wt.Add(rel); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	hash, err := wt.Commit("add "+name, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  authorName,
+			Email: authorEmail,
+			When:  time.Now(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	return hash
 }
 
 func initTestRepo(t *testing.T) (string, string) {

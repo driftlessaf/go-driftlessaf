@@ -55,6 +55,14 @@ var ErrNothingToCommit = errors.New("nothing to commit: working tree is clean")
 // [commitscope.Scope.MarkActive]) or declares the edit.
 var ErrUnguardedWorkflowEdit = errors.New("commit guard: workflow edit in a run without an active commit scope")
 
+// ErrBranchMoved is returned by MakeAndPushChanges when the target branch has
+// moved since it was leased. Under this package's exclusive-lease model
+// nothing else should legitimately move a branch during a lease, so any
+// movement at all — regardless of how many commits, who authored them, or
+// even an overlapping run of this same identity — is refused rather than
+// silently discarded by a force push.
+var ErrBranchMoved = errors.New("refusing to push: branch moved since it was leased")
+
 // LeaseOption configures optional parameters for LeaseRef.
 type LeaseOption func(*leaseOptions)
 
@@ -177,6 +185,12 @@ type Lease struct {
 	// in sync with the actual clone depth so callers never request more
 	// history than was fetched.
 	baseCommit plumbing.Hash
+	// leasedRef is the ref this lease fetched sha from. MakeAndPushChanges
+	// only re-checks for branch movement when pushing back to this same
+	// ref: that's the only case where sha reflects that branch's own prior
+	// remote state rather than some other ref (e.g. the default branch) a
+	// fresh PR branch is about to be created from.
+	leasedRef string
 }
 
 // UpdateFunc receives the prepared working tree for a lease and returns the
@@ -310,6 +324,7 @@ func (m *Manager) leaseRef(ctx context.Context, res *githubreconciler.Resource, 
 		sha:        sha,
 		pathExists: exists,
 		baseCommit: baseCommit,
+		leasedRef:  ref,
 	}, nil
 }
 
@@ -627,10 +642,140 @@ func (l *Lease) MakeAndPushChanges(ctx context.Context, branchName string, updat
 		"merge_base_sha", l.baseCommit.String(),
 		"commits_ahead_of_base", commitsAheadOfBase)
 
-	if err := l.manager.forcePushBranch(ctx, l.clone.repo, ref, l.remoteURL); err != nil {
+	requireRemote, err := l.refuseIfOverwritesOthers(ctx, ref)
+	if err != nil {
+		return err
+	}
+
+	if err := l.manager.forcePushBranch(ctx, l.clone.repo, ref, l.remoteURL, requireRemote); err != nil {
 		return fmt.Errorf("force pushing branch: %w", err)
 	}
 
+	return nil
+}
+
+// refuseIfOverwritesOthers re-fetches ref and refuses to let MakeAndPushChanges
+// force-push over it if its tip moved since it was leased -- e.g. a human
+// committing to the PR branch while updateFn is still running. ref must be
+// the same ref createFreshBranch is about to push to, not recomputed from
+// branchName independently: createFreshBranch always treats branchName as a
+// bare name (plumbing.NewBranchReferenceName prepends "refs/heads/"
+// unconditionally), so a caller passing an already-qualified branchName would
+// otherwise make this guard and the actual push target disagree. It only
+// applies when ref is the same ref this lease was created against (see
+// leasedRef): a fresh branch has no prior remote state of its own to protect,
+// so it returns a zero hash (no push constraint) in that case.
+//
+// On success it returns the SHA forcePushBranch must pin the push to via
+// RequireRemoteRefs, so a commit landing after this check returns but
+// before the push lands still fails the push (client- or server-side, see
+// isRemoteRefLeaseRejected) instead of being silently discarded.
+func (l *Lease) refuseIfOverwritesOthers(ctx context.Context, ref plumbing.ReferenceName) (plumbing.Hash, error) {
+	if ref != resolveRefName(l.leasedRef) {
+		return plumbing.ZeroHash, nil
+	}
+
+	// A fixed, single-segment ref name, not one built from ref: it's used and
+	// removed synchronously under an exclusive lease, so it needs no
+	// per-branch uniqueness, and a single segment is fully confined by one
+	// Remove below. ref commonly nests (e.g.
+	// "refs/heads/package-updater/os/foo.yaml"); a scratch ref built from it
+	// would spread the confinement check across several directories, any of
+	// which updateFn could symlink first.
+	const dstFSPath = ".git/refs/clonemanager-recheck"
+	dst := plumbing.ReferenceName("refs/clonemanager-recheck")
+
+	// updateFn's untrusted content may have planted a symlink here, or at a
+	// parent like .git/refs; clear it through the confined root, same as
+	// resetClone's .git/info/exclude removal, so an escape aborts instead of
+	// falling through to the unconfined fetch below.
+	if err := l.clone.root.Remove(dstFSPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return plumbing.ZeroHash, fmt.Errorf("clearing recheck ref path: %w", err)
+	}
+
+	// updateFn may also have replaced .git/objects, or a directory directly
+	// inside it (pack/, or a loose-object fan-out bucket like 3f/), with a
+	// symlink: both backends write the fetch's received objects there, and
+	// the CLI backend's git subprocess follows a symlink there with none of
+	// go-git's own confinement. Unlike dstFSPath above, removing a symlink
+	// here and leaving it absent isn't enough: an empty object store makes
+	// git itself refuse the clone as "not a git repository", so a cleared
+	// symlink is replaced with a real, empty directory in the same step.
+	if err := clearSymlinkedDir(l.clone.root, ".git/objects"); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	// Enumerated rather than hardcoded to "pack" alone: a fan-out bucket only
+	// exists once some object has hashed into it, so updateFn can plant a
+	// symlink under any name here, including one git itself never created
+	// yet. .git/objects is confirmed real above, so this only ever lists
+	// what updateFn or a prior lease actually left behind.
+	entries, err := fs.ReadDir(l.clone.root.FS(), ".git/objects")
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("listing .git/objects: %w", err)
+	}
+	for _, e := range entries {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		if err := clearSymlinkedDir(l.clone.root, ".git/objects/"+e.Name()); err != nil {
+			return plumbing.ZeroHash, err
+		}
+	}
+
+	// dst is deleted above and removed below on every call, so
+	// backend.fetch's grew signal always reports the ref as recreated here,
+	// not whether a pack transferred. Counting it would inflate
+	// WithMaxFetches past actual object-store growth.
+	refspec := fmt.Sprintf("+%s:%s", ref, dst)
+	if _, err := l.manager.backend.fetch(ctx, l.clone, l.remoteURL, refspec, dst, 1); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("re-fetching branch %q before push: %w", ref, err)
+	}
+	// This ref only exists to read the fetch result; clear it so it doesn't
+	// linger in .git/refs between calls.
+	defer func() {
+		if err := l.clone.repo.Storer.RemoveReference(dst); err != nil {
+			clog.WarnContextf(ctx, "Removing recheck ref %s: %v", dst, err)
+		}
+	}()
+
+	currentRef, err := l.clone.repo.Reference(dst, true)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("reading re-fetched branch %q: %w", ref, err)
+	}
+
+	leasedSHA := plumbing.NewHash(l.sha)
+	if currentRef.Hash() != leasedSHA {
+		return plumbing.ZeroHash, fmt.Errorf("%w: branch %q now at %s, leased at %s",
+			ErrBranchMoved, ref, currentRef.Hash(), l.sha)
+	}
+	return leasedSHA, nil
+}
+
+// clearSymlinkedDir replaces path with a real, empty directory if it is
+// currently a symlink, and leaves it untouched otherwise (including when it
+// doesn't exist, which callers that depend on path existing handle on their
+// own next read). Unlike a path with no such dependent, such as dstFSPath in
+// refuseIfOverwritesOthers, a cleared symlink here is recreated rather than
+// left absent: callers use this for directories the clone itself needs
+// present, where git would otherwise error out rather than proceed with a
+// confined replacement.
+func clearSymlinkedDir(root *os.Root, path string) error {
+	fi, err := root.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking %s for a symlink: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	if err := root.Remove(path); err != nil {
+		return fmt.Errorf("clearing symlinked %s: %w", path, err)
+	}
+	if err := root.Mkdir(path, 0o755); err != nil {
+		return fmt.Errorf("recreating %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -766,15 +911,10 @@ func (m *Manager) commitChanges(ctx context.Context, repo *git.Repository, scope
 		return err
 	}
 
-	email := m.identity
-	if !strings.Contains(email, "@") {
-		email = fmt.Sprintf("%s@chainguard.dev", email)
-	}
-
 	_, err = worktree.Commit(commitMessage, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  m.identity,
-			Email: email,
+			Email: m.authorEmail(),
 			When:  time.Now(),
 		},
 		Signer: m.signer,
@@ -784,6 +924,16 @@ func (m *Manager) commitChanges(ctx context.Context, repo *git.Repository, scope
 	}
 
 	return nil
+}
+
+// authorEmail returns the commit author email derived from the manager's
+// identity, suffixing it with @chainguard.dev when the identity itself
+// isn't already an email address.
+func (m *Manager) authorEmail() string {
+	if strings.Contains(m.identity, "@") {
+		return m.identity
+	}
+	return fmt.Sprintf("%s@chainguard.dev", m.identity)
 }
 
 // trustedRemote returns an in-memory git remote pinned to remoteURL, so push and
@@ -799,7 +949,14 @@ func trustedRemote(repo *git.Repository, remoteURL string) *gogit.Remote {
 	})
 }
 
-func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, remoteURL string) error {
+// forcePushBranch force-pushes ref to remoteURL. When requireRemote is
+// non-zero, the push carries a RequireRemoteRefs constraint pinning it to
+// that SHA (force-with-lease semantics), rejecting the push if the remote's
+// current value isn't exactly requireRemote. That closes the window a
+// caller's own earlier check (necessarily separate from the push itself)
+// cannot: a commit landing between that check and this call still fails the
+// push instead of being silently discarded by the plain Force push below.
+func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, remoteURL string, requireRemote plumbing.Hash) error {
 	if remoteURL == "" {
 		return errors.New("refusing to push: no trusted remote URL")
 	}
@@ -814,11 +971,11 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 	if headRef, herr := repo.Reference(ref, true); herr == nil {
 		pushHeadSHA = headRef.Hash().String()
 	}
-	clog.InfoContext(ctx, "Force pushing branch", "ref", ref.String(), "head_sha", pushHeadSHA, "remote", remoteURL)
+	clog.InfoContext(ctx, "Force pushing branch", "ref", ref.String(), "head_sha", pushHeadSHA, "remote", remoteURL, "require_remote", requireRemote.String())
 
 	remote := trustedRemote(repo, remoteURL)
 
-	err = remote.PushContext(ctx, &git.PushOptions{
+	pushOpts := &git.PushOptions{
 		RemoteName: "origin",
 		Auth: &githttp.BasicAuth{
 			Username: "unused-when-using-access-tokens",
@@ -826,16 +983,55 @@ func (m *Manager) forcePushBranch(ctx context.Context, repo *git.Repository, ref
 		},
 		Force:    true,
 		RefSpecs: []gitconfig.RefSpec{refSpec},
-	})
-	if errors.Is(err, git.NoErrAlreadyUpToDate) {
+	}
+	if !requireRemote.IsZero() {
+		pushOpts.RequireRemoteRefs = []gitconfig.RefSpec{gitconfig.RefSpec(requireRemote.String() + ":" + ref.String())}
+	}
+
+	err = remote.PushContext(ctx, pushOpts)
+	switch {
+	case errors.Is(err, git.NoErrAlreadyUpToDate):
 		clog.InfoContextf(ctx, "Branch already up to date")
 		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("force pushing: %w", err)
+	case err != nil:
+		return classifyPushError(requireRemote, err)
 	}
 
 	return nil
+}
+
+// classifyPushError maps a force-push failure to ErrBranchMoved, gated on
+// requireRemote: isRemoteRefLeaseRejected's markers are generic
+// git-receive-pack ref-transaction text (e.g. "cannot lock ref" also covers
+// a ref-name conflict or a stale server-side lock), so without the gate a
+// fresh branch -- which carries no RequireRemoteRefs constraint to violate --
+// could still be misreported as ErrBranchMoved.
+func classifyPushError(requireRemote plumbing.Hash, err error) error {
+	if !requireRemote.IsZero() && isRemoteRefLeaseRejected(err) {
+		return fmt.Errorf("%w: %w", ErrBranchMoved, err)
+	}
+	return fmt.Errorf("force pushing: %w", err)
+}
+
+// isRemoteRefLeaseRejected reports whether err is git-receive-pack (or
+// go-git's own client-side check) rejecting a RequireRemoteRefs-constrained
+// push because the remote ref no longer matches the required value. Neither
+// layer returns a typed error for this, only message text: "required to be"
+// is go-git's own client-side RequireRemoteRefs check (remote.go); "incorrect
+// old value provided" and "cannot lock ref" are git-receive-pack's
+// ref-transaction hook rejecting the server-side compare-and-swap, narrowed
+// here to the update (not create/delete) case this package's pushes are.
+func isRemoteRefLeaseRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{"required to be", "incorrect old value provided", "cannot lock ref"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // ID returns a clone ID based on the underlying working tree path.

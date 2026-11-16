@@ -95,7 +95,10 @@ func (b cliBackend) clone(ctx context.Context, dir, remote, ref string) (*git.Re
 func (b cliBackend) fetch(ctx context.Context, cl *clone, remote, refspec string, dst plumbing.ReferenceName, depth int) (bool, error) {
 	before := remoteRefHash(cl.repo, dst)
 
-	if err := b.runInClone(ctx, cl, remote, "fetch", "--quiet", "--no-tags", fmt.Sprintf("--depth=%d", depth), remote, refspec); err != nil {
+	// --no-write-fetch-head: nothing here reads .git/FETCH_HEAD, and without
+	// this flag a symlink updateFn planted there would make the write land on
+	// whatever host path it points to.
+	if err := b.runInClone(ctx, cl, remote, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", fmt.Sprintf("--depth=%d", depth), remote, refspec); err != nil {
 		return false, err
 	}
 
