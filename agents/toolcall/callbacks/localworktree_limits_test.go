@@ -144,6 +144,130 @@ func TestLocalWorktree_SearchOversizedFile(t *testing.T) {
 	}
 }
 
+func TestLocalWorktree_SearchFileLimitOptions(t *testing.T) {
+	t.Parallel()
+	const big = (4 << 20) + 100
+	r := openTestRoot(t, map[string]string{"a.txt": "needle", "m-big.js": strings.Repeat("x", big-6) + "needle", "z.txt": "needle"})
+	huge := filepath.Join(r.Name(), "n-huge.bin")
+	if err := os.WriteFile(huge, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(huge, 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	bigMatch := callbacks.Match{Path: "m-big.js", Offset: big - 6, Length: 6}
+	all := []callbacks.Match{{Path: "a.txt", Length: 6}, bigMatch, {Path: "z.txt", Length: 6}}
+
+	tests := []struct {
+		name    string
+		opts    []callbacks.LocalWorktreeOption
+		path    string
+		limit   int
+		offset  int
+		want    callbacks.SearchResult
+		wantErr string
+	}{{
+		name:    "zero cap keeps the default and its error",
+		opts:    []callbacks.LocalWorktreeOption{callbacks.WithMaxSearchFileBytes(0)},
+		path:    ".",
+		wantErr: "m-big.js: file exceeds search byte limit (4194304 bytes)",
+	}, {
+		name:    "a raised cap still fails on a file past it",
+		opts:    []callbacks.LocalWorktreeOption{callbacks.WithMaxSearchFileBytes(6 << 20)},
+		path:    ".",
+		wantErr: "n-huge.bin: file exceeds search byte limit (6291456 bytes)",
+	}, {
+		name:  "a raised cap searches a file past 4 MiB",
+		opts:  []callbacks.LocalWorktreeOption{callbacks.WithMaxSearchFileBytes(6 << 20)},
+		path:  "m-big.js",
+		limit: 50,
+		want:  callbacks.SearchResult{Matches: []callbacks.Match{{Path: "m-big.js", Offset: big - 6, Length: 6}}},
+	}, {
+		name:  "the largest cap searches a file past 4 MiB",
+		opts:  []callbacks.LocalWorktreeOption{callbacks.WithMaxSearchFileBytes(math.MaxInt64)},
+		path:  "m-big.js",
+		limit: 50,
+		want:  callbacks.SearchResult{Matches: []callbacks.Match{bigMatch}},
+	}, {
+		name:  "skip mode skips and names an oversized file",
+		opts:  []callbacks.LocalWorktreeOption{callbacks.WithMaxSearchFileBytes(6 << 20), callbacks.WithSkipOversizedSearchFiles()},
+		path:  ".",
+		limit: 50,
+		want: callbacks.SearchResult{
+			Matches: all,
+			Note:    "1 file(s) longer than 6291456 bytes were not searched: n-huge.bin (8388608 bytes); read them with read_file offsets, since no match here is not conclusive",
+		},
+	}, {
+		name:  "skip mode at the default cap",
+		opts:  []callbacks.LocalWorktreeOption{callbacks.WithSkipOversizedSearchFiles()},
+		path:  ".",
+		limit: 50,
+		want: callbacks.SearchResult{
+			Matches: []callbacks.Match{{Path: "a.txt", Length: 6}, {Path: "z.txt", Length: 6}},
+			Note:    "2 file(s) longer than 4194304 bytes were not searched: m-big.js (4194404 bytes), n-huge.bin (8388608 bytes); read them with read_file offsets, since no match here is not conclusive",
+		},
+	}, {
+		name:   "skip mode pages across the skipped file",
+		opts:   []callbacks.LocalWorktreeOption{callbacks.WithMaxSearchFileBytes(6 << 20), callbacks.WithSkipOversizedSearchFiles()},
+		path:   ".",
+		limit:  1,
+		offset: 1,
+		// The walk passes n-huge.bin before z.txt holds the continuation, so
+		// this page skipped it too.
+		want: callbacks.SearchResult{
+			Matches:    []callbacks.Match{bigMatch},
+			NextOffset: new(2),
+			HasMore:    true,
+			Note:       "1 file(s) longer than 6291456 bytes were not searched: n-huge.bin (8388608 bytes); read them with read_file offsets, since no match here is not conclusive",
+		},
+	}, {
+		name:  "skip mode with nothing skipped has no note",
+		opts:  []callbacks.LocalWorktreeOption{callbacks.WithSkipOversizedSearchFiles()},
+		path:  "z.txt",
+		limit: 50,
+		want:  callbacks.SearchResult{Matches: []callbacks.Match{{Path: "z.txt", Length: 6}}},
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := callbacks.LocalWorktree(r, tc.opts...).SearchCodebase(t.Context(), tc.path, "needle", "", tc.offset, tc.limit)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error: got = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("search (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestLocalWorktree_SearchSkipNoteCapsNames(t *testing.T) {
+	t.Parallel()
+	r := openTestRoot(t, map[string]string{"keep.txt": "x"})
+	for i := range 7 {
+		p := filepath.Join(r.Name(), "big-"+string(rune('a'+i)))
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(p, (4<<20)+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := callbacks.LocalWorktree(r, callbacks.WithSkipOversizedSearchFiles()).SearchCodebase(t.Context(), ".", "x", "", 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got.Note, "7 file(s)") || !strings.Contains(got.Note, "big-e (4194305 bytes) and 2 more;") || strings.Contains(got.Note, "big-f") {
+		t.Errorf("note: got = %q, want 7 counted, 5 named and \"and 2 more\"", got.Note)
+	}
+}
+
 func TestLocalWorktree_SearchPages(t *testing.T) {
 	r := openTestRoot(t, map[string]string{"a.txt": "ababa", "b.txt": "abaa"})
 	cb := callbacks.LocalWorktree(r)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -32,7 +33,52 @@ const (
 	maxSearchOffset    = 10000
 )
 
+// maxNotedSearchSkips caps how many skipped files a search Note names.
+const maxNotedSearchSkips = 5
+
 var errSearchFileTooLarge = errors.New("file exceeds search byte limit")
+
+// searchFileTooLargeError reports a file past the search byte limit. It
+// unwraps to errSearchFileTooLarge and carries the size for the skip Note.
+type searchFileTooLargeError struct {
+	name  string
+	size  int64
+	limit int64
+}
+
+func (e *searchFileTooLargeError) Error() string {
+	return fmt.Sprintf("%s: %v (%d bytes); narrow the path or filter", e.name, errSearchFileTooLarge, e.limit)
+}
+
+func (e *searchFileTooLargeError) Unwrap() error { return errSearchFileTooLarge }
+
+// LocalWorktreeOption configures LocalWorktree.
+type LocalWorktreeOption func(*localWorktreeConfig)
+
+type localWorktreeConfig struct {
+	maxSearchFileBytes       int64
+	skipOversizedSearchFiles bool
+}
+
+// WithMaxSearchFileBytes sets the largest file SearchCodebase reads, in place
+// of the 4 MiB default. A value of zero or less keeps the default. The search
+// holds one such file in memory at a time.
+func WithMaxSearchFileBytes(n int64) LocalWorktreeOption {
+	return func(c *localWorktreeConfig) {
+		if n > 0 {
+			// The read takes one byte past the cap to detect a file that grew,
+			// so math.MaxInt64 would overflow it and read every file as empty.
+			c.maxSearchFileBytes = min(n, math.MaxInt64-1)
+		}
+	}
+}
+
+// WithSkipOversizedSearchFiles makes SearchCodebase skip a file past the search
+// byte limit instead of failing the whole search. The result's Note names the
+// skipped files, so a partial search is never reported as a complete one.
+func WithSkipOversizedSearchFiles() LocalWorktreeOption {
+	return func(c *localWorktreeConfig) { c.skipOversizedSearchFiles = true }
+}
 
 // LocalWorktree returns a WorktreeCallbacks backed by r, an os.Root that
 // sandboxes all file operations within a single directory tree. Path traversal
@@ -40,8 +86,13 @@ var errSearchFileTooLarge = errors.New("file exceeds search byte limit")
 // ReadFile caps a window at 1 MiB plus at most 64 KiB of line alignment on
 // either side, including when limit is negative. SearchCodebase caps pages at
 // 1000 matches, rejects offsets above 10000, and errors on files over 4 MiB;
-// narrow the path or filter when a search exceeds these limits.
-func LocalWorktree(r *os.Root) WorktreeCallbacks {
+// narrow the path or filter when a search exceeds these limits. Options change
+// only the search's file limit and what it does with a file past it.
+func LocalWorktree(r *os.Root, opts ...LocalWorktreeOption) WorktreeCallbacks {
+	cfg := localWorktreeConfig{maxSearchFileBytes: maxSearchFileBytes}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return WorktreeCallbacks{
 		ReadFile: func(ctx context.Context, path string, offset int64, limit int) (ReadResult, error) {
 			if err := checkOffset(offset); err != nil {
@@ -236,8 +287,9 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 				return SearchResult{}, fmt.Errorf("invalid pattern: %w", err)
 			}
 			var result SearchResult
+			var skipped []*searchFileTooLargeError
 			skip := offset
-			if err := localWalkDir(ctx, r, path, filter, func(relPath string, data []byte) error {
+			if err := localWalkDir(ctx, r, path, filter, cfg, &skipped, func(relPath string, data []byte) error {
 				// One extra match distinguishes a full final page from one
 				// with a continuation, without collecting the rest of the tree.
 				for _, loc := range re.FindAllIndex(data, skip+limit-len(result.Matches)+1) {
@@ -264,9 +316,31 @@ func LocalWorktree(r *os.Root) WorktreeCallbacks {
 			}); err != nil {
 				return SearchResult{}, err
 			}
+			result.Note = skippedSearchNote(skipped)
 			return result, nil
 		},
 	}
+}
+
+// skippedSearchNote renders the SearchResult.Note naming the files a search
+// skipped, or is empty when it skipped none. The paths are as found in the
+// tree; a caller serving them to a model neutralizes them as it does any
+// match path.
+func skippedSearchNote(skipped []*searchFileTooLargeError) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	shown := skipped[:min(len(skipped), maxNotedSearchSkips)]
+	named := make([]string, 0, len(shown))
+	for _, s := range shown {
+		named = append(named, fmt.Sprintf("%s (%d bytes)", s.name, s.size))
+	}
+	more := ""
+	if extra := len(skipped) - len(shown); extra > 0 {
+		more = fmt.Sprintf(" and %d more", extra)
+	}
+	return fmt.Sprintf("%d file(s) longer than %d bytes were not searched: %s%s; read them with read_file offsets, since no match here is not conclusive",
+		len(skipped), skipped[0].limit, strings.Join(named, ", "), more)
 }
 
 // indentationNote renders the EditResult.Note for an edit that matched after
@@ -295,8 +369,9 @@ func checkOffset(offset int64) error {
 // dir is cleaned first, because fs.ValidPath rejects equivalent forms such as
 // "./os", "os/" and "a/../os". An error on the walk root is returned wrapped.
 // Unreadable entries below the root are skipped. Oversized files fail the
-// search so incomplete coverage is not reported as a complete result.
-func localWalkDir(ctx context.Context, r *os.Root, dir, filter string, fn func(relPath string, data []byte) error) error {
+// search so incomplete coverage is not reported as a complete result, unless
+// cfg skips them, in which case each is appended to skipped for the Note.
+func localWalkDir(ctx context.Context, r *os.Root, dir, filter string, cfg localWorktreeConfig, skipped *[]*searchFileTooLargeError, fn func(relPath string, data []byte) error) error {
 	dir = path.Clean(dir)
 	return fs.WalkDir(r.FS(), dir, func(name string, d fs.DirEntry, err error) error {
 		if err := ctx.Err(); err != nil {
@@ -320,10 +395,13 @@ func localWalkDir(ctx context.Context, r *os.Root, dir, filter string, fn func(r
 				return nil
 			}
 		}
-		data, readErr := readSearchFile(r, name)
+		data, readErr := readSearchFile(r, name, cfg.maxSearchFileBytes)
 		if readErr != nil {
-			if errors.Is(readErr, errSearchFileTooLarge) {
-				return readErr
+			if tooLarge, ok := errors.AsType[*searchFileTooLargeError](readErr); ok {
+				if !cfg.skipOversizedSearchFiles {
+					return readErr
+				}
+				*skipped = append(*skipped, tooLarge)
 			}
 			return nil
 		}
@@ -331,7 +409,7 @@ func localWalkDir(ctx context.Context, r *os.Root, dir, filter string, fn func(r
 	})
 }
 
-func readSearchFile(r *os.Root, name string) ([]byte, error) {
+func readSearchFile(r *os.Root, name string, limit int64) ([]byte, error) {
 	f, err := openRegularFile(r, name)
 	if err != nil {
 		return nil, err
@@ -341,15 +419,15 @@ func readSearchFile(r *os.Root, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() > maxSearchFileBytes {
-		return nil, fmt.Errorf("%s: %w (%d bytes); narrow the path or filter", name, errSearchFileTooLarge, maxSearchFileBytes)
+	if info.Size() > limit {
+		return nil, &searchFileTooLargeError{name: name, size: info.Size(), limit: limit}
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxSearchFileBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > maxSearchFileBytes {
-		return nil, fmt.Errorf("%s: %w (%d bytes); narrow the path or filter", name, errSearchFileTooLarge, maxSearchFileBytes)
+	if int64(len(data)) > limit {
+		return nil, &searchFileTooLargeError{name: name, size: int64(len(data)), limit: limit}
 	}
 	return data, nil
 }
