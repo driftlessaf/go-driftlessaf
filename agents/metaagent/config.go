@@ -172,6 +172,20 @@ type Config[Resp, CB any] struct {
 	// see claudeexecutor.WithPromptTokensBeforeFinalize.
 	PromptTokensBeforeFinalize int64
 
+	// FinalizeBeforeDeadline, when positive, asks the model once to call its
+	// submit tool on the first tool turn that ends with less than this long
+	// before the context deadline, forcing it where the model allows. The
+	// deadline is not moved and the result validators still gate the
+	// submission. Same limits as MaxToolCallsBeforeFinalize; see
+	// claudeexecutor.WithFinalizeBeforeDeadline.
+	FinalizeBeforeDeadline time.Duration
+
+	// MinRequestBudget, when positive, ends the run with an error matching
+	// executor.ErrDeadlineBudget instead of starting a turn with less than
+	// this long before the context deadline. Claude only; see
+	// claudeexecutor.WithMinRequestBudget.
+	MinRequestBudget time.Duration
+
 	// EnforceInputBudget, when true, checks each request's input tokens
 	// before the model call and, when the input does not fit the serving
 	// model's context window less the output headroom, reduces older tool

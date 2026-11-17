@@ -212,6 +212,17 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithMaxToolCallsBeforeFinalize[Req, Resp](config.MaxToolCallsBeforeFinalize))
 	}
 
+	if config.FinalizeBeforeDeadline != 0 {
+		if config.ThinkingBudget > 0 {
+			return nil, errors.New("FinalizeBeforeDeadline is incompatible with ThinkingBudget: explicit thinking forbids the forced submit tool_choice")
+		}
+		executorOpts = append(executorOpts, claudeexecutor.WithFinalizeBeforeDeadline[Req, Resp](config.FinalizeBeforeDeadline))
+	}
+
+	if config.MinRequestBudget != 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithMinRequestBudget[Req, Resp](config.MinRequestBudget))
+	}
+
 	if config.PromptTokensBeforeFinalize != 0 {
 		if config.ThinkingBudget > 0 {
 			return nil, errors.New("PromptTokensBeforeFinalize is incompatible with ThinkingBudget: explicit thinking forbids the forced submit tool_choice")

@@ -91,3 +91,14 @@ func (e *InterruptedError) Unwrap() error {
 // wrap it, so a caller can recognize the condition with errors.Is without
 // importing a provider-specific error type.
 var ErrInputTooLarge = errors.New("agent request exceeds model input budget")
+
+// ErrDeadlineBudget reports that a run stopped before a model request because
+// its context deadline was closer than the minimum the executor was given for
+// one request. No request was sent. Executors that enforce the minimum wrap
+// it, so a caller can tell a run that ran out of time between turns from one
+// cancelled mid-request.
+var ErrDeadlineBudget = errors.New("too little time before the deadline for a model request")
+
+// MetadataDeadlineFinalizeNudge is the Trace.Metadata key an executor sets to
+// true when it asked the model to submit because the run's deadline was near.
+const MetadataDeadlineFinalizeNudge = "deadline_finalize_nudge"

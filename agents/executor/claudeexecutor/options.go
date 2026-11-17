@@ -529,6 +529,37 @@ func WithPromptTokensBeforeFinalize[Request promptbuilder.Bindable, Response any
 	}
 }
 
+// WithFinalizeBeforeDeadline asks the model once to call its submit tool on the
+// first tool turn that ends with less than d before the context deadline, and
+// forces that tool on the next turn unless the model allows only automatic
+// choice or thinking is on. The deadline is not moved and the submission still
+// passes the result validators. Zero, no submit tool, or a context with no
+// deadline disables it.
+func WithFinalizeBeforeDeadline[Request promptbuilder.Bindable, Response any](d time.Duration) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if d < 0 {
+			return fmt.Errorf("finalize before deadline must be non-negative, got %s", d)
+		}
+		e.finalizeBeforeDeadline = d
+		return nil
+	}
+}
+
+// WithMinRequestBudget stops the run with an error matching
+// agentexecutor.ErrDeadlineBudget instead of starting a turn with less than d
+// before the context deadline, so a run that is out of time ends between turns
+// with no request cancelled mid-stream. Zero, or a context with no deadline,
+// disables it.
+func WithMinRequestBudget[Request promptbuilder.Bindable, Response any](d time.Duration) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if d < 0 {
+			return fmt.Errorf("min request budget must be non-negative, got %s", d)
+		}
+		e.minRequestBudget = d
+		return nil
+	}
+}
+
 // WithForceSubmitToolChoice forces the model to call its terminal submit tool
 // via tool_choice instead of leaving the choice to the model. This eliminates
 // the wasted turn the executor would otherwise spend reactively redirecting a

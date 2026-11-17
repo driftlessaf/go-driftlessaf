@@ -39,6 +39,12 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	if config.PromptTokensBeforeFinalize != 0 {
 		return nil, fmt.Errorf("PromptTokensBeforeFinalize (%d) is not supported on the Gemini backend", config.PromptTokensBeforeFinalize)
 	}
+	if config.FinalizeBeforeDeadline != 0 {
+		return nil, fmt.Errorf("FinalizeBeforeDeadline (%s) is not supported on the Gemini backend", config.FinalizeBeforeDeadline)
+	}
+	if config.MinRequestBudget != 0 {
+		return nil, fmt.Errorf("MinRequestBudget (%s) is not supported on the Gemini backend", config.MinRequestBudget)
+	}
 	if config.EnforceInputBudget {
 		return nil, errors.New("EnforceInputBudget is not supported on the Gemini backend")
 	}

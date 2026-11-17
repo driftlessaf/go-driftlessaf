@@ -372,6 +372,12 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 	if config.PromptTokensBeforeFinalize < 0 {
 		return fmt.Errorf("creating routed meta-agent: prompt tokens before finalize must not be negative, got %d", config.PromptTokensBeforeFinalize)
 	}
+	if config.FinalizeBeforeDeadline < 0 {
+		return fmt.Errorf("creating routed meta-agent: finalize before deadline must not be negative, got %s", config.FinalizeBeforeDeadline)
+	}
+	if config.MinRequestBudget < 0 {
+		return fmt.Errorf("creating routed meta-agent: min request budget must not be negative, got %s", config.MinRequestBudget)
+	}
 	if config.InputContextWindow < 0 {
 		return fmt.Errorf("creating routed meta-agent: input context window must not be negative, got %d", config.InputContextWindow)
 	}
@@ -392,6 +398,12 @@ func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol
 	}
 	if config.PromptTokensBeforeFinalize != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: PromptTokensBeforeFinalize is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
+	if config.FinalizeBeforeDeadline != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: FinalizeBeforeDeadline is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
+	if config.MinRequestBudget != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: MinRequestBudget is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}
 	if config.EnforceInputBudget && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: EnforceInputBudget is supported only on the Anthropic Messages protocol, not %s", protocol)

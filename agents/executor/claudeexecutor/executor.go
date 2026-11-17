@@ -19,6 +19,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/effort"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"chainguard.dev/driftlessaf/agents/executor/internal/telemetry"
 	"chainguard.dev/driftlessaf/agents/executor/retry"
@@ -168,6 +169,20 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// reaches this many tokens. Zero disables it.
 	promptTokensBeforeFinalize int64
 
+	// finalizeBeforeDeadline, when greater than zero, asks the model once to
+	// call its submit tool on the first tool turn that ends with less than
+	// this long before the context deadline. Zero disables it.
+	finalizeBeforeDeadline time.Duration
+
+	// minRequestBudget, when greater than zero, stops the run with
+	// agentexecutor.ErrDeadlineBudget instead of starting a turn with less
+	// than this long before the context deadline. Zero disables it.
+	minRequestBudget time.Duration
+
+	// now reads the clock the two deadline checks compare against the context
+	// deadline. Tests replace it.
+	now func() time.Time
+
 	// forceSubmitToolChoice, when true, forces the model to call its terminal
 	// submit tool via tool_choice rather than leaving the choice to the model.
 	// This removes the wasted turn the executor would otherwise spend
@@ -294,6 +309,8 @@ func NewWithMessages[Request promptbuilder.Bindable, Response any](
 		toolCallConcurrency: DefaultToolCallConcurrency, // Concurrent tool dispatch by default — see WithToolCallConcurrency
 
 		truncatedToolCallRetries: 1, // see WithTruncatedToolCallRetries
+
+		now: time.Now,
 
 		// The base schema-conformance validator is always first: submissions
 		// must honor the constraints declared in the Response type's
@@ -623,6 +640,12 @@ func (e *executor[Request, Response]) runConversation(
 	// injected: only the first forces the submit tool, and once it is set the
 	// tool-call cap sends nothing.
 	finalizeNudged := false
+	// deadlineNudged records that the deadline nudge was appended to the
+	// conversation; it is appended once. deadlineNudgeSent records that a
+	// request carrying it went to the model: a run that ends first (the turn
+	// budget, WithMinRequestBudget) never showed the model the nudge.
+	deadlineNudged := false
+	deadlineNudgeSent := false
 	// refusalRetries counts consecutive turns retried after a
 	// safety-classifier refusal, bounded by refusalNudgeMaxRetries (see
 	// WithRefusalNudge); a turn that completes without a refusal resets it,
@@ -930,6 +953,14 @@ func (e *executor[Request, Response]) runConversation(
 		// sent to.
 		request := params
 		request.Model = srv.modelName
+
+		if deadlineNudged && !deadlineNudgeSent {
+			if trace.Metadata == nil {
+				trace.Metadata = make(map[string]any, 1)
+			}
+			trace.Metadata[agentexecutor.MetadataDeadlineFinalizeNudge] = true
+			deadlineNudgeSent = true
+		}
 
 		// Stream response with retry for transient errors. Each attempt gets a
 		// fresh timer, so the latency recorded below is the answering attempt's.
@@ -1355,6 +1386,15 @@ func (e *executor[Request, Response]) runConversation(
 				e.nudgeFinalize(ctx, &params, "prompt_budget_finalize_nudge", submitToolName, !finalizeNudged,
 					fmt.Sprintf("This conversation is close to the model's context limit and cannot grow much further. Call the %s tool now to return your result based on what you have found so far; if it is rejected, fix it with as few tool calls as possible.", submitToolName))
 				finalizeNudged = true
+			case !deadlineNudged && submitToolName != "" && nearDeadline(ctx, e.now(), e.finalizeBeforeDeadline):
+				// Ahead of the tool-call cap: the deadline ends the run, and
+				// an earlier cap nudge said nothing about time.
+				clog.InfoContext(ctx, "context deadline is near, nudging model to emit result",
+					"threshold", e.finalizeBeforeDeadline)
+				e.nudgeFinalize(ctx, &params, "deadline_finalize_nudge", submitToolName, true,
+					fmt.Sprintf("The time allowed for this run is almost over. Call the %s tool now to return your result based on what you have found so far; if it is rejected, fix it with as few tool calls as possible.", submitToolName))
+				deadlineNudged = true
+				finalizeNudged = true
 			case shouldNudgeFinalize(e.maxToolCallsBeforeFinalize, liveToolCalls, finalizeNudged, submitToolName):
 				clog.InfoContext(ctx, "early-finalize threshold reached, nudging model to emit result",
 					"live_tool_calls", liveToolCalls,
@@ -1439,6 +1479,12 @@ func (e *executor[Request, Response]) runConversation(
 	// overall turn budget is honored across pauses.
 	for i := range turnBudget {
 		turn := startTurn + i
+		if nearDeadline(ctx, e.now(), e.minRequestBudget) {
+			deadline, _ := ctx.Deadline()
+			clog.WarnContext(ctx, "Too little time before the deadline for another model request",
+				"turn", turn, "remaining", deadline.Sub(e.now()), "minimum", e.minRequestBudget)
+			return response, fmt.Errorf("%w: turn %d needs %s", agentexecutor.ErrDeadlineBudget, turn, e.minRequestBudget)
+		}
 		resp, done, err := executeTurn(turn)
 		// done=true on all terminal paths (including errors); || err != nil is a
 		// safety net in case a future path sets err without setting done.
@@ -1807,6 +1853,16 @@ func shouldNudgeFinalize(threshold, liveToolCalls int, alreadyNudged bool, submi
 		return false
 	}
 	return liveToolCalls >= threshold
+}
+
+// nearDeadline reports whether ctx has a deadline less than within after now.
+// A context with no deadline, or a non-positive within, is never near.
+func nearDeadline(ctx context.Context, now time.Time, within time.Duration) bool {
+	if within <= 0 {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && deadline.Sub(now) < within
 }
 
 // nextPromptTokens is at most the size of the next request before this turn's

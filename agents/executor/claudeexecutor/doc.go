@@ -81,6 +81,10 @@ SPDX-License-Identifier: Apache-2.0
 //     promptbuilder.SuffixBindable request, as a second block of the initial
 //     user message, outside the shared cacheable prefix (off by default)
 //   - WithMaxToolCallsBeforeFinalize: Soft-cap the agentic loop (off by default)
+//   - WithFinalizeBeforeDeadline: Ask for the result once when the context
+//     deadline is near (off by default)
+//   - WithMinRequestBudget: End the run between turns when too little time
+//     remains before the context deadline for a request (off by default)
 //   - WithForceSubmitToolChoice: Force the terminal submit tool via tool_choice (off by default)
 //   - WithTruncatedToolCallRetries: Bound the retries when the output-token cap
 //     cuts off a tool call (defaults to 1)

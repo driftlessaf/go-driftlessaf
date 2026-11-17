@@ -276,6 +276,12 @@ func validateOpenAICompatibleConfig[Resp, CB any](config Config[Resp, CB]) error
 	if config.PromptTokensBeforeFinalize != 0 {
 		return fmt.Errorf("PromptTokensBeforeFinalize (%d) is not supported on the OpenAI-compatible backend", config.PromptTokensBeforeFinalize)
 	}
+	if config.FinalizeBeforeDeadline != 0 {
+		return fmt.Errorf("FinalizeBeforeDeadline (%s) is not supported on the OpenAI-compatible backend", config.FinalizeBeforeDeadline)
+	}
+	if config.MinRequestBudget != 0 {
+		return fmt.Errorf("MinRequestBudget (%s) is not supported on the OpenAI-compatible backend", config.MinRequestBudget)
+	}
 	if config.EnforceInputBudget {
 		return errors.New("EnforceInputBudget is not supported on the OpenAI-compatible backend")
 	}
