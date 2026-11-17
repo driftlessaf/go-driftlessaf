@@ -8,6 +8,7 @@ package workqueue
 import (
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -141,6 +142,49 @@ func TestGetRequeueOptions(t *testing.T) {
 			}
 			if floor != tt.wantFloor {
 				t.Errorf("floor = %v, want %v", floor, tt.wantFloor)
+			}
+		})
+	}
+}
+
+func TestRequeueSeconds(t *testing.T) {
+	tests := []struct {
+		name  string
+		delay time.Duration
+		want  int64
+	}{{
+		name:  "negative stays zero",
+		delay: -time.Second,
+		want:  0,
+	}, {
+		name:  "zero stays zero",
+		delay: 0,
+		want:  0,
+	}, {
+		name:  "a nanosecond rounds up to a second",
+		delay: time.Nanosecond,
+		want:  1,
+	}, {
+		name:  "half a second rounds up to a second",
+		delay: 500 * time.Millisecond,
+		want:  1,
+	}, {
+		name:  "whole seconds are exact",
+		delay: 90 * time.Second,
+		want:  90,
+	}, {
+		name:  "a fractional remainder rounds up",
+		delay: 90*time.Second + time.Millisecond,
+		want:  91,
+	}, {
+		name:  "the longest duration does not overflow",
+		delay: time.Duration(math.MaxInt64),
+		want:  int64(time.Duration(math.MaxInt64)/time.Second) + 1,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RequeueSeconds(tt.delay); got != tt.want {
+				t.Errorf("RequeueSeconds(%v): got = %d, want = %d", tt.delay, got, tt.want)
 			}
 		})
 	}

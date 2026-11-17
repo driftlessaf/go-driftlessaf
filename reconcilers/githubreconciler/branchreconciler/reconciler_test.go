@@ -9,12 +9,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
+	"chainguard.dev/driftlessaf/workqueue"
 )
 
 func TestNew(t *testing.T) {
@@ -173,4 +176,53 @@ func TestBranchInfo(t *testing.T) {
 	require.Equal(t, "abc123", info.HeadSHA)
 	require.Equal(t, 3, info.CommitCount)
 	require.Equal(t, "def456", info.BaseCommit)
+}
+
+// TestProcessSubSecondRequeue checks that a requeue under a second reaches the
+// wire as one second. Zero RequeueAfterSeconds tells the dispatcher the key is
+// done, so truncating would drop the branch until its next resync. The
+// requeue comes from minting the branch's GitHub token, which is the first
+// step of a reconcile.
+func TestProcessSubSecondRequeue(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantFloor bool
+	}{{
+		name: "requeue after",
+		err:  workqueue.RequeueAfter(500 * time.Millisecond),
+	}, {
+		name:      "requeue not before",
+		err:       workqueue.RequeueNotBefore(500 * time.Millisecond),
+		wantFloor: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientCache := githubreconciler.NewClientCache(func(context.Context, string, string) (oauth2.TokenSource, error) {
+				return nil, tt.err
+			})
+			rec, err := New(&clonemanager.Meta{}, clientCache,
+				WithBranchNamer(func(string) (string, string, string, error) {
+					return "owner", "repo", "branch", nil
+				}),
+				WithAgentFunc(func(context.Context, *git.Worktree, *BranchInfo) (string, error) {
+					t.Error("agent ran: got = true, want = false")
+					return "", nil
+				}),
+				WithCriteriaFunc(func(context.Context, *BranchInfo) (bool, error) {
+					return true, nil
+				}),
+			)
+			require.NoError(t, err)
+
+			resp, err := rec.Process(t.Context(), &workqueue.ProcessRequest{Key: "owner/repo/branch"})
+			require.NoError(t, err)
+			if got := resp.GetRequeueAfterSeconds(); got != 1 {
+				t.Errorf("RequeueAfterSeconds: got = %d, want = 1", got)
+			}
+			if got := resp.GetRequeueFloor(); got != tt.wantFloor {
+				t.Errorf("RequeueFloor: got = %t, want = %t", got, tt.wantFloor)
+			}
+		})
+	}
 }

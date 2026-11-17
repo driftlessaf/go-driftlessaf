@@ -19,7 +19,8 @@ var processInfo = &grpc.UnaryServerInfo{
 }
 
 // requireRequeue asserts resp is a drain requeue: a ProcessResponse whose
-// RequeueAfterSeconds falls within [DrainRequeueDelay, delay+jitter).
+// RequeueAfterSeconds falls within [DrainRequeueDelay, delay+jitter]. The
+// upper bound is inclusive because the delay is rounded up to whole seconds.
 func requireRequeue(t *testing.T, resp any, err error) {
 	t.Helper()
 	if err != nil {
@@ -31,8 +32,8 @@ func requireRequeue(t *testing.T, resp any, err error) {
 	}
 	minS := int64(DrainRequeueDelay.Seconds())
 	maxS := int64((DrainRequeueDelay + DrainRequeueJitter).Seconds())
-	if got := pr.GetRequeueAfterSeconds(); got < minS || got >= maxS {
-		t.Errorf("RequeueAfterSeconds: got = %d, want in [%d, %d)", got, minS, maxS)
+	if got := pr.GetRequeueAfterSeconds(); got < minS || got > maxS {
+		t.Errorf("RequeueAfterSeconds: got = %d, want in [%d, %d]", got, minS, maxS)
 	}
 }
 
@@ -77,6 +78,28 @@ func TestDrainInterceptorRefusesAtArrivalWhileDraining(t *testing.T) {
 			return nil, nil
 		})
 	requireRequeue(t, resp, err)
+}
+
+// TestDrainInterceptorRoundsSubSecondDelayUp checks that a drain delay
+// under a second still requeues the key: zero RequeueAfterSeconds would tell
+// the dispatcher the key is done.
+func TestDrainInterceptorRoundsSubSecondDelayUp(t *testing.T) {
+	prevDelay, prevJitter := DrainRequeueDelay, DrainRequeueJitter
+	DrainRequeueDelay, DrainRequeueJitter = 500*time.Millisecond, 0
+	t.Cleanup(func() { DrainRequeueDelay, DrainRequeueJitter = prevDelay, prevJitter })
+
+	drain, cancel := context.WithCancel(t.Context())
+	cancel()
+	icpt := DrainInterceptor(drain)
+
+	resp, err := icpt(t.Context(), &ProcessRequest{Key: "k"}, processInfo,
+		func(ctx context.Context, req any) (any, error) { return nil, nil })
+	if err != nil {
+		t.Fatalf("err: got = %v, want = nil", err)
+	}
+	if got := resp.(*ProcessResponse).GetRequeueAfterSeconds(); got != 1 {
+		t.Errorf("RequeueAfterSeconds: got = %d, want = 1", got)
+	}
 }
 
 func TestDrainInterceptorTranslatesCooperativeUnwind(t *testing.T) {

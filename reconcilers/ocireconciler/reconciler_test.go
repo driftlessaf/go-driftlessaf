@@ -123,6 +123,42 @@ func TestProcessRequeue(t *testing.T) {
 	}
 }
 
+// TestProcessSubSecondRequeue verifies that a requeue under a second reaches
+// the wire as one second. Zero RequeueAfterSeconds tells the dispatcher the
+// key is done, so truncating would drop the digest until its next resync.
+func TestProcessSubSecondRequeue(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantFloor bool
+	}{{
+		name: "requeue after",
+		err:  workqueue.RequeueAfter(500 * time.Millisecond),
+	}, {
+		name:      "requeue not before",
+		err:       workqueue.RequeueNotBefore(500 * time.Millisecond),
+		wantFloor: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := New(WithReconciler(func(context.Context, name.Digest) error {
+				return tt.err
+			}))
+
+			resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "cgr.dev/example@" + testDigest})
+			if err != nil {
+				t.Fatalf("Process error: got = %v, wanted = nil", err)
+			}
+			if got := resp.GetRequeueAfterSeconds(); got != 1 {
+				t.Errorf("RequeueAfterSeconds: got = %d, wanted = 1", got)
+			}
+			if got := resp.GetRequeueFloor(); got != tt.wantFloor {
+				t.Errorf("RequeueFloor: got = %t, wanted = %t", got, tt.wantFloor)
+			}
+		})
+	}
+}
+
 // TestProcessNonRetriable verifies that non-retriable errors return success with no requeue.
 func TestProcessNonRetriable(t *testing.T) {
 	r := New(WithReconciler(func(context.Context, name.Digest) error {

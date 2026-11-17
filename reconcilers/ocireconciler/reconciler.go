@@ -79,7 +79,7 @@ func (r *Reconciler) Process(ctx context.Context, req *workqueue.ProcessRequest)
 	if err != nil {
 		if delay, floor, ok := workqueue.GetRequeueOptions(err); ok {
 			clog.InfoContextf(ctx, "Reconciliation requested requeue after %v (floor=%t) for key: %s", delay, floor, req.Key)
-			return &workqueue.ProcessResponse{RequeueAfterSeconds: int64(delay.Seconds()), RequeueFloor: floor}, nil
+			return &workqueue.ProcessResponse{RequeueAfterSeconds: workqueue.RequeueSeconds(delay), RequeueFloor: floor}, nil
 		}
 
 		if details := workqueue.GetNonRetriableDetails(err); details != nil {

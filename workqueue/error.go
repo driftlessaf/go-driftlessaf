@@ -296,6 +296,23 @@ func GetRequeueOptions(err error) (delay time.Duration, floor bool, ok bool) {
 	return 0, false, false
 }
 
+// RequeueSeconds converts a requeue delay to the whole seconds that
+// ProcessResponse.RequeueAfterSeconds and QueueKeyRequest.DelaySeconds carry,
+// rounding up. The dispatcher completes a key whose response carries zero
+// RequeueAfterSeconds, so truncating a positive sub-second delay would drop
+// the key until its next resync instead of requeueing it. A delay of zero or
+// less converts to 0.
+func RequeueSeconds(delay time.Duration) int64 {
+	if delay <= 0 {
+		return 0
+	}
+	seconds := int64(delay / time.Second)
+	if delay%time.Second != 0 {
+		seconds++
+	}
+	return seconds
+}
+
 // QueueKey represents a key to be queued with optional priority and delay.
 type QueueKey struct {
 	Key          string

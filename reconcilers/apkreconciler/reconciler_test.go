@@ -244,6 +244,29 @@ func TestProcess(t *testing.T) {
 		}
 	})
 
+	// Zero RequeueAfterSeconds tells the dispatcher the key is done, so a
+	// truncated sub-second requeue would drop the key until its next resync.
+	t.Run("sub-second requeue rounds up", func(t *testing.T) {
+		r := New(WithReconciler(func(ctx context.Context, key *apkurl.Key) error {
+			return workqueue.RequeueNotBefore(500 * time.Millisecond)
+		}))
+
+		resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{
+			Key:      validKey,
+			Priority: 1,
+		})
+
+		if err != nil {
+			t.Fatalf("Process() error = %v", err)
+		}
+		if resp.GetRequeueAfterSeconds() != 1 {
+			t.Errorf("Process() RequeueAfterSeconds = %d, want 1", resp.GetRequeueAfterSeconds())
+		}
+		if !resp.GetRequeueFloor() {
+			t.Error("Process() RequeueFloor = false, want true")
+		}
+	})
+
 	t.Run("non-retriable error", func(t *testing.T) {
 		r := New(WithReconciler(func(ctx context.Context, key *apkurl.Key) error {
 			return workqueue.NonRetriableError(errors.New("permanent failure"), "test reason")

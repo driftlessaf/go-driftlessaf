@@ -317,6 +317,41 @@ func TestReconciler_Process_RequeueFloor(t *testing.T) {
 	}
 }
 
+// TestReconciler_Process_SubSecondRequeue checks that a requeue under a
+// second reaches the wire as one second. Zero RequeueAfterSeconds tells the
+// dispatcher the key is done, so truncating would drop the key until its
+// next resync.
+func TestReconciler_Process_SubSecondRequeue(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want *workqueue.ProcessResponse
+	}{{
+		name: "requeue after",
+		err:  workqueue.RequeueAfter(500 * time.Millisecond),
+		want: &workqueue.ProcessResponse{RequeueAfterSeconds: 1},
+	}, {
+		name: "requeue not before",
+		err:  workqueue.RequeueNotBefore(500 * time.Millisecond),
+		want: &workqueue.ProcessResponse{RequeueAfterSeconds: 1, RequeueFloor: true},
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewReconciler(NewClientCache(mockTokenSourceFunc), WithReconciler(func(context.Context, *Resource, *github.Client) error {
+				return tt.err
+			}))
+
+			resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "https://github.com/owner/repo/issues/123"})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, resp, protocmp.Transform()); diff != "" {
+				t.Errorf("response (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestReconciler_Process_Attempt proves Process hands the reconcile function
 // the dispatch attempt from the ProcessRequest. Over gRPC that is the only way
 // the attempt reaches it, and without it a reconciler never sees its last

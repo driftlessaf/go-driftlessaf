@@ -56,7 +56,7 @@ func drainRequeueResponse() *ProcessResponse {
 	if DrainRequeueJitter > 0 {
 		delay += rand.N(DrainRequeueJitter) //nolint:gosec // G404: jitter, not security-sensitive
 	}
-	return &ProcessResponse{RequeueAfterSeconds: int64(delay.Seconds())}
+	return &ProcessResponse{RequeueAfterSeconds: RequeueSeconds(delay)}
 }
 
 // DrainInterceptor returns a unary server interceptor that converts orderly

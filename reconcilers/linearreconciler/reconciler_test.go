@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/workqueue"
 )
@@ -542,5 +543,49 @@ func TestReconcile_RequiredAndWithoutLabel_Mixed(t *testing.T) {
 	}
 	if got := callCount.Load(); got != 1 {
 		t.Errorf("after unmanaged: call count = %d, want 1 (missing required label)", got)
+	}
+}
+
+// TestReconciler_Process_SubSecondRequeue checks that a requeue under a
+// second reaches the wire as one second. Zero RequeueAfterSeconds tells the
+// dispatcher the key is done, so truncating would drop the issue until its
+// next resync.
+func TestReconciler_Process_SubSecondRequeue(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantFloor bool
+	}{{
+		name: "requeue after",
+		err:  workqueue.RequeueAfter(500 * time.Millisecond),
+	}, {
+		name:      "requeue not before",
+		err:       workqueue.RequeueNotBefore(500 * time.Millisecond),
+		wantFloor: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &Issue{ID: "issue-1", Identifier: "TEST-1", Title: "Test Issue"}
+			srv := newTestServer(t, issue)
+			defer srv.Close()
+
+			r := &Reconciler{
+				client: NewClientWithAPIKey("test-token").
+					WithHTTPClient(srv.Client()).
+					WithEndpoint(srv.URL),
+				reconcileFunc: func(context.Context, *Issue, *Client) error { return tt.err },
+			}
+
+			resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: issue.ID})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if got := resp.GetRequeueAfterSeconds(); got != 1 {
+				t.Errorf("RequeueAfterSeconds: got = %d, want = 1", got)
+			}
+			if got := resp.GetRequeueFloor(); got != tt.wantFloor {
+				t.Errorf("RequeueFloor: got = %t, want = %t", got, tt.wantFloor)
+			}
+		})
 	}
 }
