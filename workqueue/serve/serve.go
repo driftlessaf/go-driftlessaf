@@ -63,10 +63,13 @@ const shutdownGrace = 8 * time.Second
 
 // ListenAndServe registers srv and a health service on a duplex gRPC server,
 // starts the metrics listener and memusage.Heartbeat, and blocks until ctx is
-// cancelled or the server fails. On cancellation it drains in-flight requests
-// for up to shutdownGrace and returns nil. The metrics listener and the memory
-// heartbeat run for the life of the process, not of the call, so a second call
-// with the same metrics port in one process exits the process. Callers set up
+// cancelled or the server fails. On cancellation it waits up to shutdownGrace
+// for in-flight handlers to return, including those whose caller has already
+// cancelled the call and that are still cleaning up, then returns nil; it does
+// not wait past shutdownGrace for a handler that is still running. The metrics
+// listener and the memory heartbeat run for the life of the process, not of
+// the call, so a second call with the same metrics port in one process exits
+// the process. Callers set up
 // profiling, metrics, and tracing exporters before calling it, as
 // githubreconciler.Main does.
 func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, opts ...Option) error {
@@ -86,6 +89,12 @@ func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, o
 			recovery.UnaryServerInterceptor(), // must be last
 		)...),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// d.Shutdown waits only for requests whose client is still there. On
+		// SIGTERM the workqueue dispatcher cancels its calls first, and gRPC's
+		// ServeHTTP returns as soon as the client is gone while the handler
+		// still runs its cleanup (closing a microVM session, say). This makes
+		// d.Shutdown's Stop wait for those handlers too.
+		grpc.WaitForHandlers(true),
 	)
 
 	workqueue.RegisterWorkqueueServiceServer(d.Server, srv)
@@ -97,7 +106,7 @@ func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, o
 	clog.InfoContext(ctx, "Starting workqueue server", "port", o.port)
 
 	// duplex.ListenAndServe does not watch ctx, so cancellation is bridged to
-	// Shutdown here. Shutdown blocks until in-flight requests finish or
+	// Shutdown here. The drain ends when in-flight handlers return or
 	// shutdownGrace passes; the receive afterwards joins the serve goroutine
 	// and keeps a real serve error.
 	serveErrCh := make(chan error, 1)
@@ -112,7 +121,16 @@ func ListenAndServe(ctx context.Context, srv workqueue.WorkqueueServiceServer, o
 		clog.InfoContext(ctx, "workqueue server draining", "cause", context.Cause(ctx), "deadline", shutdownGrace.String())
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 		defer cancel()
-		if err := d.Shutdown(shutdownCtx); err != nil {
+		// Stop waits for handlers without a deadline, so bound it here.
+		shutdownErr := make(chan error, 1)
+		go func() { shutdownErr <- d.Shutdown(shutdownCtx) }()
+		var err error
+		select {
+		case err = <-shutdownErr:
+		case <-shutdownCtx.Done():
+			err = shutdownCtx.Err()
+		}
+		if err != nil {
 			clog.WarnContext(ctx, "workqueue server shutdown did not finish cleanly", "error", err, "elapsed", time.Since(start).String())
 		} else {
 			clog.InfoContext(ctx, "workqueue server drained", "elapsed", time.Since(start).String())

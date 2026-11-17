@@ -8,13 +8,16 @@ package serve_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/chainguard-dev/clog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -190,4 +193,130 @@ func TestListenAndServeDrainsInFlightRequest(t *testing.T) {
 	if !finishedAtReturn {
 		t.Error("ListenAndServe returned before the in-flight handler finished")
 	}
+}
+
+// cleanupServer is a Process handler that, once its call is cancelled, runs a
+// cleanup lasting until release is closed.
+type cleanupServer struct {
+	workqueue.UnimplementedWorkqueueServiceServer
+	entered   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+}
+
+func (s *cleanupServer) Process(ctx context.Context, _ *workqueue.ProcessRequest) (*workqueue.ProcessResponse, error) {
+	close(s.entered)
+	<-ctx.Done()
+	close(s.cancelled)
+	<-s.release
+	return nil, ctx.Err()
+}
+
+// TestListenAndServeWaitsForHandlerOfCancelledCall verifies that
+// ListenAndServe waits for a handler whose caller already cancelled the call.
+// On SIGTERM the workqueue dispatcher cancels its in-flight calls before this
+// server drains. gRPC's ServeHTTP returns as soon as the client is gone, but
+// the handler keeps running its cleanup, such as closing a microVM session. If
+// ListenAndServe returned then, the process would exit with that cleanup
+// unfinished.
+//
+// The handler's cleanup lasts until ListenAndServe returns, so a
+// ListenAndServe that waits for it can only return once shutdownGrace runs
+// out, and says so in its log; one that does not wait reports a clean drain,
+// and one that waits without a deadline never returns. Whether it waited is
+// read from that outcome rather than from how long the test watched it not
+// return, at the cost of the test taking shutdownGrace.
+func TestListenAndServeWaitsForHandlerOfCancelledCall(t *testing.T) {
+	logs := &recordingHandler{}
+	ctx, cancel := context.WithCancel(clog.WithLogger(t.Context(), clog.New(logs)))
+	defer cancel()
+
+	srv := &cleanupServer{
+		entered:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	addr, done := start(ctx, t, srv, func() { close(srv.release) })
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer conn.Close()
+
+	callCtx, callCancel := context.WithCancel(t.Context())
+	defer callCancel()
+	go func() {
+		_, _ = workqueue.NewWorkqueueServiceClient(conn).Process(callCtx, &workqueue.ProcessRequest{})
+	}()
+
+	select {
+	case <-srv.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Process handler did not start")
+	}
+
+	// The dispatcher cancels its call, then the server is told to stop.
+	callCancel()
+	select {
+	case <-srv.cancelled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Process handler did not see its call cancelled")
+	}
+	cancel()
+
+	// Generous next to shutdownGrace, so a slow runner does not fail it.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ListenAndServe: got = %v, want = nil", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("ListenAndServe did not return within 30s; the handler held shutdown past its deadline")
+	}
+	if got := logs.shutdownError(); !errors.Is(got, context.DeadlineExceeded) {
+		t.Errorf("shutdown outcome: got = %v, want = %v from waiting on the handler", got, context.DeadlineExceeded)
+	}
+}
+
+// recordingHandler is a slog.Handler that keeps every record logged through
+// it.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (*recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *recordingHandler) WithGroup(string) slog.Handler { return h }
+
+// shutdownError returns the error ListenAndServe logged when its server
+// shutdown did not finish cleanly, or nil if it logged none.
+func (h *recordingHandler) shutdownError() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message != "workqueue server shutdown did not finish cleanly" {
+			continue
+		}
+		var err error
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key != "error" {
+				return true
+			}
+			err, _ = a.Value.Any().(error)
+			return false
+		})
+		return err
+	}
+	return nil
 }
