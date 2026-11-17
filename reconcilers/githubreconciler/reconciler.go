@@ -71,6 +71,16 @@ const (
 	// ResourceTypePath represents a file or directory path in a repository.
 	ResourceTypePath ResourceType = "path"
 
+	// abuseRetryAfter is how long to wait on a GitHub secondary rate limit
+	// that names no Retry-After.
+	abuseRetryAfter = time.Minute
+
+	// minRateLimitRequeue is the shortest rate-limit requeue. A reset that
+	// has passed, or a Retry-After of 0, gives a delay of zero or less, which
+	// workqueue.RequeueSeconds sends as 0, and the dispatcher completes a key
+	// whose delay is 0 rather than requeueing it.
+	minRateLimitRequeue = time.Second
+
 	// grpcRateLimitRetryDuration is the base duration to wait before retrying
 	// when a gRPC ResourceExhausted error is encountered.
 	grpcRateLimitRetryDuration = 2 * time.Minute
@@ -230,23 +240,8 @@ func requeueFor(err error) *requeue {
 		return nil
 	}
 
-	// Check if it's a rate limit error from any GitHub API call
-	if rateLimitErr, ok := errors.AsType[*github.RateLimitError](err); ok {
-		// Calculate duration until rate limit resets
-		resetTime := rateLimitErr.Rate.Reset.Time
-		delay := jitter.Add(time.Until(resetTime))
-		return &requeue{err: workqueue.RequeueAfter(delay), msg: "Rate limited, requeueing after rate limit reset", attrs: []any{"reset_at", resetTime}}
-	}
-
-	// Check if it's an abuse rate limit error
-	if abuseRateLimitErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
-		// GitHub wants us to slow down - use retry after if provided, otherwise use a conservative 1 minute
-		retryAfter := time.Minute
-		if abuseRateLimitErr.RetryAfter != nil {
-			retryAfter = *abuseRateLimitErr.RetryAfter
-		}
-		delay := jitter.Add(retryAfter)
-		return &requeue{err: workqueue.RequeueAfter(delay), msg: "Abuse rate limit detected, requeueing after retry period", attrs: []any{"retry_after", delay}}
+	if rq := rateLimitRequeue(err); rq != nil {
+		return rq
 	}
 
 	// Check if it's a gRPC ResourceExhausted error
@@ -267,6 +262,49 @@ func requeueFor(err error) *requeue {
 	// or one marked by transient.Retry)
 	if transient.Is(err) {
 		return &requeue{err: workqueue.RequeueAfterWithJitter(transientRequeueDelay, transientRequeueJitter), msg: "Transient failure, requeueing with jitter", attrs: []any{"error", err}}
+	}
+	return nil
+}
+
+// RequeueRateLimit answers a GitHub rate limit in err with a workqueue
+// requeue for when the limit lifts, and returns any other err, nil included,
+// unchanged. It logs a warning when it requeues.
+//
+// A primary rate limit ([github.RateLimitError]) requeues at its reset time.
+// A secondary rate limit ([github.AbuseRateLimitError]) requeues after its
+// Retry-After, or after a minute when GitHub names none. Either delay gains
+// up to as long again in jitter, so keys limited together do not all return
+// at once, and is at least a second, so a reset that has passed still
+// requeues.
+//
+// [Reconciler] already does this for the errors its reconcile function
+// returns. RequeueRateLimit is for a reconciler served some other way that
+// still calls GitHub, which would otherwise retry a rate-limited key with
+// backoff and spend its attempts against a limit that has not lifted.
+func RequeueRateLimit(ctx context.Context, err error) error {
+	if rq := rateLimitRequeue(err); rq != nil {
+		clog.WarnContext(ctx, rq.msg, rq.attrs...)
+		return rq.err
+	}
+	return err
+}
+
+// rateLimitRequeue returns how to requeue a GitHub rate limit in err, and nil
+// when err holds none.
+func rateLimitRequeue(err error) *requeue {
+	if rateLimitErr, ok := errors.AsType[*github.RateLimitError](err); ok {
+		resetTime := rateLimitErr.Rate.Reset.Time
+		delay := max(jitter.Add(time.Until(resetTime)), minRateLimitRequeue)
+		return &requeue{err: workqueue.RequeueAfter(delay), msg: "Rate limited, requeueing after rate limit reset", attrs: []any{"reset_at", resetTime}}
+	}
+
+	if abuseRateLimitErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
+		retryAfter := abuseRetryAfter
+		if abuseRateLimitErr.RetryAfter != nil {
+			retryAfter = *abuseRateLimitErr.RetryAfter
+		}
+		delay := max(jitter.Add(retryAfter), minRateLimitRequeue)
+		return &requeue{err: workqueue.RequeueAfter(delay), msg: "Abuse rate limit detected, requeueing after retry period", attrs: []any{"retry_after", delay}}
 	}
 	return nil
 }

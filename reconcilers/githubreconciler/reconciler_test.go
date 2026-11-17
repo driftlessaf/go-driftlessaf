@@ -7,6 +7,7 @@ package githubreconciler
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/http"
@@ -291,6 +292,100 @@ func TestReconciler_RateLimitHandling(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRequeueRateLimit(t *testing.T) {
+	t.Parallel()
+	errOther := errors.New(rand.Text())
+	retryAfter := 7 * time.Minute
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		// minDelay and maxDelay bound the requeue delay, which is jittered
+		// by up to its base again. passthrough means RequeueRateLimit
+		// returns err itself rather than a requeue.
+		minDelay, maxDelay time.Duration
+		passthrough        bool
+	}{{
+		name:        "nil",
+		passthrough: true,
+	}, {
+		name:        "other error",
+		err:         fmt.Errorf("creating PR: %w", errOther),
+		passthrough: true,
+	}, {
+		name:        "gRPC ResourceExhausted",
+		err:         status.Error(codes.ResourceExhausted, "quota exceeded"),
+		passthrough: true,
+	}, {
+		name: "primary rate limit",
+		err: fmt.Errorf("creating PR: %w", &github.RateLimitError{
+			Rate: github.Rate{Reset: github.Timestamp{Time: time.Now().Add(time.Hour)}},
+		}),
+		// time.Until runs after the reset is set, so the base is a little
+		// under an hour.
+		minDelay: 59 * time.Minute,
+		maxDelay: 2 * time.Hour,
+	}, {
+		name: "primary rate limit already reset",
+		err: &github.RateLimitError{
+			Rate: github.Rate{Reset: github.Timestamp{Time: time.Now().Add(-time.Hour)}},
+		},
+		minDelay: minRateLimitRequeue,
+		maxDelay: minRateLimitRequeue,
+	}, {
+		name:     "secondary rate limit with zero retry-after",
+		err:      &github.AbuseRateLimitError{RetryAfter: new(time.Duration(0))},
+		minDelay: minRateLimitRequeue,
+		maxDelay: minRateLimitRequeue,
+	}, {
+		name:     "secondary rate limit with retry-after",
+		err:      fmt.Errorf("adding labels: %w", &github.AbuseRateLimitError{RetryAfter: &retryAfter}),
+		minDelay: retryAfter,
+		maxDelay: 2 * retryAfter,
+	}, {
+		name:     "secondary rate limit without retry-after",
+		err:      &github.AbuseRateLimitError{},
+		minDelay: abuseRetryAfter,
+		maxDelay: 2 * abuseRetryAfter,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := RequeueRateLimit(t.Context(), tc.err)
+			if tc.passthrough {
+				if got != tc.err { //nolint:errorlint // the same error, unwrapped
+					t.Errorf("RequeueRateLimit: got = %v, want = %v", got, tc.err)
+				}
+				return
+			}
+			delay, ok := workqueue.GetRequeueDelay(got)
+			if !ok {
+				t.Fatalf("RequeueRateLimit: got = %v, want a requeue", got)
+			}
+			if delay < tc.minDelay || delay > tc.maxDelay {
+				t.Errorf("requeue delay: got = %v, want in [%v, %v]", delay, tc.minDelay, tc.maxDelay)
+			}
+		})
+	}
+}
+
+// A rate limit that has already lifted still reaches the dispatcher as a
+// requeue. ProcessResponse carries whole seconds, and the dispatcher completes
+// a key whose RequeueAfterSeconds is 0, so a sub-second delay would drop it.
+func TestReconciler_Process_RateLimitAlreadyReset(t *testing.T) {
+	t.Parallel()
+	r := NewReconciler(NewClientCache(mockTokenSourceFunc), WithReconciler(func(context.Context, *Resource, *github.Client) error {
+		return &github.RateLimitError{Rate: github.Rate{Reset: github.Timestamp{Time: time.Now().Add(-time.Minute)}}}
+	}))
+
+	resp, err := r.Process(t.Context(), &workqueue.ProcessRequest{Key: "https://github.com/owner/repo/issues/123"})
+	if err != nil {
+		t.Fatalf("Process: got error %v", err)
+	}
+	if got := resp.GetRequeueAfterSeconds(); got <= 0 {
+		t.Errorf("RequeueAfterSeconds: got = %d, want > 0", got)
 	}
 }
 
