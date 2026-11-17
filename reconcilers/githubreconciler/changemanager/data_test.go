@@ -251,7 +251,7 @@ func TestCollectFindings(t *testing.T) {
 	// Ignored runs are neither findings nor pending, whatever they conclude.
 	ignored := map[string]struct{}{"eligibility": {}, "eligibility-rerun": {}}
 
-	findings, pending, err := collectFindings(t.Context(), nil, "owner", "repo", "sha", contexts, ignored)
+	findings, pending, err := collectFindings(t.Context(), nil, "owner", "repo", "sha", contexts, ignored, nil)
 	if err != nil {
 		t.Fatalf("collectFindings: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestCollectFindings_PaginatesRollupContexts(t *testing.T) {
 	initial.PageInfo.HasNextPage = true
 	initial.PageInfo.EndCursor = "cursor-1"
 
-	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial, nil)
+	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial, nil, nil)
 	if err != nil {
 		t.Fatalf("collectFindings: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestCollectFindings_PaginationErrorPropagates(t *testing.T) {
 	initial.PageInfo.HasNextPage = true
 	initial.PageInfo.EndCursor = "cursor-1"
 
-	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial, nil)
+	findings, pending, err := collectFindings(t.Context(), gqlClient, "owner", "repo", "sha", initial, nil, nil)
 	if err == nil {
 		t.Fatal("collectFindings: got nil error, want pagination error")
 	}
@@ -405,6 +405,59 @@ func TestWithIgnoredChecksAppends(t *testing.T) {
 	want := map[string]struct{}{"a": {}, "b": {}}
 	if !maps.Equal(cm.ignoredChecks, want) {
 		t.Errorf("ignoredChecks: got = %v, want = %v", cm.ignoredChecks, want)
+	}
+}
+
+func TestWithApprovalGatedChecksAppends(t *testing.T) {
+	cm, err := New[testData]("test-bot",
+		template.Must(template.New("title").Parse("x")),
+		template.Must(template.New("body").Parse("x")),
+		WithApprovalGatedChecks[testData]("a"),
+		WithApprovalGatedChecks[testData]("b"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := map[string]struct{}{"a": {}, "b": {}}
+	if !maps.Equal(cm.approvalGatedChecks, want) {
+		t.Errorf("approvalGatedChecks: got = %v, want = %v", cm.approvalGatedChecks, want)
+	}
+}
+
+func TestApprovalGatedChecksCollection(t *testing.T) {
+	cr := func(id int64, name, status, conclusion string) gqlStatusCheckRollupContext {
+		return gqlStatusCheckRollupContext{
+			Typename: "CheckRun",
+			CheckRun: gqlCheckRunNode{DatabaseId: id, Name: name, Status: status, Conclusion: conclusion},
+		}
+	}
+	gated := map[string]struct{}{"doc-approval": {}, "both": {}}
+	ignored := map[string]struct{}{"both": {}}
+
+	for _, tc := range []struct {
+		name         string
+		run          gqlStatusCheckRollupContext
+		wantFindings int
+		wantPending  []string
+	}{
+		{"incomplete gated run is not pending", cr(1, "doc-approval", "IN_PROGRESS", ""), 0, nil},
+		{"failed gated run is a finding", cr(2, "doc-approval", "COMPLETED", "FAILURE"), 1, nil},
+		{"incomplete ungated run is pending", cr(3, "build", "IN_PROGRESS", ""), 0, []string{"build"}},
+		{"ignored wins over gated", cr(4, "both", "COMPLETED", "FAILURE"), 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contexts := gqlRollupContextsConnection{Nodes: []gqlStatusCheckRollupContext{tc.run}}
+			findings, pending, err := collectFindings(t.Context(), nil, "owner", "repo", "sha", contexts, ignored, gated)
+			if err != nil {
+				t.Fatalf("collectFindings: %v", err)
+			}
+			if len(findings) != tc.wantFindings {
+				t.Errorf("findings: got %d, want %d (%+v)", len(findings), tc.wantFindings, findings)
+			}
+			if !slices.Equal(pending, tc.wantPending) {
+				t.Errorf("pending: got %v, want %v", pending, tc.wantPending)
+			}
+		})
 	}
 }
 

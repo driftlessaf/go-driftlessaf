@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"text/template"
@@ -133,7 +134,7 @@ func TestCollectSuiteFindings(t *testing.T) {
 	// Ignored runs are neither findings nor pending, whatever they conclude.
 	ignored := map[string]struct{}{"eligibility": {}, "eligibility-rerun": {}}
 
-	findings, pending, err := collectSuiteFindings(t.Context(), nil, "owner", "repo", "sha", nil, suites, ignored)
+	findings, pending, err := collectSuiteFindings(t.Context(), nil, "owner", "repo", "sha", nil, suites, ignored, nil)
 	if err != nil {
 		t.Fatalf("collectSuiteFindings: %v", err)
 	}
@@ -151,6 +152,39 @@ func TestCollectSuiteFindings(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"unit-tests", "lint"}, pending); diff != "" {
 		t.Errorf("pendingChecks (-want +got):\n%s", diff)
+	}
+}
+
+// TestCollectSuiteFindingsApprovalGated locks in that gated runs read through
+// check suites are not pending while incomplete, but still yield a finding
+// when they fail.
+func TestCollectSuiteFindingsApprovalGated(t *testing.T) {
+	gated := map[string]struct{}{"doc-approval": {}}
+	for _, tc := range []struct {
+		name         string
+		run          gqlCheckRunNode
+		wantFindings int
+		wantPending  []string
+	}{
+		{"incomplete gated run is not pending", gqlCheckRunNode{DatabaseId: 1, Name: "doc-approval", Status: "IN_PROGRESS"}, 0, nil},
+		{"failed gated run is a finding", gqlCheckRunNode{DatabaseId: 2, Name: "doc-approval", Status: "COMPLETED", Conclusion: "FAILURE"}, 1, nil},
+		{"incomplete ungated run is pending", gqlCheckRunNode{DatabaseId: 3, Name: "build", Status: "IN_PROGRESS"}, 0, []string{"build"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := gqlCheckSuiteNode{Id: "s1"}
+			s.CheckRuns.Nodes = []gqlCheckRunNode{tc.run}
+			suites := gqlCheckSuitesConnection{Nodes: []gqlCheckSuiteNode{s}}
+			findings, pending, err := collectSuiteFindings(t.Context(), nil, "owner", "repo", "sha", nil, suites, nil, gated)
+			if err != nil {
+				t.Fatalf("collectSuiteFindings: %v", err)
+			}
+			if len(findings) != tc.wantFindings {
+				t.Errorf("findings: got %d, want %d (%+v)", len(findings), tc.wantFindings, findings)
+			}
+			if !slices.Equal(pending, tc.wantPending) {
+				t.Errorf("pending: got %v, want %v", pending, tc.wantPending)
+			}
+		})
 	}
 }
 
@@ -265,7 +299,7 @@ func TestCollectSuiteFindings_Paginates(t *testing.T) {
 	initial.PageInfo.HasNextPage = true
 	initial.PageInfo.EndCursor = "suites-1"
 
-	findings, pending, err := collectSuiteFindings(t.Context(), gqlClient, "owner", "repo", "sha", nil, initial, nil)
+	findings, pending, err := collectSuiteFindings(t.Context(), gqlClient, "owner", "repo", "sha", nil, initial, nil, nil)
 	if err != nil {
 		t.Fatalf("collectSuiteFindings: %v", err)
 	}
@@ -307,7 +341,7 @@ func TestCollectSuiteFindings_CheckApps(t *testing.T) {
 	s1.CheckRuns.Nodes = []gqlCheckRunNode{{DatabaseId: 1, Name: "build", Status: "COMPLETED", Conclusion: "FAILURE"}}
 	initial.Nodes = []gqlCheckSuiteNode{s1}
 
-	findings, pending, err := collectSuiteFindings(t.Context(), gqlClient, "owner", "repo", "sha", []int64{15368, 42}, initial, nil)
+	findings, pending, err := collectSuiteFindings(t.Context(), gqlClient, "owner", "repo", "sha", []int64{15368, 42}, initial, nil, nil)
 	if err != nil {
 		t.Fatalf("collectSuiteFindings: %v", err)
 	}
@@ -363,7 +397,7 @@ func TestCollectSuiteFindings_PaginationErrorPropagates(t *testing.T) {
 	initial.PageInfo.HasNextPage = true
 	initial.PageInfo.EndCursor = "cursor-1"
 
-	findings, pending, err := collectSuiteFindings(t.Context(), gqlClient, "owner", "repo", "sha", nil, initial, nil)
+	findings, pending, err := collectSuiteFindings(t.Context(), gqlClient, "owner", "repo", "sha", nil, initial, nil, nil)
 	if err == nil {
 		t.Fatal("collectSuiteFindings: got nil error, want pagination error")
 	}

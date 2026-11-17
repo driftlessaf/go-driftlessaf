@@ -326,6 +326,26 @@ func WithIgnoredChecks[T any](names ...string) Option[T] {
 	}
 }
 
+// WithApprovalGatedChecks names check runs that wait on a human approval, not
+// on CI. A run with one of these names that has not completed is not a pending
+// check, so it does not hold the PR as pending while it waits. Unlike
+// WithIgnoredChecks, a run that concludes FAILURE is still a finding, and a
+// name in both sets is ignored. Repeated calls add to the set.
+//
+// Runs match by name alone, and any GitHub App can create a run with a listed
+// name. Naming a check here only stops its incomplete runs holding the PR as
+// pending, so name a check only if nothing else relies on that.
+func WithApprovalGatedChecks[T any](names ...string) Option[T] {
+	return func(cm *CM[T]) {
+		if cm.approvalGatedChecks == nil {
+			cm.approvalGatedChecks = make(map[string]struct{}, len(names))
+		}
+		for _, n := range names {
+			cm.approvalGatedChecks[n] = struct{}{}
+		}
+	}
+}
+
 // WithCheckSuites reads check runs through the head commit's check suites
 // rather than its statusCheckRollup. The rollup also carries commit statuses, so
 // reading it requires the statuses permission on top of checks, though only
@@ -379,6 +399,9 @@ type CM[T any] struct {
 	// ignoredChecks are check run names excluded from findings and pending
 	// checks; see WithIgnoredChecks.
 	ignoredChecks map[string]struct{}
+	// approvalGatedChecks are check run names that are not pending checks
+	// while incomplete; see WithApprovalGatedChecks.
+	approvalGatedChecks map[string]struct{}
 	// checkSuites reads checks through check suites rather than the rollup,
 	// limited to the suites of checkApps when non-empty; see WithCheckSuites.
 	checkSuites bool
@@ -842,7 +865,7 @@ func (cm *CM[T]) NewSession(
 		// Collect all check runs, handling pagination
 		if !sc.skipChecks && pr.checks != nil {
 			var err error
-			findings, pendingChecks, err = pr.checks.collect(ctx, gqlClient, owner, repo, pr.HeadRefOid, cm.checkApps, cm.ignoredChecks)
+			findings, pendingChecks, err = pr.checks.collect(ctx, gqlClient, owner, repo, pr.HeadRefOid, cm.checkApps, cm.ignoredChecks, cm.approvalGatedChecks)
 			if err != nil {
 				return nil, fmt.Errorf("collecting findings: %w", err)
 			}
@@ -1103,7 +1126,7 @@ type prInfo struct {
 // headChecks selects a head commit's check runs in the GetPRInfo query, and
 // collects findings from them, paginating past the first page.
 type headChecks interface {
-	collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, apps []int64, ignored map[string]struct{}) ([]callbacks.Finding, []string, error)
+	collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, apps []int64, ignored, gated map[string]struct{}) ([]callbacks.Finding, []string, error)
 }
 
 // rollupChecks reads checks through statusCheckRollup (the default).
@@ -1113,8 +1136,8 @@ type rollupChecks struct {
 	} `graphql:"statusCheckRollup @include(if: $includeChecks)"`
 }
 
-func (r rollupChecks) collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, _ []int64, ignored map[string]struct{}) ([]callbacks.Finding, []string, error) {
-	return collectFindings(ctx, gqlClient, owner, repo, sha, r.StatusCheckRollup.Contexts, ignored)
+func (r rollupChecks) collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, _ []int64, ignored, gated map[string]struct{}) ([]callbacks.Finding, []string, error) {
+	return collectFindings(ctx, gqlClient, owner, repo, sha, r.StatusCheckRollup.Contexts, ignored, gated)
 }
 
 // suiteChecks reads checks through check suites; see WithCheckSuites.
@@ -1122,8 +1145,8 @@ type suiteChecks struct {
 	CheckSuites gqlCheckSuitesConnection `graphql:"checkSuites(first: 100, filterBy: $checkSuiteFilter) @include(if: $includeChecks)"`
 }
 
-func (s suiteChecks) collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, apps []int64, ignored map[string]struct{}) ([]callbacks.Finding, []string, error) {
-	return collectSuiteFindings(ctx, gqlClient, owner, repo, sha, apps, s.CheckSuites, ignored)
+func (s suiteChecks) collect(ctx context.Context, gqlClient *graphqlclient.GraphQLClient, owner, repo, sha string, apps []int64, ignored, gated map[string]struct{}) ([]callbacks.Finding, []string, error) {
+	return collectSuiteFindings(ctx, gqlClient, owner, repo, sha, apps, s.CheckSuites, ignored, gated)
 }
 
 // queryPRInfo runs GetPRInfo, selecting the head commit's checks with C. It
@@ -1179,9 +1202,9 @@ func collectFindings(
 	gqlClient *graphqlclient.GraphQLClient,
 	owner, repo, sha string,
 	initialContexts gqlRollupContextsConnection,
-	ignored map[string]struct{},
+	ignored, gated map[string]struct{},
 ) ([]callbacks.Finding, []string, error) {
-	c := &checkCollector{gqlClient: gqlClient, owner: owner, repo: repo, sha: sha, ignored: ignored}
+	c := &checkCollector{gqlClient: gqlClient, owner: owner, repo: repo, sha: sha, ignored: ignored, gated: gated}
 	if err := c.addContexts(ctx, initialContexts); err != nil {
 		return nil, nil, err
 	}
@@ -1198,9 +1221,9 @@ func collectSuiteFindings(
 	owner, repo, sha string,
 	apps []int64,
 	initialSuites gqlCheckSuitesConnection,
-	ignored map[string]struct{},
+	ignored, gated map[string]struct{},
 ) ([]callbacks.Finding, []string, error) {
-	c := &checkCollector{gqlClient: gqlClient, owner: owner, repo: repo, sha: sha, ignored: ignored}
+	c := &checkCollector{gqlClient: gqlClient, owner: owner, repo: repo, sha: sha, ignored: ignored, gated: gated}
 	if err := c.addSuites(ctx, checkSuiteFilter(apps, 0), initialSuites); err != nil {
 		return nil, nil, err
 	}
@@ -1217,7 +1240,7 @@ func collectSuiteFindings(
 type checkCollector struct {
 	gqlClient        *graphqlclient.GraphQLClient
 	owner, repo, sha string
-	ignored          map[string]struct{}
+	ignored, gated   map[string]struct{}
 
 	findings      []callbacks.Finding
 	pendingChecks []string
@@ -1243,6 +1266,9 @@ func (c *checkCollector) addRuns(runs []gqlCheckRunNode) {
 				ExternalID: run.ExternalId,
 			})
 		case pending:
+			if _, gated := c.gated[run.Name]; gated {
+				continue
+			}
 			c.pendingChecks = append(c.pendingChecks, run.Name)
 		}
 	}
