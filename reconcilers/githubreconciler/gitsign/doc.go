@@ -13,6 +13,8 @@ SPDX-License-Identifier: Apache-2.0
 // VerifyCommit checks that a commit was signed by an expected Google service
 // account: the certificate must chain to the public-good Fulcio roots, name
 // that account and the Google issuer, and carry a verified Rekor inclusion
-// receipt from within its validity window. The gitsigntest package provides
-// a local signing authority for tests.
+// receipt from within its validity window. Verifier.IdentifyCommit applies the
+// same signature checks to a commit as GitHub's API reports it, and returns the
+// signer's issuer and subject. The gitsigntest package provides a local
+// signing authority for tests.
 package gitsign
