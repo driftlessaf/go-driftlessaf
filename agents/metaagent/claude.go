@@ -193,6 +193,10 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithEffort[Req, Resp](config.Effort))
 	}
 
+	if config.DisableTailPromptCaching {
+		executorOpts = append(executorOpts, claudeexecutor.WithoutTailCacheControl[Req, Resp]())
+	}
+
 	if config.RefusalNudgeMaxRetries > 0 {
 		executorOpts = append(executorOpts, claudeexecutor.WithRefusalNudge[Req, Resp](config.RefusalNudgeMaxRetries))
 	}

@@ -96,7 +96,8 @@ SPDX-License-Identifier: Apache-2.0
 // # Prompt Caching
 //
 // Anthropic prompt caching is enabled by default (disable with
-// WithoutCacheControl). The executor places cache breakpoints on the static
+// WithoutCacheControl, or WithoutTailCacheControl to drop only the moving tail
+// breakpoint). The executor places cache breakpoints on the static
 // request prefix — the last tool definition and the system prompt — and
 // advances a moving breakpoint along the conversation tail each turn. The
 // tail breakpoint means the accumulated message history (the rendered prompt

@@ -148,6 +148,16 @@ type Config[Resp, CB any] struct {
 	// other protocols reject it. See claudeexecutor.WithRefusalFallback.
 	RefusalFallbackModel string
 
+	// DisableTailPromptCaching, when true, builds the Claude executor with
+	// claudeexecutor.WithoutTailCacheControl, so the moving cache marker on the
+	// conversation tail is never placed and the per-request tokens are billed as
+	// plain input instead of paying the cache-write premium. Static-prefix
+	// caching (tool definitions and system prompt) stays on. Use it for agents
+	// whose rendered request is never reused within the cache TTL. Zero (the
+	// default) keeps tail caching on. Claude backend only: other backends
+	// ignore it.
+	DisableTailPromptCaching bool
+
 	// MaxToolCallsBeforeFinalize, when positive, asks the model once to call its
 	// submit tool after this many investigative tool calls, forcing it where the
 	// model allows, unless an earlier finalize nudge was sent; a run that would

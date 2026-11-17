@@ -96,6 +96,13 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 	cacheControl bool
 
+	// disableTailCacheControl, when true, stops the executor advancing the
+	// moving breakpoint along the conversation tail while leaving the static
+	// markers on tool definitions and the system prompt in place. Set via
+	// WithoutTailCacheControl. It has no effect under WithoutCacheControl, and
+	// the first-user-block marker of WithCacheFirstUserBlock is independent of it.
+	disableTailCacheControl bool
+
 	// cacheTTL is the lifetime carried by every cache breakpoint the executor
 	// places. Empty leaves the field off the wire, which the API reads as its
 	// 5-minute default. Set via WithCacheTTL.
@@ -885,7 +892,7 @@ func (e *executor[Request, Response]) runConversation(
 		// appended since the last turn (tool results, redirects) is written to
 		// the prompt cache once and read cheaply on subsequent turns, instead
 		// of re-billing the whole conversation at full input price every turn.
-		if e.cacheControl {
+		if e.cacheControl && !e.disableTailCacheControl {
 			tail.advance(params.Messages)
 		}
 

@@ -387,6 +387,25 @@ func WithoutCacheControl[Request promptbuilder.Bindable, Response any]() Option[
 	}
 }
 
+// WithoutTailCacheControl stops the executor placing the moving cache breakpoint
+// on the conversation tail, while keeping the breakpoints on the tool
+// definitions and the system prompt.
+//
+// The tail marker writes the rendered prompt and every prior tool result to the
+// cache at the 1.25x write premium so later turns of the same run read them at
+// 10%. When the rendered prompt is unique to each request, no other execution
+// reads that write, and only a run with further turns recoups it. Disabling it
+// leaves the shared static prefix cacheable across executions. Cache reads and
+// writes are still recorded in usage. WithCacheFirstUserBlock is independent and
+// still places its marker. Applies to resumed executions too. WithoutCacheControl
+// already disables every marker, so this option adds nothing when combined with it.
+func WithoutTailCacheControl[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.disableTailCacheControl = true
+		return nil
+	}
+}
+
 // WithCacheTTL sets the lifetime of every cache breakpoint the executor places.
 // Anthropic accepts two values: 5 minutes (the default) and 1 hour; any other
 // duration is an error.
