@@ -149,21 +149,23 @@ func (e *executor[Request, Response]) countTokens(ctx context.Context, cfg retry
 // result, recount, then reject. That caps a turn at three count calls.
 // With WithInputBudgetNoReduction both reduction passes are skipped and the
 // first exact count over the budget rejects the turn.
-func (e *executor[Request, Response]) enforceInputBudget(ctx context.Context, cfg retry.RetryConfig, params *anthropic.MessageNewParams, protected func(name string) bool) error {
+//
+// It returns how many tool results it reduced.
+func (e *executor[Request, Response]) enforceInputBudget(ctx context.Context, cfg retry.RetryConfig, params *anthropic.MessageNewParams, protected func(name string) bool) (int, error) {
 	budget := inputBudget(e.contextWindow, params.MaxTokens)
 	cp, err := countParams(*params)
 	if err != nil {
-		return fmt.Errorf("failed to count Claude request tokens: %w", err)
+		return 0, fmt.Errorf("failed to count Claude request tokens: %w", err)
 	}
 	if upperBoundTokens(cp) <= budget {
-		return nil
+		return 0, nil
 	}
 	inputTokens, err := e.countTokens(ctx, cfg, cp)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if inputTokens <= budget {
-		return nil
+		return 0, nil
 	}
 
 	current := inputTokens
@@ -181,7 +183,7 @@ func (e *executor[Request, Response]) enforceInputBudget(ctx context.Context, cf
 		// Reduction replaces blocks inside the existing message slices, so
 		// the count request built from the same slices sees the change.
 		if current, err = e.countTokens(ctx, cfg, cp); err != nil {
-			return err
+			return reducedResults, err
 		}
 		if current <= budget {
 			break
@@ -202,11 +204,11 @@ func (e *executor[Request, Response]) enforceInputBudget(ctx context.Context, cf
 	}
 	if current <= budget {
 		clog.InfoContext(ctx, "Reduced older tool results to fit the model input budget", kvs...)
-		return nil
+		return reducedResults, nil
 	}
 	e.telemetry.RecordToolCall(ctx, "input_budget_rejection")
 	clog.WarnContext(ctx, "Rejecting Claude request over the model input budget", kvs...)
-	return &InputTooLargeError{
+	return reducedResults, &InputTooLargeError{
 		Model:              e.modelName,
 		ContextWindow:      e.contextWindow,
 		OutputHeadroom:     params.MaxTokens,

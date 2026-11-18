@@ -830,7 +830,7 @@ func TestInputBudgetMediaSkipsLocalBound(t *testing.T) {
 				MaxTokens: 32000,
 				Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(tt.content...)},
 			}
-			if err := e.enforceInputBudget(t.Context(), retry.DefaultRetryConfig(), &params, func(string) bool { return false }); err != nil {
+			if _, err := e.enforceInputBudget(t.Context(), retry.DefaultRetryConfig(), &params, func(string) bool { return false }); err != nil {
 				t.Fatalf("enforceInputBudget: %v", err)
 			}
 			if got := int(counts.Load()); got != tt.wantCounts {

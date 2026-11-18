@@ -124,6 +124,18 @@ SPDX-License-Identifier: Apache-2.0
 // entries alive across such turns at a higher write price (2x the base input
 // price instead of 1.25x); every marker the executor places carries it.
 //
+// The executor logs "Prompt cache did not carry over from the previous turn"
+// when a later turn of one run reads much less from the cache than the previous
+// turn's cached prefix (more than 1024 tokens and more than 10 percent) and
+// writes the cache again. The log does not say why. Expiry, a changed prefix,
+// a different serving model, or a provider location that does not keep one
+// cache across turns can each cause it. lost_tokens estimates the prefix that
+// was not read; it is not a billed amount. Turns where the input budget
+// reduced earlier tool results are skipped, as are turns sent with a different
+// tool_choice than the previous turn (for example the forced submit tool after
+// a text redirect), because a changed tool_choice invalidates the cached
+// messages.
+//
 // WithUserPromptSuffix extends the shared prefix across executions: it splits
 // the initial user message into a leading payload block (the rendered prompt,
 // carrying a cache breakpoint) and a trailing suffix block, which a

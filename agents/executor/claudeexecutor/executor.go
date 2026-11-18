@@ -897,6 +897,14 @@ func (e *executor[Request, Response]) runConversation(
 	// it at function exit. Every error path must use `return ..., err` (or set
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
+	//
+	// prevInputTokens and prevCachedTokens are the previous turn's total
+	// input and cached prefix (cache read plus cache creation). They are
+	// run-local, so a resumed run starts fresh.
+	//
+	// prevToolChoice is the tool_choice the previous turn was sent with.
+	var prevInputTokens, prevCachedTokens int64
+	var prevToolChoice anthropic.ToolChoiceUnionParam
 	executeTurn := func(turn int) (_ Response, _ bool, err error) {
 		retrying := fallbackRetry
 		fallbackRetry = nil
@@ -931,13 +939,22 @@ func (e *executor[Request, Response]) runConversation(
 		// The budget runs after the tail advance and before RecordRequest so
 		// the request counted, the request traced and the request sent are
 		// the same. Count calls stay out of genai.api.requests.
+		// budgetReduced records that this turn's budget pass rewrote earlier
+		// tool results, which changes the prefix the cache was written for.
+		budgetReduced := false
 		if e.inputBudgetEnabled {
 			countCfg := e.retryConfig
 			countCfg.OnAttemptError = llmTurn.RecordError
-			if err := e.enforceInputBudget(ctx, countCfg, &params, protectedResult); err != nil {
+			reduced, err := e.enforceInputBudget(ctx, countCfg, &params, protectedResult)
+			if err != nil {
 				return response, true, err
 			}
+			budgetReduced = reduced > 0
 		}
+		// A changed tool_choice invalidates the cached message blocks, so a
+		// turn sent with a different one is expected to miss the cache.
+		toolChoice := params.ToolChoice
+		toolChoiceChanged := !reflect.DeepEqual(toolChoice, prevToolChoice)
 
 		// Capture the cumulative prompt as sent to Anthropic. params.Messages
 		// grows across turns (tool results are appended in-place after each
@@ -1086,7 +1103,30 @@ func (e *executor[Request, Response]) runConversation(
 					"cache_creation_5m_tokens", message.Usage.CacheCreation.Ephemeral5mInputTokens,
 					"cache_creation_1h_tokens", message.Usage.CacheCreation.Ephemeral1hInputTokens)
 			}
+
+			// Report a turn that did not read the cached prefix the previous
+			// turn left behind. Loss is measured against that cached prefix,
+			// capped at this turn's total input so tokens the input budget
+			// dropped on purpose are not counted. A turn the budget rewrote
+			// is skipped, as is one after a turn that cached nothing and one
+			// sent with a different tool_choice than the previous turn.
+			currentInput := message.Usage.InputTokens + cacheRead + cacheCreation
+			if turn > startTurn && prevCachedTokens > 0 && !budgetReduced && !toolChoiceChanged && cacheCreation > 0 {
+				baseline := min(prevCachedTokens, currentInput)
+				if lost := baseline - cacheRead; lost > max(1024, baseline/10) {
+					clog.InfoContext(ctx, "Prompt cache did not carry over from the previous turn",
+						"turn", turn,
+						"previous_input_tokens", prevInputTokens,
+						"baseline_input_tokens", baseline,
+						"cache_read_tokens", cacheRead,
+						"cache_creation_tokens", cacheCreation,
+						"lost_tokens", lost)
+				}
+			}
 		}
+		prevInputTokens = message.Usage.InputTokens + message.Usage.CacheReadInputTokens + message.Usage.CacheCreationInputTokens
+		prevCachedTokens = message.Usage.CacheReadInputTokens + message.Usage.CacheCreationInputTokens
+		prevToolChoice = toolChoice
 
 		// A refusal means Anthropic's safety classifier intervened, not that
 		// the model chose to produce no content — message.Content is always
