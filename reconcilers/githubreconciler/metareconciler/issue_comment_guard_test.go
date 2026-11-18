@@ -88,8 +88,30 @@ type issueHarness struct {
 	prLabels []string
 	extra    func(w http.ResponseWriter, r *http.Request) bool
 
+	// prText is the open PR's body as the fake reports it, and prAssignees
+	// its assignees' logins.
+	prText      string
+	prAssignees []string
+
 	agentCalls int
 	prCreates  int
+}
+
+// prBodyJSON renders prText as a JSON string. h.mu is held.
+func (h *issueHarness) prBodyJSON() string {
+	b, _ := json.Marshal(h.prText)
+	return string(b)
+}
+
+// prAssigneeNodes renders prAssignees as the PR query's assignee nodes. h.mu
+// is held.
+func (h *issueHarness) prAssigneeNodes() string {
+	nodes := []map[string]string{}
+	for _, a := range h.prAssignees {
+		nodes = append(nodes, map[string]string{"login": a})
+	}
+	b, _ := json.Marshal(nodes)
+	return string(b)
 }
 
 // prLabelNodes renders prLabels as the PR query's label nodes. h.mu is held.
@@ -325,7 +347,7 @@ func (h *issueHarness) serveGraphQL(t *testing.T, w http.ResponseWriter, r *http
 		}}})
 
 	case h.pr != nil:
-		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":"","mergeable":%q,"isDraft":false,"headRefOid":"abc123","labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":[]},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.pr.mergeable, h.prLabelNodes(), h.pr.checks)
+		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":%s,"mergeable":%q,"isDraft":false,"headRefOid":"abc123","labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":%s},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.prBodyJSON(), h.pr.mergeable, h.prLabelNodes(), h.pr.checks, h.prAssigneeNodes())
 
 	default:
 		reply(map[string]any{"repository": map[string]any{"pullRequests": map[string]any{"nodes": []any{}}}})
