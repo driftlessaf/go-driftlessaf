@@ -56,6 +56,13 @@ var (
 		},
 		[]string{"service_name", "revision_name", "queue_name"},
 	)
+	mQueuedKeysByPriorityClass = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "workqueue_queued_keys_by_priority_class",
+			Help: "The number of eligible queued keys per priority class; the classes sum to workqueue_queued_keys. A separate gauge so the unlabeled total keeps working with max/min reducers.",
+		},
+		[]string{"service_name", "revision_name", "queue_name", "priority_class"},
+	)
 	mQueuedKeysByTenant = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "workqueue_queued_keys_by_tenant",
@@ -247,6 +254,28 @@ func setQueuedKeysByTenant(labels prometheus.Labels, backlog map[string]int) {
 		l["tenant"] = ""
 		l["overflow"] = "true"
 		mQueuedKeysByTenant.With(l).Set(float64(other))
+	}
+}
+
+// setQueuedKeysByPriorityClass sets the queue's per-class backlog. A class
+// this queue reported before but whose backlog drained is set to 0 rather
+// than deleted: every dispatcher replica reports the backlog and dashboards
+// take the minimum across them, so a missing series would let a replica
+// still holding an older count (one at capacity skips the queued read)
+// win over the replicas that saw the class drain.
+func (w *wq) setQueuedKeysByPriorityClass(labels prometheus.Labels, backlog map[string]int) {
+	w.reportedClassesMu.Lock()
+	defer w.reportedClassesMu.Unlock()
+	if w.reportedClasses == nil {
+		w.reportedClasses = make(map[string]struct{}, len(backlog))
+	}
+	for class := range backlog {
+		w.reportedClasses[class] = struct{}{}
+	}
+	for class := range w.reportedClasses {
+		l := maps.Clone(labels)
+		l["priority_class"] = class
+		mQueuedKeysByPriorityClass.With(l).Set(float64(backlog[class]))
 	}
 }
 

@@ -99,6 +99,11 @@ type wq struct {
 	scheduledWaitWarningThreshold time.Duration
 	// tenant assigns keys to tenants; nil disables tenant-fair ordering.
 	tenant workqueue.TenantFunc
+
+	// reportedClasses holds every priority class this queue has reported a
+	// queued count for, so a drained class reads 0 rather than vanishing.
+	reportedClasses   map[string]struct{}
+	reportedClassesMu sync.Mutex
 }
 
 // tenantOf returns the tenant of key, or "" when no TenantFunc is configured.
@@ -460,6 +465,7 @@ type enumerationState struct {
 	qd           *workqueue.TenantSelector[*queuedKey]
 	dl           []workqueue.DeadLetteredKey
 	queued       int
+	queuedClass  map[string]int
 	notbefore    int
 	deadlettered int
 	ownerCounts  map[string]int
@@ -479,6 +485,7 @@ func (w *wq) enumerate(ctx context.Context, capacity *int, ownerCapacity int) ([
 		wip:         make([]workqueue.ObservedInProgressKey, 0, w.limit),
 		qd:          workqueue.NewTenantSelector[*queuedKey](w.limit),
 		ownerCounts: map[string]int{},
+		queuedClass: map[string]int{},
 	}
 	readQueued := capacity == nil
 	readDead := capacity == nil
@@ -560,6 +567,7 @@ func (w *wq) enumerate(ctx context.Context, capacity *int, ownerCapacity int) ([
 	}
 	if readQueued {
 		mQueuedKeys.With(labels).Set(float64(state.queued))
+		w.setQueuedKeysByPriorityClass(labels, state.queuedClass)
 		mQueuedKeysLowerBound.With(labels).Set(float64(state.queued + state.notbefore))
 		mNotBeforeKeys.With(labels).Set(float64(state.notbefore))
 		mMaxAttempts.With(labels).Set(float64(state.maxAttempts))
@@ -657,6 +665,7 @@ func (s *enumerationState) add(ctx context.Context, attrs *keyAttrs) {
 			tenant:                        tenant,
 		}, tenant, key, priority, attrs.Created)
 		s.queued++
+		s.queuedClass[priorityClass(priority)]++
 
 	case strings.HasPrefix(attrs.Name, deadLetterPrefix):
 		s.dl = append(s.dl, &deadLetteredKey{attrs: attrs, priority: priority})

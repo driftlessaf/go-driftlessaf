@@ -123,7 +123,7 @@ func TestSetQueuedKeysByTenantBoundsCardinality(t *testing.T) {
 	}
 	setQueuedKeysByTenant(labels, backlog)
 
-	if got := tenantSeries(t, "tenant-metric-test"); got != topTenants+1 {
+	if got := queueSeries(t, mQueuedKeysByTenant, "tenant-metric-test"); got != topTenants+1 {
 		t.Errorf("series: got = %d, want = %d", got, topTenants+1)
 	}
 	if got := testutil.ToFloat64(mQueuedKeysByTenant.With(tenantLabels("t11"))); got != 12 {
@@ -145,23 +145,23 @@ func TestSetQueuedKeysByTenantBoundsCardinality(t *testing.T) {
 	if got := testutil.ToFloat64(mQueuedKeysByTenant.With(overflowLabels)); got != 1 {
 		t.Errorf("overflow: got = %v, want = 1", got)
 	}
-	if got := tenantSeries(t, "tenant-metric-test"); got != topTenants+1 {
+	if got := queueSeries(t, mQueuedKeysByTenant, "tenant-metric-test"); got != topTenants+1 {
 		t.Errorf("series with tenant other: got = %d, want = %d", got, topTenants+1)
 	}
 
 	// A tenant whose backlog drained loses its series.
 	setQueuedKeysByTenant(labels, map[string]int{"t11": 1})
-	if got := tenantSeries(t, "tenant-metric-test"); got != 1 {
+	if got := queueSeries(t, mQueuedKeysByTenant, "tenant-metric-test"); got != 1 {
 		t.Errorf("series after drain: got = %d, want = 1", got)
 	}
 }
 
-// tenantSeries counts the workqueue_queued_keys_by_tenant series of one
-// queue, ignoring those other tests left behind.
-func tenantSeries(t *testing.T, queueName string) int {
+// queueSeries counts the series c holds for one queue, ignoring those
+// other tests left behind.
+func queueSeries(t *testing.T, c prometheus.Collector, queueName string) int {
 	t.Helper()
 	ch := make(chan prometheus.Metric, 100)
-	mQueuedKeysByTenant.Collect(ch)
+	c.Collect(ch)
 	close(ch)
 	n := 0
 	for m := range ch {

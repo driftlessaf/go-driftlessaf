@@ -15,6 +15,7 @@ SPDX-License-Identifier: Apache-2.0
 //
 //   - workqueue_in_progress_keys: The number of keys currently being processed
 //   - workqueue_queued_keys: The number of keys currently in the backlog
+//   - workqueue_queued_keys_by_priority_class: workqueue_queued_keys split by priority class (priority/100, e.g. "5xx")
 //   - workqueue_queued_keys_lower_bound: The queued object count refreshed on every capacity-aware pass; exact with an open slot and bounded while at capacity
 //   - workqueue_notbefore_keys: The number of keys waiting on a 'not before' time (last complete value while at capacity)
 //   - workqueue_max_attempts: The maximum number of attempts for any queued or in-progress task (last complete value while at capacity)
