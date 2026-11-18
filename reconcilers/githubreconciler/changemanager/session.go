@@ -530,6 +530,56 @@ func (s *Session[T]) ClearGaveUp(ctx context.Context) (string, error) {
 	return s.prURL, nil
 }
 
+// ClearReadyForReview removes the <identity>/ready-for-review label, for a
+// caller about to act on a PR that is no longer ready for review as it
+// stands. Pairs with ApplyReadyForReview. No-op if the label is not present on
+// the PR or no PR exists. Returns the PR URL.
+func (s *Session[T]) ClearReadyForReview(ctx context.Context) (string, error) {
+	if s.prNumber == 0 {
+		return "", nil
+	}
+	label := s.readyForReviewLabel()
+	if !slices.Contains(s.prLabels, label) {
+		return s.prURL, nil
+	}
+	clog.InfoContext(ctx, "PR is being worked on again, removing ready-for-review label", "pr", s.prNumber, "label", label)
+	if _, err := s.client.Issues.RemoveLabelForIssue(ctx, s.owner, s.repo, s.prNumber, label); err != nil {
+		return "", fmt.Errorf("removing ready-for-review label: %w", err)
+	}
+	s.prLabels = slices.DeleteFunc(s.prLabels, func(l string) bool { return l == label })
+	return s.prURL, nil
+}
+
+// ReembedData replaces the data embedded in the PR body with data, keeping the
+// rest of the body and the changemanager metadata as they are. It is for a run
+// that changed nothing in the branch but learned something the embedded data
+// should record, so a later Upsert finds the data current. No-op if no PR
+// exists. Like Upsert, it refuses a PR that carries the skip label.
+func (s *Session[T]) ReembedData(ctx context.Context, data *T) error {
+	if s.prNumber == 0 {
+		return nil
+	}
+	freshPR, _, err := s.client.PullRequests.Get(ctx, s.owner, s.repo, s.prNumber)
+	if err != nil {
+		return fmt.Errorf("refetching pull request: %w", err)
+	}
+	skipLabel := s.skipLabel()
+	for _, label := range freshPR.Labels {
+		if label.GetName() == skipLabel {
+			return errors.New("PR has skip label, not updating to avoid stomping manual changes")
+		}
+	}
+	body, err := s.manager.templateExecutor.Replace(freshPR.GetBody(), &embeddedData[T]{Data: *data, Meta: s.meta})
+	if err != nil {
+		return fmt.Errorf("embedding data: %w", err)
+	}
+	if _, _, err := s.client.PullRequests.Edit(ctx, s.owner, s.repo, s.prNumber, &github.PullRequest{Body: new(body)}); err != nil {
+		return fmt.Errorf("updating pull request: %w", err)
+	}
+	s.prBody = body
+	return nil
+}
+
 // AddLabels adds the given labels to the existing PR. Labels exceeding
 // GitHub's limit are shortened to a 40-character prefix and 10-character hash.
 // This is a no-op if no PR exists or if all provided labels are already present.

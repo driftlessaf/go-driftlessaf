@@ -171,8 +171,10 @@ func newVertexAnthropicMessageService(
 		return anthropic.MessageService{}, err
 	}
 
+	// Disable SDK retries; the executor owns retry and backoff.
 	return anthropic.NewClient(
 		credentialsOption,
+		sdkoption.WithMaxRetries(0),
 	).Messages, nil
 }
 

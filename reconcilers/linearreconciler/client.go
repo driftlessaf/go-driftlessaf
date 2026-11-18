@@ -984,6 +984,9 @@ func (c *Client) UploadFileAttachment(ctx context.Context, issueID, title string
 	}, &attachResult); err != nil {
 		return fmt.Errorf("creating attachment: %w", err)
 	}
+	if !attachResult.AttachmentCreate.Success {
+		return fmt.Errorf("creating attachment: API returned success=false")
+	}
 
 	return nil
 }

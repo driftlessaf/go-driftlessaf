@@ -113,6 +113,21 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		return r.reconcileIssueOnce(ctx, res, gh, true)
 	}
 
+	// A steering note the PR has not recorded yet. The run that consumes it
+	// records it again in the PR's data, so a note is acted on once.
+	var steeringID string
+	var steeringNew bool
+	if r.steering {
+		steeringID = newestSteeringID(issue.GetBody())
+		if steeringID != "" && state.HasPR() {
+			var recorded string
+			if stored, err := changeSession.Extract(); err == nil && stored != nil {
+				recorded = stored.SteeringID
+			}
+			steeringNew = steeringID != recorded
+		}
+	}
+
 	var usePRBranch bool
 	// revision stamps a give-up note posted by this reconcile. It is read
 	// before the agent runs, so a reply that arrives during the run is not
@@ -205,6 +220,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		log.With("after", r.unknownMergeabilityRequeueAfter).Info("PR mergeability still being computed by GitHub, requeuing")
 		return workqueue.RequeueAfter(r.unknownMergeabilityRequeueAfter)
 
+	case steeringNew:
+		log.With("steering_id", steeringID).Info("Issue has a new steering note, iterating on the PR")
+		usePRBranch = true
+
 	case state.HasNoConflicts():
 		log.Info("PR is green, leaving it for human review")
 		newlyReady := !changeSession.HasReadyForReviewLabel()
@@ -287,7 +306,15 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		IssueURL:      issue.GetHTMLURL(),
 		IssueNumber:   issue.GetNumber(),
 		IssueBodyHash: sha256.Sum256([]byte(issue.GetBody())),
+		SteeringID:    steeringID,
 		Request:       request,
+	}
+	// The run consumes the note, so the PR is no longer ready for review as it
+	// stands. The green path restores the label once the PR settles.
+	if steeringNew {
+		if _, err := changeSession.ClearReadyForReview(ctx); err != nil {
+			return fmt.Errorf("clear ready-for-review: %w", err)
+		}
 	}
 	prURL, err := changeSession.Upsert(ctx, prData, draft, prLabels, func(ctx context.Context, branchName string) error {
 		// Tee the agent's completed trace so the PR body template can render
@@ -408,6 +435,13 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		}
 		if errors.Is(err, changemanager.ErrNoChanges) {
 			log.Info("No changes after agent execution, nothing to commit")
+			// The agent read the note and left the branch as it was. Record
+			// the note so later events do not run it again.
+			if agentRan && steeringNew {
+				if err := changeSession.ReembedData(ctx, prData); err != nil {
+					return fmt.Errorf("record steering ID: %w", err)
+				}
+			}
 			switch {
 			case !agentRan:
 				// Upsert skipped the closure (PR already up to date): result
