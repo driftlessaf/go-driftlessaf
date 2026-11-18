@@ -57,11 +57,6 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// WithUpdateBranchLabel.
 	updateBranchLabel string
 
-	// steering, when set, reruns the agent on an open PR when the issue body
-	// gains a newer Steering-ID than the one the PR records. See
-	// WithSteering.
-	steering bool
-
 	// prLabelsFromResult derives extra labels to stamp on the generated PR from
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
@@ -196,22 +191,6 @@ func WithWorkflowEditLabel[Req promptbuilder.Bindable, Resp Result, CB any](labe
 func WithUpdateBranchLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.updateBranchLabel = label
-	}
-}
-
-// WithSteering reruns the agent on an open PR when a newer note lands in the
-// issue body's "## Steering" section. Each note starts a line with
-// "Steering-ID: <id>"; the newest is the last such line in the section (a
-// quoted "> Steering-ID:" does not count). Every run that publishes, or that
-// ends with no change, records the newest ID it saw in the PR's embedded data,
-// so a note is acted on once. A run that consumes a new ID first removes the
-// PR's ready-for-review label; the green path restores it. The turn limit,
-// pending checks, skip and takeover, and a closed issue still win over a
-// note, and a note does not renew the commit budget. A failed run keeps the
-// recorded ID. Off by default: the issue body is read as before.
-func WithSteering[Req promptbuilder.Bindable, Resp Result, CB any]() Option[Req, Resp, CB] {
-	return func(r *Reconciler[Req, Resp, CB]) {
-		r.steering = true
 	}
 }
 

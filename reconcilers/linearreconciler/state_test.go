@@ -10,9 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -433,137 +431,6 @@ func TestStateManager_SaveInjectsMetadata(t *testing.T) {
 	}
 	if location != "Bridge" {
 		t.Errorf("location = %q, want %q", location, "Bridge")
-	}
-}
-
-// newOrderingServer records GraphQL operations in order. When failUpload is
-// set, the presigned PUT fails. When createFails is set, attachmentCreate
-// answers success=false.
-func newOrderingServer(t *testing.T, failUpload, createFails bool) (*httptest.Server, func() []string, func() []string) {
-	t.Helper()
-	var mu sync.Mutex
-	var ops, deleted []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			mu.Lock()
-			ops = append(ops, "put")
-			mu.Unlock()
-			if failUpload {
-				http.Error(w, "boom", http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		var req struct {
-			Query     string         `json:"query"`
-			Variables map[string]any `json:"variables"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-
-		var resp any
-		mu.Lock()
-		switch {
-		case strings.Contains(req.Query, "fileUpload"):
-			resp = map[string]any{"fileUpload": map[string]any{"uploadFile": map[string]any{
-				"uploadUrl": "http://" + r.Host + "/upload",
-				"assetUrl":  "https://uploads.linear.app/test/asset",
-				"headers":   []any{},
-			}}}
-		case strings.Contains(req.Query, "attachmentDelete"):
-			ops = append(ops, "delete")
-			id, _ := req.Variables["id"].(string)
-			deleted = append(deleted, id)
-			resp = map[string]any{"attachmentDelete": map[string]any{"success": true}}
-		case strings.Contains(req.Query, "attachmentCreate"):
-			ops = append(ops, "create")
-			resp = map[string]any{"attachmentCreate": map[string]any{"success": !createFails}}
-		default:
-			resp = map[string]any{}
-		}
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": resp})
-	}))
-	t.Cleanup(srv.Close)
-	return srv,
-		func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), ops...) },
-		func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), deleted...) }
-}
-
-func TestStateManager_SaveUploadsBeforeDeleting(t *testing.T) {
-	srv, ops, deleted := newOrderingServer(t, false, false)
-
-	client := NewClientWithAPIKey("test-token").
-		WithHTTPClient(srv.Client()).
-		WithEndpoint(srv.URL)
-	client.statePrefix = "test"
-
-	issue := &Issue{ID: "issue-1"}
-	issue.Attachments.Nodes = []Attachment{
-		{ID: "att-1", Title: "test_state"},
-		{ID: "att-other", Title: "other"},
-		{ID: "att-2", Title: "test_state"},
-	}
-
-	sm := client.NewStateManager(issue)
-	if err := sm.Save(t.Context(), &testBotState{Location: "Bridge", Health: 1}); err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
-
-	want := []string{"put", "create", "delete", "delete"}
-	if got := ops(); !slices.Equal(got, want) {
-		t.Errorf("ops = %v, want %v", got, want)
-	}
-	if got, want := deleted(), []string{"att-1", "att-2"}; !slices.Equal(got, want) {
-		t.Errorf("deleted = %v, want %v", got, want)
-	}
-}
-
-func TestStateManager_SaveCreateSuccessFalseDeletesNothing(t *testing.T) {
-	srv, _, deleted := newOrderingServer(t, false, true)
-
-	client := NewClientWithAPIKey("test-token").
-		WithHTTPClient(srv.Client()).
-		WithEndpoint(srv.URL)
-	client.statePrefix = "test"
-
-	issue := &Issue{ID: "issue-1"}
-	issue.Attachments.Nodes = []Attachment{{ID: "att-1", Title: "test_state"}}
-
-	sm := client.NewStateManager(issue)
-	if err := sm.Save(t.Context(), &testBotState{Location: "Bridge", Health: 1}); err == nil {
-		t.Fatal("Save succeeded, want error")
-	}
-	if got := deleted(); len(got) != 0 {
-		t.Errorf("deleted = %v, want none", got)
-	}
-}
-
-func TestStateManager_SaveFailedUploadDeletesNothing(t *testing.T) {
-	srv, ops, deleted := newOrderingServer(t, true, false)
-
-	client := NewClientWithAPIKey("test-token").
-		WithHTTPClient(srv.Client()).
-		WithEndpoint(srv.URL)
-	client.statePrefix = "test"
-
-	issue := &Issue{ID: "issue-1"}
-	issue.Attachments.Nodes = []Attachment{{ID: "att-1", Title: "test_state"}}
-
-	sm := client.NewStateManager(issue)
-	err := sm.Save(t.Context(), &testBotState{Location: "Bridge", Health: 1})
-	if err == nil {
-		t.Fatal("Save succeeded, want upload error")
-	}
-	if !strings.Contains(err.Error(), "uploading state attachment") {
-		t.Errorf("error = %v, want upload error", err)
-	}
-	if got := deleted(); len(got) != 0 {
-		t.Errorf("deleted = %v, want none", got)
-	}
-	if got := ops(); slices.Contains(got, "delete") {
-		t.Errorf("ops = %v, want no delete", got)
 	}
 }
 

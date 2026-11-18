@@ -57,11 +57,6 @@ type PRData[Req any] struct {
 	IssueBodyHash [32]byte `json:"issue_body_hash"`
 	Request       Req      `json:"-"`
 
-	// SteeringID is the newest Steering-ID in the issue body's "## Steering"
-	// section as of the run that built or last updated this PR. It is set
-	// only under WithSteering, and empty when the body carried none.
-	SteeringID string `json:"steering_id,omitempty"`
-
 	// ReasoningSummary is a truncated summary of the agent's extended-thinking
 	// output for the run that produced this PR, populated by the reconciler
 	// after the agent executes and empty when the run carried no reasoning.

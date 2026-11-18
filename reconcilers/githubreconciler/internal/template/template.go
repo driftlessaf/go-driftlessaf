@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"text/template"
 )
 
@@ -76,22 +75,6 @@ func (t *Template[T]) Embed(body string, data *T) (string, error) {
 	embedded := fmt.Sprintf("\n\n<!--%s-->\n<!--\n%s\n-->\n<!--/%s-->", marker, string(jsonData), marker)
 
 	return body + embedded, nil
-}
-
-// Replace swaps the embedded block in body, the last one as Extract reads, for
-// a block holding data, leaving the rest of body as it was. A body with no
-// block gets one appended, as Embed does.
-func (t *Template[T]) Replace(body string, data *T) (string, error) {
-	embedded, err := t.Embed("", data)
-	if err != nil {
-		return "", err
-	}
-	locs := t.regex.FindAllStringIndex(body, -1)
-	if len(locs) == 0 {
-		return body + embedded, nil
-	}
-	last := locs[len(locs)-1]
-	return body[:last[0]] + strings.TrimPrefix(embedded, "\n\n") + body[last[1]:], nil
 }
 
 // Extract extracts embedded data from the body text.

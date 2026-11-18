@@ -395,37 +395,3 @@ func Test_ExtractLastMarker(t *testing.T) {
 		}
 	})
 }
-
-func Test_ReplaceData(t *testing.T) {
-	executor, err := New[testData]("test-identity", "-test-data", "test-entity")
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	embedded, err := executor.Embed("visible text", &testData{Foo: "old"})
-	if err != nil {
-		t.Fatalf("Embed() failed: %v", err)
-	}
-
-	got, err := executor.Replace(embedded+"\nfooter", &testData{Foo: "new"})
-	if err != nil {
-		t.Fatalf("Replace() failed: %v", err)
-	}
-	if !strings.HasPrefix(got, "visible text\n\n<!--test-identity-test-data-->") || !strings.HasSuffix(got, "\nfooter") {
-		t.Errorf("Replace() body: got = %q, want the text around the block kept", got)
-	}
-	data, err := executor.Extract(got)
-	if err != nil {
-		t.Fatalf("Extract() failed: %v", err)
-	}
-	if data.Foo != "new" {
-		t.Errorf("Extract() Foo: got = %q, want = %q", data.Foo, "new")
-	}
-
-	got, err = executor.Replace("no block", &testData{Foo: "added"})
-	if err != nil {
-		t.Fatalf("Replace() without a block failed: %v", err)
-	}
-	if data, err := executor.Extract(got); err != nil || data.Foo != "added" {
-		t.Errorf("Extract() after Replace() without a block: got = %v, %v, want Foo = %q", data, err, "added")
-	}
-}

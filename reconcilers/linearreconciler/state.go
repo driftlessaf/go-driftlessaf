@@ -155,8 +155,8 @@ func (sm *StateManager) Load(ctx context.Context, v any) (bool, error) {
 }
 
 // Save serializes the bot data from v, merges internal metadata, and uploads
-// as a file attachment. Existing state attachments are deleted only after the
-// upload succeeds, to prevent orphans without risking the previous state. Automatically marks any pending comments (from
+// as a file attachment. Any existing state attachments are deleted before uploading
+// to prevent orphans. Automatically marks any pending comments (from
 // UnprocessedComments) as processed.
 func (sm *StateManager) Save(ctx context.Context, v any) error {
 	// Mark pending comments as processed.
@@ -194,13 +194,7 @@ func (sm *StateManager) Save(ctx context.Context, v any) error {
 	log := clog.FromContext(ctx)
 	title := sm.client.stateAttachmentTitle()
 
-	// Upload first so a failed upload leaves the previous state in place.
-	if err := sm.client.UploadFileAttachment(ctx, sm.issue.ID, title, data); err != nil {
-		return fmt.Errorf("uploading state attachment: %w", err)
-	}
-
-	// Delete the state attachments read at reconcile-start (never the new
-	// one) to prevent orphans.
+	// Delete all existing state attachments to prevent orphans.
 	for _, att := range sm.issue.Attachments.Nodes {
 		if att.Title != title {
 			continue
@@ -208,6 +202,10 @@ func (sm *StateManager) Save(ctx context.Context, v any) error {
 		if err := sm.client.DeleteAttachment(ctx, att.ID); err != nil {
 			log.With("attachment_id", att.ID).Warnf("Failed to delete old state attachment: %v", err)
 		}
+	}
+
+	if err := sm.client.UploadFileAttachment(ctx, sm.issue.ID, title, data); err != nil {
+		return fmt.Errorf("uploading state attachment: %w", err)
 	}
 
 	log.Infof("Saved state to attachment %q", title)
