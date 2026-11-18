@@ -83,8 +83,23 @@ type issueHarness struct {
 	prBody   string
 	prBodies []string
 
+	// prLabels are the labels on the open PR. extra, when set, answers a REST
+	// request first and reports whether it did, with h.mu held.
+	prLabels []string
+	extra    func(w http.ResponseWriter, r *http.Request) bool
+
 	agentCalls int
 	prCreates  int
+}
+
+// prLabelNodes renders prLabels as the PR query's label nodes. h.mu is held.
+func (h *issueHarness) prLabelNodes() string {
+	nodes := []map[string]string{}
+	for _, l := range h.prLabels {
+		nodes = append(nodes, map[string]string{"name": l})
+	}
+	b, _ := json.Marshal(nodes)
+	return string(b)
 }
 
 func newIssueHarness(t *testing.T) *issueHarness {
@@ -310,7 +325,7 @@ func (h *issueHarness) serveGraphQL(t *testing.T, w http.ResponseWriter, r *http
 		}}})
 
 	case h.pr != nil:
-		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":"","mergeable":%q,"isDraft":false,"headRefOid":"abc123","labels":{"nodes":[]},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":[]},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.pr.mergeable, h.pr.checks)
+		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":"","mergeable":%q,"isDraft":false,"headRefOid":"abc123","labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":[]},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.pr.mergeable, h.prLabelNodes(), h.pr.checks)
 
 	default:
 		reply(map[string]any{"repository": map[string]any{"pullRequests": map[string]any{"nodes": []any{}}}})
@@ -362,6 +377,9 @@ func (h *issueHarness) client(t *testing.T) *github.Client {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if h.servePRComment(t, w, r) {
+			return
+		}
+		if h.extra != nil && h.extra(w, r) {
 			return
 		}
 		switch {

@@ -51,6 +51,12 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// default) never declares one. See WithWorkflowEditLabel.
 	workflowEditLabel string
 
+	// updateBranchLabel, when set and present on the PR, makes the reconciler
+	// merge the default branch into the PR branch through GitHub instead of
+	// running the agent. Empty (the default) disables it. See
+	// WithUpdateBranchLabel.
+	updateBranchLabel string
+
 	// prLabelsFromResult derives extra labels to stamp on the generated PR from
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string
@@ -168,6 +174,23 @@ func WithDraftLabel[Req promptbuilder.Bindable, Resp Result, CB any](label strin
 func WithWorkflowEditLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.workflowEditLabel = label
+	}
+}
+
+// WithUpdateBranchLabel lets a person ask for the PR branch to be brought up to
+// date: when the PR carries the given label, the reconciler asks GitHub to
+// merge the default branch into the PR branch (the "Update branch" button),
+// removes the label, and returns without running the agent. The push is made
+// by the bot, so it is the last pusher. A branch that already contains the
+// default branch's head only loses the label; a refusal from GitHub with 422
+// (a conflict or a moved head) also only removes the label. Any other failure
+// is returned for a retry with the label kept. Skip and takeover still win and
+// leave the label alone, as does an untrusted issue author. A PR whose head is
+// in another repository (a fork) only loses the label. Off by default (empty
+// label).
+func WithUpdateBranchLabel[Req promptbuilder.Bindable, Resp Result, CB any](label string) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		r.updateBranchLabel = label
 	}
 }
 

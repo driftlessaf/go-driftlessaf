@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
@@ -157,6 +159,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	case untrusted:
 		log.With("author", author.GetLogin(), "association", issue.GetAuthorAssociation()).Info("Issue author is not trusted, skipping")
 		return nil
+
+	case r.updateBranchLabel != "" && state.HasPR() && changeSession.HasLabel(r.updateBranchLabel):
+		return r.updateBranch(ctx, res, gh, changeSession)
 
 	case state.NeedsRebase():
 		clog.InfoContext(ctx, "PR needs rebase, starting fresh from default branch")
@@ -488,6 +493,67 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 
 	log.With("pr_url", prURL).Info("PR created/updated")
 	return nil
+}
+
+// updateBranch handles the update-branch label on the PR: it merges the default
+// branch into the PR branch through GitHub when the branch lacks it, then
+// removes the label. The agent does not run. The merge push starts CI and a
+// normal reconcile.
+func (r *Reconciler[Req, Resp, CB]) updateBranch(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, session *changemanager.Session[PRData[Req]]) error {
+	prNumber := session.PRNumber()
+
+	// Act only on a branch in this repository: a fork PR's head lives in the
+	// fork, so the same-named branch here is not part of that PR.
+	pr, _, err := gh.PullRequests.Get(ctx, res.Owner, res.Repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("get PR: %w", err)
+	}
+	if !strings.EqualFold(pr.GetHead().GetRepo().GetFullName(), res.Owner+"/"+res.Repo) {
+		clog.InfoContext(ctx, "PR head is not in this repository, dropping the label without updating", "pr", prNumber, "head", pr.GetHead().GetRepo().GetFullName())
+		return r.removeUpdateBranchLabel(ctx, res, gh, prNumber)
+	}
+
+	repo, _, err := gh.Repositories.Get(ctx, res.Owner, res.Repo)
+	if err != nil {
+		return fmt.Errorf("get repository: %w", err)
+	}
+	cmp, _, err := gh.Repositories.CompareCommits(ctx, res.Owner, res.Repo, repo.GetDefaultBranch(), session.HeadSHA(), &github.ListOptions{PerPage: 1})
+	if err != nil {
+		return fmt.Errorf("compare default branch with PR head: %w", err)
+	}
+
+	// "ahead" and "identical" mean the PR head contains the default branch.
+	if status := cmp.GetStatus(); status != "ahead" && status != "identical" {
+		sha := session.HeadSHA()
+		_, _, err = gh.PullRequests.UpdateBranch(ctx, res.Owner, res.Repo, prNumber, &github.PullRequestBranchUpdateOptions{ExpectedHeadSHA: &sha})
+		_, accepted := errors.AsType[*github.AcceptedError](err)
+		ghErr, isGHErr := errors.AsType[*github.ErrorResponse](err)
+		switch {
+		case err == nil, accepted:
+			clog.InfoContext(ctx, "Asked GitHub to update the PR branch", "pr", prNumber)
+		case isGHErr && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusUnprocessableEntity:
+			clog.InfoContext(ctx, "GitHub refused to update the PR branch, dropping the label", "pr", prNumber, "error", err)
+		default:
+			return fmt.Errorf("update PR branch: %w", err)
+		}
+	} else {
+		clog.InfoContext(ctx, "PR branch already contains the default branch, dropping the label", "pr", prNumber)
+	}
+
+	return r.removeUpdateBranchLabel(ctx, res, gh, prNumber)
+}
+
+// removeUpdateBranchLabel removes the update-branch label from the PR. A 404
+// counts as removed.
+func (r *Reconciler[Req, Resp, CB]) removeUpdateBranchLabel(ctx context.Context, res *githubreconciler.Resource, gh *github.Client, prNumber int) error {
+	_, err := gh.Issues.RemoveLabelForIssue(ctx, res.Owner, res.Repo, prNumber, changemanager.NormalizeLabel(r.updateBranchLabel))
+	if err == nil {
+		return nil
+	}
+	if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	return fmt.Errorf("remove update-branch label: %w", err)
 }
 
 // prLabelsForIssue returns the labels to stamp on the PR for this issue: the
