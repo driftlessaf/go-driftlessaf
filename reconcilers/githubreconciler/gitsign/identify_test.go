@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,6 +192,54 @@ func TestDefaultVerifierReportsTrustRootFailure(t *testing.T) {
 	_, err := gitsign.NewDefaultVerifier(t.Context())
 	if _, ok := errors.AsType[*gitsign.TrustRootError](err); !ok {
 		t.Fatalf("NewDefaultVerifier() error = %v, want TrustRootError", err)
+	}
+}
+
+// failingTransport fails every request with err.
+type failingTransport struct {
+	err error
+}
+
+func (f failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, f.err
+}
+
+func TestDefaultVerifierFetchesWithClient(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	refused := errors.New("refused by the caller's transport")
+
+	_, err := gitsign.NewDefaultVerifier(t.Context(), gitsign.WithHTTPClient(&http.Client{Transport: failingTransport{err: refused}}))
+	if _, ok := errors.AsType[*gitsign.TrustRootError](err); !ok {
+		t.Fatalf("NewDefaultVerifier() error = %v, want TrustRootError", err)
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("NewDefaultVerifier() error = %v, want the client's transport error", err)
+	}
+}
+
+// cancellingTransport cancels the caller's context when a request starts,
+// then waits for the request's context to end.
+type cancellingTransport struct {
+	cancel context.CancelFunc
+}
+
+func (c cancellingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.cancel()
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+func TestDefaultVerifierStopsFetchWhenContextEnds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	_, err := gitsign.NewDefaultVerifier(ctx, gitsign.WithHTTPClient(&http.Client{Transport: cancellingTransport{cancel: cancel}}))
+	if _, ok := errors.AsType[*gitsign.TrustRootError](err); !ok {
+		t.Fatalf("NewDefaultVerifier() error = %v, want TrustRootError", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewDefaultVerifier() error = %v, want context.Canceled", err)
 	}
 }
 

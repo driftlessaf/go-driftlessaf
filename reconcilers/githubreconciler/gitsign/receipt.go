@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package gitsign
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/github/smimesign/ietf-cms/protocol"
@@ -26,19 +28,61 @@ import (
 	hashedrekord "github.com/sigstore/rekor/pkg/types/hashedrekord/v0.0.1"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
+	"github.com/sigstore/sigstore-go/pkg/util"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 	"google.golang.org/protobuf/proto"
 )
+
+// VerifierOption configures NewDefaultVerifier.
+type VerifierOption func(*verifierConfig)
+
+type verifierConfig struct {
+	client *http.Client
+}
+
+// WithHTTPClient makes NewDefaultVerifier send its requests to Sigstore's TUF
+// repository with client, so that client's timeout and transport apply to
+// them. The fetch makes each request once.
+func WithHTTPClient(client *http.Client) VerifierOption {
+	return func(c *verifierConfig) { c.client = client }
+}
+
+// contextClient attaches the context of one NewDefaultVerifier call to each
+// request, so that ending the context stops the fetch. go-tuf's fetcher builds
+// its requests and calls Do without a context, so the context has to be kept
+// here.
+type contextClient struct {
+	ctx    context.Context
+	client *http.Client
+}
+
+func (c contextClient) Do(req *http.Request) (*http.Response, error) {
+	return c.client.Do(req.WithContext(c.ctx)) //nolint:gosec // G704: go-tuf builds the URL from tuf.DefaultMirror and target paths in signed TUF metadata
+}
 
 // NewDefaultVerifier loads Fulcio certificates and Rekor keys from Sigstore's
 // public trusted root. The verifier checks commits offline with that snapshot.
 // Construct a new verifier to pick up changes to the trust root.
-func NewDefaultVerifier(ctx context.Context) (*Verifier, error) {
+//
+// The fetch uses http.DefaultClient unless WithHTTPClient gives another
+// client, and it stops when ctx ends.
+func NewDefaultVerifier(ctx context.Context, opts ...VerifierOption) (*Verifier, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tr, err := root.FetchTrustedRootWithOptions(tuf.DefaultOptions().WithContext(ctx))
+
+	var cfg verifierConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	f := fetcher.NewDefaultFetcher()
+	f.SetHTTPUserAgent(util.ConstructUserAgent())
+	f.SetHTTPClient(contextClient{ctx: ctx, client: cmp.Or(cfg.client, http.DefaultClient)})
+
+	tr, err := root.FetchTrustedRootWithOptions(tuf.DefaultOptions().WithContext(ctx).WithFetcher(f))
 	if err != nil {
 		return nil, &TrustRootError{Cause: err}
 	}
