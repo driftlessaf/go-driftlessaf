@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/effort"
+	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -210,6 +211,14 @@ type Config[Resp, CB any] struct {
 	// claudeexecutor.WithInputBudgetNoReduction for why an agent that
 	// answers the error with a fresh conversation pays less this way.
 	InputBudgetNoReduction bool
+
+	// ContextBudget, when its Tokens is positive, shortens tool
+	// results once a request's estimated prompt passes that many tokens. It
+	// never fails a request. Claude backend only: the Gemini and
+	// OpenAI-compatible backends, and routed protocols other than Anthropic
+	// Messages, reject it at construction. See
+	// claudeexecutor.WithContextBudget.
+	ContextBudget claudeexecutor.ContextBudget
 
 	// CacheTTL sets the lifetime of the prompt-cache breakpoints: 5 minutes
 	// or 1 hour, and zero leaves the API's 5-minute default. A 1-hour entry

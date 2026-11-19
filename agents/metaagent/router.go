@@ -378,6 +378,9 @@ func validateRoutedConfig[Resp, CB any](config Config[Resp, CB]) error {
 	if config.MinRequestBudget < 0 {
 		return fmt.Errorf("creating routed meta-agent: min request budget must not be negative, got %s", config.MinRequestBudget)
 	}
+	if config.ContextBudget.Tokens < 0 {
+		return fmt.Errorf("creating routed meta-agent: context budget tokens must not be negative, got %d", config.ContextBudget.Tokens)
+	}
 	if config.InputContextWindow < 0 {
 		return fmt.Errorf("creating routed meta-agent: input context window must not be negative, got %d", config.InputContextWindow)
 	}
@@ -410,6 +413,9 @@ func validateRoutedConfigForProtocol[Resp, CB any](protocol modelrouter.Protocol
 	}
 	if config.InputBudgetNoReduction && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: InputBudgetNoReduction is supported only on the Anthropic Messages protocol, not %s", protocol)
+	}
+	if config.ContextBudget.Tokens != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
+		return fmt.Errorf("creating routed meta-agent: ContextBudget is supported only on the Anthropic Messages protocol, not %s", protocol)
 	}
 	if config.CacheTTL != 0 && protocol != modelrouter.ProtocolAnthropicMessages {
 		return fmt.Errorf("creating routed meta-agent: CacheTTL is supported only on the Anthropic Messages protocol, not %s", protocol)

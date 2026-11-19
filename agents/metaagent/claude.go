@@ -238,6 +238,10 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithInputBudgetNoReduction[Req, Resp]())
 	}
 
+	if config.ContextBudget.Tokens != 0 {
+		executorOpts = append(executorOpts, claudeexecutor.WithContextBudget[Req, Resp](config.ContextBudget))
+	}
+
 	if config.CacheTTL != 0 {
 		executorOpts = append(executorOpts, claudeexecutor.WithCacheTTL[Req, Resp](config.CacheTTL))
 	}

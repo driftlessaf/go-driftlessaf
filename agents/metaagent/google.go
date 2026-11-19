@@ -51,6 +51,9 @@ func newGoogleAgent[Req promptbuilder.Bindable, Resp, CB any](
 	if config.InputBudgetNoReduction {
 		return nil, errors.New("InputBudgetNoReduction is not supported on the Gemini backend")
 	}
+	if config.ContextBudget.Tokens != 0 {
+		return nil, errors.New("ContextBudget is not supported on the Gemini backend")
+	}
 	if config.CacheTTL != 0 {
 		return nil, errors.New("CacheTTL is not supported on the Gemini backend")
 	}

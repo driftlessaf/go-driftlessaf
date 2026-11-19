@@ -31,6 +31,11 @@ type tailPosition struct {
 	block   int
 }
 
+// before reports whether p comes earlier in the conversation than q.
+func (p tailPosition) before(q tailPosition) bool {
+	return p.message < q.message || (p.message == q.message && p.block < q.block)
+}
+
 // tailBreakpoints tracks the moving cache_control markers placed on the
 // conversation tail so the growing message history is cached incrementally.
 //
@@ -57,6 +62,15 @@ type tailBreakpoints struct {
 	// prefix's markers: the API rejects a request whose 1-hour entries follow
 	// a 5-minute one.
 	ttl anthropic.CacheControlEphemeralTTL
+	// pin is the block the last context-budget compaction ended a cache
+	// entry on, nil before the first one. Every result before it that a
+	// compaction can shorten already is, so the entry outlives every later
+	// compaction. See repin.
+	pin *tailPosition
+	// compacted records that a context-budget compaction has rewritten a
+	// block, after which the cache entries of earlier tails may no longer
+	// match the conversation.
+	compacted bool
 }
 
 // newTailBreakpoints builds a tracker whose marker budget is whatever remains
@@ -127,6 +141,103 @@ func (tb *tailBreakpoints) advance(messages []anthropic.MessageParam) {
 		*blockCacheControl(&messages[old.message].Content[old.block]) = anthropic.CacheControlEphemeralParam{}
 		tb.positions = tb.positions[1:]
 	}
+}
+
+// repin replaces the tail markers on a request that a context-budget
+// compaction rewrote, so the request reads the prompt cache up to the
+// rewritten blocks and leaves an entry the next compaction can read.
+//
+// first is the earliest block the compaction rewrote. rest is the earliest
+// block a later compaction could rewrite, nil when there is none.
+//
+// The markers advance places end on the previous request's tail and this
+// one's, both after first. Neither matches a cache entry, and the API looks
+// back only about 20 blocks from a marker for an earlier one, so with them
+// the whole conversation would be written to the cache again.
+//
+// repin marks two blocks in their place. The first is the pin, whose entry
+// the previous compaction wrote; on the first compaction it is the tail of
+// an earlier request instead. The second is the last block before rest, and
+// becomes the pin. The blocks after it are sent uncached once: advance marks
+// the next request's tail, which writes them.
+//
+// With fewer than two tail markers it does nothing.
+func (tb *tailBreakpoints) repin(messages []anthropic.MessageParam, first tailPosition, rest *tailPosition) {
+	if tb.limit < tailBreakpointLimit {
+		return
+	}
+	tail, ok := lastCacheableBlock(messages)
+	if !ok {
+		return
+	}
+	unchanged := first
+	if rest != nil && rest.before(first) {
+		unchanged = *rest
+	}
+	// read ends the newest cache entry that still matches the conversation.
+	// Without a pin that is an earlier request's tail, and only while no
+	// compaction has rewritten a block before one.
+	var read tailPosition
+	switch {
+	case tb.pin != nil:
+		read = *tb.pin
+	case !tb.compacted:
+		read, ok = lastUserTail(messages, unchanged.message)
+	default:
+		ok = false
+	}
+	tb.compacted = true
+	if !ok || !read.before(unchanged) {
+		return
+	}
+	// write ends the entry this request leaves for the next compaction. With
+	// nothing left to shorten that is the tail. Otherwise it is the last
+	// block before rest, unless no block between the pin and rest can carry a
+	// marker: the pin then stays where it is.
+	write, pin := tail, tail
+	if rest != nil {
+		pin = read
+		if p, ok := lastCacheableBefore(messages, *rest); ok && read.before(p) {
+			write, pin = p, p
+		}
+	}
+	for _, old := range tb.positions {
+		*blockCacheControl(&messages[old.message].Content[old.block]) = anthropic.CacheControlEphemeralParam{}
+	}
+	tb.positions = []tailPosition{read, write}
+	for _, pos := range tb.positions {
+		*blockCacheControl(&messages[pos.message].Content[pos.block]) = cacheMarker(tb.ttl)
+	}
+	tb.pin = &pin
+}
+
+// lastUserTail returns the last cacheable block of the newest user message
+// before messages[before]: the tail marker of the request that message
+// ended.
+func lastUserTail(messages []anthropic.MessageParam, before int) (tailPosition, bool) {
+	for i := min(before, len(messages)) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropic.MessageParamRoleUser {
+			return lastCacheableBlock(messages[:i+1])
+		}
+	}
+	return tailPosition{}, false
+}
+
+// lastCacheableBefore returns the position of the last content block before
+// pos that supports a cache_control marker.
+func lastCacheableBefore(messages []anthropic.MessageParam, pos tailPosition) (tailPosition, bool) {
+	for m := pos.message; m >= 0; m-- {
+		b := len(messages[m].Content)
+		if m == pos.message {
+			b = pos.block
+		}
+		for b--; b >= 0; b-- {
+			if blockCacheControl(&messages[m].Content[b]) != nil {
+				return tailPosition{message: m, block: b}, true
+			}
+		}
+	}
+	return tailPosition{}, false
 }
 
 // lastCacheableBlock returns the position of the last content block of the

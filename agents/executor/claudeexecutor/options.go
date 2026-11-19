@@ -283,6 +283,39 @@ func WithInputBudget[Request promptbuilder.Bindable, Response any](contextWindow
 	}
 }
 
+// WithContextBudget brings each request's prompt toward budget.Tokens by
+// shortening tool results the model has already read. It is a cost control:
+// a request that cannot be brought under the budget is sent at the size
+// shortening reaches, and the option makes no count_tokens call.
+//
+// Before each provider call the executor estimates the request's prompt from
+// the provider's token count for the previous request plus the bytes
+// appended since. Over the budget, it shortens results, the way
+// WithInputBudget shortens them, until the estimate is at most
+// budget.LowWaterTokens. Results of the newest turn and results
+// budget.Protect reports are never shortened. See ContextBudget.
+//
+// A zero budget.Tokens leaves the executor unchanged.
+func WithContextBudget[Request promptbuilder.Bindable, Response any](budget ContextBudget) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		if budget.KeepRecentTurns < 0 {
+			return fmt.Errorf("context budget keep-recent turns must not be negative, got %d", budget.KeepRecentTurns)
+		}
+		if budget.Tokens < 0 {
+			return fmt.Errorf("context budget tokens must not be negative, got %d", budget.Tokens)
+		}
+		if budget.LowWaterTokens < 0 || budget.LowWaterTokens > budget.Tokens {
+			return fmt.Errorf("context budget low-water tokens must be between 0 and the %d-token budget, got %d", budget.Tokens, budget.LowWaterTokens)
+		}
+		if budget.Tokens == 0 {
+			e.contextBudget = nil
+			return nil
+		}
+		e.contextBudget = &budget
+		return nil
+	}
+}
+
 // WithInputBudgetNoReduction makes a turn over the input budget fail with an
 // *InputTooLargeError at once, with no tool result reduced. The budget itself
 // comes from WithInputBudget, and New fails when that option is absent.

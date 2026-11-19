@@ -96,6 +96,8 @@ SPDX-License-Identifier: Apache-2.0
 //     (off by default; see Input Budget)
 //   - WithInputBudgetNoReduction: Reject an over-budget turn at once instead
 //     of reducing older tool results first (off by default; see Input Budget)
+//   - WithContextBudget: Shorten tool results once a request's estimated
+//     prompt passes a token budget (off by default; see Context Budget)
 //
 // # Prompt Caching
 //
@@ -210,6 +212,48 @@ SPDX-License-Identifier: Apache-2.0
 // classify an error as a stream failure or a turn-limit stop. A turn that
 // reduces or rejects logs one clog line and increments the pseudo-tool
 // counter input_budget_reduction or input_budget_rejection.
+//
+// # Context Budget
+//
+// WithContextBudget is a cost control for providers that price a request by
+// its prompt size. It brings each request toward ContextBudget.Tokens by
+// shortening tool results, and it never fails a request or calls
+// count_tokens.
+//
+// Before every provider call the executor estimates the request's prompt:
+// the provider's count for the previous request, plus that turn's output
+// tokens, plus one token per two bytes of the messages appended since. A
+// conversation with no answered request yet, such as a resumed one, is not
+// compacted until the provider has counted one.
+//
+// An estimate over the budget starts a compaction, which shortens results
+// with the Input Budget stub until the estimate, crediting one token per four
+// bytes removed, is at most ContextBudget.LowWaterTokens. Eligibility is the
+// Input Budget's, less the results ContextBudget.Protect reports. A
+// compaction shortens every eligible result older than the
+// ContextBudget.KeepRecentTurns most recent assistant turns before the newest
+// one. If the estimate is still over the mark it shortens those turns'
+// results too, largest saving first, and stops at the mark. A request the
+// eligible results cannot bring under the budget is sent as close to it as
+// they allow.
+//
+// The newest turn's results are never shortened, so a request that delivers
+// a result larger than the budget is sent over it once. That request keeps
+// its recent turns' results when the new result is all that holds it over
+// the mark: the next request shortens the new result instead.
+//
+// A low-water mark under the budget makes compactions rarer: the prompt has
+// to grow by the difference before the next one.
+//
+// A shortened result is not eligible again, so each compaction rewrites only
+// blocks after those the previous one left whole. A compaction also moves the
+// two tail cache markers for one request: one onto the block where the
+// previous compaction's cache entry ends, which is read, and one onto the
+// last block before the first result a later compaction could shorten, which
+// is written. The blocks after the second marker are sent uncached on that
+// request and written on the next. A compaction logs one clog line,
+// increments the pseudo-tool counter context_budget_compaction and calls
+// ContextBudget.OnCompact.
 //
 // # Extended Thinking
 //

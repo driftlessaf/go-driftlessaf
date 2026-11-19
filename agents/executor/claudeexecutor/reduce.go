@@ -123,41 +123,73 @@ func reduceToolResults(messages []anthropic.MessageParam, protected func(name st
 				return reduced
 			}
 			tr := m.Content[b].OfToolResult
-			if tr == nil || (tr.IsError.Valid() && tr.IsError.Value) {
+			if tr == nil {
 				continue
 			}
 			name, ok := names[tr.ToolUseID]
 			if !ok || protected(name) {
 				continue
 			}
-			text, ok := toolResultText(tr)
-			if !ok || len(text) < minReducibleBytes {
+			nb, n, ok := reducedToolResult(tr, name)
+			if !ok {
 				continue
 			}
-			var obj map[string]json.RawMessage
-			if json.Unmarshal([]byte(text), &obj) != nil {
-				obj = nil
-			}
-			if _, isErr := obj["error"]; isErr {
-				continue
-			}
-			if _, done := obj["executor_reduced"]; done {
-				continue
-			}
-			replacement, ok := reducedResultText(name, tr.ToolUseID, text, obj)
-			if !ok || len(replacement) >= len(text) {
-				continue
-			}
-			nb := *tr
-			nb.Content = []anthropic.ToolResultBlockParamContentUnion{{
-				OfText: &anthropic.TextBlockParam{Text: replacement},
-			}}
-			m.Content[b].OfToolResult = &nb
-			saved += int64(len(text) - len(replacement))
+			m.Content[b].OfToolResult = nb
+			saved += int64(n)
 			reduced++
 		}
 	}
 	return reduced
+}
+
+// reducedToolResult returns the shortened copy of tr, a result of the named
+// tool, and the bytes the copy saves. ok is false when tr stays whole: it is
+// an error (IsError or a top-level "error" key), is not text only, is smaller
+// than minReducibleBytes, is already reduced, or would not get shorter.
+//
+// The copy keeps tr's ToolUseID, IsError and CacheControl.
+func reducedToolResult(tr *anthropic.ToolResultBlockParam, name string) (_ *anthropic.ToolResultBlockParam, saved int, ok bool) {
+	if tr.IsError.Valid() && tr.IsError.Value {
+		return nil, 0, false
+	}
+	text, ok := toolResultText(tr)
+	if !ok || len(text) < minReducibleBytes {
+		return nil, 0, false
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(text), &obj) != nil {
+		obj = nil
+	}
+	if _, isErr := obj["error"]; isErr {
+		return nil, 0, false
+	}
+	if isReducedResult(obj, tr.ToolUseID) {
+		return nil, 0, false
+	}
+	replacement, ok := reducedResultText(name, tr.ToolUseID, text, obj)
+	if !ok || len(replacement) >= len(text) {
+		return nil, 0, false
+	}
+	nb := *tr
+	nb.Content = []anthropic.ToolResultBlockParamContentUnion{{
+		OfText: &anthropic.TextBlockParam{Text: replacement},
+	}}
+	return &nb, len(text) - len(replacement), true
+}
+
+// isReducedResult reports whether obj is the replacement reducedResultText
+// wrote for the result of toolUseID.
+//
+// Tool output is untrusted and can carry its own executor_reduced key. The
+// marker counts only with the tool_use_id of the block it sits in, which a
+// tool does not see, so a tool cannot keep a large result whole by copying
+// the marker.
+func isReducedResult(obj map[string]json.RawMessage, toolUseID string) bool {
+	if string(bytes.TrimSpace(obj["executor_reduced"])) != "true" {
+		return false
+	}
+	var id string
+	return json.Unmarshal(obj["tool_use_id"], &id) == nil && id == toolUseID
 }
 
 // toolResultText joins the text of a tool result whose content is text only.

@@ -248,6 +248,11 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// inputBudgetNoReduction makes an over-budget turn fail without
 	// reducing older tool results first. Set via WithInputBudgetNoReduction.
 	inputBudgetNoReduction bool
+
+	// contextBudget, when non-nil, shortens tool results once a request is
+	// estimated over its token budget. Set via WithContextBudget.
+	// See contextbudget.go.
+	contextBudget *ContextBudget
 }
 
 // maxCacheBreakpoints is the Anthropic API's hard limit on the number of
@@ -667,6 +672,10 @@ func (e *executor[Request, Response]) runConversation(
 	// WithTruncatedToolCallRetries). It never resets: a suspension carries it
 	// in the envelope's loop state, so a resumed run continues the count.
 	truncatedToolCalls := state.TruncatedToolCalls
+	// budgetAnchor is the provider's count for the last answered request,
+	// which WithContextBudget estimates the next request from. A resumed run
+	// starts without one.
+	var budgetAnchor contextAnchor
 	// deferredGateResolved records whether the deferral gate tool (when one is
 	// configured via WithForceSubmitToolChoice) has been called at least once.
 	// While a gate tool is registered but unresolved, the first turn was left
@@ -942,6 +951,11 @@ func (e *executor[Request, Response]) runConversation(
 		// budgetReduced records that this turn's budget pass rewrote earlier
 		// tool results, which changes the prefix the cache was written for.
 		budgetReduced := false
+		if e.contextBudget != nil {
+			before := budgetAnchor
+			budgetAnchor = e.compactToBudget(ctx, turn, &params, budgetAnchor, protectedResult, tail)
+			budgetReduced = budgetAnchor != before
+		}
 		if e.inputBudgetEnabled {
 			countCfg := e.retryConfig
 			countCfg.OnAttemptError = llmTurn.RecordError
@@ -949,7 +963,7 @@ func (e *executor[Request, Response]) runConversation(
 			if err != nil {
 				return response, true, err
 			}
-			budgetReduced = reduced > 0
+			budgetReduced = budgetReduced || reduced > 0
 		}
 		// A changed tool_choice invalidates the cached message blocks, so a
 		// turn sent with a different one is expected to miss the cache.
@@ -1067,6 +1081,11 @@ func (e *executor[Request, Response]) runConversation(
 			return response, true, fmt.Errorf("failed to stream Claude response: %w", err)
 		}
 		execshared.RecordCallLatency(ctx, trace, llmTurn, timer.Latency())
+		// A response with no prompt usage counted nothing, so the earlier
+		// anchor stays: messages are only appended, and its index holds.
+		if u := message.Usage; u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > 0 {
+			budgetAnchor = contextAnchor{tokens: nextPromptTokens(u), messages: len(params.Messages)}
+		}
 
 		// Record token usage in metrics and on the per-turn span. Trace-level
 		// token totals are derived from turns[] in downstream consumers — see
