@@ -5,7 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 package blob
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Gen is a blob object's generation — a version stamp advanced on every write,
 // used as the compare-and-swap token. The zero Gen never matches a stored
@@ -34,6 +37,16 @@ type Cond struct {
 type Object struct {
 	Name string
 	Gen  Gen
+}
+
+// Version is one generation of an object, as GetVersion returns it: the bytes,
+// the generation and when storage created that generation. A generation's
+// bytes and creation time never change, so Created is when the object reached
+// this state.
+type Version struct {
+	Data    []byte
+	Gen     Gen
+	Created time.Time
 }
 
 // Page is one bounded slice of a List plus the cursor for the next. List never

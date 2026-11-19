@@ -10,24 +10,35 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Mem is an in-memory blob backend for tests and single-process use. It is safe
 // for concurrent use. The zero value is not usable; call NewMem.
 type Mem struct {
 	mu      sync.Mutex
+	now     func() time.Time
 	nextGen Gen
 	objects map[string]memObject
 }
 
 type memObject struct {
-	data []byte
-	gen  Gen
+	data    []byte
+	gen     Gen
+	created time.Time
 }
 
-// NewMem returns an empty in-memory blob backend.
+// NewMem returns an empty in-memory blob backend. It records each generation's
+// creation time from the wall clock.
 func NewMem() *Mem {
+	return NewMemWithClock(time.Now)
+}
+
+// NewMemWithClock returns an empty in-memory blob backend that records each
+// generation's creation time by calling now when the write succeeds.
+func NewMemWithClock(now func() time.Time) *Mem {
 	return &Mem{
+		now:     now,
 		nextGen: 1,
 		objects: make(map[string]memObject),
 	}
@@ -58,7 +69,7 @@ func (m *Mem) Put(_ context.Context, name string, data []byte, cond Cond) (Gen, 
 	gen := m.nextGen
 	m.nextGen++
 	// Clone so a caller mutating data after the write can't alter stored bytes.
-	m.objects[name] = memObject{data: slices.Clone(data), gen: gen}
+	m.objects[name] = memObject{data: slices.Clone(data), gen: gen, created: m.now()}
 	return gen, nil
 }
 
@@ -74,6 +85,20 @@ func (m *Mem) Get(_ context.Context, name string) ([]byte, Gen, bool, error) {
 	}
 	// Clone so callers can't mutate stored bytes through the returned slice.
 	return slices.Clone(o.data), o.gen, true, nil
+}
+
+// GetVersion returns the object's current generation with its bytes and
+// creation time; ok is false (zero Version, nil error) when no object exists at
+// name.
+func (m *Mem) GetVersion(_ context.Context, name string) (Version, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	o, ok := m.objects[name]
+	if !ok {
+		return Version{}, false, nil
+	}
+	return Version{Data: slices.Clone(o.data), Gen: o.gen, Created: o.created}, true, nil
 }
 
 // Delete removes name. With ifGen == 0 the delete is unconditional; with

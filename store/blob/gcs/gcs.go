@@ -92,6 +92,62 @@ func (s *Store) Get(ctx context.Context, name string) ([]byte, blob.Gen, bool, e
 	return data, blob.Gen(r.Attrs.Generation), true, nil
 }
 
+// maxVersionAttempts bounds how many times GetVersion starts again when the
+// object is replaced between reading its attributes and reading its bytes.
+const maxVersionAttempts = 3
+
+// GetVersion returns the object's current generation with its bytes and
+// creation time; ok is false (zero Version, nil error) when no object exists at
+// name. It reads the object's attributes, then the bytes of the generation that
+// the attributes describe, so all three values come from one generation. When
+// that generation is replaced before its bytes are read, GetVersion starts
+// again, up to maxVersionAttempts times. A generation without a creation time
+// is an error.
+func (s *Store) GetVersion(ctx context.Context, name string) (blob.Version, bool, error) {
+	obj := s.bucket.Object(name)
+	for range maxVersionAttempts {
+		attrs, err := obj.Attrs(ctx)
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return blob.Version{}, false, nil
+		}
+		if err != nil {
+			return blob.Version{}, false, fmt.Errorf("blob get version %q: %w", name, mapErr(err))
+		}
+		if attrs.Created.IsZero() {
+			return blob.Version{}, false, fmt.Errorf("blob get version %q: generation %d has no creation time", name, attrs.Generation)
+		}
+
+		data, ok, err := readGeneration(ctx, obj, attrs.Generation)
+		if err != nil {
+			return blob.Version{}, false, fmt.Errorf("blob get version %q: %w", name, err)
+		}
+		if !ok {
+			continue
+		}
+		return blob.Version{Data: data, Gen: blob.Gen(attrs.Generation), Created: attrs.Created}, true, nil
+	}
+	return blob.Version{}, false, fmt.Errorf("blob get version %q: replaced before each of %d reads", name, maxVersionAttempts)
+}
+
+// readGeneration returns the bytes of one generation of obj; ok is false when
+// that generation no longer exists.
+func readGeneration(ctx context.Context, obj *storage.ObjectHandle, gen int64) ([]byte, bool, error) {
+	r, err := obj.Generation(gen).NewReader(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, mapErr(err)
+	}
+	defer r.Close()
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, false, mapErr(err)
+	}
+	return data, true, nil
+}
+
 // Delete removes name. With ifGen == 0 the delete is unconditional; with
 // ifGen > 0 it removes the object only if its generation matches. An
 // unconditional delete of an absent object is reported as blob.ErrNotExist; a

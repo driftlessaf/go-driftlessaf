@@ -22,6 +22,7 @@ SPDX-License-Identifier: Apache-2.0
 //
 //	Put(ctx, name string, data []byte, cond Cond) (Gen, error)
 //	Get(ctx, name string) (data []byte, gen Gen, ok bool, err error)
+//	GetVersion(ctx, name string) (v Version, ok bool, err error)
 //	Delete(ctx, name string, ifGen Gen) error
 //	List(ctx, prefix string, limit int, cursor string) (Page, error)
 //

@@ -36,4 +36,5 @@ func TestGCS_Conformance(t *testing.T) {
 
 	bucket := client.Bucket(bucketName)
 	blobtest.RunConformance(t, func() blobtest.Store { return gcs.New(bucket) })
+	blobtest.RunVersionConformance(t, func() blobtest.VersionStore { return gcs.New(bucket) })
 }

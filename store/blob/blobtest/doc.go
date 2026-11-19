@@ -8,5 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 // Every blob backend — the in-memory [blob.Mem] and the GCS-backed store alike
 // — is driven through the same [RunConformance] table, so an in-memory double
 // cannot silently diverge from the real implementation: the moment a backend
-// stops matching the contract, its conformance test fails.
+// stops matching the contract, its conformance test fails. A backend that
+// implements GetVersion also runs [RunVersionConformance].
 package blobtest
