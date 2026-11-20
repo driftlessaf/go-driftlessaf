@@ -71,6 +71,15 @@ func WithFindingReplies[T any]() Option[T] {
 	}
 }
 
+// WithFullReviewBodyLogs lets finding log reads return the complete text of a
+// review body or thread comment that was truncated in its displayed finding.
+// Off by default so existing callers keep the finding preview as their logs.
+func WithFullReviewBodyLogs[T any]() Option[T] {
+	return func(cm *CM[T]) {
+		cm.fullReviewBodyLogs = true
+	}
+}
+
 // WithConversationComments makes a session read the comments people leave in the
 // pull request's conversation, not just review threads and review bodies. Each
 // comment from a trusted author (see authorTrusted) that was left after the head
@@ -199,6 +208,12 @@ type metadata struct {
 	// body while the pull request stays a draft, so a draft whose change is
 	// partial goes on saying so after the bot iterates on it.
 	DraftNote string `json:"draft_note,omitempty"`
+
+	// OutOfScope holds accepted decisions that an automated review finding
+	// asks for a change outside the issue's constraints; see
+	// Session.SetOutOfScopeRecords. omitempty keeps older bodies parseable
+	// and byte-identical when none exist.
+	OutOfScope []OutOfScopeRecord `json:"out_of_scope,omitempty"`
 }
 
 // ReasoningEntry is one iteration's agent-reasoning record, keyed by the
@@ -409,6 +424,9 @@ type CM[T any] struct {
 	// conversationComments makes sessions read comments in the pull request's
 	// conversation as findings; see WithConversationComments.
 	conversationComments bool
+	// fullReviewBodyLogs serves truncated review text through GetLogs only when
+	// a caller explicitly opts in.
+	fullReviewBodyLogs bool
 }
 
 // GraphQL types for querying check runs
@@ -804,6 +822,7 @@ func (cm *CM[T]) NewSession(
 
 		awaitingReviewThreads map[string]struct{}
 		conversationByID      map[string]gqlConversationComment
+		reviewBodies          *reviewBodyReader
 	)
 
 	vars := map[string]any{
@@ -872,7 +891,10 @@ func (cm *CM[T]) NewSession(
 		}
 
 		// Collect unresolved review thread findings from trusted authors
-		threadFindings, awaiting := collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors, threadReplyMarker(cm.identity))
+		// The reader is always kept so findings can be identified by their
+		// full text; only the logs callback is gated on fullReviewBodyLogs.
+		reviewBodies = newReviewBodyReader(pr.Reviews)
+		threadFindings, awaiting := collectThreadFindings(ctx, pr.ReviewThreads, cm.trustedReviewAuthors, threadReplyMarker(cm.identity), reviewBodies)
 		findings = append(findings, threadFindings...)
 		awaitingReviewThreads = awaiting
 
@@ -894,6 +916,12 @@ func (cm *CM[T]) NewSession(
 			conversationByID = make(map[string]gqlConversationComment, len(conv.comments))
 			for _, c := range conv.comments {
 				conversationByID[conversationIdentifier(c.DatabaseId)] = c
+				if len(c.Body) > maxQuotedBodyBytes {
+					if reviewBodies.conversations == nil {
+						reviewBodies.conversations = map[string]string{}
+					}
+					reviewBodies.conversations[conversationIdentifier(c.DatabaseId)] = formatConversation(c, wrapQuotedFull)
+				}
 			}
 		}
 
@@ -934,6 +962,7 @@ func (cm *CM[T]) NewSession(
 
 		reviewThreadsAwaitingReply: awaitingReviewThreads,
 		conversationByID:           conversationByID,
+		reviewBodies:               reviewBodies,
 		threads:                    &threadActions{},
 	}, nil
 }
@@ -951,7 +980,7 @@ func (cm *CM[T]) NewSession(
 // It also returns the set of thread node ids the returned findings cover, all of
 // which await this bot. HasUnresolvedReviews consults it so a thread the bot has
 // already answered does not keep renewing the commit budget.
-func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}, replyMarker string) ([]callbacks.Finding, map[string]struct{}) {
+func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnection, trustedAuthors map[string]struct{}, replyMarker string, reader *reviewBodyReader) ([]callbacks.Finding, map[string]struct{}) {
 	findings := make([]callbacks.Finding, 0, len(threads.Nodes))
 	awaiting := make(map[string]struct{})
 
@@ -996,6 +1025,9 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 			Details:    formatThreadDetails(thread.Path, thread.Line, thread.IsOutdated, trustedComments),
 			DetailsURL: trustedComments[0].Url,
 		})
+		if reader != nil && slices.ContainsFunc(trustedComments, func(c gqlThreadComment) bool { return len(c.Body) > maxQuotedBodyBytes }) {
+			reader.threads[thread.Id] = trustedComments
+		}
 		awaiting[thread.Id] = struct{}{}
 	}
 

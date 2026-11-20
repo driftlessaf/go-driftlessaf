@@ -222,10 +222,15 @@ func createdAfter(createdAt string, since time.Time) bool {
 // formatConversationDetails builds the text the agent reads for a conversation
 // comment. The body is untrusted, so it goes inside the wrapper.
 func formatConversationDetails(c gqlConversationComment) string {
+	return formatConversation(c, wrapQuoted)
+}
+
+// formatConversation renders c with wrap applied to its body.
+func formatConversation(c gqlConversationComment, wrap func(source, body string) string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Pull request comment by @%s (%s)\n", displayReviewAuthor(c.Author.Login, c.Author.Typename), c.AuthorAssociation)
 	fmt.Fprintf(&sb, "Posted: %s\n", c.CreatedAt)
-	fmt.Fprintf(&sb, "\n%s\n", wrapQuoted("pr-comment", c.Body))
+	fmt.Fprintf(&sb, "\n%s\n", wrap("pr-comment", c.Body))
 	return sb.String()
 }
 

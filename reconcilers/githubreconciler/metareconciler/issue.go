@@ -62,6 +62,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		return fmt.Errorf("create change session: %w", err)
 	}
 
+	// Before the state is read, drop automated review bodies that repeat an
+	// accepted out-of-scope decision whose intent and evidence still hold.
+	suppressedFindings, declinedRecordsChanged := r.suppressDeclined(ctx, gh, res, issue, changeSession)
+
 	// The issue creator is a bot-managed assignee: assigning the PR to them
 	// should not cause ShouldSkip to return true.
 	creator := issue.GetUser().GetLogin()
@@ -257,7 +261,13 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		// The issue side gets the same treatment: the clear that runs when the PR
 		// opens swallows its errors, so this is the retry that keeps a stale
 		// "nothing to materialize" from outliving the PR that disproved it.
-		r.giveUp.Clear(ctx, changeSession)
+		//
+		// A retained out-of-scope decision is the exception: its give-up note
+		// is the only visible record of why the bot review went unaddressed,
+		// so it stays while the decision suppresses a finding.
+		if suppressedFindings == 0 {
+			r.giveUp.Clear(ctx, changeSession)
+		}
 		r.clearIssueGiveUp(ctx, issue, changeSession)
 		return nil
 
@@ -300,6 +310,9 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	// value, so neither must see it then.
 	var result Resp
 	var agentRan bool
+	// outOfScopeChanged reports that the run changed the stored out-of-scope
+	// decisions, which a run that commits nothing must still persist.
+	outOfScopeChanged := declinedRecordsChanged
 
 	// The commit the lease checked out for the agent, "" until it is leased.
 	var checkoutHead string
@@ -339,6 +352,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			return fmt.Errorf("clear ready-for-review: %w", err)
 		}
 	}
+	var attemptScope string
+	if r.outOfScope != nil {
+		attemptScope = r.scopeRevision(issue)
+	}
 	prURL, err := changeSession.Upsert(ctx, prData, draft, prLabels, func(ctx context.Context, branchName string) error {
 		// Tee the agent's completed trace so the PR body template can render
 		// a rationale summary via {{.ReasoningSummary}} (see
@@ -350,11 +367,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		// findings already records an attempt, and its own check event
 		// queued this run. Running the agent again would loop on that
 		// event for as long as the outcome kept changing.
-		recorded, err := r.evidenceAttemptRecorded(ctx, gh, res, prData, changeSession.HeadSHA(), changeSession.Findings())
+		recorded, err := r.evidenceAttemptRecorded(ctx, gh, res, prData, changeSession.HeadSHA(), findingsDigest(changeSession.FindingsFullText(), attemptScope))
 		if err != nil && state.HasPR() {
 			return err
 		}
-		if recorded && state.HasPR() && usePRBranch {
+		if recorded && state.HasPR() && usePRBranch && !declinedRecordsChanged {
 			log.Info("Evidence check already records an attempt for this head, intent and findings, not running the agent")
 			return changemanager.ErrNoChanges
 		}
@@ -396,6 +413,16 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		err = lease.MakeAndPushChanges(ctx, branchName, func(ctx context.Context, wt *gogit.Worktree) (string, error) {
 			scope, _ = commitscope.ScopeFromContext(ctx)
 
+			checkedOutPRHead := false
+			if r.outOfScope != nil && usePRBranch {
+				if head, err := lease.Repo().Head(); err == nil {
+					checkedOutPRHead = head.Hash().String() == changeSession.HeadSHA()
+				}
+			}
+			if suppressedFindings > 0 && !checkedOutPRHead {
+				return "", workqueue.RequeueAfter(time.Second)
+			}
+
 			cbs, err := r.buildCallbacks(ctx, changeSession, lease)
 			if err != nil {
 				return "", fmt.Errorf("build callbacks: %w", err)
@@ -414,6 +441,11 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 				return "", fmt.Errorf("execute agent: %w", err)
 			}
 			agentRan = true
+			status, err := wt.Status()
+			if err != nil {
+				return "", fmt.Errorf("get worktree status: %w", err)
+			}
+			outOfScopeChanged = r.recordOutOfScope(ctx, gh, res, issue, changeSession, result, checkedOutPRHead, status) || outOfScopeChanged
 			prData.ReasoningSummary = agenttrace.SummarizeTraceReasoning(captured(), reasoningSummaryMaxChars)
 			if r.prRenderFromResult != nil {
 				render := r.prRenderFromResult(result)
@@ -423,10 +455,6 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 
 			// Check if the agent left the worktree clean (no file changes).
 			// Return ErrNoChanges so Upsert can propagate it to the caller.
-			status, err := wt.Status()
-			if err != nil {
-				return "", fmt.Errorf("get worktree status: %w", err)
-			}
 			if status.IsClean() {
 				return "", changemanager.ErrNoChanges
 			}
@@ -528,25 +556,35 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 					noOpRecord, prData.Evidence = prData.Evidence, storedRaw
 				}
 			}
-			// Preserve the existing write for an explicit steering note. A new
-			// attempt or issue edit alone never owns the PR description.
-			if agentRan && steeringNew {
+			// Persist steering and out-of-scope metadata from this no-op run.
+			// A new attempt or issue edit alone never owns the PR description.
+			if agentRan && (steeringNew || outOfScopeChanged) {
 				// Evidence claims a head, so the write confirms the live PR
 				// still has that head and the body this run read (no newer
 				// push, steer or takeover). A consumer must verify the live
 				// head, the current intent and the checks directly: editable
 				// PR text cannot authenticate GitHub checks.
 				var err error
-				if prData.Evidence != nil && r.evidenceCheck == nil {
+				switch {
+				case outOfScopeChanged:
+					if checkoutHead == "" || checkoutHead != changeSession.HeadSHA() {
+						err = errors.New("out-of-scope decisions are not bound to the current PR head")
+					} else {
+						err = changeSession.ReembedDataAtHead(ctx, prData, checkoutHead)
+					}
+				case prData.Evidence != nil && r.evidenceCheck == nil:
 					err = changeSession.ReembedDataAtHead(ctx, prData, prData.Evidence.HeadSHA)
-				} else {
+				default:
 					// No head is claimed: keep the long-standing
 					// data-block-only write, which preserves a person's
 					// prose edits to the description.
 					err = changeSession.ReembedData(ctx, prData)
 				}
 				if err != nil {
-					return fmt.Errorf("record steering ID and evidence: %w", err)
+					if steeringNew {
+						return fmt.Errorf("record steering ID, evidence and out-of-scope decisions: %w", err)
+					}
+					log.Warn("Could not cache out-of-scope decisions", "error", err)
 				}
 			}
 			// The latest attempt's result for the head the run saw replaces
@@ -582,7 +620,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 					// The digest only suppresses PR-branch findings
 					// iterations, so a default-branch run never sets it.
 					if checkoutIsSession && usePRBranch {
-						details.FindingsDigest = findingsDigest(changeSession.Findings())
+						details.FindingsDigest = findingsDigest(changeSession.FindingsFullText(), attemptScope)
 					}
 					if err := r.publishEvidenceCheck(ctx, gh, res, details); err != nil {
 						return err

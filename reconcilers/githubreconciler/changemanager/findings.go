@@ -61,6 +61,11 @@ func wrapQuoted(source, body string) string {
 	return fmt.Sprintf("<untrusted-content source=%q>\n%s\n</untrusted-content>", source, safe)
 }
 
+// wrapQuotedFull is wrapQuoted without the display cap.
+func wrapQuotedFull(source, body string) string {
+	return fmt.Sprintf("<untrusted-content source=%q>\n%s\n</untrusted-content>", source, neutralizeUntrustedMarkers(body))
+}
+
 // neutralizeUntrustedMarkers rewrites every occurrence of the boundary tag so a
 // quoted body cannot close or reopen the wrapper. The rewrite is loud rather
 // than lossy: an attempted boundary stays legible as evidence, and the rest of

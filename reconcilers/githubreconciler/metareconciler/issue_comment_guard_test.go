@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"text/template"
 	"time"
 
+	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/changemanager"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler/clonemanager"
@@ -75,7 +77,8 @@ type issueHarness struct {
 
 	// cloneOpts configure the clone manager the reconciler leases from, for a
 	// test that needs the commit-scope guard.
-	cloneOpts []clonemanager.Option
+	cloneOpts          []clonemanager.Option
+	fullReviewBodyLogs bool
 
 	// prBody, when set, replaces the harness's fixed PR body template, for a
 	// test that checks what the rendered body carries; prBodies records the
@@ -90,8 +93,19 @@ type issueHarness struct {
 
 	// prText is the open PR's body as the fake reports it, and prAssignees
 	// its assignees' logins.
-	prText      string
-	prAssignees []string
+	prText           string
+	priorBodyEditor  string
+	moreBodyEdits    bool
+	provenanceFields map[string]any
+	provenanceFails  bool
+	prAssignees      []string
+
+	// reviews are the top-level reviews on the open PR's head commit.
+	reviews []harnessReview
+
+	// findingCbs are the finding callbacks of the latest reconcile's session,
+	// for an agent that reads finding details the way the real one does.
+	findingCbs callbacks.FindingCallbacks
 
 	agentCalls int
 	prCreates  int
@@ -120,6 +134,38 @@ func (h *issueHarness) prTip() string {
 // prBodyJSON renders prText as a JSON string. h.mu is held.
 func (h *issueHarness) prBodyJSON() string {
 	b, _ := json.Marshal(h.prText)
+	return string(b)
+}
+
+// harnessReview is a top-level review on the open PR's head commit. A login
+// ending in "[bot]" is a GitHub App.
+type harnessReview struct {
+	id          int64
+	login       string
+	association string
+	body        string
+}
+
+// reviewNodes renders reviews as the PR query's review nodes. h.mu is held.
+func (h *issueHarness) reviewNodes() string {
+	nodes := []map[string]any{}
+	for _, rv := range h.reviews {
+		typename := "User"
+		if strings.HasSuffix(rv.login, "[bot]") {
+			typename = "Bot"
+		}
+		nodes = append(nodes, map[string]any{
+			"databaseId":        rv.id,
+			"author":            map[string]any{"login": strings.TrimSuffix(rv.login, "[bot]"), "__typename": typename},
+			"authorAssociation": rv.association,
+			"state":             "COMMENTED",
+			"body":              rv.body,
+			"url":               fmt.Sprintf("https://github.com/owner/repo/pull/456#pullrequestreview-%d", rv.id),
+			"submittedAt":       "2026-10-14T09:00:00Z",
+			"commit":            map[string]any{"oid": h.prTip()},
+		})
+	}
+	b, _ := json.Marshal(nodes)
 	return string(b)
 }
 
@@ -187,7 +233,10 @@ func (h *issueHarness) openPR(t *testing.T, mergeable, checks string) {
 func (h *issueHarness) setPR(mergeable, checks string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.pr = &harnessPR{mergeable: mergeable, checks: checks}
+	if h.pr == nil {
+		h.pr = &harnessPR{}
+	}
+	h.pr.mergeable, h.pr.checks = mergeable, checks
 }
 
 // prNotes returns the bodies of the PR's comments beginning with the give-up
@@ -306,6 +355,22 @@ func (h *issueHarness) serveGraphQL(t *testing.T, w http.ResponseWriter, r *http
 		}
 	}
 	switch {
+	case strings.Contains(req.Query, "userContentEdits("):
+		if h.provenanceFails {
+			fmt.Fprint(w, `{"errors":[{"message":"unavailable"}]}`)
+			return
+		}
+		author := map[string]any{"id": "BOT_fixture", "__typename": "Bot"}
+		edits := []any{map[string]any{"editor": author}}
+		if h.priorBodyEditor != "" {
+			edits = append(edits, map[string]any{"editor": map[string]any{"login": h.priorBodyEditor, "__typename": "User"}})
+		}
+		live := map[string]any{
+			"viewerDidAuthor": true, "body": h.prText, "headRefOid": h.prTip(), "author": author, "includesCreatedEdit": true,
+			"userContentEdits": map[string]any{"totalCount": len(edits), "nodes": edits, "pageInfo": map[string]any{"hasNextPage": h.moreBodyEdits}},
+		}
+		maps.Copy(live, h.provenanceFields)
+		reply(map[string]any{"repository": map[string]any{"pullRequest": live}})
 	case strings.Contains(req.Query, "deleteIssueComment("):
 		if h.deleteFails {
 			fmt.Fprint(w, `{"errors":[{"message":"delete failed"}]}`)
@@ -367,7 +432,7 @@ func (h *issueHarness) serveGraphQL(t *testing.T, w http.ResponseWriter, r *http
 		}}})
 
 	case h.pr != nil:
-		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":%s,"mergeable":%q,"isDraft":false,"headRefOid":%q,"labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":%s},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.prBodyJSON(), h.pr.mergeable, h.prTip(), h.prLabelNodes(), h.pr.checks, h.prAssigneeNodes())
+		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":%s,"mergeable":%q,"isDraft":false,"headRefOid":%q,"labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":%s},"reviewThreads":{"nodes":[]},"reviews":{"nodes":%s}}]}}}}`, h.prBodyJSON(), h.pr.mergeable, h.prTip(), h.prLabelNodes(), h.pr.checks, h.prAssigneeNodes(), h.reviewNodes())
 
 	default:
 		reply(map[string]any{"repository": map[string]any{"pullRequests": map[string]any{"nodes": []any{}}}})
@@ -512,10 +577,17 @@ func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent fun
 	if h.prBody != "" {
 		body = h.prBody
 	}
+	cmOpts := []changemanager.Option[PRData[*testRequest]]{
+		changemanager.WithFindingsIteration[PRData[*testRequest]](),
+		changemanager.WithTrustedReviewAuthors[PRData[*testRequest]]("reviewer[bot]"),
+	}
+	if h.fullReviewBodyLogs {
+		cmOpts = append(cmOpts, changemanager.WithFullReviewBodyLogs[PRData[*testRequest]]())
+	}
 	cm, err := changemanager.New[PRData[*testRequest]]("test-bot",
 		template.Must(template.New("title").Parse("Update content")),
 		template.Must(template.New("body").Parse(body)),
-		changemanager.WithFindingsIteration[PRData[*testRequest]]())
+		cmOpts...)
 	if err != nil {
 		t.Fatalf("create change manager: %v", err)
 	}
@@ -533,7 +605,10 @@ func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent fun
 		func(context.Context, *github.Issue, *changemanager.Session[PRData[*testRequest]]) (*testRequest, error) {
 			return &testRequest{}, nil
 		},
-		func(context.Context, *changemanager.Session[PRData[*testRequest]], *clonemanager.Lease) (struct{}, error) {
+		func(_ context.Context, session *changemanager.Session[PRData[*testRequest]], _ *clonemanager.Lease) (struct{}, error) {
+			h.mu.Lock()
+			h.findingCbs = session.FindingCallbacks()
+			h.mu.Unlock()
 			return struct{}{}, nil
 		},
 		append([]Option[*testRequest, *publishResult, struct{}]{

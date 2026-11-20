@@ -78,8 +78,11 @@ type EvidenceCheckDetails struct {
 	FindingsDigest string `json:"findings_digest,omitempty"`
 }
 
-// findingsDigest identifies a set of findings, "" for none.
-func findingsDigest(findings []callbacks.Finding) string {
+// findingsDigest identifies a set of findings, "" for none. Review findings
+// must be passed with their full text (see
+// changemanager.Session.FindingsFullText); the clipped preview hides a tail
+// that can change without changing the digest.
+func findingsDigest(findings []callbacks.Finding, scope string) string {
 	if len(findings) == 0 {
 		return ""
 	}
@@ -89,6 +92,9 @@ func findingsDigest(findings []callbacks.Finding) string {
 		keys = append(keys, string(f.Kind)+"\x00"+f.Identifier+"\x00"+hex.EncodeToString(content[:]))
 	}
 	sort.Strings(keys)
+	if scope != "" {
+		keys = append(keys, "scope:"+scope)
+	}
 	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
 	return hex.EncodeToString(sum[:])
 }
@@ -99,9 +105,8 @@ func findingsDigest(findings []callbacks.Finding) string {
 // no-op with findings would run the agent once more for its own event, and
 // again for as long as the outcome kept changing. A failed read is returned
 // so the queue retries; a corrupt record reports false and the agent runs.
-func (r *Reconciler[Req, Resp, CB]) evidenceAttemptRecorded(ctx context.Context, gh *github.Client, res *githubreconciler.Resource, data *PRData[Req], head string, findings []callbacks.Finding) (bool, error) {
+func (r *Reconciler[Req, Resp, CB]) evidenceAttemptRecorded(ctx context.Context, gh *github.Client, res *githubreconciler.Resource, data *PRData[Req], head, digest string) (bool, error) {
 	cfg := r.evidenceCheck
-	digest := findingsDigest(findings)
 	if cfg == nil || digest == "" || !commitSHA.MatchString(head) {
 		return false, nil
 	}

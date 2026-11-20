@@ -62,6 +62,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// WithSteering.
 	steering bool
 
+	// outOfScope extracts the agent's out-of-scope decisions from a result so
+	// they can be retained across pushes. Nil disables it. See
+	// WithOutOfScopeDispositions.
+	outOfScope func(Resp) []OutOfScopeDecision
+
 	// prLabelsFromResult derives extra labels to stamp on the generated PR from
 	// the agent result. Opt-in: nil means no extra labels are added.
 	prLabelsFromResult func(Resp) []string

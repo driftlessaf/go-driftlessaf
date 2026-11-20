@@ -517,11 +517,22 @@ func TestEvidenceCheckDetailsValidate(t *testing.T) {
 	}
 }
 
+func TestLiteralTruncatedTextHasDigest(t *testing.T) {
+	findings := []callbacks.Finding{{
+		Kind:       callbacks.FindingKindReview,
+		Identifier: "review-body-1",
+		Details:    "<untrusted-content source=\"review-body\">\nclipped log[truncated]\n</untrusted-content>",
+	}}
+	if got := findingsDigest(findings, ""); got == "" {
+		t.Error("findingsDigest(short text ending in [truncated]): got empty, want a digest")
+	}
+}
+
 func TestNewReviewReplyChangesFindingsDigest(t *testing.T) {
 	findings := []callbacks.Finding{{Kind: callbacks.FindingKindReview, Identifier: "thread-1", Details: "Initial finding"}}
-	before := findingsDigest(findings)
+	before := findingsDigest(findings, "")
 	findings[0].Details += "\nA teammate added a correction"
-	if findingsDigest(findings) == before {
+	if findingsDigest(findings, "") == before {
 		t.Error("a new reply in the same thread reused the prior attempt")
 	}
 }

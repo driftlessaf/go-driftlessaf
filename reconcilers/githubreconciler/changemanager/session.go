@@ -112,6 +112,10 @@ type Session[T any] struct {
 	// Set only for a manager built with WithConversationComments.
 	conversationByID map[string]gqlConversationComment
 
+	// reviewBodies serves the full text of review bodies longer than the
+	// rendered preview through the finding logs callback.
+	reviewBodies *reviewBodyReader
+
 	// draftNote, when non-empty, makes the in-flight Upsert publish as a draft
 	// and appends the note to the pull request body; see PublishAsDraft.
 	draftNote string
@@ -1069,6 +1073,27 @@ func (s *Session[T]) Findings() []callbacks.Finding {
 	return s.findings
 }
 
+// FindingsFullText returns the findings with each review finding's Details
+// replaced by its full quoted text when the rendered preview was cut at the
+// display cap. It is for identifying the findings (for example hashing them),
+// not for showing them to the agent.
+func (s *Session[T]) FindingsFullText() []callbacks.Finding {
+	if s.findings == nil {
+		return nil
+	}
+	out := make([]callbacks.Finding, len(s.findings))
+	copy(out, s.findings)
+	for i, f := range out {
+		if f.Kind != callbacks.FindingKindReview {
+			continue
+		}
+		if full, ok := s.reviewBodies.full(f.Identifier); ok {
+			out[i].Details = full
+		}
+	}
+	return out
+}
+
 // HasUnresolvedReviews reports whether the PR carries review feedback the bot
 // still owes a response to. A review body on the current head commit always
 // counts: bodies carry no reply or resolution and drop out once the bot pushes a
@@ -1152,6 +1177,11 @@ func (s *Session[T]) FindingCallbacks() callbacks.FindingCallbacks {
 			f, err := s.findingByID(kind, identifier)
 			if err != nil {
 				return "", err
+			}
+			if s.manager != nil && s.manager.fullReviewBodyLogs {
+				if full, ok := s.reviewBodies.full(identifier); ok && kind == callbacks.FindingKindReview {
+					return full, nil
+				}
 			}
 			if kind != callbacks.FindingKindCICheck {
 				return f.Details, nil
