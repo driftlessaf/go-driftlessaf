@@ -1014,18 +1014,20 @@ func collectThreadFindings(ctx context.Context, threads gqlReviewThreadsConnecti
 
 		// The finding name is model-facing text outside any wrapper, so the
 		// contributor-controlled path is sanitized before it becomes the name.
+		clipped := slices.ContainsFunc(trustedComments, func(c gqlThreadComment) bool { return len(c.Body) > maxQuotedBodyBytes })
 		threadName := sanitizeInlinePath(thread.Path)
 		if thread.Line > 0 {
 			threadName = fmt.Sprintf("%s:%d", threadName, thread.Line)
 		}
 		findings = append(findings, callbacks.Finding{
-			Kind:       callbacks.FindingKindReview,
-			Identifier: thread.Id,
-			Name:       threadName,
-			Details:    formatThreadDetails(thread.Path, thread.Line, thread.IsOutdated, trustedComments),
-			DetailsURL: trustedComments[0].Url,
+			Kind:             callbacks.FindingKindReview,
+			Identifier:       thread.Id,
+			Name:             threadName,
+			Details:          formatThreadDetails(thread.Path, thread.Line, thread.IsOutdated, trustedComments),
+			DetailsURL:       trustedComments[0].Url,
+			DetailsTruncated: clipped,
 		})
-		if reader != nil && slices.ContainsFunc(trustedComments, func(c gqlThreadComment) bool { return len(c.Body) > maxQuotedBodyBytes }) {
+		if reader != nil && clipped {
 			reader.threads[thread.Id] = trustedComments
 		}
 		awaiting[thread.Id] = struct{}{}
@@ -1112,11 +1114,12 @@ func collectReviewBodyFindings(ctx context.Context, headRefOid string, reviews g
 		}
 
 		findings = append(findings, callbacks.Finding{
-			Kind:       callbacks.FindingKindReview,
-			Identifier: reviewBodyIdentifierPrefix + fmt.Sprintf("%d", review.DatabaseId),
-			Name:       "@" + displayReviewAuthor(review.Author.Login, review.Author.Typename),
-			Details:    formatReviewBodyDetails(review),
-			DetailsURL: review.Url,
+			Kind:             callbacks.FindingKindReview,
+			Identifier:       reviewBodyIdentifierPrefix + fmt.Sprintf("%d", review.DatabaseId),
+			Name:             "@" + displayReviewAuthor(review.Author.Login, review.Author.Typename),
+			Details:          formatReviewBodyDetails(review),
+			DetailsURL:       review.Url,
+			DetailsTruncated: len(review.Body) > maxQuotedBodyBytes,
 		})
 	}
 

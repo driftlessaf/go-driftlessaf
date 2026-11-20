@@ -198,11 +198,12 @@ func collectConversationFindings(ctx context.Context, comments []gqlConversation
 			continue
 		}
 		findings = append(findings, callbacks.Finding{
-			Kind:       callbacks.FindingKindReview,
-			Identifier: conversationIdentifier(c.DatabaseId),
-			Name:       "@" + displayReviewAuthor(c.Author.Login, c.Author.Typename),
-			Details:    formatConversationDetails(c),
-			DetailsURL: c.Url,
+			Kind:             callbacks.FindingKindReview,
+			Identifier:       conversationIdentifier(c.DatabaseId),
+			Name:             "@" + displayReviewAuthor(c.Author.Login, c.Author.Typename),
+			Details:          formatConversationDetails(c),
+			DetailsURL:       c.Url,
+			DetailsTruncated: len(c.Body) > maxQuotedBodyBytes,
 		})
 	}
 	return findings

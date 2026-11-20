@@ -8,6 +8,7 @@ package changemanager
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 )
@@ -62,6 +63,94 @@ func TestTruncatedReviewBodyTailReadableThroughLogs(t *testing.T) {
 	out, err = cbs.GetLogs(t.Context(), callbacks.FindingKindReview, "review-body:2")
 	if err != nil || out != findings[1].Details {
 		t.Errorf("short review logs = %q, %v, want the finding details", out, err)
+	}
+}
+
+func TestFindingsFullTextUsesCollectionBoundary(t *testing.T) {
+	const marker = "<untrusted-content"
+	review := gqlReviewBodyNode{DatabaseId: 1, AuthorAssociation: "NONE", State: "COMMENTED"}
+	review.Author.Login, review.Author.Typename, review.Commit.Oid = "reviewbot", "Bot", "head"
+	prefix := marker + strings.Repeat("x", maxQuotedBodyBytes-len(marker))
+	for _, tail := range []string{"", "a", "b"} {
+		review.Body = prefix + tail
+		reviews := gqlReviewBodiesConnection{Nodes: []gqlReviewBodyNode{review}}
+		findings := collectReviewBodyFindings(t.Context(), "head", reviews, map[string]struct{}{"reviewbot[bot]": {}})
+		s := &Session[struct{}]{findings: findings}
+		if got := s.FindingsFullText(); (got == nil) != (tail != "") {
+			t.Fatalf("unavailable raw body, tail %q: got nil = %t", tail, got == nil)
+		}
+		s.reviewBodies = newReviewBodyReader(reviews)
+		got := s.FindingsFullText()
+		if len(got) != 1 || got[0].DetailsTruncated || !strings.Contains(got[0].Details, "Commit: head") || !strings.Contains(got[0].Details, neutralizeUntrustedMarkers(review.Body)) {
+			t.Fatalf("tail %q: identity lost review metadata or full text", tail)
+		}
+	}
+	s := &Session[struct{}]{findings: []callbacks.Finding{{Kind: callbacks.FindingKindCICheck, Details: prefix + "ci-tail"}}}
+	if got := s.FindingsFullText(); got[0].Details != s.findings[0].Details {
+		t.Fatal("CI finding text changed")
+	}
+	s.findings[0].DetailsTruncated = true
+	if got := s.FindingsFullText(); got != nil {
+		t.Fatal("used an incomplete CI finding for identity")
+	}
+}
+
+func TestCollectedCommentPreviewBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		tail        string
+		wantClipped bool
+	}{
+		{name: "at_limit"},
+		{name: "one_byte_over_limit", tail: "!", wantClipped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Repeat("x", maxQuotedBodyBytes) + tc.tail
+			reader := newReviewBodyReader(gqlReviewBodiesConnection{})
+			th := thread("thread", false, threadComment("member", "User", "MEMBER", body, ""))
+			threads, _ := collectThreadFindings(t.Context(), gqlReviewThreadsConnection{Nodes: []gqlReviewThread{th}}, nil, "", reader)
+			c := conversationComment(1, "member", "User", "MEMBER", body, false, false)
+			comments := collectConversationFindings(t.Context(), []gqlConversationComment{c}, nil, time.Time{}, "")
+			threadFull := "[Comment by @member]\n" + wrapQuotedFull("review-thread", body) + "\n"
+			conversationFull := formatConversation(c, wrapQuotedFull)
+			if tc.wantClipped {
+				reader.conversations = map[string]string{conversationIdentifier(1): conversationFull}
+			}
+			for _, collector := range []struct {
+				name     string
+				findings []callbacks.Finding
+				full     string
+			}{
+				{name: "thread", findings: threads, full: threadFull},
+				{name: "conversation", findings: comments, full: conversationFull},
+			} {
+				t.Run(collector.name, func(t *testing.T) {
+					if got := len(collector.findings); got != 1 {
+						t.Fatalf("finding count: got = %d, want = 1", got)
+					}
+					want := collector.findings[0]
+					if want.DetailsTruncated != tc.wantClipped {
+						t.Fatalf("DetailsTruncated: got = %t, want = %t", want.DetailsTruncated, tc.wantClipped)
+					}
+					if got := strings.Contains(want.Details, body); got == tc.wantClipped {
+						t.Errorf("preview contains the complete body: got = %t, want = %t", got, !tc.wantClipped)
+					}
+					s := &Session[struct{}]{findings: collector.findings}
+					if got := s.FindingsFullText(); (got == nil) != tc.wantClipped {
+						t.Errorf("FindingsFullText() == nil without a reader: got = %t, want = %t", got == nil, tc.wantClipped)
+					}
+					s.reviewBodies = reader
+					if tc.wantClipped {
+						want.Details += "\n" + collector.full
+						want.DetailsTruncated = false
+					}
+					got := s.FindingsFullText()
+					if len(got) != 1 || got[0] != want {
+						t.Error("FindingsFullText did not preserve the finding with its complete details")
+					}
+				})
+			}
+		})
 	}
 }
 

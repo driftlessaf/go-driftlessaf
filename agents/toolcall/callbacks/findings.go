@@ -39,6 +39,9 @@ type Finding struct {
 	// For CI checks: name, status, conclusion, title, summary, text, detailsUrl
 	Details string `json:"details" xml:"details"`
 
+	// DetailsTruncated marks a display preview that cannot identify the full finding.
+	DetailsTruncated bool `json:"-" xml:"-"`
+
 	// DetailsURL is the URL to the finding's details page (e.g., GitHub Actions job URL).
 	// Used by GetLogs to fetch logs for the finding.
 	DetailsURL string `json:"details_url" xml:"details_url"`

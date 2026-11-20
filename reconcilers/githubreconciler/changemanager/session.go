@@ -1076,7 +1076,8 @@ func (s *Session[T]) Findings() []callbacks.Finding {
 // FindingsFullText returns the findings with each review finding's Details
 // replaced by its full quoted text when the rendered preview was cut at the
 // display cap. It is for identifying the findings (for example hashing them),
-// not for showing them to the agent.
+// not for showing them to the agent. A missing full input returns nil so a
+// later change beyond the preview cannot match an earlier attempt.
 func (s *Session[T]) FindingsFullText() []callbacks.Finding {
 	if s.findings == nil {
 		return nil
@@ -1084,11 +1085,15 @@ func (s *Session[T]) FindingsFullText() []callbacks.Finding {
 	out := make([]callbacks.Finding, len(s.findings))
 	copy(out, s.findings)
 	for i, f := range out {
-		if f.Kind != callbacks.FindingKindReview {
-			continue
+		if f.Kind == callbacks.FindingKindReview {
+			if full, ok := s.reviewBodies.full(f.Identifier); ok {
+				out[i].Details = f.Details + "\n" + full
+				out[i].DetailsTruncated = false
+				continue
+			}
 		}
-		if full, ok := s.reviewBodies.full(f.Identifier); ok {
-			out[i].Details = full
+		if f.DetailsTruncated {
+			return nil
 		}
 	}
 	return out
