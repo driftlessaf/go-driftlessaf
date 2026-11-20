@@ -7,6 +7,7 @@ package googletool
 
 import (
 	"context"
+	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -32,6 +33,38 @@ type Metadata[Response any] struct {
 	// executor runs the tool's calls after the turn's other calls, before
 	// its submit.
 	AfterSiblings bool
+
+	// InjectedReasoning reports that Definition carries the reasoning
+	// parameter FromTool injects, which WithoutReasoning removes.
+	InjectedReasoning bool
+}
+
+// WithoutReasoning returns m with the injected reasoning parameter removed
+// from its definition. Metadata without one is returned unchanged, so a
+// hand-built tool's own reasoning parameter is never dropped. The definition
+// is copied, never modified in place, and the handler is unchanged: tool
+// handlers do not read the injected parameter.
+func (m Metadata[Response]) WithoutReasoning() Metadata[Response] {
+	if !m.InjectedReasoning || m.Definition == nil || m.Definition.Parameters == nil {
+		return m
+	}
+	schema := *m.Definition.Parameters
+	schema.Properties = make(map[string]*genai.Schema, len(m.Definition.Parameters.Properties))
+	for k, v := range m.Definition.Parameters.Properties {
+		if k != "reasoning" {
+			schema.Properties[k] = v
+		}
+	}
+	notReasoning := func(s []string) []string {
+		return slices.DeleteFunc(slices.Clone(s), func(r string) bool { return r == "reasoning" })
+	}
+	schema.Required = notReasoning(schema.Required)
+	schema.PropertyOrdering = notReasoning(schema.PropertyOrdering)
+	def := *m.Definition
+	def.Parameters = &schema
+	m.Definition = &def
+	m.InjectedReasoning = false
+	return m
 }
 
 // SubmitMetadata describes the terminal submit tool for the Google executor.
@@ -53,6 +86,12 @@ type SubmitMetadata[Response any] struct {
 		call *genai.FunctionCall,
 		trace *agenttrace.Trace[Response],
 	) toolcall.SubmitOutcome[Response]
+
+	// NoReasoning is the same submit tool without its reasoning parameter,
+	// for models whose provider facts set OmitToolReasoning. Nil when the
+	// tool has no reasoning parameter or has no such variant; the executor
+	// then sends Definition as it is.
+	NoReasoning *SubmitMetadata[Response]
 }
 
 // Error creates a FunctionResponse with an error message
@@ -76,10 +115,11 @@ func ErrorWithContext(call *genai.FunctionCall, err error, context map[string]an
 // FromTool converts a unified tool to Google-specific metadata.
 func FromTool[Resp any](t toolcall.Tool[Resp]) Metadata[Resp] {
 	return Metadata[Resp]{
-		Definition:    toolParam(t.Def),
-		Handler:       handler(t),
-		LogPolicy:     t.Def.LogPolicy,
-		AfterSiblings: t.Def.AfterSiblings,
+		Definition:        toolParam(t.Def),
+		Handler:           handler(t),
+		LogPolicy:         t.Def.LogPolicy,
+		AfterSiblings:     t.Def.AfterSiblings,
+		InjectedReasoning: true,
 	}
 }
 

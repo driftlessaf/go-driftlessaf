@@ -94,10 +94,12 @@ type Info struct {
 	// per-request output cap across requests, linked by a continuation token,
 	// up to MaxOutputTokens.
 	LongDecode bool
-	// OmitToolReasoning reports that Claude tool schemas should leave out the
-	// reasoning parameter driftlessaf injects into every tool. Asking for
-	// reasoning in a tool input draws reasoning_extraction refusals on these
-	// models, a category with no fallback model.
+	// OmitToolReasoning reports that tool schemas should leave out the
+	// reasoning parameter driftlessaf injects into every tool. On the Claude
+	// models that set it, asking for reasoning in a tool input draws
+	// reasoning_extraction refusals, a category with no fallback model. Gemini
+	// 4 models think before every call, so the parameter repeats that thinking
+	// as output tokens the model must generate and later turns replay.
 	// See: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
 	OmitToolReasoning bool
 }
@@ -297,8 +299,10 @@ func claudeInfo(id string) Info {
 }
 
 // gemini4Prefixes lists the Gemini id prefixes with the Gemini 4 request
-// surface: thinkingBudget and explicit context caches return a 400, and a
-// generation can run to 1,048,576 output tokens through long decodes.
+// surface: thinkingBudget and explicit context caches return a 400, a
+// generation can run to 1,048,576 output tokens through long decodes, and the
+// model thinks before every tool call, so tools leave out the injected
+// reasoning parameter.
 // See: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
 var gemini4Prefixes = []string{"gemini-4"}
 
@@ -320,6 +324,7 @@ func geminiInfo(id string) Info {
 		info.NoExplicitContextCache = true
 		info.MaxOutputTokens = gemini4MaxOutputTokens
 		info.LongDecode = true
+		info.OmitToolReasoning = true
 	}
 	return info
 }

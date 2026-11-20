@@ -67,6 +67,8 @@ The executor supports various configuration options:
   - WithResponseSchema: Define structured output schema
   - WithThinking: Enable thinking mode with a token budget
   - WithEffort: Enable thinking via the provider-neutral effort scale
+  - WithToolReasoning: Send or leave out the injected tool reasoning parameter
+    (left out by default for models whose provider facts set OmitToolReasoning)
 
 # Thinking Mode
 
@@ -109,6 +111,11 @@ into one response. The extra room goes to reasoning; the model does
 not lengthen its answers to fill it. Each continuation request re-sends the
 prompt and is billed, and a retry after a failed continuation request starts
 the generation again (see WithRetryConfig).
+
+Gemini 4 models think before every tool call, so their tools leave out the
+reasoning parameter googletool.FromTool injects, and the submit tool leaves
+out its own; WithToolReasoning(true) keeps them. With payloads enabled, the
+trace's thought summaries record why the model acted instead.
 
 # Suspend and Resume
 

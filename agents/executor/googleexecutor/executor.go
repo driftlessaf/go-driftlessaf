@@ -145,6 +145,15 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// safe for concurrent use (they share the trace, which is safe). Set via
 	// WithToolCallConcurrency.
 	toolCallConcurrency int
+
+	// toolReasoning, when non-nil, overrides whether tools carry the reasoning
+	// parameter that googletool.FromTool injects. When nil, the parameter is
+	// left out when model.Resolve reports OmitToolReasoning. Set via
+	// WithToolReasoning.
+	toolReasoning *bool
+
+	// omitToolReasoning is toolReasoning resolved against the model in New.
+	omitToolReasoning bool
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -211,6 +220,15 @@ func New[Request promptbuilder.Bindable, Response any](
 		return nil, fmt.Errorf("model %q rejects a thinking budget: set its thinking level with WithEffort instead of WithThinking", exec.capabilityModel)
 	}
 	exec.cacheUnsupported = info.NoExplicitContextCache
+	// Resolved after options so WithModel, WithRoutedModel and
+	// WithToolReasoning may come in any order.
+	exec.omitToolReasoning = info.OmitToolReasoning
+	if exec.toolReasoning != nil {
+		exec.omitToolReasoning = !*exec.toolReasoning
+	}
+	if exec.omitToolReasoning && exec.submitTool.NoReasoning != nil {
+		exec.submitTool = *exec.submitTool.NoReasoning
+	}
 	// Effort resolution needs the final model and max_output_tokens, so it is
 	// validated after all options have been applied.
 	if exec.effortLevel != "" {
@@ -323,6 +341,9 @@ func (e *executor[Request, Response]) staticRequest(tools map[string]googletool.
 	// changed. Sorting by name ensures stable content across calls.
 	toolDeclarations := make([]*genai.FunctionDeclaration, 0, len(tools)+2)
 	for _, meta := range tools {
+		if e.omitToolReasoning {
+			meta = meta.WithoutReasoning()
+		}
 		toolDeclarations = append(toolDeclarations, meta.Definition)
 	}
 	// Advertise the terminal submit tool alongside the regular tools. It lives

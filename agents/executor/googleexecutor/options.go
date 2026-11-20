@@ -157,6 +157,20 @@ func WithToolCallConcurrency[Request promptbuilder.Bindable, Response any](n int
 	}
 }
 
+// WithToolReasoning sets whether tools carry the reasoning parameter that
+// googletool.FromTool injects and the submit tool's reasoning parameter.
+// Without this option the model decides: the parameters are left out for
+// models whose provider facts set model.Info.OmitToolReasoning, which think
+// before every call, so the parameter repeats that thinking as output tokens.
+// Only tools built by FromTool and submit tools from submitresult lose the
+// parameter; a hand-built tool is sent as defined.
+func WithToolReasoning[Request promptbuilder.Bindable, Response any](include bool) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.toolReasoning = &include
+		return nil
+	}
+}
+
 // WithSystemInstructions sets the system instructions for the model
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {

@@ -16,8 +16,24 @@ import (
 	"google.golang.org/genai"
 )
 
-// GoogleTool constructs the Google executor metadata for the submit_result tool.
+// GoogleTool constructs the Google executor metadata for the submit_result
+// tool. Unless opts omits reasoning already, the metadata carries a
+// NoReasoning variant built with OmitReasoning set.
 func GoogleTool[Response any](opts Options[Response]) (googletool.SubmitMetadata[Response], error) {
+	meta, err := googleTool(opts)
+	if err != nil || opts.OmitReasoning {
+		return meta, err
+	}
+	opts.OmitReasoning = true
+	unreasoned, err := googleTool(opts)
+	if err != nil {
+		return googletool.SubmitMetadata[Response]{}, err
+	}
+	meta.NoReasoning = &unreasoned
+	return meta, nil
+}
+
+func googleTool[Response any](opts Options[Response]) (googletool.SubmitMetadata[Response], error) {
 	opts.setDefaults()
 
 	props, required, flat, err := toolParameters(opts, func(s *jsonschema.Schema) (*genai.Schema, error) {

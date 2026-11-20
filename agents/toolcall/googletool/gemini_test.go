@@ -7,8 +7,10 @@ package googletool
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
+	"chainguard.dev/driftlessaf/agents/toolcall"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 )
@@ -213,5 +215,55 @@ func TestConcurrent(t *testing.T) {
 	// Wait for all goroutines
 	for range 10 {
 		<-done
+	}
+}
+
+// WithoutReasoning drops the injected reasoning parameter from a FromTool
+// definition, leaves the original definition intact, and returns a hand-built
+// tool unchanged, so its own reasoning parameter is never dropped.
+func TestWithoutReasoning(t *testing.T) {
+	meta := FromTool(toolcall.Tool[string]{Def: toolcall.Definition{
+		Name: "lookup",
+		Parameters: []toolcall.Parameter{
+			{Name: "query", Type: "string", Required: true},
+		},
+	}})
+	if !meta.InjectedReasoning {
+		t.Fatal("FromTool InjectedReasoning: got = false, want = true")
+	}
+
+	stripped := meta.WithoutReasoning()
+	if stripped.InjectedReasoning {
+		t.Error("stripped InjectedReasoning: got = true, want = false")
+	}
+	if _, ok := stripped.Definition.Parameters.Properties["reasoning"]; ok {
+		t.Error("stripped properties: got = reasoning, want = none")
+	}
+	if diff := cmp.Diff([]string{"query"}, stripped.Definition.Parameters.Required); diff != "" {
+		t.Errorf("stripped required (-want +got):\n%s", diff)
+	}
+	if _, ok := stripped.Definition.Parameters.Properties["query"]; !ok {
+		t.Error("stripped properties: got = no query, want = query")
+	}
+
+	// The original metadata still advertises reasoning: WithoutReasoning
+	// copies the definition rather than editing a declaration other runs share.
+	if _, ok := meta.Definition.Parameters.Properties["reasoning"]; !ok {
+		t.Error("original properties after WithoutReasoning: got = no reasoning, want = reasoning")
+	}
+	if !slices.Contains(meta.Definition.Parameters.Required, "reasoning") {
+		t.Error("original required after WithoutReasoning: got = no reasoning, want = reasoning")
+	}
+
+	handmade := Metadata[string]{Definition: &genai.FunctionDeclaration{
+		Name: "handmade",
+		Parameters: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"reasoning": {Type: genai.TypeString}},
+			Required:   []string{"reasoning"},
+		},
+	}}
+	if got := handmade.WithoutReasoning(); got.Definition != handmade.Definition {
+		t.Error("hand-built tool: got = a new definition, want = the same one")
 	}
 }
