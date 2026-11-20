@@ -120,6 +120,11 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// is disabled (the default). See WithStateTransitionEmission.
 	transitionEmitter *statemachine.Emitter
 
+	// evidenceCheck, when set, publishes the latest attempt's evidence as an
+	// app-owned informational check on the evaluated head. See
+	// WithEvidenceCheck.
+	evidenceCheck *evidenceCheckConfig
+
 	// Agent and its adapters
 	agent          metaagent.Agent[Req, Resp, CB]
 	buildRequest   func(context.Context, *github.Issue, *changemanager.Session[PRData[Req]]) (Req, error)
@@ -212,6 +217,28 @@ func WithUpdateBranchLabel[Req promptbuilder.Bindable, Resp Result, CB any](labe
 func WithSteering[Req promptbuilder.Bindable, Resp Result, CB any]() Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.steering = true
+	}
+}
+
+// WithEvidenceCheck publishes the evidence of each completed attempt that
+// evaluated a PR head as an informational (neutral) check run named identity,
+// owned by the GitHub App appID and attached to that head. It is the
+// authoritative read of the latest attempt: it records a push as changed, a
+// no-op as no_change, and an attempt that cannot stand behind a verdict as
+// unknown, so a verdict from an earlier attempt on the same head is replaced
+// rather than left standing. A repeat of the same record writes nothing. The
+// conclusion is never an approval and never a verdict. See ReadEvidenceCheck.
+//
+// The reconciler must authenticate as that App, which is what lets it write
+// the check; a write that fails is logged and leaves the record absent, which
+// a reader treats as unknown. A zero appID leaves the option off, as does not
+// passing it: evidence then lives only in the PR's data, as before. While on,
+// a no-op never writes evidence into the PR description.
+func WithEvidenceCheck[Req promptbuilder.Bindable, Resp Result, CB any](identity string, appID int64) Option[Req, Resp, CB] {
+	return func(r *Reconciler[Req, Resp, CB]) {
+		if identity != "" && appID != 0 {
+			r.evidenceCheck = &evidenceCheckConfig{identity: identity, appID: appID}
+		}
 	}
 }
 
@@ -418,6 +445,12 @@ func WithMergeabilityRecheck[Req promptbuilder.Bindable, Resp Result, CB any](af
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.mergeabilityRecheck = after
 	}
+}
+
+// EvidenceCheckEnabled reports whether [WithEvidenceCheck] is on, so a caller
+// can test that it wired the option.
+func (r *Reconciler[Req, Resp, CB]) EvidenceCheckEnabled() bool {
+	return r.evidenceCheck != nil
 }
 
 // New creates a new generic metaagent reconciler.

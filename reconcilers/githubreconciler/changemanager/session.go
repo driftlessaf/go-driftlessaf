@@ -187,6 +187,21 @@ func (s *Session[T]) IssueHasSkipLabel(issue *github.Issue) bool {
 	return false
 }
 
+// IssueTakenOver reports whether a freshly fetched issue or PR carries this
+// identity's skip label or is assigned to someone not in excludeAssignees. It
+// is the freshly-read counterpart to ShouldSkip.
+func (s *Session[T]) IssueTakenOver(issue *github.Issue, excludeAssignees ...string) bool {
+	labels := make([]string, 0, len(issue.Labels))
+	for _, l := range issue.Labels {
+		labels = append(labels, l.GetName())
+	}
+	assignees := make([]string, 0, len(issue.Assignees))
+	for _, a := range issue.Assignees {
+		assignees = append(assignees, a.GetLogin())
+	}
+	return takenOver(labels, assignees, s.skipLabel(), excludeAssignees)
+}
+
 // HasLabel returns true if the PR has the specified label.
 func (s *Session[T]) HasLabel(labelName string) bool {
 	return s.prNumber != 0 && slices.Contains(s.prLabels, NormalizeLabel(labelName))
@@ -556,12 +571,43 @@ func (s *Session[T]) ClearReadyForReview(ctx context.Context) (string, error) {
 // should record, so a later Upsert finds the data current. No-op if no PR
 // exists. Like Upsert, it refuses a PR that carries the skip label.
 func (s *Session[T]) ReembedData(ctx context.Context, data *T) error {
+	return s.reembedData(ctx, data, "", false)
+}
+
+// ReembedDataAtHead is ReembedData for a record that claims to describe the
+// commit headSHA. It refuses, and writes nothing, when the PR's live head is
+// not headSHA or when the live body is no longer the body this session read,
+// so a newer push, a newer steer or a human edit made while the attempt ran
+// is not overwritten (an edit between the live read and the PATCH is not
+// covered, as the check and the write are separate calls) by a
+// record built from the earlier attempt.
+func (s *Session[T]) ReembedDataAtHead(ctx context.Context, data *T, headSHA string) error {
+	if headSHA == "" {
+		return errors.New("no head SHA to bind the data to")
+	}
+	return s.reembedData(ctx, data, headSHA, true)
+}
+
+func normalizeNewlines(s string) string {
+	return strings.ReplaceAll(s, "\r\n", "\n")
+}
+
+func (s *Session[T]) reembedData(ctx context.Context, data *T, headSHA string, exact bool) error {
 	if s.prNumber == 0 {
 		return nil
 	}
 	freshPR, _, err := s.client.PullRequests.Get(ctx, s.owner, s.repo, s.prNumber)
 	if err != nil {
 		return fmt.Errorf("refetching pull request: %w", err)
+	}
+	if exact {
+		if live := freshPR.GetHead().GetSHA(); headSHA != "" && live != headSHA {
+			return fmt.Errorf("PR head %q is not the evaluated head %q", live, headSHA)
+		}
+		// The GraphQL and REST APIs may differ in line endings (CRLF from web edits).
+		if normalizeNewlines(freshPR.GetBody()) != normalizeNewlines(s.prBody) {
+			return errors.New("PR body changed since it was read, not overwriting it")
+		}
 	}
 	skipLabel := s.skipLabel()
 	for _, label := range freshPR.Labels {

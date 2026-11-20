@@ -34,7 +34,14 @@ import (
 
 type publishResult struct {
 	dropped []commitscope.Dropped
+
+	// verdict and summary are what the result declares as evidence; an empty
+	// verdict declares none.
+	verdict, summary string
 }
+
+// DeclaredEvidence implements EvidenceDeclarer.
+func (r *publishResult) DeclaredEvidence() (string, string) { return r.verdict, r.summary }
 
 func (*publishResult) GetCommitMessage() string { return "Update content" }
 
@@ -56,14 +63,15 @@ func (r *publishResult) GetNoChangeExplanation() string {
 func (r *publishResult) SetDropped(dropped []commitscope.Dropped) { r.dropped = dropped }
 
 type publishAgent struct {
-	execute func(context.Context) error
+	execute          func(context.Context) error
+	verdict, summary string
 }
 
 func (a *publishAgent) Execute(ctx context.Context, _ *testRequest, _ struct{}) (*publishResult, error) {
 	if err := a.execute(ctx); err != nil {
 		return nil, err
 	}
-	return &publishResult{}, nil
+	return &publishResult{verdict: a.verdict, summary: a.summary}, nil
 }
 
 // publishTransport serves both REST and GraphQL through the same handler,

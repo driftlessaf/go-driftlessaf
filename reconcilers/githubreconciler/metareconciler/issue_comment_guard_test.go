@@ -95,6 +95,26 @@ type issueHarness struct {
 
 	agentCalls int
 	prCreates  int
+
+	// verdict and summary are the evidence the agent's result declares.
+	verdict, summary string
+
+	// liveHead, when set, is the head the fake reports for the open PR in
+	// place of the remote branch's tip.
+	liveHead string
+}
+
+// prTip is the head commit the fake reports for the open PR: liveHead when a
+// test sets one, otherwise the tip of the remote's PR branch. h.mu is held.
+func (h *issueHarness) prTip() string {
+	if h.liveHead != "" {
+		return h.liveHead
+	}
+	ref, err := h.remote.Reference(plumbing.NewBranchReferenceName("test-bot/issue-123"), true)
+	if err != nil {
+		return ""
+	}
+	return ref.Hash().String()
 }
 
 // prBodyJSON renders prText as a JSON string. h.mu is held.
@@ -347,7 +367,7 @@ func (h *issueHarness) serveGraphQL(t *testing.T, w http.ResponseWriter, r *http
 		}}})
 
 	case h.pr != nil:
-		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":%s,"mergeable":%q,"isDraft":false,"headRefOid":"abc123","labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":%s},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.prBodyJSON(), h.pr.mergeable, h.prLabelNodes(), h.pr.checks, h.prAssigneeNodes())
+		fmt.Fprintf(w, `{"data":{"repository":{"pullRequests":{"nodes":[{"number":456,"url":"https://github.com/owner/repo/pull/456","body":%s,"mergeable":%q,"isDraft":false,"headRefOid":%q,"labels":{"nodes":%s},"commits":{"totalCount":1,"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":%s}}}}]},"assignees":{"nodes":%s},"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]}}]}}}}`, h.prBodyJSON(), h.pr.mergeable, h.prTip(), h.prLabelNodes(), h.pr.checks, h.prAssigneeNodes())
 
 	default:
 		reply(map[string]any{"repository": map[string]any{"pullRequests": map[string]any{"nodes": []any{}}}})
@@ -411,6 +431,14 @@ func (h *issueHarness) client(t *testing.T) *github.Client {
 			h.issue.Comments = new(len(h.comments))
 			if err := json.NewEncoder(w).Encode(h.issue); err != nil {
 				t.Errorf("encode issue: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/456":
+			pr := &github.Issue{Number: new(456), State: new("open"), Body: new(h.prText)}
+			for _, l := range h.prLabels {
+				pr.Labels = append(pr.Labels, &github.Label{Name: new(l)})
+			}
+			if err := json.NewEncoder(w).Encode(pr); err != nil {
+				t.Errorf("encode PR issue: %v", err)
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/123/comments":
 			if err := json.NewEncoder(w).Encode(h.comments); err != nil {
@@ -496,7 +524,7 @@ func (h *issueHarness) reconcileErr(t *testing.T, ctx context.Context, agent fun
 			return clonemanager.StaticTokenSource(""), nil
 		}, "test-bot", nil, h.cloneOpts...),
 		[]string{requiredLabel},
-		&publishAgent{execute: func(ctx context.Context) error {
+		&publishAgent{verdict: h.verdict, summary: h.summary, execute: func(ctx context.Context) error {
 			h.mu.Lock()
 			h.agentCalls++
 			h.mu.Unlock()

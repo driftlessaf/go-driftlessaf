@@ -115,7 +115,7 @@ func (f *steeringFake) serve(w http.ResponseWriter, r *http.Request) bool {
 	const labels = "/repos/owner/repo/issues/456/labels"
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/456":
-		pr := &github.PullRequest{Number: new(456), Body: new(h.prText)}
+		pr := &github.PullRequest{Number: new(456), Body: new(h.prText), Head: &github.PullRequestBranch{SHA: new(h.prTip())}}
 		for _, l := range h.prLabels {
 			pr.Labels = append(pr.Labels, &github.Label{Name: new(l)})
 		}

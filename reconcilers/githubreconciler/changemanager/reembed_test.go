@@ -17,6 +17,12 @@ import (
 // newReembedServer serves GET /pulls/7 with the given labels and records PATCHes.
 func newReembedServer(t *testing.T, labels ...string) (*github.Client, *[]string) {
 	t.Helper()
+	return newReembedServerBody(t, "PR body text", labels...)
+}
+
+// newReembedServerBody is newReembedServer with a configurable REST body.
+func newReembedServerBody(t *testing.T, body string, labels ...string) (*github.Client, *[]string) {
+	t.Helper()
 	var patches []string
 	prLabels := make([]*github.Label, 0, len(labels))
 	for _, l := range labels {
@@ -25,7 +31,8 @@ func newReembedServer(t *testing.T, labels ...string) (*github.Client, *[]string
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v3/repos/test-owner/test-repo/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, &github.PullRequest{Number: new(7), Body: new("PR body text"), Labels: prLabels})
+		writeJSON(t, w, &github.PullRequest{Number: new(7), Body: new(body), Labels: prLabels,
+			Head: &github.PullRequestBranch{SHA: new("live-head")}})
 	})
 	mux.HandleFunc("PATCH /api/v3/repos/test-owner/test-repo/pulls/7", func(w http.ResponseWriter, r *http.Request) {
 		patches = append(patches, r.URL.Path)
@@ -69,6 +76,41 @@ func TestReembedDataWritesWithoutSkipLabel(t *testing.T) {
 	}
 	if len(*patches) != 1 {
 		t.Errorf("PATCH calls: got = %v, want 1", *patches)
+	}
+}
+
+func TestReembedDataAtHead(t *testing.T) {
+	tests := []struct {
+		name      string
+		head      string
+		sessBody  string
+		srvBody   string
+		wantErr   bool
+		wantPatch int
+	}{
+		{name: "head and body match", head: "live-head", sessBody: "PR body text", wantPatch: 1},
+		{name: "CRLF server body matches LF session body", head: "live-head", sessBody: "a\nb", srvBody: "a\r\nb", wantPatch: 1},
+		{name: "live head moved", head: "other-head", sessBody: "PR body text", wantErr: true},
+		{name: "body edited since read", head: "live-head", sessBody: "older body", wantErr: true},
+		{name: "no head", head: "", sessBody: "PR body text", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srvBody := tt.srvBody
+			if srvBody == "" {
+				srvBody = "PR body text"
+			}
+			client, patches := newReembedServerBody(t, srvBody)
+			s := newReembedSession(t, client)
+			s.prBody = tt.sessBody
+			err := s.ReembedDataAtHead(t.Context(), &testData{}, tt.head)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ReembedDataAtHead: got error = %v, want error = %v", err, tt.wantErr)
+			}
+			if len(*patches) != tt.wantPatch {
+				t.Errorf("PATCH calls: got = %d, want = %d", len(*patches), tt.wantPatch)
+			}
+		})
 	}
 }
 

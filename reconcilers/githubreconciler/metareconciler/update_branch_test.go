@@ -165,6 +165,7 @@ func TestReconcileIssueUpdateBranch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newIssueHarness(t)
 			h.openPR(t, "MERGEABLE", "[]")
+			h.liveHead = "abc123"
 			h.prLabels = tt.prLabels
 			h.extra = tt.fake.serve
 			if tt.untrusted {
@@ -201,6 +202,7 @@ func TestReconcileIssueUpdateBranch(t *testing.T) {
 func TestReconcileIssueUpdateBranchRetry(t *testing.T) {
 	h := newIssueHarness(t)
 	h.openPR(t, "MERGEABLE", "[]")
+	h.liveHead = "abc123"
 	h.prLabels = []string{updateBranchLabel}
 	fake := &fakeUpdateBranch{compareStatus: "diverged", updateCode: http.StatusAccepted, removeCode: http.StatusInternalServerError}
 	h.extra = fake.serve

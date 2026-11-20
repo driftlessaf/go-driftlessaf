@@ -128,6 +128,20 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		}
 	}
 
+	// The evidence the PR already records. It rides along in the data this run
+	// compares against the PR, so that a PR whose direction is unchanged is
+	// not refreshed just because its evidence differs from a run's. A run
+	// that executes the agent replaces it.
+	//
+	// storedRaw is the value as stored, for the refresh comparison, so a
+	// record that fails validation does not read as a change on every run.
+	var storedRaw *Evidence
+	if state.HasPR() {
+		if stored, err := changeSession.Extract(); err == nil && stored != nil {
+			storedRaw = stored.Evidence
+		}
+	}
+
 	var usePRBranch bool
 	// revision stamps a give-up note posted by this reconcile. It is read
 	// before the agent runs, so a reply that arrives during the run is not
@@ -287,6 +301,14 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	var result Resp
 	var agentRan bool
 
+	// The commit the lease checked out for the agent, "" until it is leased.
+	var checkoutHead string
+
+	// The commit a push left at the branch tip and the evidence the run
+	// records for it, for the evidence check. Empty when nothing was pushed.
+	var pushedHead string
+	var pushedEvidence *Evidence
+
 	// Carry the issue's labels onto the PR when configured, so labels added to
 	// the issue (e.g. to enable optional review) propagate situationally rather
 	// than always. Merged with the fixed prLabels; deduped so a label present in
@@ -307,6 +329,7 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		IssueNumber:   issue.GetNumber(),
 		IssueBodyHash: sha256.Sum256([]byte(issue.GetBody())),
 		SteeringID:    steeringID,
+		Evidence:      storedRaw,
 		Request:       request,
 	}
 	// The run consumes the note, so the PR is no longer ready for review as it
@@ -323,6 +346,18 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 		// present, falling back to extended-thinking blocks. No-op when the
 		// run produced neither.
 		ctx, captured := agenttrace.CaptureTrace[Resp](ctx)
+		// The evidence check this bot wrote for the head, intent and
+		// findings already records an attempt, and its own check event
+		// queued this run. Running the agent again would loop on that
+		// event for as long as the outcome kept changing.
+		recorded, err := r.evidenceAttemptRecorded(ctx, gh, res, prData, changeSession.HeadSHA(), changeSession.Findings())
+		if err != nil && state.HasPR() {
+			return err
+		}
+		if recorded && state.HasPR() && usePRBranch {
+			log.Info("Evidence check already records an attempt for this head, intent and findings, not running the agent")
+			return changemanager.ErrNoChanges
+		}
 		cloneMgr, err := r.cloneMeta.Get(res.Owner, res.Repo)
 		if err != nil {
 			return fmt.Errorf("get clone manager: %w", err)
@@ -348,6 +383,10 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 				log.With("error", err).Warn("Failed to return lease")
 			}
 		}()
+		// The commit the agent actually sees, before it edits anything.
+		if head, herr := lease.Repo().Head(); herr == nil {
+			checkoutHead = head.Hash().String()
+		}
 
 		// Run the agent and push changes. The commit scope the lease installs on
 		// the update context is captured here, because the commit runs after the
@@ -416,6 +455,34 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			changeSession.SetHeadline(prData.Headline)
 			return result.GetCommitMessage(), nil
 		})
+		// A pushed change is evaluated at the commit now at the branch tip. The
+		// evidence names it, and the checks seen on the input head stay bound
+		// to that head. Without a known tip or a declared verdict the PR
+		// records none, so an earlier attempt's evidence never stands for
+		// this commit.
+		if err == nil && agentRan {
+			prData.Evidence = nil
+			if head, herr := lease.Repo().Head(); herr == nil {
+				// The input head is the commit the lease actually checked
+				// out. The checks were read for the session's head, so they
+				// are kept only when the checkout is that same commit.
+				inputHead, inputFindings := checkoutHead, changeSession.Findings()
+				if !usePRBranch || checkoutHead == "" || checkoutHead != changeSession.HeadSHA() {
+					// The agent ran on the default branch checkout, or on a
+					// commit other than the one the checks were read for.
+					inputFindings = nil
+				}
+				if !usePRBranch {
+					inputHead = ""
+				}
+				prData.Evidence = newEvidence(prData, result, head.Hash().String(), inputHead, inputFindings)
+				// A contradictory declaration cannot attest the pushed commit.
+				if prData.Evidence != nil && prData.Evidence.Verdict != EvidenceVerdictChanged {
+					prData.Evidence = nil
+				}
+				pushedHead, pushedEvidence = head.Hash().String(), prData.Evidence
+			}
+		}
 		// Whatever the commit's outcome, the guard's drops are known now: the
 		// body template renders them on a PR that carries the rest of the
 		// change, and the result can name them in its no-change explanation
@@ -437,9 +504,89 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			log.Info("No changes after agent execution, nothing to commit")
 			// The agent read the note and left the branch as it was. Record
 			// the note so later events do not run it again.
+			// The branch is as it was, so the head the agent evaluated is the
+			// PR head the run started from, but only when the agent ran on the
+			// PR branch. On the default branch it never saw that head, so no
+			// evidence is recorded (unknown).
+			// With the evidence check on, the attempt's result lives there and
+			// the PR data keeps the record it had.
+			var noOpRecord *Evidence
+			if agentRan {
+				prData.Evidence = nil
+				// The head is the commit actually checked out under the lease,
+				// and it must be the head this session saw on the PR. A
+				// default-branch run, or a checkout that is not the session's
+				// head, makes no claim about that head.
+				if state.HasPR() && usePRBranch && checkoutHead != "" && checkoutHead == changeSession.HeadSHA() {
+					prData.Evidence = newEvidence(prData, result, checkoutHead, checkoutHead, changeSession.Findings())
+					// Nothing landed, so a "changed" declaration (a commit
+					// message the guard emptied, or a clean worktree) fails
+					// validation on the unchanged head and leaves no record:
+					// the evidence stays unknown rather than claiming an edit.
+				}
+				if r.evidenceCheck != nil {
+					noOpRecord, prData.Evidence = prData.Evidence, storedRaw
+				}
+			}
+			// Preserve the existing write for an explicit steering note. A new
+			// attempt or issue edit alone never owns the PR description.
 			if agentRan && steeringNew {
-				if err := changeSession.ReembedData(ctx, prData); err != nil {
-					return fmt.Errorf("record steering ID: %w", err)
+				// Evidence claims a head, so the write confirms the live PR
+				// still has that head and the body this run read (no newer
+				// push, steer or takeover). A consumer must verify the live
+				// head, the current intent and the checks directly: editable
+				// PR text cannot authenticate GitHub checks.
+				var err error
+				if prData.Evidence != nil && r.evidenceCheck == nil {
+					err = changeSession.ReembedDataAtHead(ctx, prData, prData.Evidence.HeadSHA)
+				} else {
+					// No head is claimed: keep the long-standing
+					// data-block-only write, which preserves a person's
+					// prose edits to the description.
+					err = changeSession.ReembedData(ctx, prData)
+				}
+				if err != nil {
+					return fmt.Errorf("record steering ID and evidence: %w", err)
+				}
+			}
+			// The latest attempt's result for the head the run saw replaces
+			// any earlier one on that commit, a "changed" from a push
+			// included, and an attempt that cannot stand behind a verdict
+			// leaves it unknown. The session's PR head is the commit the
+			// result is about even when the run could not claim it.
+			if agentRan && state.HasPR() && r.evidenceCheck != nil {
+				// The clean-worktree path returns before the fresh-issue
+				// check, so a skip label applied while the agent ran is
+				// read here and leaves the check alone.
+				freshIssue, _, err := gh.Issues.Get(ctx, res.Owner, res.Repo, res.Number)
+				if err != nil {
+					return fmt.Errorf("refresh issue before evidence check: %w", err)
+				}
+				freshPR, _, err := gh.Issues.Get(ctx, res.Owner, res.Repo, changeSession.PRNumber())
+				if err != nil {
+					return fmt.Errorf("refresh PR before evidence check: %w", err)
+				}
+				if changeSession.IssueHasSkipLabel(freshIssue) || changeSession.IssueTakenOver(freshPR, creator) {
+					clog.InfoContext(ctx, "Skip label or human assignee appeared while the agent ran, not publishing the evidence check")
+				} else {
+					// Publish on the commit the agent actually saw. When the
+					// PR advanced between the session read and the checkout,
+					// that is the new tip, and the record is unknown there.
+					evalHead := changeSession.HeadSHA()
+					checkoutIsSession := true
+					if usePRBranch && checkoutHead != "" {
+						evalHead = checkoutHead
+						checkoutIsSession = checkoutHead == changeSession.HeadSHA()
+					}
+					details := newEvidenceCheckDetails(prData, evalHead, noOpRecord)
+					// The digest only suppresses PR-branch findings
+					// iterations, so a default-branch run never sets it.
+					if checkoutIsSession && usePRBranch {
+						details.FindingsDigest = findingsDigest(changeSession.Findings())
+					}
+					if err := r.publishEvidenceCheck(ctx, gh, res, details); err != nil {
+						return err
+					}
 				}
 			}
 			switch {
@@ -489,6 +636,15 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 	r.giveUp.Clear(ctx, changeSession)
 	if !state.HasPR() {
 		r.clearIssueGiveUp(ctx, issue, changeSession)
+	}
+
+	// The pushed commit's result, so a reader of the evidence check sees the
+	// push and not an earlier attempt. A commit that was not pushed has no
+	// check of its own.
+	if agentRan && prURL != "" && pushedHead != "" && r.evidenceCheck != nil {
+		if err := r.publishEvidenceCheck(ctx, gh, res, newEvidenceCheckDetails(prData, pushedHead, pushedEvidence)); err != nil {
+			clog.WarnContext(ctx, "Failed to publish the evidence check for the push", "error", err)
+		}
 	}
 
 	// Every push is a genuine transition (back) to active: the initial run

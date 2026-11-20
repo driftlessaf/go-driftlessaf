@@ -62,6 +62,14 @@ type PRData[Req any] struct {
 	// only under WithSteering, and empty when the body carried none.
 	SteeringID string `json:"steering_id,omitempty"`
 
+	// Evidence records the head the last pushed attempt evaluated and the
+	// verdict it declared. With WithEvidenceCheck on, a later no-op does not
+	// rewrite it: the evidence check is the authoritative read of the latest
+	// attempt (see ReadEvidenceCheck), and this record may be older. It is
+	// absent on data written before it existed and when the result declares
+	// no verdict. Read it with EvidenceRecord.
+	Evidence *Evidence `json:"evidence,omitempty"`
+
 	// ReasoningSummary is a truncated summary of the agent's extended-thinking
 	// output for the run that produced this PR, populated by the reconciler
 	// after the agent executes and empty when the run carried no reasoning.
