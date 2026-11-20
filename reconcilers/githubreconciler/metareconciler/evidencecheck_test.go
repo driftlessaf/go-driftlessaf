@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -203,6 +204,52 @@ func TestEvidenceCheckPush(t *testing.T) {
 	}
 }
 
+// ReadIssueEvidenceCheck finds the record the publisher wrote for the exact
+// head, identity and original issue body, and nothing for other inputs.
+func TestReadIssueEvidenceCheckRoundTrip(t *testing.T) {
+	body := steeringBody()
+	h, _, _, inputHead := checkHarness(t, body, failingCheck)
+
+	body = steeringBody("b")
+	h.setIssueBody(body)
+	h.verdict, h.summary = "changed", "addressed the note"
+	h.reconcile(t, writes("two"), withSteering(), withEvidenceCheck())
+	pushed := h.branchHead(t)
+	if pushed == inputHead {
+		t.Fatal("the run did not push")
+	}
+
+	read := func(identity string, app int64, head, issueBody string) *EvidenceCheckDetails {
+		t.Helper()
+		d, err := ReadIssueEvidenceCheck(t.Context(), h.client(t), "owner", "repo", identity, app, 123, head, issueBody)
+		if err != nil {
+			t.Fatalf("ReadIssueEvidenceCheck(): %v", err)
+		}
+		return d
+	}
+
+	d := read(testCheckIdentity, testCheckApp, pushed, body)
+	if d == nil || d.Verdict != EvidenceVerdictChanged || d.HeadSHA != pushed || d.SteeringID != "b" || d.InputHeadSHA != inputHead {
+		t.Fatalf("ReadIssueEvidenceCheck(): got = %+v, want changed on %q under steering b", d, pushed)
+	}
+	if d.IssueBodyHash != sha256.Sum256([]byte(body)) {
+		t.Errorf("IssueBodyHash: got = %x, want the hash of the original body", d.IssueBodyHash)
+	}
+
+	for name, got := range map[string]*EvidenceCheckDetails{
+		"changed body":        read(testCheckIdentity, testCheckApp, pushed, body+"\nedited"),
+		"other steering":      read(testCheckIdentity, testCheckApp, pushed, steeringBody("c")),
+		"other app":           read(testCheckIdentity, otherCheckApp, pushed, body),
+		"other identity":      read("other-evidence", testCheckApp, pushed, body),
+		"input head":          read(testCheckIdentity, testCheckApp, inputHead, body),
+		"head without record": read(testCheckIdentity, testCheckApp, strings.Repeat("a", 40), body),
+	} {
+		if got != nil {
+			t.Errorf("ReadIssueEvidenceCheck() with %s: got = %+v, want unknown", name, got)
+		}
+	}
+}
+
 // A no-op on the head a push left replaces the push's "changed", and repeating
 // it, however the agent words it, writes nothing and never edits the PR body.
 func TestEvidenceCheckChangedThenNoOp(t *testing.T) {
@@ -293,6 +340,34 @@ func TestEvidenceCheckChangedThenUnknown(t *testing.T) {
 	h.mu.Unlock()
 	if !kept {
 		t.Error("PR body: got = edit lost, want the person's edit kept")
+	}
+}
+
+func TestReadIssueEvidenceCheckRecordPreservesBoundUnknown(t *testing.T) {
+	body := steeringBody()
+	h, _, _, head := checkHarness(t, body, failingCheck)
+	edit := func(context.Context) error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.prText += "\nedited by a person"
+		return nil
+	}
+	h.verdict, h.summary = "", ""
+	if err := h.reconcileErr(t, t.Context(), edit, withSteering(), withEvidenceCheck()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	record, err := ReadIssueEvidenceCheckRecord(t.Context(), h.client(t), "owner", "repo", testCheckIdentity, testCheckApp, 123, head, body)
+	if err != nil || record == nil || record.Verdict != EvidenceVerdictUnknown {
+		t.Fatalf("ReadIssueEvidenceCheckRecord(): got = %+v, err = %v; want the bound unknown record", record, err)
+	}
+	accepted, err := ReadIssueEvidenceCheck(t.Context(), h.client(t), "owner", "repo", testCheckIdentity, testCheckApp, 123, head, body)
+	if err != nil || accepted != nil {
+		t.Fatalf("ReadIssueEvidenceCheck(): got = %+v, err = %v; want no eligible evidence", accepted, err)
+	}
+	mismatched, err := ReadIssueEvidenceCheckRecord(t.Context(), h.client(t), "owner", "repo", testCheckIdentity, testCheckApp, 123, head, body+"\nchanged")
+	if !errors.Is(err, ErrEvidenceMismatch) || mismatched != nil {
+		t.Fatalf("ReadIssueEvidenceCheckRecord(changed body): got = %+v, err = %v; want ErrEvidenceMismatch", mismatched, err)
 	}
 }
 

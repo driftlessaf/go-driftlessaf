@@ -228,6 +228,34 @@ func isCheckPermissionError(err error) bool {
 	return false
 }
 
+// ReadIssueEvidenceCheck matches the live issue body using the same intent
+// digest and steering section parser as the publisher.
+func ReadIssueEvidenceCheck(ctx context.Context, gh *github.Client, owner, repo, identity string, appID int64, issueNumber int, headSHA, body string) (*EvidenceCheckDetails, error) {
+	return ReadEvidenceCheck(ctx, gh, owner, repo, identity, appID, issueNumber, headSHA, sha256.Sum256([]byte(body)), newestSteeringID(body))
+}
+
+// ReadIssueEvidenceCheckRecord returns the exact issue, body, steering and
+// head record, including an explicit unknown verdict. Use it when comparing
+// multiple publishers so an unknown record cannot be mistaken for no record.
+// Callers must still require an eligible verdict before accepting evidence.
+// A record that exists for the head but is bound to another issue, body or
+// steering revision returns [ErrEvidenceMismatch], so it is not mistaken for
+// an absent publisher.
+func ReadIssueEvidenceCheckRecord(ctx context.Context, gh *github.Client, owner, repo, identity string, appID int64, issueNumber int, headSHA, body string) (*EvidenceCheckDetails, error) {
+	d, err := readEvidenceCheckRecord(ctx, gh, owner, repo, identity, appID, headSHA)
+	if err != nil || d == nil {
+		return nil, err
+	}
+	if d.IssueNumber != issueNumber || d.IssueBodyHash != sha256.Sum256([]byte(body)) || d.SteeringID != newestSteeringID(body) {
+		return nil, ErrEvidenceMismatch
+	}
+	return d, nil
+}
+
+// ErrEvidenceMismatch reports that a publisher's record exists for the head
+// but is bound to a different issue, body or steering revision.
+var ErrEvidenceMismatch = errors.New("evidence record is bound to a different issue, body or steering revision")
+
 // ReadEvidenceCheck returns the latest attempt's record for the commit headSHA
 // that a consumer holds as the live PR head, or nil when the attempt is
 // unknown. It is the authoritative read of the latest attempt: the PR data's
