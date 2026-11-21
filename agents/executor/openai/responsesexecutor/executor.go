@@ -61,6 +61,13 @@ type Config[Response any] struct {
 	// execution deadline. This is a total timeout, not an idle timeout.
 	RequestTimeout time.Duration
 
+	// LogProviderErrors logs the provider's own code, type, param and message
+	// for failed and error stream events at WARN, each bounded and stripped
+	// of control characters. Provider text can echo request content, such as
+	// a signed URL, so only callers whose logs may hold that should set it.
+	// The returned error and the trace never carry it either way.
+	LogProviderErrors bool
+
 	// ExecutionTimeout bounds the conversation, including tools and retries.
 	// Zero selects 30 minutes. A shorter caller deadline always wins. Each
 	// Resume gets a fresh ExecutionTimeout.

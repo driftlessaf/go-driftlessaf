@@ -10,14 +10,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"github.com/chainguard-dev/clog"
 	"github.com/google/go-cmp/cmp"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -100,7 +103,9 @@ func TestTerminalStreamDiagnostics(t *testing.T) {
 				}})
 			}, config(t))
 			tracer := new(recordingTracer)
-			got, err := e.Execute(agenttrace.WithTracer[answer](t.Context(), tracer), request{}, map[string]toolcall.Tool[answer]{
+			var logs strings.Builder
+			ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(&logs, nil)))
+			got, err := e.Execute(agenttrace.WithTracer[answer](ctx, tracer), request{}, map[string]toolcall.Tool[answer]{
 				"read_fixture": {Def: toolcall.Definition{Name: "read_fixture"}, Handler: func(context.Context, toolcall.ToolCall, *agenttrace.Trace[answer], *answer) map[string]any {
 					t.Error("tool called for an unsuccessful stream")
 					return nil
@@ -134,6 +139,9 @@ func TestTerminalStreamDiagnostics(t *testing.T) {
 			}
 			if strings.Contains(string(b), canary) {
 				t.Error("trace leaked untrusted stream content")
+			}
+			if strings.Contains(logs.String(), canary) {
+				t.Error("log leaked untrusted stream content with LogProviderErrors unset")
 			}
 		})
 	}
@@ -215,7 +223,9 @@ func TestInterceptedStreamErrorEnvelope(t *testing.T) {
 				fmt.Fprintf(w, "data: %s\n\n", b)
 			}, config(t))
 			tracer := new(recordingTracer)
-			got, err := e.Execute(agenttrace.WithTracer[answer](t.Context(), tracer), request{}, map[string]toolcall.Tool[answer]{
+			var logs strings.Builder
+			ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(&logs, nil)))
+			got, err := e.Execute(agenttrace.WithTracer[answer](ctx, tracer), request{}, map[string]toolcall.Tool[answer]{
 				"read_fixture": {Def: toolcall.Definition{Name: "read_fixture"}, Handler: func(context.Context, toolcall.ToolCall, *agenttrace.Trace[answer], *answer) map[string]any {
 					t.Error("tool called for an intercepted stream error")
 					return nil
@@ -249,6 +259,9 @@ func TestInterceptedStreamErrorEnvelope(t *testing.T) {
 			}
 			if strings.Contains(string(b), canary) {
 				t.Error("trace leaked untrusted intercepted stream content")
+			}
+			if strings.Contains(logs.String(), canary) {
+				t.Error("log leaked untrusted intercepted stream content with LogProviderErrors unset")
 			}
 		})
 	}
@@ -391,6 +404,141 @@ func TestSafeResponseID(t *testing.T) {
 			t.Parallel()
 			if got := safeResponseID(tt.id); got != tt.want {
 				t.Errorf("response ID: got = %q, want = %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestContextLengthExceeded pins a request refused as over the context window:
+// on an HTTP 400, on an error event and on the error envelope the SDK
+// intercepts, the error names the code and is agentexecutor.ErrInputTooLarge,
+// so a caller knows resending it fails the same way. With LogProviderErrors
+// set, the provider's message and param are logged; either way they stay out
+// of the error and the trace.
+func TestContextLengthExceeded(t *testing.T) {
+	t.Parallel()
+	const (
+		message = "Your input exceeds the context window of this model."
+		param   = "input"
+	)
+	envelope := map[string]any{"code": "context_length_exceeded", "type": "invalid_request_error", "message": message, "param": param}
+	for _, tt := range []struct {
+		name    string
+		handle  func(w http.ResponseWriter)
+		log     bool
+		wantLog bool
+	}{{
+		name: "HTTP 400",
+		handle: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			b, _ := json.Marshal(map[string]any{"error": envelope})
+			_, _ = w.Write(b)
+		},
+	}, {
+		name: "error event",
+		handle: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			b, _ := json.Marshal(map[string]any{"type": "error", "sequence_number": 2, "code": "context_length_exceeded", "message": message, "param": param})
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", b)
+		},
+		log:     true,
+		wantLog: true,
+	}, {
+		name: "error event, logging unset",
+		handle: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			b, _ := json.Marshal(map[string]any{"type": "error", "sequence_number": 2, "code": "context_length_exceeded", "message": message, "param": param})
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", b)
+		},
+	}, {
+		name: "intercepted envelope",
+		handle: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			b, _ := json.Marshal(map[string]any{"type": "error", "sequence_number": 2, "error": envelope})
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", b)
+		},
+		log:     true,
+		wantLog: true,
+	}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(&logs, nil)))
+			tracer := new(recordingTracer)
+			cfg := config(t)
+			cfg.LogProviderErrors = tt.log
+			e := serve(t, func(w http.ResponseWriter, _ *http.Request) { tt.handle(w) }, cfg)
+			_, err := e.Execute(agenttrace.WithTracer[answer](ctx, tracer), request{}, nil)
+			if !errors.Is(err, agentexecutor.ErrInputTooLarge) || !strings.Contains(err.Error(), "code=context_length_exceeded") {
+				t.Fatalf("error: got = %v, want ErrInputTooLarge naming context_length_exceeded", err)
+			}
+			if strings.Contains(err.Error(), message) {
+				t.Errorf("error carries the provider message: %v", err)
+			}
+			b, _ := json.Marshal(tracer.trace)
+			if strings.Contains(string(b), message) {
+				t.Error("trace carries the provider message")
+			}
+			if got := strings.Contains(logs.String(), message) && strings.Contains(logs.String(), `"param":"input"`); got != tt.wantLog {
+				t.Errorf("log names message and param: got = %t, want = %t\n%s", got, tt.wantLog, logs.String())
+			}
+		})
+	}
+}
+
+// TestLogText pins how provider text is bounded for the log line.
+func TestLogText(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, in, want string }{
+		{name: "plain", in: "too long", want: "too long"},
+		{name: "control characters", in: "a\nb\x1bc", want: "a b c"},
+		{name: "bounded on a rune", in: strings.Repeat("é", maxLoggedText), want: strings.Repeat("é", maxLoggedText/2) + "..."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := logText(tt.in); got != tt.want {
+				t.Errorf("logText: got = %q, want = %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLogProviderErrorsTerminalEvents pins which terminal events log the
+// provider's text with LogProviderErrors set: a failed response logs its
+// error's code and message; an incomplete one carries no provider error and
+// logs nothing.
+func TestLogProviderErrorsTerminalEvents(t *testing.T) {
+	t.Parallel()
+	const message = "provider-failure-text"
+	for _, tt := range []struct {
+		eventType string
+		wantLog   bool
+	}{
+		{eventType: "response.failed", wantLog: true},
+		{eventType: "response.incomplete"},
+	} {
+		t.Run(tt.eventType, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(&logs, nil)))
+			cfg := config(t)
+			cfg.LogProviderErrors = true
+			e := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				b, _ := json.Marshal(map[string]any{"type": tt.eventType, "response": map[string]any{
+					"status":             strings.TrimPrefix(tt.eventType, "response."),
+					"error":              map[string]any{"code": "server_error", "message": message},
+					"incomplete_details": map[string]any{"reason": "max_output_tokens"},
+				}})
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", tt.eventType, b)
+			}, cfg)
+			if _, err := e.Execute(ctx, request{}, nil); err == nil || strings.Contains(err.Error(), message) {
+				t.Fatalf("error: got = %v, want a failure without the provider text", err)
+			}
+			got := strings.Contains(logs.String(), message) && strings.Contains(logs.String(), `"code":"server_error"`)
+			if got != tt.wantLog {
+				t.Errorf("logged the provider error: got = %t, want = %t\n%s", got, tt.wantLog, logs.String())
 			}
 		})
 	}

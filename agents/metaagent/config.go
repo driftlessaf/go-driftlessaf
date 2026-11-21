@@ -60,6 +60,12 @@ type Config[Resp, CB any] struct {
 	// openai-responses agent. Zero inherits the execution deadline.
 	ResponsesRequestTimeout time.Duration
 
+	// ResponsesLogProviderErrors sets the Responses executor's
+	// LogProviderErrors on a NewRouted openai-responses agent: the provider's
+	// message and param for a failed stream are logged. Other protocols
+	// ignore it.
+	ResponsesLogProviderErrors bool
+
 	// ResponsesExecutionTimeout bounds the entire NewRouted openai-responses
 	// conversation. Zero selects 30 minutes; a shorter caller deadline wins.
 	// These timeout fields do not configure the compatibility New path.

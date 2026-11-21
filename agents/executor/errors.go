@@ -85,11 +85,12 @@ func (e *InterruptedError) Unwrap() error {
 }
 
 // ErrInputTooLarge reports that a model request exceeded the input budget of
-// the model's serving context window and was rejected before the provider was
-// called. Resending the same conversation fails the same way, so callers
-// should treat it as non-retriable. Executors that enforce an input budget
-// wrap it, so a caller can recognize the condition with errors.Is without
-// importing a provider-specific error type.
+// the model's serving context window: an executor that enforces an input
+// budget rejected it before calling the provider, or the provider refused it
+// as over the window. Resending the same conversation fails the same way, so
+// callers should treat it as non-retriable. Executors wrap it, so a caller can
+// recognize the condition with errors.Is without importing a
+// provider-specific error type.
 var ErrInputTooLarge = errors.New("agent request exceeds model input budget")
 
 // ErrDeadlineBudget reports that a run stopped before a model request because

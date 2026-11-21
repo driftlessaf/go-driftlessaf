@@ -8,13 +8,17 @@ package metaagent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"chainguard.dev/driftlessaf/agents/toolcall"
+	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 )
@@ -201,5 +205,49 @@ func TestResponsesBindingCopiesAndRegistryValidation(t *testing.T) {
 	}
 	if _, err := (RouteResolution{}).bindOpenAIResponses(t.Context(), modelrouter.Requirements{}); !errors.Is(err, ErrInvalidRouter) {
 		t.Error(err)
+	}
+}
+
+// TestRoutedResponsesLogProviderErrors pins that ResponsesLogProviderErrors
+// reaches the executor: a stream error event's provider message is logged
+// only when it is set.
+func TestRoutedResponsesLogProviderErrors(t *testing.T) {
+	t.Parallel()
+	const message = "provider-error-text"
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"sequence_number\":1,\"code\":\"server_error\",\"message\":%q}\n\n", message)
+			}))
+			defer server.Close()
+			service := responses.NewResponseService(option.WithBaseURL(server.URL), option.WithHTTPClient(server.Client()), option.WithMaxRetries(0))
+			registry, err := NewOpenAIResponsesAdapterRegistry(OpenAIResponsesRegistration{
+				Provider: modelrouter.ProviderAWSBedrock,
+				Adapter: func(_ context.Context, plan modelrouter.Plan) (OpenAIResponsesBinding, error) {
+					return NewOpenAIResponsesBinding(plan, service, nil)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			route := responsesRoute()
+			cfg := routedTestConfig(t)
+			cfg.ResponsesLogProviderErrors = enabled
+			router := mustRouter(t, mustRouteRegistry(t, route), AdapterRegistries{OpenAIResponses: registry})
+			agent, err := NewRouted[*testRequest](t.Context(), router, route.Selection, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs strings.Builder
+			ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(&logs, nil)))
+			if _, err := agent.Execute(ctx, &testRequest{}, toolcall.EmptyTools{}); err == nil {
+				t.Fatal("stream error was ignored")
+			}
+			if got := strings.Contains(logs.String(), message); got != enabled {
+				t.Errorf("logged the provider message: got = %t, want = %t", got, enabled)
+			}
+		})
 	}
 }

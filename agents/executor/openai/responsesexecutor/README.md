@@ -65,6 +65,15 @@ in a parallel batch. Only an accepted, validated submission commits a result.
   but never include provider messages or partial output. Even a terminal
   `rate_limit_exceeded` or `server_error` event doesn't retry. Usage may be
   unavailable when the stream fails.
+- With `Config.LogProviderErrors` set (off by default), the provider's code,
+  type, param and message for `response.failed` and `error` events are logged
+  at WARN on the caller's logger, each bounded to 512 bytes with control
+  characters replaced. Provider text can echo request content, so set it only
+  where the logs may hold that. It never reaches the returned error or the
+  trace.
+- A request refused as `context_length_exceeded`, on an HTTP 400 or on the
+  stream, matches `errors.Is(err, executor.ErrInputTooLarge)`: resending the
+  same conversation fails the same way.
 
 Choose timeout budgets before comparing models, allowing for reasoning and the
 configured output-token limit. Deadline expiration remains an execution error,

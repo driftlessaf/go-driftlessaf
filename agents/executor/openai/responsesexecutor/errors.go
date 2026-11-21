@@ -7,13 +7,18 @@ package responsesexecutor
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
+	agentexecutor "chainguard.dev/driftlessaf/agents/executor"
 	"chainguard.dev/driftlessaf/agents/internal/bedrockruntime"
+	"github.com/chainguard-dev/clog"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
 )
@@ -45,6 +50,12 @@ func (e *httpFailure) Error() string {
 		message += "; verify provider quota"
 	}
 	return message
+}
+
+// Is reports a request the provider refused as over the model's context
+// window as agentexecutor.ErrInputTooLarge: resending it fails the same way.
+func (e *httpFailure) Is(target error) bool {
+	return target == agentexecutor.ErrInputTooLarge && e.code == codeContextLengthExceeded
 }
 
 func safeHTTPFailure(api *openai.Error) *httpFailure {
@@ -80,7 +91,7 @@ func safeHTTPFailure(api *openai.Error) *httpFailure {
 			"ValidationException", "ResourceNotFoundException", "ThrottlingException", "ServiceQuotaExceededException",
 			"ModelNotReadyException", "ModelTimeoutException", "InternalServerException", "ServiceUnavailableException",
 			"invalid_api_key", "authentication_error", "permission_denied", "model_not_found", "insufficient_quota",
-			"rate_limit_exceeded", "invalid_request_error", "server_error":
+			"rate_limit_exceeded", codeContextLengthExceeded, "invalid_request_error", "server_error":
 			failure.code = code
 			return failure
 		}
@@ -119,6 +130,17 @@ func (e *streamFailure) Error() string {
 	return message + "; usage may be unavailable"
 }
 
+// Is reports a request the provider refused as over the model's context
+// window as agentexecutor.ErrInputTooLarge: resending it fails the same way.
+func (e *streamFailure) Is(target error) bool {
+	return target == agentexecutor.ErrInputTooLarge && e.code == codeContextLengthExceeded
+}
+
+// codeContextLengthExceeded is OpenAI's code for an input over the model's
+// context window. It arrives on an HTTP 400 or, once the stream has opened,
+// on an error event.
+const codeContextLengthExceeded = "context_length_exceeded"
+
 // Called only for the three recognized terminal event types. Retain no raw
 // event, provider message, output, or credentials in the returned error.
 func safeStreamFailure(event responses.ResponseStreamEventUnion, response *http.Response, responseID string) *streamFailure {
@@ -135,7 +157,7 @@ func safeStreamFailure(event responses.ResponseStreamEventUnion, response *http.
 		"invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url",
 		"image_too_large", "image_too_small", "image_parse_error", "image_content_policy_violation",
 		"invalid_image_mode", "image_file_too_large", "unsupported_image_media_type", "empty_image_file",
-		"failed_to_download_image", "image_file_not_found", "invalid_request_error":
+		"failed_to_download_image", "image_file_not_found", "invalid_request_error", codeContextLengthExceeded:
 		failure.code = code
 	}
 	if event.Type == "response.incomplete" {
@@ -150,18 +172,19 @@ func safeStreamFailure(event responses.ResponseStreamEventUnion, response *http.
 // The pinned SDK's ssestream.Stream.Next intercepts SSE data containing a
 // top-level "error" field and returns a generic error before our executor
 // receives the event. The error message has the fixed prefix below, followed
-// by the raw JSON value of the "error" field. Parse only the allowlisted code
-// from that JSON; never retain the message, param, or any other field.
+// by the raw JSON value of the "error" field. Only the allowlisted code from
+// that JSON reaches the returned error; the message and param are logged.
 const sdkInterceptedPrefix = "received error while streaming: "
 
 // safeInterceptedStreamError detects the SDK's intercepted top-level error
 // envelope and returns a streamFailure with only the allowlisted code and
-// validated correlation IDs. It returns nil when the error is not from the
-// intercepted path, so the caller can fall through to the generic message.
-func safeInterceptedStreamError(err error, response *http.Response, responseID string) *streamFailure {
+// validated correlation IDs, and the envelope as the provider wrote it. It
+// returns a nil failure when the error is not from the intercepted path, so
+// the caller can fall through to the generic message.
+func safeInterceptedStreamError(err error, response *http.Response, responseID string) (*streamFailure, providerError) {
 	suffix, ok := strings.CutPrefix(err.Error(), sdkInterceptedPrefix)
 	if !ok {
-		return nil
+		return nil, providerError{}
 	}
 	failure := &streamFailure{
 		eventType:  "error",
@@ -171,25 +194,71 @@ func safeInterceptedStreamError(err error, response *http.Response, responseID s
 		failure.requestID = safeHeaderRequestID(response.Header)
 	}
 	// The suffix is the gjson string representation of the "error" field.
-	// Parse only the "code" and "type" sub-fields; ignore message and param.
 	var envelope struct {
-		Code string `json:"code"`
-		Type string `json:"type"`
+		Code    string `json:"code"`
+		Type    string `json:"type"`
+		Param   string `json:"param"`
+		Message string `json:"message"`
 	}
-	if err := json.Unmarshal([]byte(suffix), &envelope); err == nil {
-		for _, code := range []string{envelope.Code, envelope.Type} {
-			switch code {
-			case "server_error", "rate_limit_exceeded", "invalid_prompt", "vector_store_timeout",
-				"invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url",
-				"image_too_large", "image_too_small", "image_parse_error", "image_content_policy_violation",
-				"invalid_image_mode", "image_file_too_large", "unsupported_image_media_type", "empty_image_file",
-				"failed_to_download_image", "image_file_not_found", "invalid_request_error":
-				failure.code = code
-				return failure
-			}
+	if err := json.Unmarshal([]byte(suffix), &envelope); err != nil {
+		return failure, providerError{}
+	}
+	detail := providerError{code: envelope.Code, typ: envelope.Type, param: envelope.Param, message: envelope.Message}
+	for _, code := range []string{envelope.Code, envelope.Type} {
+		switch code {
+		case "server_error", "rate_limit_exceeded", "invalid_prompt", "vector_store_timeout",
+			"invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url",
+			"image_too_large", "image_too_small", "image_parse_error", "image_content_policy_violation",
+			"invalid_image_mode", "image_file_too_large", "unsupported_image_media_type", "empty_image_file",
+			"failed_to_download_image", "image_file_not_found", "invalid_request_error", codeContextLengthExceeded:
+			failure.code = code
+			return failure, detail
 		}
 	}
-	return failure
+	return failure, detail
+}
+
+// providerError is a stream error as the provider wrote it, logged when
+// Config.LogProviderErrors is set and never returned: the returned error
+// reaches traces and status records, which must not carry provider text.
+// Without it an invalid_request_error does not say what to fix.
+type providerError struct{ code, typ, param, message string }
+
+// streamProviderError is the provider's account of a failed or error event.
+func streamProviderError(event responses.ResponseStreamEventUnion) providerError {
+	if event.Type == "error" {
+		return providerError{code: event.Code, param: event.Param, message: event.Message}
+	}
+	return providerError{code: string(event.Response.Error.Code), message: event.Response.Error.Message}
+}
+
+// log writes p with the failure's correlation IDs, each field bounded and
+// stripped of control characters.
+func (p providerError) log(ctx context.Context, failure *streamFailure) {
+	clog.WarnContext(ctx, "Responses stream error",
+		"event", failure.eventType, "code", logText(p.code), "type", logText(p.typ),
+		"param", logText(p.param), "message", logText(p.message),
+		"request_id", failure.requestID, "response_id", failure.responseID)
+}
+
+// maxLoggedText bounds each provider field in the log line.
+const maxLoggedText = 512
+
+func logText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	if len(s) <= maxLoggedText {
+		return s
+	}
+	cut := maxLoggedText
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 // safeBedrockStreamFailure converts a SafeBedrockError into a streamFailure

@@ -196,7 +196,11 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 			}
 			return &event.Response, nil
 		case "response.failed", "response.incomplete", "error":
-			return nil, safeStreamFailure(event, httpResponse, responseID)
+			failure := safeStreamFailure(event, httpResponse, responseID)
+			if e.config.LogProviderErrors && event.Type != "response.incomplete" {
+				streamProviderError(event).log(ctx, failure)
+			}
+			return nil, failure
 		default:
 			// Every other event is incremental: consume it, but execute only
 			// the authoritative completed response, so no tool sees an
@@ -218,7 +222,10 @@ func (e *executor[Request, Response]) stream(ctx context.Context, params respons
 		if api, ok := errors.AsType[*openai.Error](err); ok && events == 0 {
 			return nil, safeHTTPFailure(api)
 		}
-		if f := safeInterceptedStreamError(err, httpResponse, responseID); f != nil {
+		if f, detail := safeInterceptedStreamError(err, httpResponse, responseID); f != nil {
+			if e.config.LogProviderErrors {
+				detail.log(ctx, f)
+			}
 			return nil, f
 		}
 		if be, ok := errors.AsType[bedrockruntime.SafeBedrockError](err); ok {

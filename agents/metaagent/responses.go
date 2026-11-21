@@ -138,6 +138,7 @@ func newRoutedResponsesAgent[Req promptbuilder.Bindable, Resp, CB any](binding O
 		ResourceLabels:      binding.ResourceLabels(),
 		RequestTimeout:      config.ResponsesRequestTimeout,
 		ExecutionTimeout:    config.ResponsesExecutionTimeout,
+		LogProviderErrors:   config.ResponsesLogProviderErrors,
 		SuspendTool:         suspendFunctionTool(config.SuspendToolName, config.SuspendToolDescription),
 		SuspendOnSubmit:     config.SuspendOnSubmit,
 	})
