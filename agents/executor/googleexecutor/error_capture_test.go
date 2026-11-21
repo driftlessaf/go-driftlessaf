@@ -263,9 +263,9 @@ func TestExecutorRecordsUnprocessedResponseAtMaxTurnsExhaustion(t *testing.T) {
 	// tokens. The synthetic turn at index maxTurns wraps the Send of the
 	// last turn's tool responses; no turn processes that response.
 	want := []agenttrace.RecordedTurn{
-		{Index: 0, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 114, OutputTokens: 116},
-		{Index: 1, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 224, OutputTokens: 226},
-		{Index: 2, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 334, OutputTokens: 336},
+		{Index: 0, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 114, OutputTokens: 116, ReasoningTokens: 14},
+		{Index: 1, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 224, OutputTokens: 226, ReasoningTokens: 24},
+		{Index: 2, Model: "gemini-3.8-flash", Provider: "gcp.vertex_ai", System: agenttrace.SystemGoogleVertex, InputTokens: 334, OutputTokens: 336, ReasoningTokens: 34},
 	}
 	if diff := cmp.Diff(want, trace.Turns, cmpopts.IgnoreFields(agenttrace.RecordedTurn{}, "StartTime", "EndTime", "Latency")); diff != "" {
 		t.Errorf("trace turns (-want +got):\n%s", diff)

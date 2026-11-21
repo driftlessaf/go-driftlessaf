@@ -679,6 +679,7 @@ func (e *executor[Request, Response]) runConversation(
 		if response.UsageMetadata != nil {
 			inputTokens, outputTokens := inputOutputTokenCounts(response.UsageMetadata)
 			llmTurn.RecordTokens(inputTokens, outputTokens)
+			llmTurn.RecordReasoningTokens(int64(response.UsageMetadata.ThoughtsTokenCount))
 			cacheReadTokens = int64(response.UsageMetadata.CachedContentTokenCount)
 		}
 		execshared.RecordCallLatency(ctx, trace, llmTurn, latency)
