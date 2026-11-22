@@ -49,13 +49,16 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // tools without converging on a result.
 const DefaultMaxTurns = 200
 
-// maxEmptyResponseRetries bounds how many consecutive empty turns (no text, no
-// tool call) the executor will nudge the model through before giving up.
+// maxConsecutiveNudges bounds how many turns in a row the executor answers
+// with a corrective nudge before giving up. A nudge follows a turn with
+// neither text nor a tool call, a turn cut off at the output token limit, and
+// a malformed function call. Each nudge resends the whole conversation, so an
+// unbounded run of them spends the turn budget on a model that is stuck.
 //
 // Three is enough to absorb the observed transient rate while still failing
 // fast when a model is genuinely stuck: the enricher golden suite measured a
 // ~5% per-call empty rate, which three attempts drives to ~0.01%.
-const maxEmptyResponseRetries = 3
+const maxConsecutiveNudges = 3
 
 // DefaultToolCallConcurrency is the default bound on how many of a single
 // turn's tool calls run concurrently. Models routinely emit several
@@ -660,10 +663,10 @@ func (e *executor[Request, Response]) runConversation(
 	// it at function exit. Every error path must use `return ..., err` (or set
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
-	// emptyTurns counts consecutive turns where the model returned neither text
-	// nor a tool call. See the empty-response branch at the bottom of
-	// executeTurn for why that is retried rather than treated as terminal.
-	emptyTurns := 0
+	// nudges counts the consecutive turns answered with a corrective nudge,
+	// bounded by maxConsecutiveNudges. A turn with text or a tool call resets
+	// it, so only a run of unusable turns fails the run.
+	nudges := 0
 
 	// callModel sends req as llmTurn's model call, so the turn's span covers
 	// the call, and records the response's token counts and the answering
@@ -775,10 +778,29 @@ func (e *executor[Request, Response]) runConversation(
 			return zero, nil, true, fmt.Errorf("response blocked due to recitation: %s", candidate.FinishMessage)
 		}
 
+		// countNudge counts this turn as one the executor answers with a
+		// corrective nudge. It returns an error once more than
+		// maxConsecutiveNudges turns in a row needed one. reason names this
+		// turn's problem in the log and the error.
+		countNudge := func(reason string) error {
+			nudges++
+			if nudges > maxConsecutiveNudges {
+				clog.ErrorContext(ctx, "Model returned an unusable response repeatedly",
+					"reason", reason, "attempts", nudges, "turn", turn)
+				return fmt.Errorf(
+					"unexpected response format from model (%s) after %d consecutive attempts", reason, nudges)
+			}
+			return nil
+		}
+
 		// Check for MAX_TOKENS - response was truncated due to output token limit
 		if candidate.FinishReason == genai.FinishReasonMaxTokens {
+			if err := countNudge(fmt.Sprintf("stopped at the output token limit of %d", e.maxOutputTokens)); err != nil {
+				return zero, nil, true, err
+			}
 			clog.WarnContext(ctx, "Gemini hit max output tokens limit, asking for more concise response",
 				"finish_message", candidate.FinishMessage,
+				"attempt", nudges,
 				"turn", turn)
 
 			// Ask the model to provide a more concise version
@@ -792,10 +814,15 @@ func (e *executor[Request, Response]) runConversation(
 
 		// Check for malformed function call
 		if candidate.FinishReason == genai.FinishReasonMalformedFunctionCall {
+			if err := countNudge("malformed function call"); err != nil {
+				return zero, nil, true, err
+			}
 			// On this finish reason the message quotes the call the model
 			// failed to emit, arguments included, so only its size is logged.
 			clog.WarnContext(ctx, "Model attempted a malformed function call, asking it to retry",
-				"finish_message_bytes", len(candidate.FinishMessage))
+				"finish_message_bytes", len(candidate.FinishMessage),
+				"attempt", nudges,
+				"turn", turn)
 
 			// Build available function names for retry message
 			var funcNames []string
@@ -834,15 +861,11 @@ func (e *executor[Request, Response]) runConversation(
 			default:
 				return nil, false, nil
 			}
-			emptyTurns++
-			if emptyTurns > maxEmptyResponseRetries {
-				clog.ErrorContext(ctx, "Model returned an unusable response repeatedly",
-					"reason", what, "attempts", emptyTurns, "turn", turn)
-				return nil, true, fmt.Errorf(
-					"unexpected response format from model (%s) after %d attempts", what, emptyTurns)
+			if err := countNudge(what); err != nil {
+				return nil, true, err
 			}
 			clog.WarnContext(ctx, "Model returned an unusable response, asking it to continue",
-				"reason", what, "attempt", emptyTurns, "turn", turn)
+				"reason", what, "attempt", nudges, "turn", turn)
 			retryMsg := genai.Part{Text: "Your last response was empty. Please continue: either call one of the available functions or provide your answer as text."}
 			retryParts, err := replayLastInput(ctx, retryMsg)
 			if err != nil {
@@ -919,6 +942,9 @@ func (e *executor[Request, Response]) runConversation(
 		}
 		if hasText {
 			responseText = turnText.String()
+		}
+		if hasText || len(toolCalls) > 0 {
+			nudges = 0
 		}
 
 		// If there are tool calls, execute them and send responses

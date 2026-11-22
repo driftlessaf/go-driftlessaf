@@ -149,7 +149,8 @@ The executor automatically integrates with the evals package for tracing:
 The executor provides comprehensive error handling:
   - Template rendering errors
   - Chat creation failures
-  - Malformed function calls (with automatic retry)
+  - Malformed function calls, empty turns and turns cut off at the output
+    token limit, each answered with a nudge, up to three turns in a row
   - Response parsing errors
   - Tool execution errors
 
