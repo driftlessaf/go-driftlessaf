@@ -9,7 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"os"
+	"syscall"
 	"testing"
 
 	"google.golang.org/api/googleapi"
@@ -55,6 +59,20 @@ func TestIsRetryableVertexError(t *testing.T) {
 		// must still retry: a real Vertex 529 always carries "Overloaded".
 		{name: "structured 401 with retryable message", err: &googleapi.Error{Code: http.StatusUnauthorized, Message: "rate limit"}, want: true},
 		{name: "structured 529 falls through on Overloaded", err: &googleapi.Error{Code: 529, Message: "Overloaded"}, want: true},
+		// Transport drops carry no status: the request was sound, so a
+		// re-send is retried. The shapes are the shared classifier's.
+		{name: "TCP reset by peer", err: fmt.Errorf("doRequest: error sending request: %w", &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}), want: true},
+		{name: "body ended early", err: fmt.Errorf("reading body: %w", io.ErrUnexpectedEOF), want: true},
+		{name: "client connection lost", err: errors.New("http2: client connection lost"), want: true},
+		{name: "graceful GOAWAY", err: errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=605, ErrCode=NO_ERROR, debug=""`), want: true},
+		{name: "GOAWAY with a real code", err: errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=605, ErrCode=ENHANCE_YOUR_CALM, debug=""`), want: false},
+		{name: "connection refused", err: &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}, want: false},
+		{name: "plain EOF", err: io.EOF, want: false},
+		{name: "reset under the request deadline", err: fmt.Errorf("%w: %w", context.DeadlineExceeded, &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}), want: false},
+		// An API error is the provider's verdict, so its message is never
+		// read as a transport drop.
+		{name: "genai 400 quoting a GOAWAY", err: genai.APIError{Code: http.StatusBadRequest, Message: `http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=""`}, want: false},
+		{name: "googleapi 400 quoting a lost connection", err: &googleapi.Error{Code: http.StatusBadRequest, Message: "http2: client connection lost"}, want: false},
 	}
 
 	for _, tt := range tests {

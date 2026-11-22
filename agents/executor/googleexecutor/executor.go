@@ -32,6 +32,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
+	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"google.golang.org/genai"
 )
@@ -1226,6 +1227,15 @@ func (e *executor[Request, Response]) sendWithRetry(
 	})
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
+		// A request the transport dropped on every attempt fails the item as
+		// infrastructure WITHOUT a requeue delay. A delayed requeue resets the
+		// workqueue's attempt count, and a drop can repeat for one request (a
+		// long decode that always outlives a proxy's stream limit), so it
+		// stays on the counted path that dead-letters.
+		if isTransportDrop(err) {
+			clog.WarnContext(ctx, "Vertex AI request dropped by the transport on every attempt", "operation", operation, "error", err)
+			return nil, agenttrace.TurnLatency{}, workqueue.InfrastructureError(fmt.Errorf("%s: %w", errContext, err))
+		}
 		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryable, "Vertex AI"); requeueErr != nil {
 			return nil, agenttrace.TurnLatency{}, requeueErr
 		}
