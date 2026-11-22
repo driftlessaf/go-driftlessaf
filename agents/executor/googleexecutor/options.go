@@ -171,6 +171,18 @@ func WithToolReasoning[Request promptbuilder.Bindable, Response any](include boo
 	}
 }
 
+// WithThinkingSummaries sets whether requests ask for thinking summaries,
+// which land in trace.Reasoning when agenttrace.WithPayloadsEnabled is set on
+// the context. Without this option they are asked for unless the model's
+// provider facts set model.Info.OmitThinkingSummaries. It takes effect only
+// when WithEffort or WithThinking configures thinking.
+func WithThinkingSummaries[Request promptbuilder.Bindable, Response any](enable bool) Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.thinkingSummaries = &enable
+		return nil
+	}
+}
+
 // WithSystemInstructions sets the system instructions for the model
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
@@ -297,15 +309,15 @@ func WithEffort[Request promptbuilder.Bindable, Response any](level effort.Level
 
 // thinkingConfigForEffort maps the provider-neutral effort level onto the
 // generation of Gemini thinking control the model understands.
-func thinkingConfigForEffort(model string, level effort.Level) *genai.ThinkingConfig {
+func thinkingConfigForEffort(model string, level effort.Level, includeThoughts bool) *genai.ThinkingConfig {
 	if usesThinkingLevel(model) {
 		return &genai.ThinkingConfig{
-			IncludeThoughts: true,
+			IncludeThoughts: includeThoughts,
 			ThinkingLevel:   thinkingLevelForEffort(level),
 		}
 	}
 	return &genai.ThinkingConfig{
-		IncludeThoughts: true,
+		IncludeThoughts: includeThoughts,
 		ThinkingBudget:  new(thinkingBudgetForEffort(level)),
 	}
 }

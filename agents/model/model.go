@@ -102,6 +102,10 @@ type Info struct {
 	// as output tokens the model must generate and later turns replay.
 	// See: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
 	OmitToolReasoning bool
+	// OmitThinkingSummaries reports that requests should not ask for thinking
+	// summaries unless the caller opts in. The summaries only reach traces, and
+	// on Gemini 4 generating them adds model time to every turn.
+	OmitThinkingSummaries bool
 }
 
 // SupportsEffort reports whether the provider accepts the effort level
@@ -325,6 +329,7 @@ func geminiInfo(id string) Info {
 		info.MaxOutputTokens = gemini4MaxOutputTokens
 		info.LongDecode = true
 		info.OmitToolReasoning = true
+		info.OmitThinkingSummaries = true
 	}
 	return info
 }

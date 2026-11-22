@@ -154,6 +154,14 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 
 	// omitToolReasoning is toolReasoning resolved against the model in New.
 	omitToolReasoning bool
+
+	// thinkingSummaries, when non-nil, overrides whether requests ask for
+	// thinking summaries. When nil, they are asked for unless model.Resolve
+	// reports OmitThinkingSummaries. Set via WithThinkingSummaries.
+	thinkingSummaries *bool
+
+	// includeThoughts is thinkingSummaries resolved against the model in New.
+	includeThoughts bool
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -220,11 +228,15 @@ func New[Request promptbuilder.Bindable, Response any](
 		return nil, fmt.Errorf("model %q rejects a thinking budget: set its thinking level with WithEffort instead of WithThinking", exec.capabilityModel)
 	}
 	exec.cacheUnsupported = info.NoExplicitContextCache
-	// Resolved after options so WithModel, WithRoutedModel and
-	// WithToolReasoning may come in any order.
+	// Resolved after options so WithModel, WithRoutedModel,
+	// WithToolReasoning and WithThinkingSummaries may come in any order.
 	exec.omitToolReasoning = info.OmitToolReasoning
 	if exec.toolReasoning != nil {
 		exec.omitToolReasoning = !*exec.toolReasoning
+	}
+	exec.includeThoughts = !info.OmitThinkingSummaries
+	if exec.thinkingSummaries != nil {
+		exec.includeThoughts = *exec.thinkingSummaries
 	}
 	if exec.omitToolReasoning && exec.submitTool.NoReasoning != nil {
 		exec.submitTool = *exec.submitTool.NoReasoning
@@ -397,11 +409,11 @@ func (e *executor[Request, Response]) staticRequest(tools map[string]googletool.
 	switch {
 	case e.thinkingBudget != nil:
 		config.ThinkingConfig = &genai.ThinkingConfig{
-			IncludeThoughts: true,
+			IncludeThoughts: e.includeThoughts,
 			ThinkingBudget:  e.thinkingBudget,
 		}
 	case e.effortLevel != "":
-		config.ThinkingConfig = thinkingConfigForEffort(e.capabilityModel, e.effortLevel)
+		config.ThinkingConfig = thinkingConfigForEffort(e.capabilityModel, e.effortLevel, e.includeThoughts)
 	}
 	return config, toolDeclarations, nil
 }

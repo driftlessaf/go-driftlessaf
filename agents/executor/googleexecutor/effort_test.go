@@ -156,7 +156,7 @@ func TestThinkingConfigForEffort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := thinkingConfigForEffort(tt.model, tt.level)
+			got := thinkingConfigForEffort(tt.model, tt.level, true)
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("thinkingConfigForEffort(%q, %q) mismatch (-want, +got):\n%s", tt.model, tt.level, diff)
 			}

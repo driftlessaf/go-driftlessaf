@@ -69,11 +69,14 @@ The executor supports various configuration options:
   - WithEffort: Enable thinking via the provider-neutral effort scale
   - WithToolReasoning: Send or leave out the injected tool reasoning parameter
     (left out by default for models whose provider facts set OmitToolReasoning)
+  - WithThinkingSummaries: Ask for thinking summaries or leave them out (left
+    out by default for models whose provider facts set OmitThinkingSummaries)
 
 # Thinking Mode
 
 Thinking mode allows Gemini to show its internal reasoning process. When enabled,
-thought blocks are captured in the trace. WithThinking sets a raw token budget,
+thought summaries are captured in the trace, unless WithThinkingSummaries(false)
+or the model's provider facts leave them out. WithThinking sets a raw token budget,
 which Gemini 2.x models take; Gemini 3.x models, including the default, take a
 discrete thinking level, so use WithEffort with them:
 
@@ -114,8 +117,10 @@ the generation again (see WithRetryConfig).
 
 Gemini 4 models think before every tool call, so their tools leave out the
 reasoning parameter googletool.FromTool injects, and the submit tool leaves
-out its own; WithToolReasoning(true) keeps them. With payloads enabled, the
-trace's thought summaries record why the model acted instead.
+out its own; WithToolReasoning(true) keeps them. Requests to Gemini 4 also
+leave out thinking summaries, which add model time to every turn and are only
+recorded in traces. WithThinkingSummaries(true) asks for them, and with
+payloads enabled the trace then records why the model acted.
 
 # Suspend and Resume
 

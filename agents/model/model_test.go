@@ -73,14 +73,15 @@ func TestResolve(t *testing.T) {
 		ThinkingControl: model.ThinkingControlLevel,
 	}
 	// gemini4 is the Gemini 4 surface: thinking levels only, no explicit
-	// context cache, long decodes up to the shared 1,048,576-token window, and
-	// tools without the injected reasoning parameter.
+	// context cache, long decodes up to the shared 1,048,576-token window,
+	// tools without the injected reasoning parameter, and no thinking summaries.
 	gemini4 := geminiLevel
 	gemini4.NoThinkingBudget = true
 	gemini4.NoExplicitContextCache = true
 	gemini4.MaxOutputTokens = 1_048_576
 	gemini4.LongDecode = true
 	gemini4.OmitToolReasoning = true
+	gemini4.OmitThinkingSummaries = true
 	gemini4Argon := gemini4
 	gemini4Argon.ContextWindow = 1_048_576
 	openAICompat := model.Info{
