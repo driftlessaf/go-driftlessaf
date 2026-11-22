@@ -300,10 +300,9 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Append the user prompt suffix, when configured. Gemini has no
-	// per-block prompt-cache semantics (context caching covers system
-	// instructions and tools via CachedContent), so plain concatenation
-	// preserves the prompt content without any block layout.
+	// Gemini takes no cache breakpoints, so a configured user prompt suffix
+	// is concatenated onto the prompt; WithUserPromptSuffix describes how
+	// that keeps the payload a cacheable prefix.
 	suffix, err := promptbuilder.BindSuffix(e.userPromptSuffix, request)
 	if err != nil {
 		return resp, err
@@ -1152,18 +1151,19 @@ func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentC
 		MaxOutputTokens: e.maxOutputTokens,
 		Labels:          e.resourceLabels,
 	}
-	// A long-decode model stops each request at its per-request output cap
-	// (32,768 tokens for the unary requests this executor sends, 65,536 for a
-	// stream) with a continuation token. Ask the SDK to follow it, so one
-	// call returns the whole generation up to MaxOutputTokens.
-	if model.Resolve(e.capabilityModel).LongDecode {
+	info := model.Resolve(e.capabilityModel)
+	// A long-decode model stops each request at a per-request output cap,
+	// which varies by model and sits below MaxOutputTokens, and returns a
+	// continuation token. Ask the SDK to follow it, so one call returns the
+	// whole generation up to MaxOutputTokens.
+	if info.LongDecode {
 		config.AutomaticContinuation = new(true)
 	}
 	// Gemini 3 models are tuned for the provider's default temperature, and
 	// low values can cause looping or degraded output, so the 0.1 executor
 	// default applies only to Gemini 2.x. An explicit WithTemperature is sent
-	// for any model.
-	if !e.omitTemperature && (e.temperatureSet || !usesThinkingLevel(e.capabilityModel)) {
+	// to any model that takes sampling parameters.
+	if !e.omitTemperature && info.SamplingParams && (e.temperatureSet || !usesThinkingLevel(e.capabilityModel)) {
 		config.Temperature = new(e.temperature)
 	}
 	return config

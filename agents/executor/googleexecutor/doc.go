@@ -106,14 +106,21 @@ where each block contains:
 Gemini 4 models take a thinking level and reject a thinking budget, so New
 refuses WithThinking on them; use WithEffort. They also reject explicit context
 caches, so the executor sends system instructions and tools inline and relies on
-the provider's implicit prefix cache. A single request returns at most 32,768
-output tokens (65,536 for a stream), but a generation can continue across
+the provider's implicit prefix cache. A single request returns at most 65,536
+output tokens (32,768 for the unary requests this executor sends to Gemini 4
+Argon and Carbon), but a generation can continue across
 requests up to 1,048,576 tokens, input included: WithMaxOutputTokens accepts values up to that limit,
 and the SDK follows the continuation tokens and merges the parts and usage
 into one response. The extra room goes to reasoning; the model does
 not lengthen its answers to fill it. Each continuation request re-sends the
 prompt and is billed, and a retry after a failed continuation request starts
 the generation again (see WithRetryConfig).
+
+WithEffort maps effort.XHigh and effort.Max to the XHIGH thinking level on
+models that accept it (model.Info.XHighThinkingLevel), such as Gemini 4 Neon
+and Hydrogen, and to HIGH on every other thinking-level model. Gemini 4 models
+ignore temperature, top_p and top_k, so their requests carry no temperature,
+even with WithTemperature set.
 
 Gemini 4 models think before every tool call, so their tools leave out the
 reasoning parameter googletool.FromTool injects, and the submit tool leaves

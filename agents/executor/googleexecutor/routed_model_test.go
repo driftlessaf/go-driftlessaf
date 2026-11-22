@@ -87,6 +87,13 @@ func TestDefaultTemperatureFollowsGeminiGeneration(t *testing.T) {
 		name:    "Gemini 3 explicit then omitted",
 		model:   "gemini-3.8-flash",
 		options: []Option[*testBindable, *testResponse]{WithTemperature[*testBindable, *testResponse](0.7), WithoutTemperature[*testBindable, *testResponse]()},
+	}, {
+		name:  "Gemini 4 default omitted",
+		model: "gemini-4-neon",
+	}, {
+		name:    "Gemini 4 explicit temperature omitted",
+		model:   "gemini-4-neon",
+		options: []Option[*testBindable, *testResponse]{WithTemperature[*testBindable, *testResponse](0.7)},
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
