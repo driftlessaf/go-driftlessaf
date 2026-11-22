@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -97,16 +98,23 @@ func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, req
 // vertexFlexRegion is the only location that serves Flex PayGo.
 const vertexFlexRegion = "global"
 
+// vertexFlexUnservedPrefixes lists the Gemini model id prefixes that Flex
+// PayGo does not serve. Flex PayGo serves only select Gemini 3.x and earlier
+// models.
+// See: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/flex-paygo
+var vertexFlexUnservedPrefixes = []string{"gemini-4"}
+
 // newVertexFlexGoogleGenAIAdapter constructs a Vertex AI adapter for the Google
 // Gen AI protocol that requests Flex PayGo on every call. Flex serves only the
 // global endpoint, so the adapter ignores the target's region. The
 // Flex-only header pair bills every request as Flex and skips Provisioned
-// Throughput.
+// Throughput. Binding a plan whose model Flex does not serve fails before a
+// client is built.
 func newVertexFlexGoogleGenAIAdapter(projectID string, newClient vertexGoogleGenAIClientFactory) (GoogleGenAIAdapter, error) {
 	if newClient == nil {
 		return nil, fmt.Errorf("%w: Vertex Google Gen AI client factory is nil", ErrInvalidAdapter)
 	}
-	return newVertexGoogleGenAIAdapter(projectID, vertexFlexRegion, func(ctx context.Context, config *genai.ClientConfig) (*genai.Client, error) {
+	adapter, err := newVertexGoogleGenAIAdapter(projectID, vertexFlexRegion, func(ctx context.Context, config *genai.ClientConfig) (*genai.Client, error) {
 		headers := config.HTTPOptions.Headers.Clone()
 		if headers == nil {
 			headers = http.Header{}
@@ -116,6 +124,30 @@ func newVertexFlexGoogleGenAIAdapter(projectID string, newClient vertexGoogleGen
 		config.HTTPOptions.Headers = headers
 		return newClient(ctx, config)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, plan modelrouter.Plan) (GoogleGenAIBinding, error) {
+		if err := checkVertexFlexServes(plan); err != nil {
+			return GoogleGenAIBinding{}, err
+		}
+		return adapter(ctx, plan)
+	}, nil
+}
+
+// checkVertexFlexServes returns an error when Flex PayGo does not serve the
+// plan's model. It checks the logical model and the last path segment of the
+// provider model ID, which can carry a "publishers/google/models/" prefix.
+func checkVertexFlexServes(plan modelrouter.Plan) error {
+	for _, id := range []string{plan.LogicalModel(), path.Base(plan.ProviderModelID())} {
+		lower := strings.ToLower(id)
+		for _, prefix := range vertexFlexUnservedPrefixes {
+			if strings.HasPrefix(lower, prefix) {
+				return fmt.Errorf("%w: Vertex AI Flex PayGo does not serve model %q; bind it on a Vertex backend without WithVertexFlex", ErrInvalidBinding, id)
+			}
+		}
+	}
+	return nil
 }
 
 // NewVertexAnthropicMessagesAdapter constructs a Vertex AI adapter for the
