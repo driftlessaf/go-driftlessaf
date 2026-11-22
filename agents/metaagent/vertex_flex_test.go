@@ -7,6 +7,7 @@ package metaagent
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/awsauth"
@@ -138,6 +139,118 @@ func TestVertexBackendFlexSelectsGlobalBinding(t *testing.T) {
 			}
 			if got := binding.ResourceLabels()["region"]; got != tc.want {
 				t.Errorf("region label: got = %q, want = %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVertexFlexAdapterRefusesGemini4 checks that the Flex adapter refuses a
+// plan for a model Flex PayGo does not serve before it builds a client, still
+// binds Gemini 3 with the Flex headers, and that the Standard adapter still
+// binds Gemini 4.
+func TestVertexFlexAdapterRefusesGemini4(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		flex            bool
+		logicalModel    string
+		providerModelID string
+		wantErr         bool
+		wantFlexHeader  string
+	}{
+		{name: "flex binds gemini 3", flex: true, logicalModel: "gemini-3.8-flash", providerModelID: "gemini-3.8-flash", wantFlexHeader: "flex"},
+		{name: "flex refuses gemini 4 neon", flex: true, logicalModel: "gemini-4-neon", providerModelID: "gemini-4-neon", wantErr: true},
+		{name: "flex refuses gemini 4 hydrogen", flex: true, logicalModel: "gemini-4-hydrogen", providerModelID: "gemini-4-hydrogen", wantErr: true},
+		{name: "flex refuses gemini 4 argon", flex: true, logicalModel: "gemini-4-argon", providerModelID: "gemini-4-argon", wantErr: true},
+		{name: "flex refuses a publisher-qualified gemini 4 id", flex: true, logicalModel: "gemini-4-neon", providerModelID: "publishers/google/models/gemini-4-neon", wantErr: true},
+		{name: "flex refuses a gemini 4 provider id behind a gemini 3 logical model", flex: true, logicalModel: "gemini-3.8-flash", providerModelID: "publishers/google/models/gemini-4-neon", wantErr: true},
+		{name: "standard binds gemini 4", logicalModel: "gemini-4-neon", providerModelID: "gemini-4-neon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := routedTestRoute(
+				modelrouter.Selection{Provider: modelrouter.ProviderVertexAI, LogicalModel: tc.logicalModel},
+				modelrouter.ProtocolGoogleGenAI,
+				tc.providerModelID,
+			)
+			plan, err := mustRouteRegistry(t, route).Resolve(route.Selection)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			var got *genai.ClientConfig
+			factory := func(_ context.Context, config *genai.ClientConfig) (*genai.Client, error) {
+				got = config
+				return &genai.Client{}, nil
+			}
+			var adapter GoogleGenAIAdapter
+			if tc.flex {
+				adapter, err = newVertexFlexGoogleGenAIAdapter("test-project", factory)
+			} else {
+				adapter, err = newVertexGoogleGenAIAdapter("test-project", "us-central1", factory)
+			}
+			if err != nil {
+				t.Fatalf("adapter constructor: %v", err)
+			}
+			_, err = adapter(t.Context(), plan)
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalidBinding) {
+					t.Fatalf("adapter: got err = %v, want ErrInvalidBinding", err)
+				}
+				if got != nil {
+					t.Error("client factory was called for a refused plan")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("adapter: %v", err)
+			}
+			if got == nil {
+				t.Fatal("client factory was not called")
+			}
+			if h := got.HTTPOptions.Headers.Get("X-Vertex-AI-LLM-Shared-Request-Type"); h != tc.wantFlexHeader {
+				t.Errorf("header X-Vertex-AI-LLM-Shared-Request-Type: got = %q, want = %q", h, tc.wantFlexHeader)
+			}
+		})
+	}
+}
+
+// TestVertexBackendFlexRefusesGemini4Target checks agent construction on a
+// Flex backend whose catalog declares both Gemini generations: the router
+// builds, the Gemini 3 target constructs, and the Gemini 4 target fails with
+// ErrInvalidBinding. The same Gemini 4 target constructs on a Standard backend.
+func TestVertexBackendFlexRefusesGemini4Target(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", fakeGoogleCredentials(t))
+
+	routes := []modelrouter.Route{
+		vertexRouterTestRoute(modelrouter.ProtocolGoogleGenAI, "gemini-3.8-flash"),
+		vertexRouterTestRoute(modelrouter.ProtocolGoogleGenAI, "gemini-4-neon"),
+	}
+	for _, tc := range []struct {
+		name    string
+		model   string
+		options []BackendOption
+		wantErr bool
+	}{
+		{name: "flex constructs gemini 3", model: "gemini-3.8-flash", options: []BackendOption{WithVertexFlex()}},
+		{name: "flex refuses gemini 4", model: "gemini-4-neon", options: []BackendOption{WithVertexFlex()}, wantErr: true},
+		{name: "standard constructs gemini 4", model: "gemini-4-neon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime, err := NewRuntime(routes, VertexBackend("", VertexConfig{ProjectID: "test-project"}, tc.options...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := runtime.Target(TargetConfig{Provider: modelrouter.ProviderVertexAI, Model: tc.model, Region: "us-central1"})
+			_, err = NewWithTarget[*testRequest](t.Context(), target, routedTestConfig(t))
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalidBinding) {
+					t.Fatalf("NewWithTarget: got err = %v, want ErrInvalidBinding", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewWithTarget: %v", err)
 			}
 		})
 	}

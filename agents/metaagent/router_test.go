@@ -688,6 +688,59 @@ func TestVertexGoogleGenAIRequestTimeoutEnablesDeadlineRetries(t *testing.T) {
 	}
 }
 
+// TestVertexGoogleGenAIAdapterBoundsLongDecodeRequests checks that a
+// long-decode route gets a per-request timeout and deadline retries when the
+// adapter sets none, and that an explicit timeout or another route keeps its
+// own behavior.
+func TestVertexGoogleGenAIAdapterBoundsLongDecodeRequests(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		logicalModel   string
+		requestTimeout time.Duration
+		want           time.Duration
+	}{
+		{name: "long-decode route without a timeout", logicalModel: "gemini-4-argon", want: longDecodeRequestTimeout},
+		{name: "long-decode route with an explicit timeout", logicalModel: "gemini-4-argon", requestTimeout: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "other route without a timeout", logicalModel: "gemini-3-flash-preview"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := routedTestRoute(
+				modelrouter.Selection{Provider: modelrouter.ProviderVertexAI, LogicalModel: tc.logicalModel},
+				modelrouter.ProtocolGoogleGenAI,
+				"publishers/google/models/"+tc.logicalModel,
+			)
+			plan, err := mustRouteRegistry(t, route).Resolve(route.Selection)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			var got *genai.ClientConfig
+			adapter, err := newVertexGoogleGenAIAdapterWithRequestTimeout("test-project", "us-central1", tc.requestTimeout, func(_ context.Context, config *genai.ClientConfig) (*genai.Client, error) {
+				got = config
+				return &genai.Client{}, nil
+			})
+			if err != nil {
+				t.Fatalf("newVertexGoogleGenAIAdapterWithRequestTimeout: %v", err)
+			}
+			binding, err := adapter(t.Context(), plan)
+			if err != nil {
+				t.Fatalf("adapter: %v", err)
+			}
+			var timeout time.Duration
+			if got.HTTPOptions.Timeout != nil {
+				timeout = *got.HTTPOptions.Timeout
+			}
+			if timeout != tc.want {
+				t.Errorf("request timeout: got = %s, want = %s", timeout, tc.want)
+			}
+			if got, want := binding.retryRequestTimeouts, tc.want > 0; got != want {
+				t.Errorf("retryRequestTimeouts: got = %v, want = %v", got, want)
+			}
+		})
+	}
+}
+
 func TestValidateVertexPlanRejectsMisattributionBeforeClientConstruction(t *testing.T) {
 	t.Parallel()
 

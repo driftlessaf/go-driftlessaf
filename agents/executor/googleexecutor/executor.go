@@ -32,6 +32,7 @@ import (
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
+	"chainguard.dev/driftlessaf/workqueue"
 	"github.com/chainguard-dev/clog"
 	"google.golang.org/genai"
 )
@@ -49,13 +50,16 @@ type Interface[Request promptbuilder.Bindable, Response any] interface {
 // tools without converging on a result.
 const DefaultMaxTurns = 200
 
-// maxEmptyResponseRetries bounds how many consecutive empty turns (no text, no
-// tool call) the executor will nudge the model through before giving up.
+// maxConsecutiveNudges bounds how many turns in a row the executor answers
+// with a corrective nudge before giving up. A nudge follows a turn with
+// neither text nor a tool call, a turn cut off at the output token limit, and
+// a malformed function call. Each nudge resends the whole conversation, so an
+// unbounded run of them spends the turn budget on a model that is stuck.
 //
 // Three is enough to absorb the observed transient rate while still failing
 // fast when a model is genuinely stuck: the enricher golden suite measured a
 // ~5% per-call empty rate, which three attempts drives to ~0.01%.
-const maxEmptyResponseRetries = 3
+const maxConsecutiveNudges = 3
 
 // DefaultToolCallConcurrency is the default bound on how many of a single
 // turn's tool calls run concurrently. Models routinely emit several
@@ -154,6 +158,14 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 
 	// omitToolReasoning is toolReasoning resolved against the model in New.
 	omitToolReasoning bool
+
+	// thinkingSummaries, when non-nil, overrides whether requests ask for
+	// thinking summaries. When nil, they are asked for unless model.Resolve
+	// reports OmitThinkingSummaries. Set via WithThinkingSummaries.
+	thinkingSummaries *bool
+
+	// includeThoughts is thinkingSummaries resolved against the model in New.
+	includeThoughts bool
 }
 
 // New creates a new Google AI executor with the given configuration
@@ -220,11 +232,15 @@ func New[Request promptbuilder.Bindable, Response any](
 		return nil, fmt.Errorf("model %q rejects a thinking budget: set its thinking level with WithEffort instead of WithThinking", exec.capabilityModel)
 	}
 	exec.cacheUnsupported = info.NoExplicitContextCache
-	// Resolved after options so WithModel, WithRoutedModel and
-	// WithToolReasoning may come in any order.
+	// Resolved after options so WithModel, WithRoutedModel,
+	// WithToolReasoning and WithThinkingSummaries may come in any order.
 	exec.omitToolReasoning = info.OmitToolReasoning
 	if exec.toolReasoning != nil {
 		exec.omitToolReasoning = !*exec.toolReasoning
+	}
+	exec.includeThoughts = !info.OmitThinkingSummaries
+	if exec.thinkingSummaries != nil {
+		exec.includeThoughts = *exec.thinkingSummaries
 	}
 	if exec.omitToolReasoning && exec.submitTool.NoReasoning != nil {
 		exec.submitTool = *exec.submitTool.NoReasoning
@@ -284,10 +300,9 @@ func (e *executor[Request, Response]) Execute(
 		return resp, fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// Append the user prompt suffix, when configured. Gemini has no
-	// per-block prompt-cache semantics (context caching covers system
-	// instructions and tools via CachedContent), so plain concatenation
-	// preserves the prompt content without any block layout.
+	// Gemini takes no cache breakpoints, so a configured user prompt suffix
+	// is concatenated onto the prompt; WithUserPromptSuffix describes how
+	// that keeps the payload a cacheable prefix.
 	suffix, err := promptbuilder.BindSuffix(e.userPromptSuffix, request)
 	if err != nil {
 		return resp, err
@@ -397,11 +412,11 @@ func (e *executor[Request, Response]) staticRequest(tools map[string]googletool.
 	switch {
 	case e.thinkingBudget != nil:
 		config.ThinkingConfig = &genai.ThinkingConfig{
-			IncludeThoughts: true,
+			IncludeThoughts: e.includeThoughts,
 			ThinkingBudget:  e.thinkingBudget,
 		}
 	case e.effortLevel != "":
-		config.ThinkingConfig = thinkingConfigForEffort(e.capabilityModel, e.effortLevel)
+		config.ThinkingConfig = thinkingConfigForEffort(e.capabilityModel, e.effortLevel, e.includeThoughts)
 	}
 	return config, toolDeclarations, nil
 }
@@ -648,10 +663,10 @@ func (e *executor[Request, Response]) runConversation(
 	// it at function exit. Every error path must use `return ..., err` (or set
 	// the named err before bare-returning) — a bare return inside a nested
 	// block where err is shadowed via `:=` would silently bypass Fail.
-	// emptyTurns counts consecutive turns where the model returned neither text
-	// nor a tool call. See the empty-response branch at the bottom of
-	// executeTurn for why that is retried rather than treated as terminal.
-	emptyTurns := 0
+	// nudges counts the consecutive turns answered with a corrective nudge,
+	// bounded by maxConsecutiveNudges. A turn with text or a tool call resets
+	// it, so only a run of unusable turns fails the run.
+	nudges := 0
 
 	// callModel sends req as llmTurn's model call, so the turn's span covers
 	// the call, and records the response's token counts and the answering
@@ -763,10 +778,29 @@ func (e *executor[Request, Response]) runConversation(
 			return zero, nil, true, fmt.Errorf("response blocked due to recitation: %s", candidate.FinishMessage)
 		}
 
+		// countNudge counts this turn as one the executor answers with a
+		// corrective nudge. It returns an error once more than
+		// maxConsecutiveNudges turns in a row needed one. reason names this
+		// turn's problem in the log and the error.
+		countNudge := func(reason string) error {
+			nudges++
+			if nudges > maxConsecutiveNudges {
+				clog.ErrorContext(ctx, "Model returned an unusable response repeatedly",
+					"reason", reason, "attempts", nudges, "turn", turn)
+				return fmt.Errorf(
+					"unexpected response format from model (%s) after %d consecutive attempts", reason, nudges)
+			}
+			return nil
+		}
+
 		// Check for MAX_TOKENS - response was truncated due to output token limit
 		if candidate.FinishReason == genai.FinishReasonMaxTokens {
+			if err := countNudge(fmt.Sprintf("stopped at the output token limit of %d", e.maxOutputTokens)); err != nil {
+				return zero, nil, true, err
+			}
 			clog.WarnContext(ctx, "Gemini hit max output tokens limit, asking for more concise response",
 				"finish_message", candidate.FinishMessage,
+				"attempt", nudges,
 				"turn", turn)
 
 			// Ask the model to provide a more concise version
@@ -780,10 +814,15 @@ func (e *executor[Request, Response]) runConversation(
 
 		// Check for malformed function call
 		if candidate.FinishReason == genai.FinishReasonMalformedFunctionCall {
+			if err := countNudge("malformed function call"); err != nil {
+				return zero, nil, true, err
+			}
 			// On this finish reason the message quotes the call the model
 			// failed to emit, arguments included, so only its size is logged.
 			clog.WarnContext(ctx, "Model attempted a malformed function call, asking it to retry",
-				"finish_message_bytes", len(candidate.FinishMessage))
+				"finish_message_bytes", len(candidate.FinishMessage),
+				"attempt", nudges,
+				"turn", turn)
 
 			// Build available function names for retry message
 			var funcNames []string
@@ -822,15 +861,11 @@ func (e *executor[Request, Response]) runConversation(
 			default:
 				return nil, false, nil
 			}
-			emptyTurns++
-			if emptyTurns > maxEmptyResponseRetries {
-				clog.ErrorContext(ctx, "Model returned an unusable response repeatedly",
-					"reason", what, "attempts", emptyTurns, "turn", turn)
-				return nil, true, fmt.Errorf(
-					"unexpected response format from model (%s) after %d attempts", what, emptyTurns)
+			if err := countNudge(what); err != nil {
+				return nil, true, err
 			}
 			clog.WarnContext(ctx, "Model returned an unusable response, asking it to continue",
-				"reason", what, "attempt", emptyTurns, "turn", turn)
+				"reason", what, "attempt", nudges, "turn", turn)
 			retryMsg := genai.Part{Text: "Your last response was empty. Please continue: either call one of the available functions or provide your answer as text."}
 			retryParts, err := replayLastInput(ctx, retryMsg)
 			if err != nil {
@@ -907,6 +942,9 @@ func (e *executor[Request, Response]) runConversation(
 		}
 		if hasText {
 			responseText = turnText.String()
+		}
+		if hasText || len(toolCalls) > 0 {
+			nudges = 0
 		}
 
 		// If there are tool calls, execute them and send responses
@@ -1113,18 +1151,19 @@ func (e *executor[Request, Response]) generationConfig() *genai.GenerateContentC
 		MaxOutputTokens: e.maxOutputTokens,
 		Labels:          e.resourceLabels,
 	}
-	// A long-decode model stops each request at its per-request output cap
-	// (32,768 tokens for the unary requests this executor sends, 65,536 for a
-	// stream) with a continuation token. Ask the SDK to follow it, so one
-	// call returns the whole generation up to MaxOutputTokens.
-	if model.Resolve(e.capabilityModel).LongDecode {
+	info := model.Resolve(e.capabilityModel)
+	// A long-decode model stops each request at a per-request output cap,
+	// which varies by model and sits below MaxOutputTokens, and returns a
+	// continuation token. Ask the SDK to follow it, so one call returns the
+	// whole generation up to MaxOutputTokens.
+	if info.LongDecode {
 		config.AutomaticContinuation = new(true)
 	}
 	// Gemini 3 models are tuned for the provider's default temperature, and
 	// low values can cause looping or degraded output, so the 0.1 executor
 	// default applies only to Gemini 2.x. An explicit WithTemperature is sent
-	// for any model.
-	if !e.omitTemperature && (e.temperatureSet || !usesThinkingLevel(e.capabilityModel)) {
+	// to any model that takes sampling parameters.
+	if !e.omitTemperature && info.SamplingParams && (e.temperatureSet || !usesThinkingLevel(e.capabilityModel)) {
 		config.Temperature = new(e.temperature)
 	}
 	return config
@@ -1188,6 +1227,15 @@ func (e *executor[Request, Response]) sendWithRetry(
 	})
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
+		// A request the transport dropped on every attempt fails the item as
+		// infrastructure WITHOUT a requeue delay. A delayed requeue resets the
+		// workqueue's attempt count, and a drop can repeat for one request (a
+		// long decode that always outlives a proxy's stream limit), so it
+		// stays on the counted path that dead-letters.
+		if isTransportDrop(err) {
+			clog.WarnContext(ctx, "Vertex AI request dropped by the transport on every attempt", "operation", operation, "error", err)
+			return nil, agenttrace.TurnLatency{}, workqueue.InfrastructureError(fmt.Errorf("%s: %w", errContext, err))
+		}
 		if requeueErr := retry.RequeueIfRetryable(ctx, err, isRetryable, "Vertex AI"); requeueErr != nil {
 			return nil, agenttrace.TurnLatency{}, requeueErr
 		}

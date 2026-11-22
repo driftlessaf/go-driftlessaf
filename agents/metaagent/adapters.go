@@ -75,9 +75,9 @@ type GoogleGenAIBinding struct {
 	plan           modelrouter.Plan
 	client         *genai.Client
 	resourceLabels map[string]string
-	// retryRequestTimeouts is set only by the timeout-configured Vertex
-	// adapter. It keeps request-deadline retry behavior coupled to the client
-	// that actually creates those deadlines.
+	// retryRequestTimeouts is set only by a Vertex adapter that gives its
+	// client a request timeout. It keeps request-deadline retry behavior
+	// coupled to the client that actually creates those deadlines.
 	retryRequestTimeouts bool
 	initialized          bool
 }

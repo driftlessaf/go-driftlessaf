@@ -7,6 +7,7 @@ package googleexecutor_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,12 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/googletool"
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 )
 
@@ -237,5 +240,89 @@ func TestExecuteMergesLongDecode(t *testing.T) {
 	}
 	if !strings.Contains(bodies[1], `"continuationToken":"Y29udGludWUtMQ=="`) {
 		t.Errorf("request 2 does not send back the continuation token: %s", bodies[1])
+	}
+}
+
+// TestThinkingLevelAndTemperatureOnTheWire checks the generation config a
+// request actually carries. effort.XHigh and effort.Max reach the wire as
+// XHIGH on a model that accepts it and as HIGH on the others. An explicit
+// temperature reaches only a model that takes sampling parameters.
+func TestThinkingLevelAndTemperatureOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		model     string
+		level     effort.Level
+		wantLevel string
+		wantTemp  *float32
+	}{
+		{name: "neon xhigh", model: "gemini-4-neon", level: effort.XHigh, wantLevel: "XHIGH"},
+		{name: "neon max", model: "gemini-4-neon", level: effort.Max, wantLevel: "XHIGH"},
+		{name: "neon high", model: "gemini-4-neon", level: effort.High, wantLevel: "HIGH"},
+		{name: "hydrogen xhigh", model: "gemini-4-hydrogen", level: effort.XHigh, wantLevel: "XHIGH"},
+		{name: "hydrogen max", model: "gemini-4-hydrogen", level: effort.Max, wantLevel: "XHIGH"},
+		{name: "argon xhigh", model: "gemini-4-argon", level: effort.XHigh, wantLevel: "HIGH"},
+		{name: "argon max", model: "gemini-4-argon", level: effort.Max, wantLevel: "HIGH"},
+		{name: "gemini 3 xhigh", model: "gemini-3.8-flash", level: effort.XHigh, wantLevel: "HIGH", wantTemp: new(float32(0.7))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var mu sync.Mutex
+			var first []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				if first == nil {
+					first = body
+				}
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"answer\": \"42\"}"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3,"totalTokenCount":13}}`)
+			}))
+			t.Cleanup(srv.Close)
+
+			prompt, err := promptbuilder.NewPrompt("hello")
+			if err != nil {
+				t.Fatalf("NewPrompt: %v", err)
+			}
+			exec, err := googleexecutor.New[errCapRequest, errCapResponse](
+				newTestClient(t, srv.URL),
+				prompt,
+				googleexecutor.WithModel[errCapRequest, errCapResponse](tt.model),
+				googleexecutor.WithEffort[errCapRequest, errCapResponse](tt.level),
+				googleexecutor.WithTemperature[errCapRequest, errCapResponse](0.7),
+				googleexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+				googleexecutor.WithMaxTurns[errCapRequest, errCapResponse](1),
+			)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := exec.Execute(t.Context(), errCapRequest{}, nil); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			var body struct {
+				GenerationConfig struct {
+					Temperature    *float32 `json:"temperature"`
+					ThinkingConfig struct {
+						ThinkingLevel string `json:"thinkingLevel"`
+					} `json:"thinkingConfig"`
+				} `json:"generationConfig"`
+			}
+			if err := json.Unmarshal(first, &body); err != nil {
+				t.Fatalf("decoding request: %v", err)
+			}
+			if got := body.GenerationConfig.ThinkingConfig.ThinkingLevel; got != tt.wantLevel {
+				t.Errorf("thinkingLevel: got = %q, want = %q", got, tt.wantLevel)
+			}
+			if diff := cmp.Diff(tt.wantTemp, body.GenerationConfig.Temperature); diff != "" {
+				t.Errorf("temperature (-want, +got):\n%s", diff)
+			}
+		})
 	}
 }

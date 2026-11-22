@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/executor/openai/chatcompletionexecutor"
+	"chainguard.dev/driftlessaf/agents/model"
 	"chainguard.dev/driftlessaf/agents/modelrouter"
 	"github.com/anthropics/anthropic-sdk-go"
 	sdkoption "github.com/anthropics/anthropic-sdk-go/option"
@@ -38,9 +40,20 @@ type vertexAnthropicMessagesFactory func(context.Context, string, string) (anthr
 type vertexAnthropicCredentialsOptionFactory func(context.Context, string, string, *google.Credentials) sdkoption.RequestOption
 type vertexTokenSourceFactory func(context.Context, ...string) (oauth2.TokenSource, error)
 
+// longDecodeRequestTimeout bounds each Google Gen AI request on a long-decode
+// route when the adapter sets no request timeout of its own. One request
+// returns up to 65,536 output tokens, and the provider asks clients to allow
+// at least 15 minutes per request. The bound applies to each HTTP request, so
+// a generation that continues across requests is not cut short. A request
+// that stalls past the bound is retried rather than holding the turn until
+// the caller's deadline.
+const longDecodeRequestTimeout = 20 * time.Minute
+
 // NewVertexGoogleGenAIAdapter constructs a Vertex AI adapter for the Google
 // Gen AI protocol. Application Default Credentials remain captured by the SDK
-// client and never enter a route or plan.
+// client and never enter a route or plan. On a long-decode route (Gemini 4)
+// each request is bounded by a 20-minute timeout, and the executor retries a
+// request that reaches it; other routes have no per-request bound.
 func NewVertexGoogleGenAIAdapter(projectID, region string) (GoogleGenAIAdapter, error) {
 	return newVertexGoogleGenAIAdapter(projectID, region, genai.NewClient)
 }
@@ -78,8 +91,12 @@ func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, req
 			Location: config.region,
 			Backend:  genai.BackendVertexAI,
 		}
-		if requestTimeout > 0 {
-			clientConfig.HTTPOptions.Timeout = &requestTimeout
+		timeout := requestTimeout
+		if timeout == 0 && model.Resolve(plan.LogicalModel()).LongDecode {
+			timeout = longDecodeRequestTimeout
+		}
+		if timeout > 0 {
+			clientConfig.HTTPOptions.Timeout = &timeout
 		}
 		client, err := newClient(ctx, clientConfig)
 		if err != nil {
@@ -89,7 +106,7 @@ func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, req
 		if err != nil {
 			return GoogleGenAIBinding{}, err
 		}
-		binding.retryRequestTimeouts = requestTimeout > 0
+		binding.retryRequestTimeouts = timeout > 0
 		return binding, nil
 	}, nil
 }
@@ -97,16 +114,23 @@ func newVertexGoogleGenAIAdapterWithRequestTimeout(projectID, region string, req
 // vertexFlexRegion is the only location that serves Flex PayGo.
 const vertexFlexRegion = "global"
 
+// vertexFlexUnservedPrefixes lists the Gemini model id prefixes that Flex
+// PayGo does not serve. Flex PayGo serves only select Gemini 3.x and earlier
+// models.
+// See: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/flex-paygo
+var vertexFlexUnservedPrefixes = []string{"gemini-4"}
+
 // newVertexFlexGoogleGenAIAdapter constructs a Vertex AI adapter for the Google
 // Gen AI protocol that requests Flex PayGo on every call. Flex serves only the
 // global endpoint, so the adapter ignores the target's region. The
 // Flex-only header pair bills every request as Flex and skips Provisioned
-// Throughput.
+// Throughput. Binding a plan whose model Flex does not serve fails before a
+// client is built.
 func newVertexFlexGoogleGenAIAdapter(projectID string, newClient vertexGoogleGenAIClientFactory) (GoogleGenAIAdapter, error) {
 	if newClient == nil {
 		return nil, fmt.Errorf("%w: Vertex Google Gen AI client factory is nil", ErrInvalidAdapter)
 	}
-	return newVertexGoogleGenAIAdapter(projectID, vertexFlexRegion, func(ctx context.Context, config *genai.ClientConfig) (*genai.Client, error) {
+	adapter, err := newVertexGoogleGenAIAdapter(projectID, vertexFlexRegion, func(ctx context.Context, config *genai.ClientConfig) (*genai.Client, error) {
 		headers := config.HTTPOptions.Headers.Clone()
 		if headers == nil {
 			headers = http.Header{}
@@ -116,6 +140,30 @@ func newVertexFlexGoogleGenAIAdapter(projectID string, newClient vertexGoogleGen
 		config.HTTPOptions.Headers = headers
 		return newClient(ctx, config)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, plan modelrouter.Plan) (GoogleGenAIBinding, error) {
+		if err := checkVertexFlexServes(plan); err != nil {
+			return GoogleGenAIBinding{}, err
+		}
+		return adapter(ctx, plan)
+	}, nil
+}
+
+// checkVertexFlexServes returns an error when Flex PayGo does not serve the
+// plan's model. It checks the logical model and the last path segment of the
+// provider model ID, which can carry a "publishers/google/models/" prefix.
+func checkVertexFlexServes(plan modelrouter.Plan) error {
+	for _, id := range []string{plan.LogicalModel(), path.Base(plan.ProviderModelID())} {
+		lower := strings.ToLower(id)
+		for _, prefix := range vertexFlexUnservedPrefixes {
+			if strings.HasPrefix(lower, prefix) {
+				return fmt.Errorf("%w: Vertex AI Flex PayGo does not serve model %q; bind it on a Vertex backend without WithVertexFlex", ErrInvalidBinding, id)
+			}
+		}
+	}
+	return nil
 }
 
 // NewVertexAnthropicMessagesAdapter constructs a Vertex AI adapter for the
