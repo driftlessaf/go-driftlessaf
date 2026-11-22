@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strings"
 
-	"chainguard.dev/driftlessaf/agents/executor/internal/execshared"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 )
@@ -118,14 +117,10 @@ func responseCodeFromMessage(s string) int {
 // Vertex sometimes returns a structured error whose code we don't classify
 // as retryable (e.g. 529) but whose message is unambiguously transient (e.g.
 // "Overloaded"), and conversely gRPC errors that surface as plain strings
-// have no structured code at all. A transport drop (isTransportDrop) carries
-// no status and is retryable too: the request itself was sound.
+// have no structured code at all.
 func isRetryableVertexError(err error) bool {
 	if err == nil {
 		return false
-	}
-	if isTransportDrop(err) {
-		return true
 	}
 	switch responseCodeFromError(err) {
 	case 429, // rate limited
@@ -147,28 +142,6 @@ func isRetryableVertexError(err error) bool {
 		return true
 	}
 	return false
-}
-
-// isTransportDrop reports whether err is the transport dropping a request
-// mid-flight; see execshared.IsTransportDrop for the shapes. The chat records
-// a turn only once GenerateContent returns the whole generation, so a drop on
-// any of a long decode's continuation requests leaves the history unchanged.
-// A re-send then starts the generation again rather than repeating part of it.
-func isTransportDrop(err error) bool {
-	return execshared.IsTransportDrop(err, hasVertexVerdict)
-}
-
-// hasVertexVerdict reports whether err carries a Vertex AI API error: the
-// provider answered the request, and its status code says how.
-func hasVertexVerdict(err error) bool {
-	if _, ok := errors.AsType[*genai.APIError](err); ok {
-		return true
-	}
-	if _, ok := errors.AsType[genai.APIError](err); ok {
-		return true
-	}
-	_, ok := errors.AsType[*googleapi.Error](err)
-	return ok
 }
 
 // isCacheRejection reports whether a Caches.Create error is a provider

@@ -133,38 +133,6 @@ func TestThinkingConfigForEffort(t *testing.T) {
 			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevelHigh},
 		},
 		{
-			name: "neon high stays HIGH", model: "gemini-4-neon", level: effort.High,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevelHigh},
-		},
-		{
-			name: "neon xhigh is XHIGH", model: "gemini-4-neon", level: effort.XHigh,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevel("XHIGH")},
-		},
-		{
-			name: "neon max takes its top level XHIGH", model: "gemini-4-neon", level: effort.Max,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevel("XHIGH")},
-		},
-		{
-			name: "hydrogen xhigh is XHIGH", model: "gemini-4-hydrogen", level: effort.XHigh,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevel("XHIGH")},
-		},
-		{
-			name: "hydrogen max takes its top level XHIGH", model: "gemini-4-hydrogen", level: effort.Max,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevel("XHIGH")},
-		},
-		{
-			name: "argon clamps xhigh to HIGH", model: "gemini-4-argon", level: effort.XHigh,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevelHigh},
-		},
-		{
-			name: "argon clamps max to HIGH", model: "gemini-4-argon", level: effort.Max,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevelHigh},
-		},
-		{
-			name: "carbon clamps xhigh to HIGH", model: "gemini-4-carbon", level: effort.XHigh,
-			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingLevel: genai.ThinkingLevelHigh},
-		},
-		{
 			name: "gemini 2.5 low budget", model: "gemini-2.5-flash", level: effort.Low,
 			want: &genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: new(int32(1024))},
 		},
@@ -188,7 +156,7 @@ func TestThinkingConfigForEffort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := thinkingConfigForEffort(tt.model, tt.level, true)
+			got := thinkingConfigForEffort(tt.model, tt.level)
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("thinkingConfigForEffort(%q, %q) mismatch (-want, +got):\n%s", tt.model, tt.level, diff)
 			}

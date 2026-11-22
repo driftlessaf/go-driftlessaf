@@ -81,10 +81,6 @@ func WithRoutedModel[Request promptbuilder.Bindable, Response any](providerModel
 // Without this option, the executor sends a temperature of 0.1 to Gemini 2.x
 // models and omits it for Gemini 3 models, which are tuned for the provider
 // default. Low values can cause Gemini 3 models to loop.
-//
-// Requests to a model whose model.Info.SamplingParams is false, such as
-// Gemini 4, never carry a temperature, even with this option set. Those
-// models ignore the value.
 func WithTemperature[Request promptbuilder.Bindable, Response any](temperature float32) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
 		if temperature < 0.0 || temperature > 2.0 {
@@ -175,18 +171,6 @@ func WithToolReasoning[Request promptbuilder.Bindable, Response any](include boo
 	}
 }
 
-// WithThinkingSummaries sets whether requests ask for thinking summaries,
-// which land in trace.Reasoning when agenttrace.WithPayloadsEnabled is set on
-// the context. Without this option they are asked for unless the model's
-// provider facts set model.Info.OmitThinkingSummaries. It takes effect only
-// when WithEffort or WithThinking configures thinking.
-func WithThinkingSummaries[Request promptbuilder.Bindable, Response any](enable bool) Option[Request, Response] {
-	return func(e *executor[Request, Response]) error {
-		e.thinkingSummaries = &enable
-		return nil
-	}
-}
-
 // WithSystemInstructions sets the system instructions for the model
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {
@@ -233,10 +217,9 @@ func WithAppendedSystemInstructions[Request promptbuilder.Bindable, Response any
 // share one large payload but vary a small trailing instruction (for example
 // multi-pass reviewers examining one changeset through different lenses) keep
 // the payload in the main prompt and the varying instruction in the suffix.
-// Gemini takes no cache breakpoints, so the suffix is concatenated onto the
-// prompt. The provider's implicit cache matches on a shared request prefix,
-// so executions that vary only the suffix can hit the cache for the payload
-// ahead of it. A request that
+// Vertex AI context caching has no per-block prefix semantics — it caches
+// system instructions and tools via CachedContent — so the suffix is simply
+// concatenated and there is no cache-shaping side effect. A request that
 // implements promptbuilder.SuffixBindable binds its per-execution values into
 // the suffix; for any other request it must be fully bound by the caller.
 func WithUserPromptSuffix[Request promptbuilder.Bindable, Response any](suffix *promptbuilder.Prompt) Option[Request, Response] {
@@ -314,15 +297,15 @@ func WithEffort[Request promptbuilder.Bindable, Response any](level effort.Level
 
 // thinkingConfigForEffort maps the provider-neutral effort level onto the
 // generation of Gemini thinking control the model understands.
-func thinkingConfigForEffort(model string, level effort.Level, includeThoughts bool) *genai.ThinkingConfig {
+func thinkingConfigForEffort(model string, level effort.Level) *genai.ThinkingConfig {
 	if usesThinkingLevel(model) {
 		return &genai.ThinkingConfig{
-			IncludeThoughts: includeThoughts,
-			ThinkingLevel:   thinkingLevelForEffort(model, level),
+			IncludeThoughts: true,
+			ThinkingLevel:   thinkingLevelForEffort(level),
 		}
 	}
 	return &genai.ThinkingConfig{
-		IncludeThoughts: includeThoughts,
+		IncludeThoughts: true,
 		ThinkingBudget:  new(thinkingBudgetForEffort(level)),
 	}
 }
@@ -335,25 +318,15 @@ func usesThinkingLevel(modelName string) bool {
 	return model.Resolve(modelName).ThinkingControl == model.ThinkingControlLevel
 }
 
-// thinkingLevelXHigh is the thinking level above HIGH, which the genai SDK
-// declares no constant for.
-const thinkingLevelXHigh genai.ThinkingLevel = "XHIGH"
-
 // thinkingLevelForEffort maps the shared scale onto Gemini thinking levels.
-// XHigh and Max take the model's top level: XHIGH where the registry sets
-// model.Info.XHighThinkingLevel, HIGH on every other model.
-func thinkingLevelForEffort(modelName string, level effort.Level) genai.ThinkingLevel {
+// Gemini's scale tops out at HIGH, so XHigh and Max clamp to it.
+func thinkingLevelForEffort(level effort.Level) genai.ThinkingLevel {
 	switch level {
 	case effort.Low:
 		return genai.ThinkingLevelLow
 	case effort.Medium:
 		return genai.ThinkingLevelMedium
-	case effort.High:
-		return genai.ThinkingLevelHigh
-	default: // XHigh, Max
-		if model.Resolve(modelName).XHighThinkingLevel {
-			return thinkingLevelXHigh
-		}
+	default: // High, XHigh, Max
 		return genai.ThinkingLevelHigh
 	}
 }

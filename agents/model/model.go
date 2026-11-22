@@ -70,10 +70,6 @@ type Info struct {
 	AutomaticToolChoiceOnly bool
 	// ThinkingControl is the Gemini thinking-knob generation the model takes.
 	ThinkingControl ThinkingControl
-	// XHighThinkingLevel reports that a thinking-level model accepts the
-	// XHIGH thinking level, one step above HIGH. Other thinking-level models
-	// accept HIGH at most.
-	XHighThinkingLevel bool
 	// ContextWindow is the serving context window in tokens, covering input
 	// and output together. Zero means unknown: callers that enforce an input
 	// budget must supply the window themselves.
@@ -106,10 +102,6 @@ type Info struct {
 	// as output tokens the model must generate and later turns replay.
 	// See: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
 	OmitToolReasoning bool
-	// OmitThinkingSummaries reports that requests should not ask for thinking
-	// summaries unless the caller opts in. The summaries only reach traces, and
-	// on Gemini 4 generating them adds model time to every turn.
-	OmitThinkingSummaries bool
 }
 
 // SupportsEffort reports whether the provider accepts the effort level
@@ -172,8 +164,6 @@ var contextWindows = map[string]int64{
 	"claude-mythos-5-1":               1_000_000,
 	"gemini-4-argon":                  1_048_576,
 	"gemini-4-argon-cyber-permissive": 1_048_576,
-	"gemini-4-hydrogen":               1_048_576,
-	"gemini-4-neon":                   1_048_576,
 }
 
 var samplingParamsRemovedPrefixes = []string{
@@ -320,16 +310,6 @@ var gemini4Prefixes = []string{"gemini-4"}
 // thinking and output tokens share; long decodes can fill it with output.
 const gemini4MaxOutputTokens = 1_048_576
 
-// xhighThinkingLevelModels are the Gemini ids that set
-// Info.XHighThinkingLevel. Entries are exact ids, not prefixes: Gemini 4
-// Argon and Carbon accept HIGH at most, so a new Gemini 4 id reports no XHIGH
-// until it is verified to accept it.
-// See: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking
-var xhighThinkingLevelModels = []string{
-	"gemini-4-hydrogen",
-	"gemini-4-neon",
-}
-
 // geminiInfo derives the capability surface for a Gemini model id.
 func geminiInfo(id string) Info {
 	info := Info{
@@ -339,17 +319,12 @@ func geminiInfo(id string) Info {
 		ThinkingControl: geminiThinkingControl(id),
 		ContextWindow:   contextWindows[id],
 	}
-	info.XHighThinkingLevel = slices.Contains(xhighThinkingLevelModels, id)
 	if hasAnyPrefix(id, gemini4Prefixes) {
 		info.NoThinkingBudget = true
-		// Gemini 4 ignores temperature, top_p and top_k, and returns a 400
-		// for out-of-range values.
-		info.SamplingParams = false
 		info.NoExplicitContextCache = true
 		info.MaxOutputTokens = gemini4MaxOutputTokens
 		info.LongDecode = true
 		info.OmitToolReasoning = true
-		info.OmitThinkingSummaries = true
 	}
 	return info
 }

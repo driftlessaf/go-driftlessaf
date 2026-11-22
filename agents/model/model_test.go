@@ -73,21 +73,16 @@ func TestResolve(t *testing.T) {
 		ThinkingControl: model.ThinkingControlLevel,
 	}
 	// gemini4 is the Gemini 4 surface: thinking levels only, no explicit
-	// context cache, long decodes up to the shared 1,048,576-token window,
-	// tools without the injected reasoning parameter, and no thinking summaries.
+	// context cache, long decodes up to the shared 1,048,576-token window, and
+	// tools without the injected reasoning parameter.
 	gemini4 := geminiLevel
 	gemini4.NoThinkingBudget = true
-	gemini4.SamplingParams = false
 	gemini4.NoExplicitContextCache = true
 	gemini4.MaxOutputTokens = 1_048_576
 	gemini4.LongDecode = true
 	gemini4.OmitToolReasoning = true
-	gemini4.OmitThinkingSummaries = true
 	gemini4Argon := gemini4
 	gemini4Argon.ContextWindow = 1_048_576
-	// Neon and Hydrogen also take the XHIGH thinking level.
-	gemini4XHigh := gemini4Argon
-	gemini4XHigh.XHighThinkingLevel = true
 	openAICompat := model.Info{
 		Backend:        model.BackendOpenAICompat,
 		Efforts:        fullScale,
@@ -214,13 +209,9 @@ func TestResolve(t *testing.T) {
 		{"gemini-pro-early-exp3", geminiLevel},
 		{"gemini-4-argon", gemini4Argon},
 		{"gemini-4-argon-cyber-permissive", gemini4Argon},
-		{"gemini-4-neon", gemini4XHigh},
-		{"gemini-4-hydrogen", gemini4XHigh},
-		// A Gemini 4 id with no table entries takes the family surface, an
-		// unknown context window and no XHIGH level, even next to a listed id.
+		// An unverified Gemini 4 id takes the family surface but reports an
+		// unknown context window.
 		{"gemini-4-ultra", gemini4},
-		{"gemini-4-carbon", gemini4},
-		{"gemini-4-neon-exp", gemini4},
 		// Unparseable Gemini versions fall back to the budget control.
 		{"gemini-ultra", geminiBudget},
 		{"gemini-exp-1206", geminiBudget},
@@ -295,9 +286,6 @@ func TestResolveContextWindow(t *testing.T) {
 		{"claude-sonnet-4-6", 0},
 		{"claude-sonnet-5-5@default", 0},
 		{"gemini-2.5-pro", 0},
-		{"gemini-4-neon", 1_048_576},
-		{"gemini-4-hydrogen", 1_048_576},
-		{"gemini-4-neon-exp", 0},
 		{"made-up-model-7", 0},
 	}
 	for _, tt := range tests {
@@ -305,36 +293,6 @@ func TestResolveContextWindow(t *testing.T) {
 			t.Parallel()
 			if got := model.Resolve(tt.id).ContextWindow; got != tt.want {
 				t.Errorf("Resolve(%q).ContextWindow: got = %d, want = %d", tt.id, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestResolveXHighThinkingLevel pins which models take the XHIGH thinking
-// level: only listed ids, so a Gemini 4 id that stops at HIGH, a Gemini 3 id,
-// a neighbouring id and a non-Gemini id all report false.
-func TestResolveXHighThinkingLevel(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		id   string
-		want bool
-	}{
-		{"gemini-4-neon", true},
-		{"gemini-4-hydrogen", true},
-		{"gemini-4-argon", false},
-		{"gemini-4-argon-cyber-permissive", false},
-		{"gemini-4-carbon", false},
-		{"gemini-4-neon-exp", false},
-		{"gemini-3.8-flash", false},
-		{"gemini-2.5-pro", false},
-		{"claude-opus-5-5", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.id, func(t *testing.T) {
-			t.Parallel()
-			if got := model.Resolve(tt.id).XHighThinkingLevel; got != tt.want {
-				t.Errorf("Resolve(%q).XHighThinkingLevel: got = %t, want = %t", tt.id, got, tt.want)
 			}
 		})
 	}

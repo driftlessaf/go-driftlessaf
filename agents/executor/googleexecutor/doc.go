@@ -69,14 +69,11 @@ The executor supports various configuration options:
   - WithEffort: Enable thinking via the provider-neutral effort scale
   - WithToolReasoning: Send or leave out the injected tool reasoning parameter
     (left out by default for models whose provider facts set OmitToolReasoning)
-  - WithThinkingSummaries: Ask for thinking summaries or leave them out (left
-    out by default for models whose provider facts set OmitThinkingSummaries)
 
 # Thinking Mode
 
 Thinking mode allows Gemini to show its internal reasoning process. When enabled,
-thought summaries are captured in the trace, unless WithThinkingSummaries(false)
-or the model's provider facts leave them out. WithThinking sets a raw token budget,
+thought blocks are captured in the trace. WithThinking sets a raw token budget,
 which Gemini 2.x models take; Gemini 3.x models, including the default, take a
 discrete thinking level, so use WithEffort with them:
 
@@ -106,9 +103,8 @@ where each block contains:
 Gemini 4 models take a thinking level and reject a thinking budget, so New
 refuses WithThinking on them; use WithEffort. They also reject explicit context
 caches, so the executor sends system instructions and tools inline and relies on
-the provider's implicit prefix cache. A single request returns at most 65,536
-output tokens (32,768 for the unary requests this executor sends to Gemini 4
-Argon and Carbon), but a generation can continue across
+the provider's implicit prefix cache. A single request returns at most 32,768
+output tokens (65,536 for a stream), but a generation can continue across
 requests up to 1,048,576 tokens, input included: WithMaxOutputTokens accepts values up to that limit,
 and the SDK follows the continuation tokens and merges the parts and usage
 into one response. The extra room goes to reasoning; the model does
@@ -116,18 +112,10 @@ not lengthen its answers to fill it. Each continuation request re-sends the
 prompt and is billed, and a retry after a failed continuation request starts
 the generation again (see WithRetryConfig).
 
-WithEffort maps effort.XHigh and effort.Max to the XHIGH thinking level on
-models that accept it (model.Info.XHighThinkingLevel), such as Gemini 4 Neon
-and Hydrogen, and to HIGH on every other thinking-level model. Gemini 4 models
-ignore temperature, top_p and top_k, so their requests carry no temperature,
-even with WithTemperature set.
-
 Gemini 4 models think before every tool call, so their tools leave out the
 reasoning parameter googletool.FromTool injects, and the submit tool leaves
-out its own; WithToolReasoning(true) keeps them. Requests to Gemini 4 also
-leave out thinking summaries, which add model time to every turn and are only
-recorded in traces. WithThinkingSummaries(true) asks for them, and with
-payloads enabled the trace then records why the model acted.
+out its own; WithToolReasoning(true) keeps them. With payloads enabled, the
+trace's thought summaries record why the model acted instead.
 
 # Suspend and Resume
 
@@ -156,8 +144,7 @@ The executor automatically integrates with the evals package for tracing:
 The executor provides comprehensive error handling:
   - Template rendering errors
   - Chat creation failures
-  - Malformed function calls, empty turns and turns cut off at the output
-    token limit, each answered with a nudge, up to three turns in a row
+  - Malformed function calls (with automatic retry)
   - Response parsing errors
   - Tool execution errors
 

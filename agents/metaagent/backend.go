@@ -32,8 +32,7 @@ type backendOptions struct {
 // latency of minutes. Flex serves only the global endpoint: Gemini routes use
 // it whatever region the target names, and the other protocols keep the
 // target's region and run as before. Without this option every call is
-// unchanged. Other backends reject it. Flex does not serve Gemini 4 models, so
-// constructing an agent for one on a Flex backend fails with ErrInvalidBinding.
+// unchanged. Other backends reject it.
 func WithVertexFlex() BackendOption {
 	return func(options *backendOptions) { options.vertexFlex = true }
 }

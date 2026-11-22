@@ -12,8 +12,8 @@ SPDX-License-Identifier: Apache-2.0
 // top_p, top_k) are accepted, whether the Claude extended-thinking budget
 // parameter is accepted, and which generation of Gemini thinking knob
 // applies. Gemini 4 ids also report the parameters that generation rejects
-// (thinkingBudget, explicit context caches), its long-decode output limit, and
-// that requests skip thinking summaries by default. Claude ids whose tool inputs must not ask for reasoning report
+// (thinkingBudget, explicit context caches) and its long-decode output
+// limit. Claude ids whose tool inputs must not ask for reasoning report
 // OmitToolReasoning. Jev ids ("jev-") and Hopper resolve to a backend with
 // no parameter surface at all, since those models take typed questions rather
 // than a conversation.
