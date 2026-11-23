@@ -7,6 +7,7 @@ package agenttrace
 
 import (
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,6 +138,103 @@ func TestCostViewAppliesGPTLongContextToEveryTerm(t *testing.T) {
 	if got := strings.Count(sql, gptTier); got != tierTerms {
 		t.Errorf("tier predicates with the GPT 272K rule: got = %d, want = %d (one per Large Context term)", got, tierTerms)
 	}
+}
+
+// caseArm matches one model arm of the view's CASE: the RE2 pattern and the
+// pricing model it selects.
+var caseArm = regexp.MustCompile(`REGEXP_CONTAINS\(LOWER\(IFNULL\(a\.model_for_pricing, ''\)\), r'([^']+)'\)\s+THEN '([^']+)'`)
+
+// TestCostViewResolvesModelIDs runs the view's CASE arms, in order, over
+// model IDs as traces record them, and checks that each resolves to the
+// expected pricing model and that the model has a Standard price row.
+// BigQuery and Go both use RE2, so the patterns behave the same here.
+func TestCostViewResolvesModelIDs(t *testing.T) {
+	sql := readCostView(t)
+
+	type arm struct {
+		re    *regexp.Regexp
+		model string
+	}
+	var arms []arm
+	for _, m := range caseArm.FindAllStringSubmatch(sql, -1) {
+		arms = append(arms, arm{re: regexp.MustCompile(m[1]), model: m[2]})
+	}
+	if len(arms) == 0 {
+		t.Fatal("cost view has no model CASE arms; update this test to the view's shape")
+	}
+	standard := standardModels(sql)
+
+	resolve := func(id string) string {
+		id = strings.ToLower(id)
+		for _, a := range arms {
+			if a.re.MatchString(id) {
+				return a.model
+			}
+		}
+		return ""
+	}
+
+	for _, test := range []struct {
+		id   string
+		want string
+	}{
+		{id: "gemini-3.8-flash", want: "gemini-3.8-flash"},
+		{id: "gemini-4-hydrogen", want: "gemini-4-hydrogen"},
+		{id: "google/gemini-4-hydrogen", want: "gemini-4-hydrogen"},
+		{id: "gemini-4-neon", want: "gemini-4-neon"},
+		{id: "Gemini-4-Neon@default", want: "gemini-4-neon"},
+		{id: "gemini-4-argon", want: "gemini-4-argon"},
+		{id: "gemini-4-argon-cyber-permissive", want: "gemini-4-argon"},
+		{id: "gemini-4-carbon", want: "gemini-4-carbon"},
+		{id: "gemini-4-carbon-cyber-permissive", want: "gemini-4-carbon"},
+		{id: "claude-sonnet-5-5@default", want: "claude-sonnet-5-5"},
+		// An experimental or unlisted ID has no list price, so it stays NULL
+		// rather than borrowing a near name's rates.
+		{id: "gemini-4-neon-exp", want: ""},
+		{id: "gemini-4-ultra", want: ""},
+	} {
+		t.Run(test.id, func(t *testing.T) {
+			got := resolve(test.id)
+			if got != test.want {
+				t.Errorf("pricing model: got = %q, want = %q", got, test.want)
+			}
+			if got == "" {
+				return
+			}
+			if _, ok := standard[got]; !ok {
+				t.Errorf("pricing model %q has no Standard price row", got)
+			}
+		})
+	}
+}
+
+// TestCostViewPricesEveryMatchedModel checks that every pricing model a CASE
+// arm selects has a Standard price row, so a new arm cannot leave its traces
+// unpriced.
+func TestCostViewPricesEveryMatchedModel(t *testing.T) {
+	sql := readCostView(t)
+
+	standard := standardModels(sql)
+	arms := caseArm.FindAllStringSubmatch(sql, -1)
+	if len(arms) == 0 {
+		t.Fatal("cost view has no model CASE arms; update this test to the view's shape")
+	}
+	for _, m := range arms {
+		if _, ok := standard[m[2]]; !ok {
+			t.Errorf("CASE arm %q selects %q, which has no Standard price row", m[1], m[2])
+		}
+	}
+}
+
+// standardModels returns the pricing models that have a Standard price row.
+func standardModels(sql string) map[string]struct{} {
+	models := make(map[string]struct{})
+	for _, f := range structRows(sql) {
+		if len(f) == 7 && f[1] == "'Standard'" {
+			models[strings.Trim(f[0], "'")] = struct{}{}
+		}
+	}
+	return models
 }
 
 func readCostView(t *testing.T) string {

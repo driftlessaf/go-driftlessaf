@@ -141,6 +141,15 @@ WITH prices AS (
     -- request is billed at the $1.50 / $7.50 list rate below.
     STRUCT('gemini-3.6-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0),
     STRUCT('gemini-3.8-flash',              'Standard',      NULL, 1.5e-6,  7.5e-6, 1.5e-7,  0.0),
+    -- Gemini 4: uniform across context size; cache read = 0.05x input. These
+    -- are the global endpoint's rates; a regional endpoint bills 10% more, and
+    -- the view does not record which one served a call. The cyber-permissive
+    -- variants bill at their base model's rates. Retrieved 2026-11-23 from the
+    -- Cloud Billing catalog.
+    STRUCT('gemini-4-hydrogen',             'Standard',      NULL, 1.5e-6,  7.5e-6, 7.5e-8,  0.0),
+    STRUCT('gemini-4-neon',                 'Standard',      NULL, 3.0e-6,  1.5e-5, 1.5e-7,  0.0),
+    STRUCT('gemini-4-argon',                'Standard',      NULL, 4.0e-6,  2.0e-5, 2.0e-7,  0.0),
+    STRUCT('gemini-4-carbon',               'Standard',      NULL, 4.0e-6,  2.0e-5, 2.0e-7,  0.0),
     -- grok-4.7 (xAI on Vertex AI): $2.00 in / $6.00 out / $0.50 cached-in per
     -- MTok up to 200K input tokens. Above 200K, every token in the call bills
     -- at $4.00 / $12.00 / $1.00. No cache-write charge. xAI direct rates match
@@ -233,6 +242,10 @@ matched AS (
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.5-flash-lite(@.*)?$')                   THEN 'gemini-3.5-flash-lite'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.6-flash(@.*)?$')                        THEN 'gemini-3.6-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.8-flash(@.*)?$')                        THEN 'gemini-3.8-flash'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-hydrogen(@.*)?$')                        THEN 'gemini-4-hydrogen'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-neon(@.*)?$')                            THEN 'gemini-4-neon'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-argon(-cyber-permissive)?(@.*)?$')       THEN 'gemini-4-argon'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-carbon(-cyber-permissive)?(@.*)?$')      THEN 'gemini-4-carbon'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(xai/)?grok-4\.7(@.*)?$')                                   THEN 'grok-4.7'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(openai/)?gpt-6\.1-terra$')                                  THEN 'gpt-6.1-terra'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(openai/)?gpt-6-astra$')                                     THEN 'gpt-6-astra'
