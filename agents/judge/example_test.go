@@ -11,6 +11,7 @@ import (
 	"math/rand"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/evals"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
@@ -235,6 +236,32 @@ func ExampleNewVertex_gemini() {
 		ReferenceAnswer: "42",
 		ActualAnswer:    "The answer is 42",
 		Criterion:       "completeness - response should include the exact answer",
+	})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Score: %.2f\n", judgment.Score)
+}
+
+// ExampleWithEffort demonstrates setting the judge's reasoning effort. The
+// option applies to either backend; on a Gemini 4 model, low effort is sent as
+// the LOW thinking level.
+func ExampleWithEffort() {
+	ctx := context.Background()
+
+	judgeInstance, err := judge.NewVertex(ctx, "my-project", "global", "gemini-4-hydrogen",
+		judge.WithEffort(effort.Low))
+	if err != nil {
+		fmt.Printf("Error creating judge: %v\n", err)
+		return
+	}
+
+	judgment, err := judgeInstance.Judge(ctx, &judge.Request{
+		Mode:         judge.StandaloneMode,
+		ActualAnswer: "Paris is the capital of France.",
+		Criterion:    "factual accuracy - response should be correct",
 	})
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

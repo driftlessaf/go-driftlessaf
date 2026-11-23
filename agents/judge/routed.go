@@ -33,16 +33,22 @@ func NewWithTarget(ctx context.Context, target metaagent.Target) (Interface, err
 // NewRouted constructs a judge from an explicit route selection. It resolves
 // one immutable plan, invokes exactly one protocol-typed adapter, and never
 // falls back to another provider or the legacy environment-selected path.
-func NewRouted(ctx context.Context, router *metaagent.Router, selection modelrouter.Selection) (Interface, error) {
-	return newRouted(ctx, router, selection, defaultMaxTokens)
+// The route must serve every capability the options require, such as the
+// level WithEffort sets, before the adapter is invoked.
+func NewRouted(ctx context.Context, router *metaagent.Router, selection modelrouter.Selection, opts ...Option) (Interface, error) {
+	return newRouted(ctx, router, selection, defaultMaxTokens, opts...)
 }
 
-func newRouted(ctx context.Context, router *metaagent.Router, selection modelrouter.Selection, maxTokens int64) (Interface, error) {
+func newRouted(ctx context.Context, router *metaagent.Router, selection modelrouter.Selection, maxTokens int64, opts ...Option) (Interface, error) {
+	var o settings
+	for _, opt := range opts {
+		opt(&o)
+	}
 	resolution, err := router.Resolve(selection)
 	if err != nil {
 		return nil, fmt.Errorf("creating routed judge: %w", err)
 	}
-	requirements := modelrouter.Requirements{MaximumOutputTokens: true}
+	requirements := modelrouter.Requirements{MaximumOutputTokens: true, Effort: o.effort}
 
 	switch resolution.Plan().Protocol() {
 	case modelrouter.ProtocolGoogleGenAI:
@@ -53,13 +59,13 @@ func newRouted(ctx context.Context, router *metaagent.Router, selection modelrou
 		if err != nil {
 			return nil, fmt.Errorf("creating routed judge: %w", err)
 		}
-		return newRoutedGoogle(binding, int32(maxTokens))
+		return newRoutedGoogle(binding, int32(maxTokens), o.effort)
 	case modelrouter.ProtocolAnthropicMessages:
 		binding, err := resolution.BindAnthropicMessages(ctx, requirements)
 		if err != nil {
 			return nil, fmt.Errorf("creating routed judge: %w", err)
 		}
-		return newRoutedClaude(binding, maxTokens)
+		return newRoutedClaude(binding, maxTokens, o.effort)
 	default:
 		return nil, fmt.Errorf("creating routed judge: protocol %q is not supported", resolution.Plan().Protocol())
 	}

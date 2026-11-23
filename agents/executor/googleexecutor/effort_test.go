@@ -103,6 +103,34 @@ func TestUsesThinkingLevel(t *testing.T) {
 	}
 }
 
+func TestThinkingBudgetForEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		model string
+		level effort.Level
+		want  int32
+	}{
+		{name: "budget model, low", model: "gemini-2.5-flash", level: effort.Low, want: 1024},
+		{name: "budget model, medium", model: "gemini-2.5-flash", level: effort.Medium, want: 8192},
+		{name: "budget model, high is dynamic", model: "gemini-2.5-flash", level: effort.High, want: 0},
+		{name: "budget model, xhigh", model: "gemini-2.5-pro", level: effort.XHigh, want: 24576},
+		{name: "budget model, max", model: "gemini-2.5-flash", level: effort.Max, want: 24576},
+		{name: "budget model, no level", model: "gemini-2.5-flash", level: "", want: 0},
+		{name: "thinking-level model", model: "gemini-4-neon", level: effort.Medium, want: 0},
+		{name: "gemini 3 thinking-level model", model: "gemini-3.5-flash", level: effort.Max, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ThinkingBudgetForEffort(tt.model, tt.level); got != tt.want {
+				t.Errorf("ThinkingBudgetForEffort(%q, %q): got = %d, want = %d", tt.model, tt.level, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestThinkingConfigForEffort(t *testing.T) {
 	t.Parallel()
 

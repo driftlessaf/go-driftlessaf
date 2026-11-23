@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
 	"chainguard.dev/driftlessaf/agents/internal/claudebackend"
 	"chainguard.dev/driftlessaf/agents/metaagent"
@@ -53,9 +54,12 @@ type claudeJudgeConstruction struct {
 	attribution     *agenttrace.Attribution
 	// maxTokens caps each judgement's output. Zero selects defaultMaxTokens.
 	maxTokens int64
+	// effort is the reasoning effort of each judgement. Empty sends no
+	// output_config.effort, so the model keeps its default.
+	effort effort.Level
 }
 
-func newRoutedClaude(binding metaagent.AnthropicMessagesBinding, maxTokens int64) (Interface, error) {
+func newRoutedClaude(binding metaagent.AnthropicMessagesBinding, maxTokens int64, level effort.Level) (Interface, error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
 	attribution.Serving.Location = binding.ResourceLabels()["region"]
@@ -69,6 +73,7 @@ func newRoutedClaude(binding metaagent.AnthropicMessagesBinding, maxTokens int64
 		resourceLabels:  binding.ResourceLabels(),
 		attribution:     &attribution,
 		maxTokens:       maxTokens,
+		effort:          level,
 	})
 }
 
@@ -78,6 +83,9 @@ func newClaudeWithMessages(construction claudeJudgeConstruction, opts ...claudee
 	execOpts := []claudeexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
 		claudeexecutor.WithMaxTokens[*Request, *Judgement](cmp.Or(construction.maxTokens, defaultMaxTokens)),
 		claudeexecutor.WithTemperature[*Request, *Judgement](0.1),
+	}
+	if construction.effort != "" {
+		execOpts = append(execOpts, claudeexecutor.WithEffort[*Request, *Judgement](construction.effort))
 	}
 	if construction.routed {
 		execOpts = append(execOpts,

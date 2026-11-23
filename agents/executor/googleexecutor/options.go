@@ -377,6 +377,19 @@ func thinkingBudgetForEffort(level effort.Level) int32 {
 	}
 }
 
+// ThinkingBudgetForEffort returns the fixed thinking budget, in tokens, that
+// WithEffort(level) sends to modelName. Gemini counts thinking and output
+// tokens together against max_output_tokens, so a caller that sets its own
+// output cap can add this budget to keep room for the answer. It returns 0
+// when the model takes a thinking level instead of a budget, when the level
+// is empty, and for High, which selects dynamic thinking.
+func ThinkingBudgetForEffort(modelName string, level effort.Level) int32 {
+	if level == "" || usesThinkingLevel(modelName) {
+		return 0
+	}
+	return max(thinkingBudgetForEffort(level), 0)
+}
+
 // SubmitResultProvider constructs tool metadata for submit_result.
 type SubmitResultProvider[Response any] func() (googletool.SubmitMetadata[Response], error)
 

@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/effort"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/metaagent"
 	"google.golang.org/genai"
@@ -54,9 +55,12 @@ type googleJudgeConstruction struct {
 	// maxOutputTokens caps each judgement's output. Zero selects
 	// defaultMaxTokens.
 	maxOutputTokens int32
+	// effort is the reasoning effort of each judgement. Empty sends no
+	// thinking configuration, so the model keeps its default.
+	effort effort.Level
 }
 
-func newRoutedGoogle(binding metaagent.GoogleGenAIBinding, maxOutputTokens int32) (Interface, error) {
+func newRoutedGoogle(binding metaagent.GoogleGenAIBinding, maxOutputTokens int32, level effort.Level) (Interface, error) {
 	plan := binding.Plan()
 	attribution := routedAttribution(plan)
 	attribution.Serving.Location = binding.ResourceLabels()["region"]
@@ -69,6 +73,7 @@ func newRoutedGoogle(binding metaagent.GoogleGenAIBinding, maxOutputTokens int32
 		resourceLabels:  binding.ResourceLabels(),
 		attribution:     &attribution,
 		maxOutputTokens: maxOutputTokens,
+		effort:          level,
 	})
 }
 
@@ -100,6 +105,18 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 		Required: []string{"mode", "score", "reasoning", "suggestions"},
 	}
 
+	// The executor resolves model capabilities from the logical model on the
+	// routed path and from the provider model otherwise.
+	capabilityModel := construction.providerModelID
+	if construction.routed {
+		capabilityModel = construction.logicalModelID
+	}
+	// Gemini counts thinking tokens against max_output_tokens. On a model that
+	// takes a thinking budget, the cap grows by the budget the effort maps to,
+	// so the judgement keeps its own room.
+	maxOutputTokens := cmp.Or(construction.maxOutputTokens, int32(defaultMaxTokens)) +
+		googleexecutor.ThinkingBudgetForEffort(capabilityModel, construction.effort)
+
 	// Create one executor per mode using the pre-parsed templates from
 	// prompts.go; executors apply options read-only, so one slice is shared.
 	execOpts := []googleexecutor.Option[*Request, *Judgement]{ //nolint: prealloc
@@ -109,9 +126,12 @@ func newGoogleWithClient(construction googleJudgeConstruction, opts ...googleexe
 		// stable rubric in the system instruction preserves the prompt boundary
 		// while allowing Gemini's implicit prefix caching where eligible.
 		googleexecutor.WithoutCacheControl[*Request, *Judgement](),
-		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](cmp.Or(construction.maxOutputTokens, int32(defaultMaxTokens))),
+		googleexecutor.WithMaxOutputTokens[*Request, *Judgement](maxOutputTokens),
 		googleexecutor.WithResponseMIMEType[*Request, *Judgement]("application/json"),
 		googleexecutor.WithResponseSchema[*Request, *Judgement](responseSchema),
+	}
+	if construction.effort != "" {
+		execOpts = append(execOpts, googleexecutor.WithEffort[*Request, *Judgement](construction.effort))
 	}
 	if construction.routed {
 		execOpts = append(execOpts,

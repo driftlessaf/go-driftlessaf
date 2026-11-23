@@ -21,7 +21,8 @@ import (
 // Accepts optional executor options that will be passed through to the underlying executor.
 // System instructions passed that way are prepended to each mode's rubric,
 // which keeps the JSON output contract as the closing system text; they
-// cannot replace it.
+// cannot replace it. Option values, such as WithEffort, apply to either
+// backend.
 func NewVertex(ctx context.Context, projectID, region, modelName string, opts ...any) (Interface, error) {
 	return NewVertexWithLabels(ctx, projectID, region, modelName, nil, opts...)
 }
@@ -72,8 +73,20 @@ func newVertexWithLabels(
 	maps.Copy(merged, labels)
 	merged["model_name"] = modelLower
 
+	var o settings
+	for _, opt := range opts {
+		if judgeOpt, ok := opt.(Option); ok {
+			judgeOpt(&o)
+		}
+	}
+
+	// The judge's effort goes ahead of the caller's executor options, so an
+	// executor option the caller passes still has the last word.
 	if strings.HasPrefix(modelLower, "claude-") {
-		claudeOpts := make([]claudeexecutor.Option[*Request, *Judgement], 0, len(opts))
+		claudeOpts := make([]claudeexecutor.Option[*Request, *Judgement], 0, len(opts)+1)
+		if o.effort != "" {
+			claudeOpts = append(claudeOpts, claudeexecutor.WithEffort[*Request, *Judgement](o.effort))
+		}
 		for _, opt := range opts {
 			if claudeOpt, ok := opt.(claudeexecutor.Option[*Request, *Judgement]); ok {
 				claudeOpts = append(claudeOpts, claudeOpt)
@@ -83,7 +96,15 @@ func newVertexWithLabels(
 	}
 
 	if strings.HasPrefix(modelLower, "gemini-") {
-		googleOpts := make([]googleexecutor.Option[*Request, *Judgement], 0, len(opts))
+		googleOpts := make([]googleexecutor.Option[*Request, *Judgement], 0, len(opts)+2)
+		if o.effort != "" {
+			googleOpts = append(googleOpts, googleexecutor.WithEffort[*Request, *Judgement](o.effort))
+			// Gemini counts thinking tokens against max_output_tokens, so the
+			// cap grows by the budget the effort maps to, as on the routed path.
+			if budget := googleexecutor.ThinkingBudgetForEffort(modelName, o.effort); budget > 0 {
+				googleOpts = append(googleOpts, googleexecutor.WithMaxOutputTokens[*Request, *Judgement](int32(defaultMaxTokens)+budget))
+			}
+		}
 		for _, opt := range opts {
 			if googleOpt, ok := opt.(googleexecutor.Option[*Request, *Judgement]); ok {
 				googleOpts = append(googleOpts, googleOpt)
