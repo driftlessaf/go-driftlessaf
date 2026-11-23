@@ -79,6 +79,14 @@ type Config[Resp, CB any] struct {
 	// whose tool handlers mutate shared state without their own synchronization.
 	ToolCallConcurrency int
 
+	// WithholdToolArgs withholds from the "Executing tool call" log line
+	// every tool-call argument no toolcall.ArgLogPolicy allows, the submit
+	// tool's included. Set it on a single-shot call, whose submitted result
+	// can restate its input: with no tool declaring a policy, every argument
+	// is logged otherwise. See claudeexecutor.WithToolArgsWithheld. The
+	// Responses executor logs no tool arguments, so it needs none.
+	WithholdToolArgs bool
+
 	// MaxTokens caps the model's output tokens per turn. NewRouted maps it to
 	// the selected protocol's supported output-limit field after route
 	// capability validation. The compatibility New path retains its historical

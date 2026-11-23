@@ -97,6 +97,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// tool handlers are themselves safe for concurrent use (they share the
 	// trace, which is safe). Set via WithToolCallConcurrency.
 	toolCallConcurrency int
+	// toolArgsWithheld polices every run's "Executing tool call" line even when
+	// no tool declares an argument log policy. See WithToolArgsWithheld.
+	toolArgsWithheld bool
 }
 
 // New creates a new OpenAI-compatible executor.
@@ -282,7 +285,7 @@ func (e *executor[Request, Response]) Execute(
 	for name, t := range tools {
 		policies[name] = t.LogPolicy
 	}
-	argLog := execshared.NewArgLogRedactor(policies, heldOutNames...)
+	argLog := execshared.NewArgLogRedactor(policies, e.toolArgsWithheld, heldOutNames...)
 
 	// executeToolCall runs a single tool call and returns its serialized result.
 	// The handler writes any terminal result into resultPtr; each tool call in a

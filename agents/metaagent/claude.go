@@ -177,6 +177,10 @@ func newClaudeAgentWithMessages[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, claudeexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
 	}
 
+	if config.WithholdToolArgs {
+		executorOpts = append(executorOpts, claudeexecutor.WithToolArgsWithheld[Req, Resp]())
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, claudeexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}

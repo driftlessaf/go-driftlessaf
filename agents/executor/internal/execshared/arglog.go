@@ -21,8 +21,9 @@ const UnknownToolName = "[unknown]"
 // "Executing tool call" line. The zero value is unpoliced and logs every
 // argument, which is what every run did before policies existed.
 type ArgLogRedactor struct {
-	// policed is true when any tool declared a policy. It gates the whole run,
-	// so a tool added later without one is withheld rather than logged.
+	// policed is true when any tool declared a policy or the caller asked for
+	// withheld arguments. It gates the whole run, so a tool added later without
+	// a policy is withheld rather than logged.
 	policed  bool
 	loggable map[string]map[string]struct{}
 	// known names every tool the run serves. A call naming anything else took
@@ -31,10 +32,15 @@ type ArgLogRedactor struct {
 }
 
 // NewArgLogRedactor builds the redactor from a run's per-tool policies. A tool
-// absent from policies, or mapped to nil, declared none. heldOut names the
-// tools the run serves outside the policy map, such as submit and suspend.
-func NewArgLogRedactor(policies map[string]*toolcall.ArgLogPolicy, heldOut ...string) ArgLogRedactor {
-	r := ArgLogRedactor{known: make(map[string]struct{}, len(policies)+len(heldOut))}
+// absent from policies, or mapped to nil, declared none. withheld polices the
+// run even when no tool declares a policy, so every argument no policy allows
+// is withheld, the held-out tools' included. heldOut names the tools the run
+// serves outside the policy map, such as submit and suspend.
+func NewArgLogRedactor(policies map[string]*toolcall.ArgLogPolicy, withheld bool, heldOut ...string) ArgLogRedactor {
+	r := ArgLogRedactor{
+		policed: withheld,
+		known:   make(map[string]struct{}, len(policies)+len(heldOut)),
+	}
 	for name, policy := range policies {
 		r.known[name] = struct{}{}
 		if policy == nil {

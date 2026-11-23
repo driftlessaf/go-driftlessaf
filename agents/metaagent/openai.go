@@ -228,6 +228,10 @@ func newOpenAIAgentWithClient[Req promptbuilder.Bindable, Resp, CB any](
 		executorOpts = append(executorOpts, chatcompletionexecutor.WithToolCallConcurrency[Req, Resp](config.ToolCallConcurrency))
 	}
 
+	if config.WithholdToolArgs {
+		executorOpts = append(executorOpts, chatcompletionexecutor.WithToolArgsWithheld[Req, Resp]())
+	}
+
 	if config.SystemInstructions != nil {
 		executorOpts = append(executorOpts, chatcompletionexecutor.WithSystemInstructions[Req, Resp](config.SystemInstructions))
 	}

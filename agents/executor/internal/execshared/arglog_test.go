@@ -44,6 +44,7 @@ func TestArgLogRedactor_AppendArgs(t *testing.T) {
 
 	for name, tc := range map[string]struct {
 		policies map[string]*toolcall.ArgLogPolicy
+		withheld bool
 		tool     string
 		want     map[string]any
 	}{
@@ -53,6 +54,36 @@ func TestArgLogRedactor_AppendArgs(t *testing.T) {
 			policies: map[string]*toolcall.ArgLogPolicy{"git_grep": nil},
 			tool:     "git_grep",
 			want:     map[string]any{"args.ref": ref, "args.pattern": secret, "args.reasoning": secret},
+		},
+		// A run with no tool of its own serves only its submit tool, and
+		// without the opt-in it logs the submitted arguments.
+		"run with no tools logs the submit tool's values": {
+			policies: map[string]*toolcall.ArgLogPolicy{},
+			tool:     "submit_result",
+			want:     map[string]any{"args.ref": ref, "args.pattern": secret, "args.reasoning": secret},
+		},
+		// The opt-in polices a run in which no tool declares a policy, so the
+		// submit tool's arguments are counted.
+		"withheld run with no tools withholds the submit tool's values": {
+			policies: map[string]*toolcall.ArgLogPolicy{},
+			withheld: true,
+			tool:     "submit_result",
+			want:     map[string]any{WithheldArgCountKey: 3},
+		},
+		"withheld run withholds a tool that declared no policy": {
+			policies: map[string]*toolcall.ArgLogPolicy{"git_grep": nil},
+			withheld: true,
+			tool:     "git_grep",
+			want:     map[string]any{WithheldArgCountKey: 3},
+		},
+		// A policy still allows its arguments under the opt-in.
+		"withheld run keeps a policy's named argument": {
+			policies: map[string]*toolcall.ArgLogPolicy{
+				"git_grep": toolcall.NewArgLogPolicy("ref"),
+			},
+			withheld: true,
+			tool:     "git_grep",
+			want:     map[string]any{"args.ref": ref, WithheldArgCountKey: 2},
 		},
 		// A withheld argument is COUNTED, not named: the name comes from the
 		// model's JSON, so logging it would carry whatever the model wrote.
@@ -96,7 +127,7 @@ func TestArgLogRedactor_AppendArgs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			redactor := NewArgLogRedactor(tc.policies)
+			redactor := NewArgLogRedactor(tc.policies, tc.withheld)
 			got := argPairs(t, redactor.AppendArgs(nil, tc.tool, args))
 
 			// An exact count is the assertion that matters: a withheld argument
@@ -121,7 +152,7 @@ func TestArgLogRedactor_InventedArgumentNameIsNotLogged(t *testing.T) {
 
 	const injected = "the caller input names lib/index.ts"
 
-	redactor := NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": toolcall.NewArgLogPolicy("ref")})
+	redactor := NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": toolcall.NewArgLogPolicy("ref")}, false)
 
 	got := argPairs(t, redactor.AppendArgs(nil, "git_grep",
 		map[string]any{"ref": "4.1.0", injected: "1"}))
@@ -159,6 +190,7 @@ func TestArgLogRedactor_ToolName(t *testing.T) {
 
 	for name, tc := range map[string]struct {
 		policies map[string]*toolcall.ArgLogPolicy
+		withheld bool
 		heldOut  []string
 		call     string
 		want     string
@@ -184,11 +216,24 @@ func TestArgLogRedactor_ToolName(t *testing.T) {
 		"unpoliced run keeps an invented name": {
 			policies: map[string]*toolcall.ArgLogPolicy{"git_grep": nil}, call: injected, want: injected,
 		},
+		"run with no tools keeps an invented name": {
+			policies: map[string]*toolcall.ArgLogPolicy{}, heldOut: []string{"submit_result"}, call: injected, want: injected,
+		},
+		// The opt-in polices the name as well as the arguments.
+		"withheld run with no tools keeps its held-out name": {
+			policies: map[string]*toolcall.ArgLogPolicy{}, withheld: true, heldOut: []string{"submit_result"}, call: "submit_result", want: "submit_result",
+		},
+		"withheld run with no tools replaces an invented name": {
+			policies: map[string]*toolcall.ArgLogPolicy{}, withheld: true, heldOut: []string{"submit_result"}, call: injected, want: UnknownToolName,
+		},
+		"withheld run keeps a tool that declared no policy": {
+			policies: map[string]*toolcall.ArgLogPolicy{"git_grep": nil}, withheld: true, call: "git_grep", want: "git_grep",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got := NewArgLogRedactor(tc.policies, tc.heldOut...).ToolName(tc.call)
+			got := NewArgLogRedactor(tc.policies, tc.withheld, tc.heldOut...).ToolName(tc.call)
 			if got != tc.want {
 				t.Errorf("ToolName(%q): got = %q, want = %q", tc.call, got, tc.want)
 			}
@@ -214,7 +259,7 @@ func TestArgLogRedactor_ZeroValueIsUnpoliced(t *testing.T) {
 func TestArgLogRedactor_PreservesCallerKVs(t *testing.T) {
 	t.Parallel()
 
-	redactor := NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": toolcall.NewArgLogPolicy("ref")})
+	redactor := NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": toolcall.NewArgLogPolicy("ref")}, false)
 
 	kvs := []any{"tool", "git_grep", "id", "toolu_01"}
 	got := argPairs(t, redactor.AppendArgs(kvs, "git_grep", map[string]any{"pattern": "restricted-input-7742"}))

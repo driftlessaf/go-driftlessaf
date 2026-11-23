@@ -91,9 +91,10 @@ func gitGrepTool(policy *toolcall.ArgLogPolicy) openaistool.Metadata[errCapRespo
 	})
 }
 
-// runToolCall drives a real executor through one call to toolName with args,
-// then a submit, and returns everything written to the context's log sink.
-func runToolCall(t *testing.T, tools map[string]openaistool.Metadata[errCapResponse], toolName string, args map[string]any) *bytes.Buffer {
+// runToolCall drives a real executor configured with opts through one call to
+// toolName with args, then a submit, and returns everything written to the
+// context's log sink. A toolName of submit_result ends the run on that call.
+func runToolCall(t *testing.T, tools map[string]openaistool.Metadata[errCapResponse], toolName string, args map[string]any, opts ...chatcompletionexecutor.Option[errCapRequest, errCapResponse]) *bytes.Buffer {
 	t.Helper()
 
 	var mu sync.Mutex
@@ -127,9 +128,11 @@ func runToolCall(t *testing.T, tools map[string]openaistool.Metadata[errCapRespo
 	exec, err := chatcompletionexecutor.New[errCapRequest, errCapResponse](
 		client,
 		prompt,
-		chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.OpenAIToolForResponse[errCapResponse]),
-		chatcompletionexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
-		chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
+		append([]chatcompletionexecutor.Option[errCapRequest, errCapResponse]{
+			chatcompletionexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.OpenAIToolForResponse[errCapResponse]),
+			chatcompletionexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+			chatcompletionexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
+		}, opts...)...,
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -266,4 +269,87 @@ func TestToolCallLog_InventedToolNameIsWithheld(t *testing.T) {
 	if got := rec["args_withheld"]; got != float64(1) {
 		t.Errorf("args_withheld: got = %v, want = 1", got)
 	}
+}
+
+// submitArgs is a submission whose values carry the caller's input text.
+var submitArgs = map[string]any{
+	"reasoning": sensitiveReasoning,
+	"result":    map[string]any{"answer": sensitivePattern},
+}
+
+// A run with no tools of its own serves only its submit tool. Without
+// WithToolArgsWithheld it logs the submitted arguments, which is every
+// driftlessaf agent that has not set the option.
+func TestToolCallLog_RunWithNoToolsLogsSubmitArgs(t *testing.T) {
+	t.Parallel()
+
+	rec := toolCallRecord(t, runToolCall(t, nil, "submit_result", submitArgs), "submit_result")
+
+	if got := rec["args.reasoning"]; got != sensitiveReasoning {
+		t.Errorf("args.reasoning: got = %v, want = %q (a run without the option must log arguments as before)", got, sensitiveReasoning)
+	}
+	if _, ok := rec["args_withheld"]; ok {
+		t.Errorf("args_withheld: present = %v; a run without the option withholds nothing", rec["args_withheld"])
+	}
+}
+
+// WithToolArgsWithheld polices a run in which no tool declares a policy, so the
+// submit tool keeps its name and its arguments are counted.
+func TestToolCallLog_ToolArgsWithheldWithholdsSubmitArgs(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t, nil, "submit_result", submitArgs, chatcompletionexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+	rec := toolCallRecord(t, logs, "submit_result")
+
+	for key := range rec {
+		if strings.HasPrefix(key, "args.") {
+			t.Errorf("%s: present; WithToolArgsWithheld logs no argument that no policy allows", key)
+		}
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+}
+
+// Under WithToolArgsWithheld a name the run never registered is model text, so
+// it is replaced even though no tool declares a policy.
+func TestToolCallLog_ToolArgsWithheldReplacesInventedName(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t, nil, sensitiveReasoning, map[string]any{"ref": publicRef}, chatcompletionexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+	if got := toolCallRecord(t, logs, "[unknown]")["args_withheld"]; got != float64(1) {
+		t.Errorf("args_withheld: got = %v, want = 1", got)
+	}
+}
+
+// A run whose tools declare policies is already policed, so the option leaves
+// the allowlisted argument legible and withholds the rest.
+func TestToolCallLog_ToolArgsWithheldKeepsPolicyAllowedArgs(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t,
+		map[string]openaistool.Metadata[errCapResponse]{
+			"git_grep": gitGrepTool(toolcall.NewArgLogPolicy("ref")),
+		},
+		"git_grep",
+		map[string]any{
+			"ref":       publicRef,
+			"pattern":   sensitivePattern,
+			"reasoning": sensitiveReasoning,
+		},
+		chatcompletionexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+
+	rec := toolCallRecord(t, logs, "git_grep")
+	if got := rec["args.ref"]; got != publicRef {
+		t.Errorf("args.ref: got = %v, want = %q", got, publicRef)
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
 }

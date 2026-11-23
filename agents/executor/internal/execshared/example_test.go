@@ -132,7 +132,7 @@ func ExampleFailTurnUnlessSuspended() {
 
 func ExampleNewArgLogRedactor() {
 	// No tool declares a policy, so the run logs every argument value.
-	unpoliced := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": nil})
+	unpoliced := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{"git_grep": nil}, false)
 	fmt.Println(unpoliced.AppendArgs(nil, "git_grep",
 		map[string]any{"pattern": "restricted-input-7742"})...)
 
@@ -141,19 +141,26 @@ func ExampleNewArgLogRedactor() {
 	policed := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{
 		"git_grep":       toolcall.NewArgLogPolicy("ref"),
 		"git_log_search": nil,
-	})
+	}, false)
 	fmt.Println(policed.AppendArgs(nil, "git_log_search",
 		map[string]any{"pattern": "restricted-input-7742"})...)
 
+	// withheld polices a run in which no tool declares a policy, such as a
+	// single-shot call that serves only its submit tool.
+	withheld := execshared.NewArgLogRedactor(nil, true, "submit_result")
+	fmt.Println(withheld.AppendArgs(nil, "submit_result",
+		map[string]any{"summary": "restricted-input-7742"})...)
+
 	// Output:
 	// args.pattern restricted-input-7742
+	// args_withheld 1
 	// args_withheld 1
 }
 
 func ExampleArgLogRedactor_AppendArgs() {
 	redactor := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{
 		"git_grep": toolcall.NewArgLogPolicy("ref"),
-	})
+	}, false)
 
 	// An allowed argument keeps its name and value; anything else is counted,
 	// because the model chooses the names too. One call per argument here:
@@ -172,7 +179,7 @@ func ExampleArgLogRedactor_ToolName() {
 	// the policy map, so leaving it out would make a real call read as unknown.
 	redactor := execshared.NewArgLogRedactor(map[string]*toolcall.ArgLogPolicy{
 		"git_grep": toolcall.NewArgLogPolicy("ref"),
-	}, "submit_result")
+	}, false, "submit_result")
 
 	// The provider reports the name the model emitted, so a name the run never
 	// registered is model text and is replaced rather than logged.

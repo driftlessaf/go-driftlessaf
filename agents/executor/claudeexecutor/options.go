@@ -189,6 +189,26 @@ func WithToolCallConcurrency[Request promptbuilder.Bindable, Response any](n int
 	}
 }
 
+// WithToolArgsWithheld withholds from the "Executing tool call" log line every
+// tool-call argument that no toolcall.ArgLogPolicy allows, including the
+// arguments of the submit and suspend tools.
+//
+// Without it, a run in which no tool declares a policy logs every argument.
+// A single-shot call serves only its submit tool, so it declares none, and its
+// submitted result can carry the caller's input text. Set this option on such
+// an executor to keep that text out of the "Executing tool call" line. The
+// option covers that line only: other log lines and trace payloads can still
+// carry model text. The line still names the tool and counts the withheld
+// arguments, and a tool name the run never registered is logged as
+// "[unknown]". A run whose tools declare policies behaves the same with or
+// without it.
+func WithToolArgsWithheld[Request promptbuilder.Bindable, Response any]() Option[Request, Response] {
+	return func(e *executor[Request, Response]) error {
+		e.toolArgsWithheld = true
+		return nil
+	}
+}
+
 // WithSystemInstructions sets custom system instructions
 func WithSystemInstructions[Request promptbuilder.Bindable, Response any](prompt *promptbuilder.Prompt) Option[Request, Response] {
 	return func(e *executor[Request, Response]) error {

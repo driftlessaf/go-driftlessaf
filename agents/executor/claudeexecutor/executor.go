@@ -207,6 +207,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// when the registered tool handlers are themselves safe for concurrent use
 	// (they share the trace, which is safe). Set via WithToolCallConcurrency.
 	toolCallConcurrency int
+	// toolArgsWithheld polices every run's "Executing tool call" line even when
+	// no tool declares an argument log policy. See WithToolArgsWithheld.
+	toolArgsWithheld bool
 
 	// resultValidators gate the terminal submit tool. When the model calls the
 	// submit tool with a payload that parses, every validator runs concurrently
@@ -730,7 +733,7 @@ func (e *executor[Request, Response]) runConversation(
 	for name, t := range tools {
 		policies[name] = t.LogPolicy
 	}
-	argLog := execshared.NewArgLogRedactor(policies, heldOutNames...)
+	argLog := execshared.NewArgLogRedactor(policies, e.toolArgsWithheld, heldOutNames...)
 
 	// executeToolCall handles executing a single tool call and returning the
 	// result. The handler writes any terminal result into resultPtr; the

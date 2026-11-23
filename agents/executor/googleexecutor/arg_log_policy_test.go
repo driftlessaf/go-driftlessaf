@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
 	"chainguard.dev/driftlessaf/agents/executor/googleexecutor"
 	"chainguard.dev/driftlessaf/agents/promptbuilder"
 	"chainguard.dev/driftlessaf/agents/toolcall"
@@ -72,9 +73,21 @@ func gitGrepTool(policy *toolcall.ArgLogPolicy) googletool.Metadata[errCapRespon
 	})
 }
 
-// runToolCall drives a real executor through one call to toolName with args,
-// then a submit, and returns everything written to the context's log sink.
-func runToolCall(t *testing.T, tools map[string]googletool.Metadata[errCapResponse], toolName string, args map[string]any) *bytes.Buffer {
+// runToolCall drives a real executor configured with opts through one call to
+// toolName with args, then a submit, and returns everything written to the
+// context's log sink. A toolName of submit_result ends the run on that call.
+func runToolCall(t *testing.T, tools map[string]googletool.Metadata[errCapResponse], toolName string, args map[string]any, opts ...googleexecutor.Option[errCapRequest, errCapResponse]) *bytes.Buffer {
+	t.Helper()
+	logs, err := runToolCallErr(t, tools, toolName, args, opts...)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	return logs
+}
+
+// runToolCallErr is runToolCall for a run expected to end in an error, such
+// as the *checkpoint.Suspension a suspend call returns.
+func runToolCallErr(t *testing.T, tools map[string]googletool.Metadata[errCapResponse], toolName string, args map[string]any, opts ...googleexecutor.Option[errCapRequest, errCapResponse]) (*bytes.Buffer, error) {
 	t.Helper()
 
 	var mu sync.Mutex
@@ -100,9 +113,7 @@ func runToolCall(t *testing.T, tools map[string]googletool.Metadata[errCapRespon
 		t.Fatalf("NewPrompt: %v", err)
 	}
 
-	exec, err := googleexecutor.New[errCapRequest, errCapResponse](
-		newTestClient(t, srv.URL),
-		prompt,
+	opts = append([]googleexecutor.Option[errCapRequest, errCapResponse]{
 		googleexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](func() (googletool.SubmitMetadata[errCapResponse], error) {
 			return googletool.SubmitMetadata[errCapResponse]{
 				Definition: &genai.FunctionDeclaration{Name: "submit_result"},
@@ -121,17 +132,16 @@ func runToolCall(t *testing.T, tools map[string]googletool.Metadata[errCapRespon
 		// Context caching is orthogonal here and would need a faked
 		// Caches.Create endpoint.
 		googleexecutor.WithoutCacheControl[errCapRequest, errCapResponse](),
-	)
+	}, opts...)
+	exec, err := googleexecutor.New[errCapRequest, errCapResponse](newTestClient(t, srv.URL), prompt, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
 	logs := &bytes.Buffer{}
 	ctx := clog.WithLogger(t.Context(), clog.New(slog.NewJSONHandler(logs, nil)))
-	if _, err := exec.Execute(ctx, errCapRequest{}, tools); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	return logs
+	_, err = exec.Execute(ctx, errCapRequest{}, tools)
+	return logs, err
 }
 
 // toolCallRecord returns the one "Executing tool call" record for tool, failing
@@ -256,4 +266,114 @@ func TestToolCallLog_InventedToolNameIsWithheld(t *testing.T) {
 	if got := rec["args_withheld"]; got != float64(1) {
 		t.Errorf("args_withheld: got = %v, want = 1", got)
 	}
+}
+
+// submitArgs is a submission whose values carry the caller's input text.
+var submitArgs = map[string]any{
+	"answer":    sensitivePattern,
+	"reasoning": sensitiveReasoning,
+}
+
+// A run with no tools of its own serves only its submit tool. Without
+// WithToolArgsWithheld it logs the submitted arguments, which is every
+// driftlessaf agent that has not set the option.
+func TestToolCallLog_RunWithNoToolsLogsSubmitArgs(t *testing.T) {
+	t.Parallel()
+
+	rec := toolCallRecord(t, runToolCall(t, nil, "submit_result", submitArgs), "submit_result")
+
+	if got := rec["args.answer"]; got != sensitivePattern {
+		t.Errorf("args.answer: got = %v, want = %q (a run without the option must log arguments as before)", got, sensitivePattern)
+	}
+	if _, ok := rec["args_withheld"]; ok {
+		t.Errorf("args_withheld: present = %v; a run without the option withholds nothing", rec["args_withheld"])
+	}
+}
+
+// WithToolArgsWithheld polices a run in which no tool declares a policy, so the
+// submit tool keeps its name and its arguments are counted.
+func TestToolCallLog_ToolArgsWithheldWithholdsSubmitArgs(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t, nil, "submit_result", submitArgs, googleexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+	rec := toolCallRecord(t, logs, "submit_result")
+
+	for key := range rec {
+		if strings.HasPrefix(key, "args.") {
+			t.Errorf("%s: present; WithToolArgsWithheld logs no argument that no policy allows", key)
+		}
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+}
+
+// Under WithToolArgsWithheld a name the run never registered is model text, so
+// it is replaced even though no tool declares a policy.
+func TestToolCallLog_ToolArgsWithheldReplacesInventedName(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t, nil, sensitiveReasoning, map[string]any{"ref": publicRef}, googleexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+	if got := toolCallRecord(t, logs, "[unknown]")["args_withheld"]; got != float64(1) {
+		t.Errorf("args_withheld: got = %v, want = 1", got)
+	}
+}
+
+// A run whose tools declare policies is already policed, so the option leaves
+// the allowlisted argument legible and withholds the rest.
+func TestToolCallLog_ToolArgsWithheldKeepsPolicyAllowedArgs(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t,
+		map[string]googletool.Metadata[errCapResponse]{
+			"git_grep": gitGrepTool(toolcall.NewArgLogPolicy("ref")),
+		},
+		"git_grep",
+		map[string]any{
+			"ref":       publicRef,
+			"pattern":   sensitivePattern,
+			"reasoning": sensitiveReasoning,
+		},
+		googleexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+
+	rec := toolCallRecord(t, logs, "git_grep")
+	if got := rec["args.ref"]; got != publicRef {
+		t.Errorf("args.ref: got = %v, want = %q", got, publicRef)
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+}
+
+// The suspend tool is held out of the tool map like the submit tool, so under
+// WithToolArgsWithheld it must still be logged by name, not as "[unknown]",
+// with its arguments counted rather than logged.
+func TestToolCallLog_ToolArgsWithheldWithholdsSuspendArgs(t *testing.T) {
+	t.Parallel()
+
+	logs, err := runToolCallErr(t, nil, "ask",
+		map[string]any{"question": sensitivePattern, "context": sensitiveReasoning},
+		googleexecutor.WithSuspendTool[errCapRequest, errCapResponse](askTool),
+		googleexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+	if _, ok := checkpoint.AsSuspension(err); !ok {
+		t.Fatalf("Execute: got err = %v, want a *checkpoint.Suspension", err)
+	}
+
+	rec := toolCallRecord(t, logs, "ask")
+	for key := range rec {
+		if strings.HasPrefix(key, "args.") {
+			t.Errorf("%s: present; WithToolArgsWithheld logs no argument that no policy allows", key)
+		}
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
 }

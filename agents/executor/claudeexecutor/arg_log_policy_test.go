@@ -19,8 +19,14 @@ import (
 	"testing"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
+	"chainguard.dev/driftlessaf/agents/checkpoint"
+	"chainguard.dev/driftlessaf/agents/executor/claudeexecutor"
+	"chainguard.dev/driftlessaf/agents/promptbuilder"
+	"chainguard.dev/driftlessaf/agents/submitresult"
 	"chainguard.dev/driftlessaf/agents/toolcall"
 	"chainguard.dev/driftlessaf/agents/toolcall/claudetool"
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/chainguard-dev/clog"
 )
 
@@ -75,9 +81,21 @@ func gitGrepTool(policy *toolcall.ArgLogPolicy) claudetool.Metadata[errCapRespon
 	})
 }
 
-// runToolCall drives a real executor through one call to toolName with input,
-// then a submit, and returns everything written to the context's log sink.
-func runToolCall(t *testing.T, tools map[string]claudetool.Metadata[errCapResponse], toolName string, input map[string]any) *bytes.Buffer {
+// runToolCall drives a real executor configured with opts through one call to
+// toolName with input, then a submit, and returns everything written to the
+// context's log sink. A toolName of submit_result ends the run on that call.
+func runToolCall(t *testing.T, tools map[string]claudetool.Metadata[errCapResponse], toolName string, input map[string]any, opts ...claudeexecutor.Option[errCapRequest, errCapResponse]) *bytes.Buffer {
+	t.Helper()
+	logs, err := runToolCallErr(t, tools, toolName, input, opts...)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	return logs
+}
+
+// runToolCallErr is runToolCall for a run expected to end in an error, such
+// as the *checkpoint.Suspension a suspend call returns.
+func runToolCallErr(t *testing.T, tools map[string]claudetool.Metadata[errCapResponse], toolName string, input map[string]any, opts ...claudeexecutor.Option[errCapRequest, errCapResponse]) (*bytes.Buffer, error) {
 	t.Helper()
 
 	var mu sync.Mutex
@@ -99,10 +117,36 @@ func runToolCall(t *testing.T, tools map[string]claudetool.Metadata[errCapRespon
 
 	logs := &bytes.Buffer{}
 	ctx := clogJSON(t, logs)
-	if _, err := newSubmitExecutor(t, srv).Execute(ctx, errCapRequest{}, tools); err != nil {
-		t.Fatalf("Execute: %v", err)
+	_, err := newArgLogExecutor(t, srv, opts...).Execute(ctx, errCapRequest{}, tools)
+	return logs, err
+}
+
+// newArgLogExecutor builds an executor against srv with the real submitresult
+// tool for errCapResponse and opts.
+func newArgLogExecutor(t *testing.T, srv *httptest.Server, opts ...claudeexecutor.Option[errCapRequest, errCapResponse]) claudeexecutor.Interface[errCapRequest, errCapResponse] {
+	t.Helper()
+
+	prompt, err := promptbuilder.NewPrompt("go")
+	if err != nil {
+		t.Fatalf("NewPrompt: %v", err)
 	}
-	return logs
+	exec, err := claudeexecutor.New[errCapRequest, errCapResponse](
+		anthropic.NewClient(
+			option.WithBaseURL(srv.URL),
+			option.WithAPIKey("test"),
+			option.WithMaxRetries(0),
+		),
+		prompt,
+		append([]claudeexecutor.Option[errCapRequest, errCapResponse]{
+			claudeexecutor.WithRetryConfig[errCapRequest, errCapResponse](fastRetry(0)),
+			claudeexecutor.WithMaxTurns[errCapRequest, errCapResponse](5),
+			claudeexecutor.WithSubmitResultProvider[errCapRequest, errCapResponse](submitresult.ClaudeToolForResponse[errCapResponse]),
+		}, opts...)...,
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return exec
 }
 
 // toolCallRecord returns the one "Executing tool call" record for tool, failing
@@ -425,4 +469,114 @@ func TestToolCallLog_InventedArgumentNameIsWithheld(t *testing.T) {
 	if got := rec["args_withheld"]; got != float64(1) {
 		t.Errorf("args_withheld: got = %v, want = 1", got)
 	}
+}
+
+// submitArgs is a submission whose values carry the caller's input text.
+var submitArgs = map[string]any{
+	"reasoning": sensitiveReasoning,
+	"result":    map[string]any{"answer": sensitivePattern},
+}
+
+// A run with no tools of its own serves only its submit tool. Without
+// WithToolArgsWithheld it logs the submitted arguments, which is every
+// driftlessaf agent that has not set the option.
+func TestToolCallLog_RunWithNoToolsLogsSubmitArgs(t *testing.T) {
+	t.Parallel()
+
+	rec := toolCallRecord(t, runToolCall(t, nil, "submit_result", submitArgs), "submit_result")
+
+	if got := rec["args.reasoning"]; got != sensitiveReasoning {
+		t.Errorf("args.reasoning: got = %v, want = %q (a run without the option must log arguments as before)", got, sensitiveReasoning)
+	}
+	if _, ok := rec["args_withheld"]; ok {
+		t.Errorf("args_withheld: present = %v; a run without the option withholds nothing", rec["args_withheld"])
+	}
+}
+
+// WithToolArgsWithheld polices a run in which no tool declares a policy, so the
+// submit tool keeps its name and its arguments are counted.
+func TestToolCallLog_ToolArgsWithheldWithholdsSubmitArgs(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t, nil, "submit_result", submitArgs, claudeexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+	rec := toolCallRecord(t, logs, "submit_result")
+
+	for key := range rec {
+		if strings.HasPrefix(key, "args.") {
+			t.Errorf("%s: present; WithToolArgsWithheld logs no argument that no policy allows", key)
+		}
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+}
+
+// Under WithToolArgsWithheld a name the run never registered is model text, so
+// it is replaced even though no tool declares a policy.
+func TestToolCallLog_ToolArgsWithheldReplacesInventedName(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t, nil, sensitiveReasoning, map[string]any{"ref": publicRef}, claudeexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+	if got := toolCallRecord(t, logs, "[unknown]")["args_withheld"]; got != float64(1) {
+		t.Errorf("args_withheld: got = %v, want = 1", got)
+	}
+}
+
+// A run whose tools declare policies is already policed, so the option leaves
+// the allowlisted argument legible and withholds the rest.
+func TestToolCallLog_ToolArgsWithheldKeepsPolicyAllowedArgs(t *testing.T) {
+	t.Parallel()
+
+	logs := runToolCall(t,
+		map[string]claudetool.Metadata[errCapResponse]{
+			"git_grep": gitGrepTool(toolcall.NewArgLogPolicy("ref")),
+		},
+		"git_grep",
+		map[string]any{
+			"ref":       publicRef,
+			"pattern":   sensitivePattern,
+			"reasoning": sensitiveReasoning,
+		},
+		claudeexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+
+	rec := toolCallRecord(t, logs, "git_grep")
+	if got := rec["args.ref"]; got != publicRef {
+		t.Errorf("args.ref: got = %v, want = %q", got, publicRef)
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
+}
+
+// The suspend tool is held out of the tool map like the submit tool, so under
+// WithToolArgsWithheld it must still be logged by name, not as "[unknown]",
+// with its arguments counted rather than logged.
+func TestToolCallLog_ToolArgsWithheldWithholdsSuspendArgs(t *testing.T) {
+	t.Parallel()
+
+	logs, err := runToolCallErr(t, nil, askAFriendToolName,
+		map[string]any{"question": sensitivePattern, "reasoning": sensitiveReasoning},
+		claudeexecutor.WithSuspendTool[errCapRequest, errCapResponse](askAFriendProvider()),
+		claudeexecutor.WithToolArgsWithheld[errCapRequest, errCapResponse]())
+	if _, ok := checkpoint.AsSuspension(err); !ok {
+		t.Fatalf("Execute: got err = %v, want a *checkpoint.Suspension", err)
+	}
+
+	rec := toolCallRecord(t, logs, askAFriendToolName)
+	for key := range rec {
+		if strings.HasPrefix(key, "args.") {
+			t.Errorf("%s: present; WithToolArgsWithheld logs no argument that no policy allows", key)
+		}
+	}
+	if got := rec["args_withheld"]; got != float64(2) {
+		t.Errorf("args_withheld: got = %v, want = 2", got)
+	}
+	assertNameAbsentOutsideTrace(t, logs, sensitivePattern)
+	assertNameAbsentOutsideTrace(t, logs, sensitiveReasoning)
 }

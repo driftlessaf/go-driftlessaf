@@ -149,6 +149,9 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	// safe for concurrent use (they share the trace, which is safe). Set via
 	// WithToolCallConcurrency.
 	toolCallConcurrency int
+	// toolArgsWithheld polices every run's "Executing tool call" line even when
+	// no tool declares an argument log policy. See WithToolArgsWithheld.
+	toolArgsWithheld bool
 
 	// toolReasoning, when non-nil, overrides whether tools carry the reasoning
 	// parameter that googletool.FromTool injects. When nil, the parameter is
@@ -505,7 +508,7 @@ func (e *executor[Request, Response]) runConversation(
 	for name, t := range tools {
 		policies[name] = t.LogPolicy
 	}
-	argLog := execshared.NewArgLogRedactor(policies, heldOutNames...)
+	argLog := execshared.NewArgLogRedactor(policies, e.toolArgsWithheld, heldOutNames...)
 
 	// executeToolCall runs a single function call and returns its response
 	// part. The handler writes any terminal result into resultPtr; each call
