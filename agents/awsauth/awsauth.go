@@ -54,6 +54,13 @@ type Config struct {
 type GoogleConfig struct {
 	RoleARN  string
 	Audience string
+	// ServiceAccount, when set, is the email of a *.iam.gserviceaccount.com
+	// account to mint the ID token as, through the IAM Credentials
+	// generateIdToken API, instead of the metadata server's default account.
+	// The metadata server's credentials authorize that call, never local ADC, so
+	// the runtime service account needs iam.serviceAccounts.getOpenIdToken on
+	// this account. Anyone who can mint this account's ID token can assume RoleARN.
+	ServiceAccount string
 }
 
 type environment struct {

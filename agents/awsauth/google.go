@@ -7,9 +7,13 @@ package awsauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
@@ -17,7 +21,14 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	httpmetrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	"golang.org/x/oauth2"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/iamcredentials/v1"
+	"google.golang.org/api/option"
 )
+
+var serviceAccountEmail = regexp.MustCompile(`^[a-z0-9-]+@[a-z0-9.-]+\.iam\.gserviceaccount\.com$`)
 
 func (cfg Config) validateGoogle(env environment) error {
 	if err := env.validateSecrets(); err != nil {
@@ -25,6 +36,9 @@ func (cfg Config) validateGoogle(env environment) error {
 	}
 	if cfg.Google.RoleARN == "" || cfg.Google.Audience == "" {
 		return errors.New("workload identity for Google requires a role ARN and audience")
+	}
+	if cfg.Google.ServiceAccount != "" && !serviceAccountEmail.MatchString(cfg.Google.ServiceAccount) {
+		return errors.New("workload identity for Google service account must be a *.iam.gserviceaccount.com email")
 	}
 	if cfg.Profile != "" || env.Profile != "" || env.WebIdentityTokenFile != "" {
 		return errors.New("workload identity for Google cannot be combined with an AWS profile or web-identity token file")
@@ -51,15 +65,45 @@ func (cfg Config) loadGoogleConfig(ctx context.Context) (aws.Config, error) {
 	if err != nil {
 		return aws.Config{}, errors.New("loading Google workload AWS configuration failed")
 	}
-	awsCfg.Credentials = aws.NewCredentialsCache(&googleProvider{
-		config: cfg.Google, client: sts.NewFromConfig(awsCfg),
-	}, func(o *aws.CredentialsCacheOptions) { o.ExpiryWindow = time.Minute })
+	provider := &googleProvider{config: cfg.Google, client: sts.NewFromConfig(awsCfg)}
+	if cfg.Google.ServiceAccount != "" {
+		// httpmetrics may wrap http.DefaultTransport; clone the inner transport when it can.
+		inner, ok := httpmetrics.ExtractInnerTransport(http.DefaultTransport).(*http.Transport)
+		if ok {
+			inner = inner.Clone()
+		} else {
+			inner = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		}
+		// Only the metadata server's credentials authorize the call, never local
+		// ADC such as key files or gcloud user credentials.
+		client := &http.Client{
+			Transport: boundedTransport{base: &oauth2.Transport{
+				Source: oauth2.ReuseTokenSourceWithExpiry(nil, metadataAccessToken{}, time.Minute),
+				Base:   inner,
+			}},
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+		// The SDK's debug logs include response bodies, and those carry tokens.
+		quiet := option.WithLogger(slog.New(slog.DiscardHandler))
+		service, err := iamcredentials.NewService(ctx, append([]option.ClientOption{quiet, option.WithHTTPClient(client)}, iamCredentialsOptions...)...)
+		if err != nil {
+			return aws.Config{}, errors.New("creating IAM Credentials client failed")
+		}
+		provider.idTokens = service.Projects.ServiceAccounts
+	}
+	awsCfg.Credentials = aws.NewCredentialsCache(provider, func(o *aws.CredentialsCacheOptions) { o.ExpiryWindow = time.Minute })
 	return awsCfg, nil
 }
+
+// iamCredentialsOptions lets tests point the IAM Credentials client at a fake.
+var iamCredentialsOptions []option.ClientOption
 
 type googleProvider struct {
 	config GoogleConfig
 	client *sts.Client
+	// idTokens mints tokens as config.ServiceAccount; nil uses the metadata server.
+	idTokens *iamcredentials.ProjectsServiceAccountsService
 }
 
 var _ aws.CredentialsProvider = (*googleProvider)(nil)
@@ -69,14 +113,30 @@ var _ aws.CredentialsProvider = (*googleProvider)(nil)
 // signer retrieves from that cache for every request, so an existing agent
 // refreshes without reconstruction or a background refresh timer.
 func (p *googleProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
-	// Obtain a fresh identity token for each STS refresh. Neither the constructor
-	// context nor its cancellation is retained for future credential refreshes.
-	token, err := googleMetadata.GetWithContext(ctx, "instance/service-accounts/default/identity?audience="+url.QueryEscape(p.config.Audience)+"&format=full")
+	// Obtain a fresh identity token for each STS refresh. No refresh inherits the
+	// constructor context's cancellation.
+	var token string
+	var err error
+	if p.idTokens == nil {
+		token, err = googleMetadata.GetWithContext(ctx, "instance/service-accounts/default/identity?audience="+url.QueryEscape(p.config.Audience)+"&format=full")
+	} else {
+		// includeEmail matches the email claims of the metadata server's format=full token.
+		var response *iamcredentials.GenerateIdTokenResponse
+		response, err = p.idTokens.GenerateIdToken("projects/-/serviceAccounts/"+p.config.ServiceAccount, &iamcredentials.GenerateIdTokenRequest{
+			Audience: p.config.Audience, IncludeEmail: true,
+		}).Context(ctx).Do()
+		if err == nil {
+			token = response.Token
+		}
+	}
 	if err != nil || token == "" {
 		if ctx.Err() != nil {
 			return aws.Credentials{}, ctx.Err()
 		}
-		// Metadata errors can contain response bodies; never surface identity tokens.
+		// Error bodies can carry token material; keep only the HTTP status.
+		if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
+			return aws.Credentials{}, fmt.Errorf("generating Google ID token as service account failed with HTTP %d", apiErr.Code)
+		}
 		return aws.Credentials{}, errors.New("retrieving Google workload identity token failed")
 	}
 	provider := stscreds.NewWebIdentityRoleProvider(p.client, p.config.RoleARN, identityToken(token), func(o *stscreds.WebIdentityRoleOptions) {
@@ -94,6 +154,28 @@ func (p *googleProvider) Retrieve(ctx context.Context) (aws.Credentials, error) 
 	return credentials, nil
 }
 
+// metadataAccessToken fetches the metadata server's access token. Refreshes
+// outlive the constructor, so they take no caller context.
+type metadataAccessToken struct{}
+
+var _ oauth2.TokenSource = (*metadataAccessToken)(nil)
+
+func (metadataAccessToken) Token() (*oauth2.Token, error) {
+	// The metadata client retries, so bound the whole fetch, not each attempt.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	body, err := googleMetadata.GetWithContext(ctx, "instance/service-accounts/default/token?scopes="+url.QueryEscape(iamcredentials.CloudPlatformScope))
+	if err != nil {
+		return nil, errors.New("retrieving metadata access token failed")
+	}
+	var token oauth2.Token
+	if err := json.Unmarshal([]byte(body), &token); err != nil || token.AccessToken == "" || token.ExpiresIn <= 0 {
+		return nil, errors.New("metadata access token response is invalid")
+	}
+	token.Expiry = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
+	return &token, nil
+}
+
 // identityToken holds the Google token for one STS exchange. googleProvider
 // obtains a fresh token and constructs a new wrapper on every cache refresh.
 type identityToken string
@@ -105,16 +187,17 @@ func (t identityToken) GetIdentityToken() ([]byte, error) { return []byte(t), ni
 // The metadata response is sensitive and small. Bound it before the SDK reads
 // the body, disable redirects, and do not send metadata requests through proxies.
 var googleMetadata = metadata.NewClient(&http.Client{
-	Transport:     metadataTransport{base: &http.Transport{}},
+	Transport:     boundedTransport{base: &http.Transport{}},
 	Timeout:       10 * time.Second,
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 })
 
-type metadataTransport struct{ base http.RoundTripper }
+// boundedTransport caps identity token response bodies at 64 KiB.
+type boundedTransport struct{ base http.RoundTripper }
 
-var _ http.RoundTripper = (*metadataTransport)(nil)
+var _ http.RoundTripper = (*boundedTransport)(nil)
 
-func (t metadataTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t boundedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	response, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
