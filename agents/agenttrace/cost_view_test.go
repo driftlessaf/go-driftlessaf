@@ -183,7 +183,6 @@ func TestCostViewResolvesModelIDs(t *testing.T) {
 		{id: "google/gemini-4-hydrogen", want: "gemini-4-hydrogen"},
 		{id: "gemini-4-neon", want: "gemini-4-neon"},
 		{id: "Gemini-4-Neon@default", want: "gemini-4-neon"},
-		{id: "gemini-4-neon-cyber-permissive", want: "gemini-4-neon"},
 		{id: "gemini-4-argon", want: "gemini-4-argon"},
 		{id: "gemini-4-argon-cyber-permissive", want: "gemini-4-argon"},
 		{id: "gemini-4-carbon", want: "gemini-4-carbon"},

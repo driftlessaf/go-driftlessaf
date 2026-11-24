@@ -174,7 +174,6 @@ var contextWindows = map[string]int64{
 	"gemini-4-argon-cyber-permissive": 1_048_576,
 	"gemini-4-hydrogen":               1_048_576,
 	"gemini-4-neon":                   1_048_576,
-	"gemini-4-neon-cyber-permissive":  1_048_576,
 }
 
 var samplingParamsRemovedPrefixes = []string{
@@ -329,7 +328,6 @@ const gemini4MaxOutputTokens = 1_048_576
 var xhighThinkingLevelModels = []string{
 	"gemini-4-hydrogen",
 	"gemini-4-neon",
-	"gemini-4-neon-cyber-permissive",
 }
 
 // geminiInfo derives the capability surface for a Gemini model id.

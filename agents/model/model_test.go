@@ -215,7 +215,6 @@ func TestResolve(t *testing.T) {
 		{"gemini-4-argon", gemini4Argon},
 		{"gemini-4-argon-cyber-permissive", gemini4Argon},
 		{"gemini-4-neon", gemini4XHigh},
-		{"gemini-4-neon-cyber-permissive", gemini4XHigh},
 		{"gemini-4-hydrogen", gemini4XHigh},
 		// A Gemini 4 id with no table entries takes the family surface, an
 		// unknown context window and no XHIGH level, even next to a listed id.
@@ -297,7 +296,6 @@ func TestResolveContextWindow(t *testing.T) {
 		{"claude-sonnet-5-5@default", 0},
 		{"gemini-2.5-pro", 0},
 		{"gemini-4-neon", 1_048_576},
-		{"gemini-4-neon-cyber-permissive", 1_048_576},
 		{"gemini-4-hydrogen", 1_048_576},
 		{"gemini-4-neon-exp", 0},
 		{"made-up-model-7", 0},
@@ -323,7 +321,6 @@ func TestResolveXHighThinkingLevel(t *testing.T) {
 		want bool
 	}{
 		{"gemini-4-neon", true},
-		{"gemini-4-neon-cyber-permissive", true},
 		{"gemini-4-hydrogen", true},
 		{"gemini-4-argon", false},
 		{"gemini-4-argon-cyber-permissive", false},

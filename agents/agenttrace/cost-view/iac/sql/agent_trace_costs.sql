@@ -243,7 +243,7 @@ matched AS (
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.6-flash(@.*)?$')                        THEN 'gemini-3.6-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-3\.8-flash(@.*)?$')                        THEN 'gemini-3.8-flash'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-hydrogen(@.*)?$')                        THEN 'gemini-4-hydrogen'
-      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-neon(-cyber-permissive)?(@.*)?$')        THEN 'gemini-4-neon'
+      WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-neon(@.*)?$')                            THEN 'gemini-4-neon'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-argon(-cyber-permissive)?(@.*)?$')       THEN 'gemini-4-argon'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(google/)?gemini-4-carbon(-cyber-permissive)?(@.*)?$')      THEN 'gemini-4-carbon'
       WHEN REGEXP_CONTAINS(LOWER(IFNULL(a.model_for_pricing, '')), r'^(xai/)?grok-4\.7(@.*)?$')                                   THEN 'grok-4.7'

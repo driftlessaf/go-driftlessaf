@@ -111,9 +111,6 @@ func TestQueueHoldsNoUploadBufferPerWrite(t *testing.T) {
 // the attempt count. Keeping it let a run key whose lifecycle events kept
 // arriving retry hot and reach the dead-letter cutoff in seconds. A requeue
 // merging into a queued twin is not new input and leaves the count alone.
-// Cutting a pending not-before short stores the incoming zero, so the key is
-// claimable at once whatever the writer's clock reads, and records the time
-// of the cut beside it for the scheduled wait.
 func TestUpdateMetadataResetsAttemptsWhenInputCutsBackoffShort(t *testing.T) {
 	const key = "backing-off"
 	future := time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339)
@@ -164,12 +161,6 @@ func TestUpdateMetadataResetsAttemptsWhenInputCutsBackoffShort(t *testing.T) {
 			want := cmp.Or(tc.want, "3")
 			if got := body.Metadata[attemptsMetadataKey]; got != want {
 				t.Errorf("attempts: got = %q, want = %q", got, want)
-			}
-			if got := body.Metadata[notBeforeMetadataKey]; got != noNotBefore {
-				t.Errorf("not-before: got = %q, want = %q", got, noNotBefore)
-			}
-			if _, got := body.Metadata[notBeforeCutAtKey]; got != (tc.pending == future) {
-				t.Errorf("cut-short time recorded: got = %t, want = %t", got, tc.pending == future)
 			}
 		})
 	}

@@ -260,8 +260,6 @@ func TestThinkingLevelAndTemperatureOnTheWire(t *testing.T) {
 		{name: "neon xhigh", model: "gemini-4-neon", level: effort.XHigh, wantLevel: "XHIGH"},
 		{name: "neon max", model: "gemini-4-neon", level: effort.Max, wantLevel: "XHIGH"},
 		{name: "neon high", model: "gemini-4-neon", level: effort.High, wantLevel: "HIGH"},
-		{name: "neon cyber-permissive xhigh", model: "gemini-4-neon-cyber-permissive", level: effort.XHigh, wantLevel: "XHIGH"},
-		{name: "neon cyber-permissive max", model: "gemini-4-neon-cyber-permissive", level: effort.Max, wantLevel: "XHIGH"},
 		{name: "hydrogen xhigh", model: "gemini-4-hydrogen", level: effort.XHigh, wantLevel: "XHIGH"},
 		{name: "hydrogen max", model: "gemini-4-hydrogen", level: effort.Max, wantLevel: "XHIGH"},
 		{name: "argon xhigh", model: "gemini-4-argon", level: effort.XHigh, wantLevel: "HIGH"},
