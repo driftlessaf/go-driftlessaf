@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"strconv"
+	"strings"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/agents/toolcall/callbacks"
@@ -80,7 +81,7 @@ func worktreeToolDefs[Resp any](cb callbacks.WorktreeCallbacks) map[string]Tool[
 		tools["list_directory"] = listDirectoryTool[Resp](cb.ListDirectory)
 	}
 	if cb.SearchCodebase != nil {
-		tools["search_codebase"] = searchCodebaseTool[Resp](cb.SearchCodebase)
+		tools["search_codebase"] = searchCodebaseTool[Resp](cb.SearchCodebase, cb.ReadFile)
 	}
 	return tools
 }
@@ -475,18 +476,34 @@ func listDirectoryTool[Resp any](listDirectory func(context.Context, string, str
 	}
 }
 
-func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, string, string, int, int) (callbacks.SearchResult, error)) Tool[Resp] {
+// searchCodebaseTool offers context_lines only when readFile is set, because the
+// context is read through it.
+func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, string, string, int, int) (callbacks.SearchResult, error), readFile func(context.Context, string, int64, int) (callbacks.ReadResult, error)) Tool[Resp] {
+	description := "Search for a regex pattern across files. Returns compact match pointers (path, byte offset, length) without content. Use read_file with the returned offset to view matches in context, padding the offset and limit as needed for surrounding context."
+	parameters := []Parameter{
+		{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
+		{Name: "path", Type: "string", Description: "Directory to search within (relative to repository root, default: \".\")", Required: false},
+		{Name: "filter", Type: "string", Description: "File filter — glob with * wildcards (e.g., \"*.go\") or exact filename (e.g., \"Makefile\")", Required: false},
+		{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false, Minimum: new(float64(0))},
+		{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 50)", Required: false},
+	}
+	if readFile != nil {
+		description += " Set context_lines to get the matching lines in this response instead."
+		parameters = append(parameters, Parameter{
+			Name: "context_lines",
+			Type: "integer",
+			Description: fmt.Sprintf("Lines of context to return around each match (default: 0, max: %d). When above 0, each match also carries line (its 1-based line number), text (the line holding the match), and before and after (up to this many neighbouring lines), which saves a read_file call. "+
+				"Lines longer than %d bytes are cut and marked %s. Context stops at a response size bound; later matches keep only their pointer, and the note says how many.",
+				maxSearchContextLines, maxSearchContextLineBytes, searchContextCut),
+			Minimum: new(float64(0)),
+			Maximum: new(float64(maxSearchContextLines)),
+		})
+	}
 	return Tool[Resp]{
 		Def: Definition{
 			Name:        "search_codebase",
-			Description: "Search for a regex pattern across files. Returns compact match pointers (path, byte offset, length) without content. Use read_file with the returned offset to view matches in context, padding the offset and limit as needed for surrounding context.",
-			Parameters: []Parameter{
-				{Name: "pattern", Type: "string", Description: "The regex pattern to search for", Required: true},
-				{Name: "path", Type: "string", Description: "Directory to search within (relative to repository root, default: \".\")", Required: false},
-				{Name: "filter", Type: "string", Description: "File filter — glob with * wildcards (e.g., \"*.go\") or exact filename (e.g., \"Makefile\")", Required: false},
-				{Name: "offset", Type: "integer", Description: "Number of matches to skip (default: 0)", Required: false, Minimum: new(float64(0))},
-				{Name: "limit", Type: "integer", Description: "Maximum matches to return (default: 50)", Required: false},
-			},
+			Description: description,
+			Parameters:  parameters,
 			Annotations: &ToolAnnotations{
 				ReadOnly:    true,
 				Destructive: new(false),
@@ -504,19 +521,32 @@ func searchCodebaseTool[Resp any](searchCodebase func(context.Context, string, s
 			filter, _ := OptionalParam[string](call, "filter", "")
 			offset, _ := OptionalParam[int](call, "offset", 0)
 			limit, _ := OptionalParam[int](call, "limit", 50)
+			contextLines := 0
+			if readFile != nil {
+				n, _ := OptionalParam[int](call, "context_lines", 0)
+				contextLines = min(max(n, 0), maxSearchContextLines)
+			}
 
 			if errResp := rejectNegativeOffset(call, trace, int64(offset)); errResp != nil {
 				return errResp
 			}
 
-			tc := trace.StartToolCall(call.ID, call.Name, map[string]any{"path": searchPath, "pattern": pattern, "filter": filter, "offset": offset, "limit": limit})
+			args := map[string]any{"path": searchPath, "pattern": pattern, "filter": filter, "offset": offset, "limit": limit}
+			if contextLines > 0 {
+				args["context_lines"] = contextLines
+			}
+			tc := trace.StartToolCall(call.ID, call.Name, args)
 
 			result, err := searchCodebase(ctx, searchPath, pattern, filter, offset, limit)
 			if err != nil {
 				return completeError(ctx, tc, "Failed to search codebase", err, "pattern", pattern)
 			}
 
-			resp := formatSearchResult(searchPath, pattern, filter, result)
+			var sc *searchContext
+			if contextLines > 0 {
+				sc = readSearchContext(ctx, readFile, pattern, result.Matches, contextLines)
+			}
+			resp := formatSearchResult(searchPath, pattern, filter, result, sc)
 			tc.Complete(resp, nil)
 			return resp
 		},
@@ -567,15 +597,20 @@ func formatListResult(path string, result callbacks.ListResult) map[string]any {
 	return resp
 }
 
-// formatSearchResult converts a SearchResult into the JSON response map.
-func formatSearchResult(searchPath, pattern, filter string, result callbacks.SearchResult) map[string]any {
+// formatSearchResult converts a SearchResult into the JSON response map. A nil
+// sc leaves the matches as bare pointers.
+func formatSearchResult(searchPath, pattern, filter string, result callbacks.SearchResult, sc *searchContext) map[string]any {
 	matches := make([]map[string]any, 0, len(result.Matches))
-	for _, m := range result.Matches {
-		matches = append(matches, map[string]any{
+	for i, m := range result.Matches {
+		entry := map[string]any{
 			"path":   m.Path,
 			"offset": m.Offset,
 			"length": m.Length,
-		})
+		}
+		if sc != nil && sc.matches[i] != nil {
+			sc.matches[i].addTo(entry)
+		}
+		matches = append(matches, entry)
 	}
 
 	resp := map[string]any{
@@ -591,8 +626,13 @@ func formatSearchResult(searchPath, pattern, filter string, result callbacks.Sea
 		resp["next_offset"] = *result.NextOffset
 	}
 	resp["has_more"] = result.HasMore
-	if result.Note != "" {
-		resp["note"] = result.Note
+	note := result.Note
+	if sc != nil {
+		resp["context_lines"] = sc.lines
+		note = strings.TrimSpace(note + " " + sc.note)
+	}
+	if note != "" {
+		resp["note"] = note
 	}
 	return resp
 }
