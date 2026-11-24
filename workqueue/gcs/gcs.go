@@ -163,7 +163,11 @@ const (
 	notBeforeFloorValue       = "true"
 	failedTimeMetadataKey     = "failed-time"
 	lastAttemptedKey          = "last-attempted"
-	ownerMetadataKey          = "owner"
+	// notBeforeCutAtKey records when an enqueue cut a pending not-before
+	// short, by the enqueuer's clock. Only the scheduled wait reads it, so a
+	// skewed clock can skew that metric but never when the key is claimable.
+	notBeforeCutAtKey = "not-before-cut-at"
+	ownerMetadataKey  = "owner"
 )
 
 var noPriority = formatPriority(0)
@@ -287,6 +291,13 @@ func metadataContention(err error) bool {
 	return false
 }
 
+// cutShort reports whether replacing the existing not-before with an earlier
+// incoming one, given now, all as RFC3339 UTC timestamps, which compare as
+// strings, makes a key that was waiting for its not-before claimable now.
+func cutShort(existing, incoming, now string) bool {
+	return existing > now && incoming <= now
+}
+
 func updateMetadataOnce(ctx context.Context, client ClientInterface, key string, metadata map[string]string, newInput bool) error {
 	attrs, err := client.Object(fmt.Sprintf("%s%s", queuedPrefix, key)).Attrs(ctx)
 	if err != nil {
@@ -335,6 +346,9 @@ func updateMetadataOnce(ctx context.Context, client ClientInterface, key string,
 		// Neither is a floor: the earliest not-before wins.
 		clog.InfoContextf(ctx, "Updating %s not-before from %q to %q", key, existingNB, incomingNB)
 		attrs.Metadata[notBeforeMetadataKey] = incomingNB
+		if now := time.Now().UTC().Format(time.RFC3339); cutShort(existingNB, incomingNB, now) {
+			attrs.Metadata[notBeforeCutAtKey] = now
+		}
 		update = true
 	}
 	// A protected retry may meet a follow-up queued while its callback ran.
@@ -1425,6 +1439,31 @@ func (q *queuedKey) baseLabels() prometheus.Labels {
 
 var _ workqueue.QueuedKey = (*queuedKey)(nil)
 
+// waitStarts returns when a queued key's wait and its scheduled wait start,
+// given the object's creation time and metadata. The wait starts at the last
+// requeue if there was one, else at creation. The scheduled wait starts at the
+// latest of that, the key's not-before and the time an enqueue cut a pending
+// not-before short: a key enqueued with a not-before that had already passed
+// was claimable only from its creation, and one whose not-before was cut
+// short only from the cut.
+func waitStarts(created time.Time, metadata map[string]string) (wait, scheduled time.Time) {
+	wait = created
+	if lastAttempted, ok := metadata[lastAttemptedKey]; ok && lastAttempted != "" {
+		if lastAttemptedUnix, err := strconv.ParseInt(lastAttempted, 10, 64); err == nil {
+			wait = time.Unix(lastAttemptedUnix, 0).UTC()
+		}
+	}
+	scheduled = wait
+	for _, k := range []string{notBeforeMetadataKey, notBeforeCutAtKey} {
+		if v, ok := metadata[k]; ok && v != "" && v != noNotBefore {
+			if t, err := time.Parse(time.RFC3339, v); err == nil && t.After(scheduled) {
+				scheduled = t
+			}
+		}
+	}
+	return wait, scheduled
+}
+
 // Name implements workqueue.Key.
 func (q *queuedKey) Name() string {
 	return strings.TrimPrefix(q.attrs.Name, queuedPrefix)
@@ -1442,25 +1481,14 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	key := strings.TrimPrefix(srcObject, queuedPrefix)
 	targetObject := fmt.Sprintf("%s%s", inProgressPrefix, key)
 
-	// Calculate wait latency using last attempted time if available, otherwise use created time
-	waitStart := q.attrs.Created
-	if lastAttempted, ok := q.attrs.Metadata[lastAttemptedKey]; ok && lastAttempted != "" {
-		if lastAttemptedUnix, err := strconv.ParseInt(lastAttempted, 10, 64); err == nil {
-			waitStart = time.Unix(lastAttemptedUnix, 0).UTC()
-		}
-	}
+	waitStart, scheduledStart := waitStarts(q.attrs.Created, q.attrs.Metadata)
 	waitLabels := q.baseLabels()
 	waitLabels["priority_class"] = priorityClass(q.priority)
 	mWaitLatency.With(waitLabels).Observe(time.Now().UTC().Sub(waitStart).Seconds())
 
-	// Calculate wait latency from scheduled time.
-	scheduledStart := waitStart
-	if notBefore, ok := q.attrs.Metadata[notBeforeMetadataKey]; ok && notBefore != "" && notBefore != noNotBefore {
-		if notBeforeTime, err := time.Parse(time.RFC3339, notBefore); err == nil {
-			scheduledStart = notBeforeTime
-		}
-	}
-	scheduledWait := time.Now().UTC().Sub(scheduledStart)
+	// The cut-short time comes from the enqueuer's clock, which may run ahead
+	// of this one.
+	scheduledWait := max(time.Now().UTC().Sub(scheduledStart), 0)
 	schedLabels := q.baseLabels()
 	schedLabels["priority_class"] = priorityClass(q.priority)
 	mWaitLatencyFromScheduled.With(schedLabels).Observe(scheduledWait.Seconds())
@@ -1505,6 +1533,9 @@ func (q *queuedKey) Start(ctx context.Context) (workqueue.OwnedInProgressKey, er
 	// not leak onto the in-progress object (or, via Deadletter's verbatim copy,
 	// onto dead-letter objects). RequeueWithOptions re-applies it on request.
 	delete(copier.Metadata, notBeforeFloorMetadataKey)
+	// Like the not-before, the time it was cut short only applies to the
+	// queued entry it was measured for.
+	delete(copier.Metadata, notBeforeCutAtKey)
 
 	attrs, err := copier.Run(ctx)
 	if err != nil {
