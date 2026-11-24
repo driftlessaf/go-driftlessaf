@@ -90,7 +90,7 @@ func readFileTool[Resp any](readFile func(context.Context, string, int64, int) (
 	return Tool[Resp]{
 		Def: Definition{
 			Name:        "read_file",
-			Description: "Read content from a file starting at a byte offset. The window is aligned to whole lines: the start moves back to the beginning of its line and the end extends to the end of a line, so the response's offset is the actual start of the content. Returns the content, offset, next_offset to continue reading, and remaining bytes. Use list_directory to check file size before reading large files.",
+			Description: "Read content from a file starting at a byte offset. The window is aligned to whole lines: the start moves back to the beginning of its line and the end extends to the end of a line, so the response's offset is the actual start of the content. Returns the content, offset, next_offset to continue reading, and remaining bytes. Read a file directly without checking its size first: each call returns one bounded window. When remaining is greater than 0 and you need more, call again with offset set to next_offset.",
 			Parameters: []Parameter{
 				{Name: "path", Type: "string", Description: "The path to the file to read (relative to repository root)", Required: true},
 				{Name: "offset", Type: "integer", Description: "Byte offset to start reading from (default: 0). The window starts at the beginning of the line containing this offset; the response's offset reports the actual start.", Required: false, Minimum: new(float64(0))},
