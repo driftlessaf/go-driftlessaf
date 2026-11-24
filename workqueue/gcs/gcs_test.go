@@ -21,6 +21,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"chainguard.dev/driftlessaf/workqueue"
 	"chainguard.dev/driftlessaf/workqueue/conformance"
@@ -762,6 +764,58 @@ func TestEnumerateWithOwnerCapacitySkipsBacklogWhenOwnerIsFull(t *testing.T) {
 			}
 			if listedFull != tc.wantListed {
 				t.Errorf("full queued listing made = %v, want %v", listedFull, tc.wantListed)
+			}
+		})
+	}
+}
+
+// TestGetReturnsReadErrors answers each of Get's object reads with the given
+// statuses, in progress, queued and dead-lettered in turn. Get must report
+// NotFound only when every object is missing, and return any other read
+// error, with the code the storage client gives it, rather than read it as
+// an absent key.
+func TestGetReturnsReadErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// codes answers the reads of in-progress/, queued/ and dead-letter/.
+		codes      map[string]int
+		wantStatus workqueue.KeyState_Status
+		wantCode   codes.Code
+		wantErr    bool
+	}{
+		{name: "queued", codes: map[string]int{inProgressPrefix: http.StatusNotFound, queuedPrefix: http.StatusOK}, wantStatus: workqueue.KeyState_QUEUED},
+		{name: "absent", codes: map[string]int{inProgressPrefix: http.StatusNotFound, queuedPrefix: http.StatusNotFound, deadLetterPrefix: http.StatusNotFound}, wantCode: codes.NotFound, wantErr: true},
+		{name: "in-progress read fails", codes: map[string]int{inProgressPrefix: http.StatusInternalServerError}, wantCode: codes.Internal, wantErr: true},
+		{name: "queued read forbidden", codes: map[string]int{inProgressPrefix: http.StatusNotFound, queuedPrefix: http.StatusForbidden}, wantCode: codes.PermissionDenied, wantErr: true},
+		{name: "dead-letter read fails", codes: map[string]int{inProgressPrefix: http.StatusNotFound, queuedPrefix: http.StatusNotFound, deadLetterPrefix: http.StatusServiceUnavailable}, wantCode: codes.Unavailable, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeGCS{handler: func(c gcsCall) (int, string) {
+				for prefix, code := range tc.codes {
+					if strings.HasSuffix(c.path, "/o/"+prefix+"k") {
+						if code != http.StatusOK {
+							return code, errorJSON(code)
+						}
+						return code, objectJSON(prefix+"k", 1, 1)
+					}
+				}
+				t.Errorf("unexpected call %s %s", c.method, c.path)
+				return http.StatusInternalServerError, errorJSON(http.StatusInternalServerError)
+			}}
+			wq := NewWorkQueue(newTestClient(t, f), 1)
+
+			state, err := wq.Get(t.Context(), "k")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Get() = %v, %v, want an error: %v", state, err, tc.wantErr)
+			}
+			if err != nil {
+				if got := status.Code(err); got != tc.wantCode {
+					t.Errorf("Get() error code: got = %v, want = %v (%v)", got, tc.wantCode, err)
+				}
+				return
+			}
+			if got := state.GetStatus(); got != tc.wantStatus {
+				t.Errorf("Get() status: got = %v, want = %v", got, tc.wantStatus)
 			}
 		})
 	}

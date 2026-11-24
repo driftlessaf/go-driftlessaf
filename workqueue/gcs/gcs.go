@@ -759,19 +759,21 @@ func (w *wq) getDeadLetterKey(ctx context.Context, key string) (*workqueue.KeySt
 }
 
 // Get implements workqueue.Interface.
+//
+// It looks for the key in progress, then queued, then dead-lettered, and
+// returns NotFound only once none of the three objects exists. Any other
+// read error is returned as it is, so a transient failure or a missing
+// permission does not read as an absent key.
 func (w *wq) Get(ctx context.Context, key string) (*workqueue.KeyState, error) {
-	if state, err := w.getInProgressKey(ctx, key); err == nil {
-		return state, nil
+	for _, get := range []func(context.Context, string) (*workqueue.KeyState, error){w.getInProgressKey, w.getQueuedKey, w.getDeadLetterKey} {
+		state, err := get(ctx, key)
+		if err == nil {
+			return state, nil
+		}
+		if !errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, fmt.Errorf("getting key %q: %w", key, err)
+		}
 	}
-
-	if state, err := w.getQueuedKey(ctx, key); err == nil {
-		return state, nil
-	}
-
-	if state, err := w.getDeadLetterKey(ctx, key); err == nil {
-		return state, nil
-	}
-
 	return nil, status.Errorf(codes.NotFound, "key %q not found", key)
 }
 
