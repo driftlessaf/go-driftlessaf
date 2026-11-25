@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -386,6 +387,59 @@ func TestWrappersForwardInput(t *testing.T) {
 				want := dag.Input{Reads: map[string][]byte{"root": draft}, Hash: "sha:" + string(draft)}
 				if diff := cmp.Diff([]dag.Input{want, want, want}, got); diff != "" {
 					t.Errorf("input per call (-want, +got):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
+// A panic is not an error to retry: under Graph.Run it fails the step on the
+// first attempt or pass, even with a predicate that retries everything.
+func TestWrappersPanicFailsStep(t *testing.T) {
+	cfg := retry.RetryConfig{MaxRetries: 3, BaseBackoff: time.Second, MaxBackoff: time.Minute}
+	tests := []struct {
+		name string
+		wrap func(calls *atomic.Int32, value string) dag.StepRunner
+	}{{
+		name: "retry",
+		wrap: func(calls *atomic.Int32, value string) dag.StepRunner {
+			return dag.Retry(cfg, "step", func(error) bool { return true }, func(context.Context, dag.Input) ([]byte, error) {
+				calls.Add(1)
+				panic(value)
+			})
+		},
+	}, {
+		name: "iterate",
+		wrap: func(calls *atomic.Int32, value string) dag.StepRunner {
+			return dag.Iterate(3, func(context.Context, dag.Input, []byte) ([]byte, bool, error) {
+				calls.Add(1)
+				panic(value)
+			})
+		},
+	}, {
+		name: "retry around iterate",
+		wrap: func(calls *atomic.Int32, value string) dag.StepRunner {
+			return dag.Retry(cfg, "step", func(error) bool { return true }, dag.Iterate(3, func(context.Context, dag.Input, []byte) ([]byte, bool, error) {
+				calls.Add(1)
+				panic(value)
+			}))
+		},
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var calls atomic.Int32
+				value := strconv.FormatUint(rand.Uint64(), 36)
+				g, err := dag.New([]dag.Step{{Name: "a", Run: tc.wrap(&calls, value)}})
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				got := g.Run(t.Context()).Steps["a"]
+				if got.Status != dag.StatusFailed || got.Err == nil || !strings.Contains(got.Err.Error(), value) {
+					t.Errorf("a: got = %v (%v), want StatusFailed with an Err containing %q", got.Status, got.Err, value)
+				}
+				if n := calls.Load(); n != 1 {
+					t.Errorf("calls: got = %d, want = 1", n)
 				}
 			})
 		})
