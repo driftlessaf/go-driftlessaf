@@ -181,28 +181,6 @@ func isCacheRejection(err error) bool {
 		code != http.StatusRequestTimeout && !isRetryableVertexError(err)
 }
 
-// isCacheExpiredError reports whether err is Vertex AI rejecting a request
-// because its CachedContent has expired. The provider signals this only as an
-// INVALID_ARGUMENT whose message reads "Cache content <id> is expired.".
-func isCacheExpiredError(err error) bool {
-	if err == nil || responseCodeFromError(err) != http.StatusBadRequest {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "Cache content") && strings.Contains(msg, "is expired")
-}
-
-// isCacheBelowMinimumError reports whether err is Vertex AI rejecting a
-// CachedContent create for having fewer tokens than the model's minimum. The
-// provider signals this only as an INVALID_ARGUMENT whose message reads "The
-// minimum token count to start explicit caching is <n>.".
-func isCacheBelowMinimumError(err error) bool {
-	if err == nil || responseCodeFromError(err) != http.StatusBadRequest {
-		return false
-	}
-	return strings.Contains(err.Error(), "minimum token count to start explicit caching")
-}
-
 // isRetryableVertexErrorWithin distinguishes an individual request timeout
 // from expiry of the caller's overall operation. The former may be retried;
 // the latter must propagate without starting more work or requesting a
