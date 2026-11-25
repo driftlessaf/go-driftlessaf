@@ -10,15 +10,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
-	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"chainguard.dev/driftlessaf/agents/agenttrace"
 	"chainguard.dev/driftlessaf/reconcilers/githubreconciler"
@@ -455,9 +451,6 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 				render := r.prRenderFromResult(result)
 				prData.Headline = prHeadline(changeSession.Headline(), render.Headline, usePRBranch)
 				prData.VariantSummary = render.VariantSummary
-				if r.keepVariantSummary {
-					prData.VariantSummary = accumulatedSummary(changeSession.VariantSummary(), render.VariantSummary, usePRBranch)
-				}
 			}
 
 			// Check if the agent left the worktree clean (no file changes).
@@ -488,9 +481,6 @@ func (r *Reconciler[Req, Resp, CB]) reconcileIssueOnce(ctx context.Context, res 
 			// A commit is certain, so the regenerated body persists the
 			// headline for the runs that stack fix-up commits on this one.
 			changeSession.SetHeadline(prData.Headline)
-			if r.keepVariantSummary {
-				changeSession.SetVariantSummary(prData.VariantSummary)
-			}
 			return result.GetCommitMessage(), nil
 		})
 		// A pushed change is evaluated at the commit now at the branch tip. The
@@ -977,118 +967,6 @@ func prHeadline(recorded, current string, stacksOnPRBranch bool) string {
 		return cmp.Or(recorded, current)
 	}
 	return current
-}
-
-const (
-	// summaryNoteSeparator joins the per-run notes of an accumulated summary:
-	// two blank lines. A note never contains it, because noteText collapses
-	// every run of blank lines inside a note to one, so splitting the recorded
-	// summary on it recovers exactly the notes that were joined, however many
-	// paragraphs each has. Markdown renders it like a single blank line.
-	summaryNoteSeparator = "\n\n\n"
-	// maxAccumulatedSummaryBytes bounds an accumulated summary as the embedded
-	// metadata carries it (see encodedLen). The summary is written to the PR
-	// body twice, once rendered and once in the metadata the change manager
-	// reads back, and the metadata is never truncated to fit GitHub's body
-	// limit, so neither the number of fix-up runs nor the size of one note may
-	// grow it without bound.
-	maxAccumulatedSummaryBytes = 3 * 4096
-	// maxSummaryNoteBytes bounds one note, encoded like the whole: half of
-	// maxAccumulatedSummaryBytes less the separator, whose newlines encode to
-	// two bytes each. The first note and the latest therefore always fit
-	// together, whatever either holds. A note of the size SanitizeAgentText
-	// allows fits in full unless it is mostly characters JSON escapes.
-	maxSummaryNoteBytes = (maxAccumulatedSummaryBytes - 2*len(summaryNoteSeparator)) / 2
-	// summaryTruncationMarker ends a note cut to fit its bound.
-	summaryTruncationMarker = " [truncated]"
-)
-
-// blankLineRunRE matches a run of blank lines: three or more newlines,
-// whitespace between them included.
-var blankLineRunRE = regexp.MustCompile(`\n(?:[ \t]*\n){2,}`)
-
-// noteText is a run's summary as the accumulated summary stores it: runs of
-// blank lines collapsed to one and surrounding whitespace trimmed, so the note
-// cannot contain summaryNoteSeparator. SanitizeAgentText already leaves notes
-// in this form; this holds for a caller that does not sanitize.
-func noteText(s string) string {
-	return strings.TrimSpace(blankLineRunRE.ReplaceAllString(s, "\n\n"))
-}
-
-// encodedLen is the number of bytes s occupies in the embedded metadata. The
-// change manager embeds it with encoding/json, which writes <, > and & as
-// six-byte \u escapes and a newline as two bytes, so a summary full of those
-// is several times its length in the metadata block. A string cannot fail to
-// marshal; the quotes are not counted.
-func encodedLen(s string) int {
-	b, _ := json.Marshal(s)
-	return len(b) - 2
-}
-
-// accumulatedSummary is the VariantSummary under WithVariantSummaryAcrossRuns.
-// A run that stacks on the PR branch appends its summary to the recorded one,
-// so a note from an earlier run (a refused directive, say) stays on the PR
-// next to the fix-up's own; a run that rebuilds from the default branch
-// discards every earlier commit and starts over with its own. An empty
-// current summary, or one equal to a recorded note, adds nothing. Every result stays within
-// maxAccumulatedSummaryBytes of encoded metadata, for a caller that does not
-// sanitize too: the current note is cut to maxSummaryNoteBytes before it is
-// used, and the first note and the latest are kept while the oldest of those
-// between them are dropped until the whole fits. A recorded summary this
-// function did not write (a metadata block edited by hand) can still be over
-// with two notes left; its first and last notes are then cut to their share.
-func accumulatedSummary(recorded, current string, stacksOnPRBranch bool) string {
-	current = boundNote(noteText(current))
-	if !stacksOnPRBranch || recorded == "" {
-		return current
-	}
-	notes := strings.Split(recorded, summaryNoteSeparator)
-	if current != "" && !slices.Contains(notes, current) {
-		notes = append(notes, current)
-	}
-	join := func() string { return strings.Join(notes, summaryNoteSeparator) }
-	for len(notes) > 2 && encodedLen(join()) > maxAccumulatedSummaryBytes {
-		notes = append(notes[:1], notes[2:]...)
-	}
-	if encodedLen(join()) > maxAccumulatedSummaryBytes {
-		notes[0] = boundNote(notes[0])
-		notes[len(notes)-1] = boundNote(notes[len(notes)-1])
-	}
-	return join()
-}
-
-// boundNote cuts one note to maxSummaryNoteBytes of encoded metadata, ending a
-// cut note with summaryTruncationMarker.
-func boundNote(note string) string {
-	if encodedLen(note) <= maxSummaryNoteBytes {
-		return note
-	}
-	return truncateEncoded(note, maxSummaryNoteBytes-len(summaryTruncationMarker)) + summaryTruncationMarker
-}
-
-// truncateEncoded cuts s so that encodedLen of the result is at most maxBytes,
-// without splitting a UTF-8 sequence. A byte of s encodes to between one and
-// six bytes, so each round drops a sixth of the excess (at least one byte):
-// that never cuts much further than needed, and the loop ends in a few rounds.
-func truncateEncoded(s string, maxBytes int) string {
-	s = truncateOnRune(s, max(maxBytes, 0))
-	for over := encodedLen(s) - maxBytes; over > 0; over = encodedLen(s) - maxBytes {
-		s = truncateOnRune(s, len(s)-max(over/6, 1))
-	}
-	return s
-}
-
-// truncateOnRune cuts s to at most maxBytes without splitting a UTF-8
-// sequence.
-func truncateOnRune(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	cut := maxBytes
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut]
 }
 
 // hasLabel checks if an issue has a specific label.

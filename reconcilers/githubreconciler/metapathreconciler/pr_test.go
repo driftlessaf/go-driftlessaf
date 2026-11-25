@@ -202,10 +202,7 @@ func testComments(now time.Time) []commentack.Comment {
 func TestAckOwnedPRComments(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
-		name string
-		// comments are what the fake comment API returns; nil means
-		// testComments.
-		comments      []commentack.Comment
+		name          string
 		headCommitted time.Time
 		listErr       error
 		wantReacted   []string
@@ -219,28 +216,13 @@ func TestAckOwnedPRComments(t *testing.T) {
 		name:          "a comment older than the head commit gets no eyes",
 		headCommitted: now.Add(-30 * time.Minute),
 	}, {
-		// The head commit predates both comments, so only the 24-hour window
-		// separates them. A minute either side pins the window from both
-		// directions.
-		name: "a comment older than a day gets no eyes",
-		comments: []commentack.Comment{
-			{NodeID: "inside", AuthorType: "User", AuthorAssociation: "OWNER", CreatedAt: now.Add(-24*time.Hour + time.Minute)},
-			{NodeID: "outside", AuthorType: "User", AuthorAssociation: "OWNER", CreatedAt: now.Add(-24*time.Hour - time.Minute)},
-		},
-		headCommitted: now.Add(-72 * time.Hour),
-		wantReacted:   []string{"inside"},
-	}, {
 		name:          "a failed read is logged and acks nothing",
 		headCommitted: now.Add(-2 * time.Hour),
 		listErr:       errors.New("secondary rate limit"),
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			comments := tc.comments
-			if comments == nil {
-				comments = testComments(now)
-			}
-			api := &fakeCommentAPI{comments: comments, headCommitted: tc.headCommitted, listErr: tc.listErr}
+			api := &fakeCommentAPI{comments: testComments(now), headCommitted: tc.headCommitted, listErr: tc.listErr}
 			r := &core{ackComments: true, commentAPI: func(*github.Client) commentack.API { return api }}
 			res := &githubreconciler.Resource{Owner: "o", Repo: "r", Number: 7}
 

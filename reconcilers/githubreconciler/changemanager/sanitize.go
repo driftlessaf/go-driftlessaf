@@ -77,15 +77,6 @@ var (
 	urlRE = regexp.MustCompile(`https?://[^\s<>)\]]+`)
 )
 
-// SanitizeAgentText prepares agent-written prose for a surface the bot authors
-// (a PR body, a comment): it strips control characters, redacts secret-shaped
-// strings, drops @mention lines, strips markdown images and off-site links,
-// collapses blank lines and bounds the length. It is the same treatment a
-// review reply gets (see WithFindingReplies). Empty in, empty out.
-func SanitizeAgentText(text string) string {
-	return sanitizeReplyBody(text)
-}
-
 // sanitizeReplyBody strips content a review reply must not carry: it removes
 // control characters, redacts secret-shaped strings, drops @mention lines,
 // strips markdown images and off-site links, collapses runs of blank lines, and

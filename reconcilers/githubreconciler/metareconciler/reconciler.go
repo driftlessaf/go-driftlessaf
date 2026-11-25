@@ -81,12 +81,6 @@ type Reconciler[Req promptbuilder.Bindable, Resp Result, CB any] struct {
 	// empty.
 	prRenderFromResult func(Resp) PRRender
 
-	// keepVariantSummary, when true, persists VariantSummary in the PR body
-	// across runs and appends each fix-up run's summary to it instead of
-	// replacing it. Opt-in: false keeps the current run's summary only. See
-	// WithVariantSummaryAcrossRuns.
-	keepVariantSummary bool
-
 	// copyIssueLabels, when true, copies every label from the source issue onto
 	// the generated PR. Opt-in: false means no issue labels are carried over.
 	// Unlike prLabels (a fixed set always stamped), this lets labels be applied
@@ -280,25 +274,11 @@ func WithReplaceLabelPrefixes[Req promptbuilder.Bindable, Resp Result, CB any](p
 // reconciler applies them inside the Upsert closure, after the agent runs and
 // before the PR title and body render, so the templates see them. A run that
 // adds a commit to an existing PR branch keeps the Headline of the run that
-// built the branch rather than taking its own; VariantSummary is the current
-// run's unless WithVariantSummaryAcrossRuns is set. A zero PRRender return
-// sets nothing. Off by default: both fields stay empty.
+// built the branch rather than taking its own. A zero PRRender return sets
+// nothing. Off by default: both fields stay empty.
 func WithPRRenderFromResult[Req promptbuilder.Bindable, Resp Result, CB any](fn func(Resp) PRRender) Option[Req, Resp, CB] {
 	return func(r *Reconciler[Req, Resp, CB]) {
 		r.prRenderFromResult = fn
-	}
-}
-
-// WithVariantSummaryAcrossRuns persists PRData.VariantSummary in the PR body
-// and carries it across runs: a run that stacks a fix-up commit on the PR
-// branch appends its own summary to the recorded one, and a run that rebuilds
-// the branch from the default branch starts over with its own. For a bot
-// whose summary is a per-run note a reviewer must not lose (what the agent
-// refused to do, for example), rather than a description of the branch's
-// final state. Off by default: each run's summary replaces the last.
-func WithVariantSummaryAcrossRuns[Req promptbuilder.Bindable, Resp Result, CB any]() Option[Req, Resp, CB] {
-	return func(r *Reconciler[Req, Resp, CB]) {
-		r.keepVariantSummary = true
 	}
 }
 

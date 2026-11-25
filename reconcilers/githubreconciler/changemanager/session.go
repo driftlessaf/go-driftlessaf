@@ -478,20 +478,6 @@ func (s *Session[T]) SetHeadline(headline string) {
 	s.meta.Headline = headline
 }
 
-// SetVariantSummary records the caller's PR-body summary. The next Upsert
-// persists it in the PR body, so a later reconcile reads it back through
-// VariantSummary. Like SetHeadline, it is for the summary of the change the
-// branch carries, which a run stacking a fix-up commit should keep.
-func (s *Session[T]) SetVariantSummary(summary string) {
-	s.meta.VariantSummary = summary
-}
-
-// VariantSummary returns the summary recorded by SetVariantSummary, recovered
-// from the PR body on a later reconcile. Empty when no summary was recorded.
-func (s *Session[T]) VariantSummary() string {
-	return s.meta.VariantSummary
-}
-
 // Headline returns the headline recorded by SetHeadline, recovered from the
 // PR body or set in this session. It is empty when no PR exists or no
 // headline was recorded.

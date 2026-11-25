@@ -94,9 +94,7 @@ type PRData[Req any] struct {
 	// commits, through WithPRRenderFromResult. It is empty when a bot does not
 	// set that option, and empty when the agent did not run, so a body
 	// template that uses it needs an {{if}} guard. It is excluded from JSON,
-	// so it never takes part in change detection. With
-	// WithVariantSummaryAcrossRuns the change manager persists it in the PR
-	// body's metadata and a fix-up run appends to it instead of replacing it.
+	// so it never takes part in change detection.
 	VariantSummary string `json:"-"`
 
 	// Dropped lists the worktree changes the commit guard left out of this
