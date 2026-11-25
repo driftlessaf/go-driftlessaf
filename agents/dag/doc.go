@@ -49,4 +49,16 @@ SPDX-License-Identifier: Apache-2.0
 // error from Hash, Lookup or Save fails the step. Save's ctx carries the run's
 // values but no deadline or cancellation, so a finished step's output is kept
 // after the run is cancelled; Save must bound its own wait.
+//
+// # Retry and iteration
+//
+// A graph never has a back edge, so a step that must repeat does so inside its
+// runner. [Retry] re-runs a runner on transient errors with the backoff of
+// package retry. [Iterate] runs a step function until it reports done, up to a
+// cap, handing each pass the previous pass's output so a judge gate can revise
+// a draft and score it again. Both return a [StepRunner], and they compose:
+// Retry around Iterate retries the whole loop, and Iterate can call a Retry
+// runner on each pass. Neither repeats a deferred step or starts work once the
+// run is cancelled. A capped Iterate fails its step under [Graph.Run]; see
+// [Iterate] for keeping its best effort.
 package dag
