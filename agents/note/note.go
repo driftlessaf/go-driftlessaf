@@ -135,7 +135,7 @@ type Page struct {
 	Cursor string // "" when the listing is exhausted
 }
 
-// ErrNotExist is returned by Get and Delete when no note exists for the given coordinates.
+// ErrNotExist is returned by Get when no note exists for the given coordinates.
 var ErrNotExist = errors.New("note: not found")
 
 // Store is the note-passing medium: a persistent read/write store of note bodies
