@@ -130,6 +130,12 @@ type executor[Request promptbuilder.Bindable, Response any] struct {
 	cacheMu             sync.Mutex
 	cachedContentName   string    // resource name of active CachedContent ("" = none)
 	cachedContentExpiry time.Time // when the current cache expires
+	// unextendableCache names a cache whose TTL extension failed, so sends do
+	// not retry the extension on every request until it expires.
+	unextendableCache string
+	// extendingCache names the cache whose TTL one execution is extending
+	// outside cacheMu, so others neither wait for nor repeat that extension.
+	extendingCache string
 	// cacheRetryAfter holds off CachedContent creation after the provider
 	// rejected a create with a 4xx that an immediate retry would repeat.
 	// Until then requests send system instructions and tools inline. The
@@ -342,6 +348,10 @@ type runSetup struct {
 	// cacheCreationTokens is the size of a cache this run created, recorded
 	// on its first turn.
 	cacheCreationTokens int64
+	// systemInstruction and tools are the content the cache holds, kept so a
+	// run can replace an expired cache or send them inline.
+	systemInstruction *genai.Content
+	tools             []*genai.Tool
 }
 
 // staticRequest builds the turn-invariant request: generation settings,
@@ -444,6 +454,7 @@ func (e *executor[Request, Response]) prepareRun(ctx context.Context, tools map[
 			clog.WarnContext(ctx, "Failed to create cached content, falling back to non-cached mode", "error", err)
 		default:
 			config.CachedContent = cacheName
+			setup.systemInstruction, setup.tools = config.SystemInstruction, config.Tools
 			config.SystemInstruction, config.Tools = nil, nil
 			setup.cacheCreationTokens = createdTokens
 			setup.usedCache = true
@@ -465,7 +476,14 @@ func (e *executor[Request, Response]) runConversation(
 	seedToolCalls []*genai.FunctionCall,
 	startTurn, budget int,
 ) (resp Response, err error) {
-	config, toolDeclarations, usedCache, cacheCreationTokens := setup.config, setup.toolDeclarations, setup.usedCache, setup.cacheCreationTokens
+	config, toolDeclarations, usedCache := setup.config, setup.toolDeclarations, setup.usedCache
+	// pendingCacheCreationTokens holds cache-write tokens not yet attributed
+	// to a trace turn: the initial creation, and any mid-run re-creation.
+	pendingCacheCreationTokens := setup.cacheCreationTokens
+	// pendingCacheRecoveries holds the errors of expired-cache recoveries
+	// that succeeded, until the turn that sent the recovered request records
+	// them.
+	var pendingCacheRecoveries []error
 
 	// submitToolName is the configured terminal tool the model calls to
 	// return its result. Empty when no submit tool is registered.
@@ -637,7 +655,44 @@ func (e *executor[Request, Response]) runConversation(
 	send := func(ctx context.Context, parts ...*genai.Part) (*genai.GenerateContentResponse, error) {
 		historyBeforeLastSend = slices.Clone(chat.History(true))
 		lastInputParts = slices.Clone(parts)
-		return chat.Send(ctx, parts...)
+		if usedCache {
+			e.extendCache(ctx, config.CachedContent)
+		}
+		response, err := chat.Send(ctx, parts...)
+		if !usedCache || !isCacheExpiredError(err) {
+			return response, err
+		}
+		// The executor shares one CachedContent across executions, so a run
+		// can outlive it when extendCache could not keep it alive. Replace
+		// the cache and resend this request once rather than failing the run.
+		e.telemetry.RecordAPIRequest(ctx, err)
+		clog.WarnContext(ctx, "Context cache expired mid-run, recreating it", "cache_name", config.CachedContent, "error", err)
+		recovered := []error{err}
+		cacheName, createdTokens, cerr := e.replaceExpiredCache(ctx, config.CachedContent, setup.systemInstruction, setup.tools)
+		if cerr != nil {
+			clog.WarnContext(ctx, "Failed to replace expired context cache, sending system instruction and tools inline for the rest of the run", "error", cerr)
+			recovered = append(recovered, cerr)
+			usedCache = false
+			config.CachedContent = ""
+			config.SystemInstruction = setup.systemInstruction
+			config.Tools = setup.tools
+		} else {
+			config.CachedContent = cacheName
+			pendingCacheCreationTokens += createdTokens
+		}
+		// The newer error leads each join so retry classification sees it: a
+		// transient failure while recovering stays retryable.
+		rebuilt, rerr := e.client.Chats.Create(ctx, e.model, config, historyBeforeLastSend)
+		if rerr != nil {
+			return nil, errors.Join(append([]error{fmt.Errorf("rebuilding chat after cache expiry: %w", rerr)}, recovered...)...)
+		}
+		chat = rebuilt
+		response, rerr = chat.Send(ctx, parts...)
+		if rerr != nil {
+			return nil, errors.Join(append([]error{rerr}, recovered...)...)
+		}
+		pendingCacheRecoveries = append(pendingCacheRecoveries, recovered...)
+		return response, nil
 	}
 	replayLastInput := func(ctx context.Context, nudge genai.Part) ([]*genai.Part, error) {
 		if len(lastInputParts) == 0 {
@@ -674,7 +729,7 @@ func (e *executor[Request, Response]) runConversation(
 	// callModel sends req as llmTurn's model call, so the turn's span covers
 	// the call, and records the response's token counts and the answering
 	// attempt's latency on the turn.
-	callModel := func(turn int, llmTurn *agenttrace.LLMTurn[Response], req *modelRequest) (*genai.GenerateContentResponse, error) {
+	callModel := func(llmTurn *agenttrace.LLMTurn[Response], req *modelRequest) (*genai.GenerateContentResponse, error) {
 		// Per-turn retry config wires transient API errors that the retry
 		// recovers from into the turn's Errors list. Without this, retries
 		// that eventually succeed leave no trace of the transients in BQ.
@@ -687,11 +742,21 @@ func (e *executor[Request, Response]) runConversation(
 			return send(ctx, req.parts...)
 		})
 		if err != nil {
+			// A failed request still wrote any cache created for it, and no
+			// later turn records that write.
+			if pendingCacheCreationTokens > 0 {
+				llmTurn.RecordCacheTokens(0, pendingCacheCreationTokens)
+				pendingCacheCreationTokens = 0
+			}
 			return nil, err
 		}
 		if response == nil {
 			return nil, fmt.Errorf("%s: model returned a nil response", req.errContext)
 		}
+		for _, rerr := range pendingCacheRecoveries {
+			llmTurn.RecordError(rerr)
+		}
+		pendingCacheRecoveries = nil
 
 		var cacheReadTokens int64
 		if response.UsageMetadata != nil {
@@ -702,17 +767,15 @@ func (e *executor[Request, Response]) runConversation(
 		}
 		execshared.RecordCallLatency(ctx, trace, llmTurn, latency)
 
-		// Cache creation prepares the context for the first model request, so
-		// its token count belongs to that request's turn. The cost view prices
+		// Cache creation prepares the context for the request this turn sent,
+		// so its token count belongs to this turn. The cost view prices
 		// Gemini cache creation at zero while retaining the count for usage
 		// accounting.
 		// Cache reads are recorded even without cacheControl: Gemini reports
 		// implicit cache hits in CachedContentTokenCount and bills them at the
 		// cache-read rate.
-		createdTokens := int64(0)
-		if turn == startTurn {
-			createdTokens = cacheCreationTokens
-		}
+		createdTokens := pendingCacheCreationTokens
+		pendingCacheCreationTokens = 0
 		if cacheReadTokens > 0 || createdTokens > 0 {
 			llmTurn.RecordCacheTokens(cacheReadTokens, createdTokens)
 		}
@@ -731,7 +794,7 @@ func (e *executor[Request, Response]) runConversation(
 			llmTurn.End()
 		}()
 
-		response, err := callModel(turn, llmTurn, req)
+		response, err := callModel(llmTurn, req)
 		if err != nil {
 			return zero, nil, true, err
 		}
@@ -1117,7 +1180,7 @@ func (e *executor[Request, Response]) runConversation(
 	// maxTurns-exhausted runs.
 	lastTurn := startTurn + budget
 	llmTurn := trace.BeginTurnWithAttribution(lastTurn, e.model, e.servingAttribution(usedCache))
-	if _, err := callModel(lastTurn, llmTurn, req); err != nil {
+	if _, err := callModel(llmTurn, req); err != nil {
 		llmTurn.Fail(err)
 		llmTurn.End()
 		return resp, err
@@ -1266,7 +1329,11 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	// Cache validity is TTL-only — tool set changes between calls are not detected.
 	// Callers must ensure a stable tool set for the lifetime of this executor;
 	// use WithoutCacheControl() if the tool set varies per call.
-	if e.cachedContentName != "" && time.Now().Add(time.Minute).Before(e.cachedContentExpiry) {
+	// A reused cache must outlast the first send that references it. The
+	// margin stays below the half-TTL point where extendCache resets the TTL,
+	// so even a one-minute cache is reused and extended instead of replaced.
+	reuseMargin := min(time.Minute, e.cacheTTL/4)
+	if e.cachedContentName != "" && time.Now().Add(reuseMargin).Before(e.cachedContentExpiry) {
 		return e.cachedContentName, 0, nil
 	}
 	// Checked under the lock so that callers queued behind a rejected create
@@ -1286,6 +1353,14 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	// shows up on the rate-limit dashboard alongside chat-send 429s.
 	e.telemetry.RecordAPIRequest(ctx, err)
 	if err != nil {
+		if isCacheBelowMinimumError(err) {
+			// Content below the model's minimum is rejected on every create,
+			// so skip creates for one TTL and send it inline. The held
+			// sentinel keeps callers from logging a warning.
+			e.cacheRetryAfter = time.Now().Add(e.cacheTTL)
+			clog.InfoContext(ctx, "Cached content is below the model's explicit caching minimum, sending it inline", "model", e.model, "skip_until", e.cacheRetryAfter, "error", err)
+			return "", 0, fmt.Errorf("%w: creating cached content: %w", errCacheCreationHeld, err)
+		}
 		if isCacheRejection(err) {
 			e.cacheRetryAfter = time.Now().Add(e.cacheTTL)
 			clog.WarnContext(ctx, "Holding context cache creation after the provider rejected a create", "model", e.model, "hold", e.cacheTTL, "error", err)
@@ -1312,6 +1387,59 @@ func (e *executor[Request, Response]) getOrCreateCache(ctx context.Context, syst
 	)
 
 	return cached.Name, int64(totalTokenCount), nil
+}
+
+// replaceExpiredCache returns a valid CachedContent to use in place of the
+// expired one the provider rejected, with the tokens written if this call
+// created it. Concurrent executions that observe the same expiry share one
+// replacement: only the first clears the stale name, and the rest find the new
+// cache through getOrCreateCache.
+func (e *executor[Request, Response]) replaceExpiredCache(ctx context.Context, expired string, systemInstruction *genai.Content, tools []*genai.Tool) (string, int64, error) {
+	e.cacheMu.Lock()
+	if e.cachedContentName == expired {
+		e.cachedContentName = ""
+	}
+	e.cacheMu.Unlock()
+	return e.getOrCreateCache(ctx, systemInstruction, tools)
+}
+
+// extendCache resets the shared CachedContent's TTL once less than half of it
+// remains, so executions in flight keep a valid cache instead of recovering
+// from its expiry. Executions sharing the cache extend it once between them:
+// the first claims the extension under cacheMu and calls the provider after
+// releasing it, so a slow update never holds up other executions' sends.
+// A cache that has already been replaced is left to expire, and a failed
+// extension is not retried for that cache: the expired-cache recovery covers
+// the run instead. A failure caused by the caller's own cancellation says
+// nothing about the cache, so another execution may still extend it.
+func (e *executor[Request, Response]) extendCache(ctx context.Context, name string) {
+	e.cacheMu.Lock()
+	if name == e.extendingCache || name != e.cachedContentName || name == e.unextendableCache || time.Until(e.cachedContentExpiry) > e.cacheTTL/2 {
+		e.cacheMu.Unlock()
+		return
+	}
+	e.extendingCache = name
+	e.cacheMu.Unlock()
+
+	updated, err := e.client.Caches.Update(ctx, name, &genai.UpdateCachedContentConfig{TTL: e.cacheTTL})
+	e.telemetry.RecordAPIRequest(ctx, err)
+
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	if e.extendingCache == name {
+		e.extendingCache = ""
+	}
+	if err != nil {
+		if ctx.Err() == nil && name == e.cachedContentName {
+			e.unextendableCache = name
+		}
+		clog.WarnContext(ctx, "Failed to extend context cache TTL", "cache_name", name, "error", err)
+		return
+	}
+	if name == e.cachedContentName {
+		e.cachedContentExpiry = updated.ExpireTime
+	}
+	clog.InfoContext(ctx, "Extended context cache TTL", "cache_name", name, "expire_time", updated.ExpireTime)
 }
 
 // recordTokenMetrics unpacks the genai usage-metadata shape into the shared
