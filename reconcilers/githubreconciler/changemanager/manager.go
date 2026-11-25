@@ -203,6 +203,14 @@ type metadata struct {
 	// field existed parseable and byte-identical when no headline is set.
 	Headline string `json:"headline,omitempty"`
 
+	// VariantSummary is the caller's summary of the change for the PR body,
+	// carried across body regenerations like Headline so a note the first run
+	// wrote (a refused directive, say) survives the fix-up runs that stack on
+	// its branch; see Session.SetVariantSummary. omitempty keeps bodies
+	// embedded before the field existed parseable and byte-identical when no
+	// summary is set.
+	VariantSummary string `json:"variant_summary,omitempty"`
+
 	// DraftNote is the note a run that stopped early published the pull
 	// request with (see Session.PublishAsDraft). Later runs keep it in the
 	// body while the pull request stays a draft, so a draft whose change is
