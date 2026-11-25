@@ -30,15 +30,27 @@ import (
 
 var serviceAccountEmail = regexp.MustCompile(`^[a-z0-9-]+@[a-z0-9.-]+\.iam\.gserviceaccount\.com$`)
 
+// Validate reports whether g is a usable Google workload identity: RoleARN
+// and Audience are set, and ServiceAccount, when set, is a
+// *.iam.gserviceaccount.com email. It loads no credentials, so a caller can
+// reject a malformed configuration at startup. The zero GoogleConfig, which
+// Config treats as "Google not selected", fails.
+func (g GoogleConfig) Validate() error {
+	if g.RoleARN == "" || g.Audience == "" {
+		return errors.New("workload identity for Google requires a role ARN and audience")
+	}
+	if g.ServiceAccount != "" && !serviceAccountEmail.MatchString(g.ServiceAccount) {
+		return errors.New("workload identity for Google service account must be a *.iam.gserviceaccount.com email")
+	}
+	return nil
+}
+
 func (cfg Config) validateGoogle(env environment) error {
 	if err := env.validateSecrets(); err != nil {
 		return err
 	}
-	if cfg.Google.RoleARN == "" || cfg.Google.Audience == "" {
-		return errors.New("workload identity for Google requires a role ARN and audience")
-	}
-	if cfg.Google.ServiceAccount != "" && !serviceAccountEmail.MatchString(cfg.Google.ServiceAccount) {
-		return errors.New("workload identity for Google service account must be a *.iam.gserviceaccount.com email")
+	if err := cfg.Google.Validate(); err != nil {
+		return err
 	}
 	if cfg.Profile != "" || env.Profile != "" || env.WebIdentityTokenFile != "" {
 		return errors.New("workload identity for Google cannot be combined with an AWS profile or web-identity token file")

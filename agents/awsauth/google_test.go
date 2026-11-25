@@ -63,6 +63,42 @@ func TestGoogleConfiguration(t *testing.T) {
 	}
 }
 
+func TestGoogleConfigValidate(t *testing.T) {
+	const account = "code-reviewer-bedrock@example-project.iam.gserviceaccount.com"
+	tests := []struct {
+		name           string
+		roleARN        string
+		audience       string
+		serviceAccount string
+		want           string // "" means valid
+	}{
+		{name: "no account", roleARN: "role", audience: "aud"},
+		{name: "valid account", roleARN: "role", audience: "aud", serviceAccount: account},
+		{name: "missing role", audience: "aud", serviceAccount: account, want: "role ARN and audience"},
+		{name: "missing audience", roleARN: "role", serviceAccount: account, want: "role ARN and audience"},
+		{name: "user domain", roleARN: "role", audience: "aud", serviceAccount: "x@gmail.com", want: "service account must be"},
+		{name: "suffix after domain", roleARN: "role", audience: "aud", serviceAccount: "x@example.iam.gserviceaccount.com.evil", want: "service account must be"},
+		{name: "uppercase", roleARN: "role", audience: "aud", serviceAccount: "Code-Reviewer@example-project.iam.gserviceaccount.com", want: "service account must be"},
+		{name: "missing local part", roleARN: "role", audience: "aud", serviceAccount: "@example-project.iam.gserviceaccount.com", want: "service account must be"},
+		{name: "leading whitespace", roleARN: "role", audience: "aud", serviceAccount: " " + account, want: "service account must be"},
+		{name: "trailing whitespace", roleARN: "role", audience: "aud", serviceAccount: account + "\n", want: "service account must be"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := GoogleConfig{RoleARN: tt.roleARN, Audience: tt.audience, ServiceAccount: tt.serviceAccount}.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate(): got = %v, want = nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate(): got = %v, want error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 const googleTestRole = "arn:aws:iam::123456789012:role/BedrockInvoker"
 
 func TestGoogleConfigFromEnv(t *testing.T) {
