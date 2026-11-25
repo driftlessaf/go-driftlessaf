@@ -42,6 +42,7 @@ type validatingGenReqBody struct {
 				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"functionResponse"`
+			Text string `json:"text"`
 		} `json:"parts"`
 	} `json:"contents"`
 }
@@ -52,8 +53,11 @@ type validatingGenReqBody struct {
 // functionResponse with the matching name in the role:"user" content that
 // immediately follows. Gemini bundles a turn's function responses into a
 // single following user content. This is the shape a verbatim transcript
-// replay (the DEV-2247 resume risk) would violate. A nil return means the body
-// is well-paired; a parse error is reported as a single violation.
+// replay (the DEV-2247 resume risk) would violate. A text part after the
+// functionResponse parts of a user content is also a violation: the Gemini API
+// rejects it with "Requests ending with a model turn are not supported". A nil
+// return means the body is well-paired; a parse error is reported as a single
+// violation.
 func genPairingViolations(body []byte) []string {
 	var parsed validatingGenReqBody
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -62,6 +66,21 @@ func genPairingViolations(body []byte) []string {
 
 	var violations []string
 	for i, c := range parsed.Contents {
+		if c.Role == "user" {
+			sawResponse := false
+			for _, p := range c.Parts {
+				if p.FunctionResponse != nil {
+					sawResponse = true
+					continue
+				}
+				if sawResponse && p.Text != "" {
+					violations = append(violations, fmt.Sprintf(
+						"user content %d has a text part after its functionResponse parts", i))
+					break
+				}
+			}
+			continue
+		}
 		if c.Role != "model" {
 			continue
 		}

@@ -703,6 +703,13 @@ func (e *executor[Request, Response]) runConversation(
 			return nil, fmt.Errorf("rebuilding chat after invalid response: %w", err)
 		}
 		chat = rebuilt
+		// The Gemini API rejects a turn whose text follows its function
+		// responses ("Requests ending with a model turn are not supported"),
+		// so the nudge goes before them. A turn without function responses
+		// keeps the nudge after the original input.
+		if slices.ContainsFunc(lastInputParts, func(p *genai.Part) bool { return p != nil && p.FunctionResponse != nil }) {
+			return append([]*genai.Part{&nudge}, lastInputParts...), nil
+		}
 		return append(slices.Clone(lastInputParts), &nudge), nil
 	}
 
