@@ -58,7 +58,8 @@ SPDX-License-Identifier: Apache-2.0
 // cap, handing each pass the previous pass's output so a judge gate can revise
 // a draft and score it again. Both return a [StepRunner], and they compose:
 // Retry around Iterate retries the whole loop, and Iterate can call a Retry
-// runner on each pass. Neither repeats a deferred step or starts work once the
-// run is cancelled. A capped Iterate fails its step under [Graph.Run]; see
-// [Iterate] for keeping its best effort.
+// runner on each pass. Neither repeats a deferred step, recovers a panic, or
+// starts work once the run is cancelled; a panic fails the step with no further
+// attempt. A capped Iterate fails its step under [Graph.Run]; see [Iterate] for
+// keeping its best effort.
 package dag
