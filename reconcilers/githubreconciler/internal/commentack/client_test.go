@@ -122,6 +122,48 @@ func TestClientListReactorsAndDeletedAuthor(t *testing.T) {
 	}
 }
 
+// TestClientListAssociationAndMinimized checks that each comment's association
+// and minimized flag come through as GitHub reports them. Pending decides on
+// both: a wrong association or a dropped minimized flag would put a 👀 on an
+// untrusted or hidden comment.
+func TestClientListAssociationAndMinimized(t *testing.T) {
+	gh := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"comments":{"nodes":[
+			{"id":"member","createdAt":"2026-10-27T14:16:24Z","isMinimized":false,"authorAssociation":"MEMBER","author":{"__typename":"User"},"reactionGroups":[]},
+			{"id":"contributor","createdAt":"2026-10-27T14:16:25Z","isMinimized":false,"authorAssociation":"CONTRIBUTOR","author":{"__typename":"User"},"reactionGroups":[]},
+			{"id":"hidden","createdAt":"2026-10-27T14:16:26Z","isMinimized":true,"authorAssociation":"OWNER","author":{"__typename":"User"},"reactionGroups":[]}
+		]},"reviewThreads":{"nodes":[
+			{"isResolved":false,"comments":{"nodes":[
+				{"id":"inline","createdAt":"2026-10-27T14:16:27Z","isMinimized":true,"authorAssociation":"NONE","author":{"__typename":"User"},"reactionGroups":[]}
+			]}}
+		]}}}}}`)
+	})
+
+	got, _, err := NewClient(gh).List(t.Context(), "o", "r", 7)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	type summary struct {
+		NodeID            string
+		AuthorAssociation string
+		IsMinimized       bool
+	}
+	gotSummary := make([]summary, 0, len(got))
+	for _, c := range got {
+		gotSummary = append(gotSummary, summary{NodeID: c.NodeID, AuthorAssociation: c.AuthorAssociation, IsMinimized: c.IsMinimized})
+	}
+	want := []summary{
+		{NodeID: "member", AuthorAssociation: "MEMBER"},
+		{NodeID: "contributor", AuthorAssociation: "CONTRIBUTOR"},
+		{NodeID: "hidden", AuthorAssociation: "OWNER", IsMinimized: true},
+		{NodeID: "inline", AuthorAssociation: "NONE", IsMinimized: true},
+	}
+	if diff := cmp.Diff(want, gotSummary); diff != "" {
+		t.Errorf("comments (-want, +got):\n%s", diff)
+	}
+}
+
 func TestClientListMissingPullRequest(t *testing.T) {
 	gh := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

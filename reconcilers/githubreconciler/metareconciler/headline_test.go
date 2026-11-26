@@ -122,7 +122,7 @@ func TestReconcileIssuePRTitleNamesTheChange(t *testing.T) {
 
 	cm, err := changemanager.New[PRData[*testRequest]]("test-bot",
 		template.Must(template.New("title").Parse(`{{if .Headline}}{{.Headline}} (#{{.IssueNumber}}){{else}}fallback (#{{.IssueNumber}}){{end}}`)),
-		template.Must(template.New("body").Parse("Resolve #123.")),
+		template.Must(template.New("body").Parse("Resolve #123.{{if .VariantSummary}} Summary: {{.VariantSummary}}{{end}}")),
 		changemanager.WithFindingsIteration[PRData[*testRequest]]())
 	if err != nil {
 		t.Fatalf("create change manager: got = %v, want = nil", err)
@@ -141,9 +141,10 @@ func TestReconcileIssuePRTitleNamesTheChange(t *testing.T) {
 			return struct{}{}, nil
 		},
 		WithRequiredLabel[*testRequest, *testResult, struct{}]("test-bot/managed"),
+		WithVariantSummaryAcrossRuns[*testRequest, *testResult, struct{}](),
 		WithPRRenderFromResult[*testRequest, *testResult, struct{}](func(res *testResult) PRRender {
 			headline, _, _ := strings.Cut(res.GetCommitMessage(), "\n")
-			return PRRender{Headline: headline}
+			return PRRender{Headline: headline, VariantSummary: "did: " + headline}
 		}),
 	)
 	reconcile := func(commitMsg string) string {
@@ -165,11 +166,19 @@ func TestReconcileIssuePRTitleNamesTheChange(t *testing.T) {
 	if got, want := reconcile("chore: fix copyright year"), "feat(widget): add the widget (#123)"; got != want {
 		t.Errorf("title after a fix-up on the PR branch: got = %q, want = %q", got, want)
 	}
+	// With WithVariantSummaryAcrossRuns, a fix-up on the PR branch appends its
+	// summary to the first run's rather than replacing it.
+	if got, want := pr.body, "Resolve #123. Summary: did: feat(widget): add the widget"+summaryNoteSeparator+"did: chore: fix copyright year\n"; !strings.HasPrefix(got, want) {
+		t.Errorf("body after a fix-up on the PR branch: got = %q, want prefix = %q", got, want)
+	}
 
 	pr.mergeable = "CONFLICTING"
 	pr.checks = `[]`
 	if got, want := reconcile("feat(widget): add the widget on the new base"), "feat(widget): add the widget on the new base (#123)"; got != want {
 		t.Errorf("title after a rebuild from the default branch: got = %q, want = %q", got, want)
+	}
+	if got, want := pr.body, "Resolve #123. Summary: did: feat(widget): add the widget on the new base\n"; !strings.HasPrefix(got, want) {
+		t.Errorf("body after a rebuild from the default branch: got = %q, want prefix = %q", got, want)
 	}
 
 	// The rebuild discarded the first run's change, so a fix-up stacked on the

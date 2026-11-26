@@ -6,7 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 package dag_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -43,4 +45,27 @@ func Example() {
 	// Output:
 	// succeeded
 	// merge review=(review draft=(draft)) critique=(critique draft=(draft))
+}
+
+// ExampleIterate keeps a capped loop's best effort: under Graph.Run a step that
+// returns ErrMaxIterations fails and its output is dropped.
+func ExampleIterate() {
+	refine := dag.Iterate(2, func(_ context.Context, _ dag.Input, prev []byte) ([]byte, bool, error) {
+		return append(bytes.Clone(prev), '+'), false, nil
+	})
+	bestEffort := func(ctx context.Context, in dag.Input) ([]byte, error) {
+		out, err := refine(ctx, in)
+		if errors.Is(err, dag.ErrMaxIterations) {
+			return out, nil
+		}
+		return out, err
+	}
+	g, err := dag.New([]dag.Step{{Name: "draft", Run: bestEffort}})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	res := g.Run(context.Background())
+	fmt.Println(res.Steps["draft"].Status, string(res.Steps["draft"].Output))
+	// Output: succeeded ++
 }
