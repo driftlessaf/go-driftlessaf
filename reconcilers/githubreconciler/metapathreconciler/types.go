@@ -7,7 +7,6 @@ package metapathreconciler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -46,14 +45,6 @@ type Analyzer interface {
 	// with no prior state pass none.
 	Analyze(ctx context.Context, wt *gogit.Worktree, paths []string, prior ...Diagnostic) ([]Diagnostic, error)
 }
-
-// ErrChangeWanted marks an Analyze error raised after the analyzer already
-// established that the path wants a change but could not apply it on this ref.
-// Base revalidation (see WithBaseRevalidation) reads such an error as a wanted
-// change, so a superseded PR whose own branch cannot be analyzed to the end is
-// refreshed from the default branch rather than failing every retry. Every
-// other caller treats it as an ordinary error.
-var ErrChangeWanted = errors.New("change wanted but not applied")
 
 // CommitMessager is an optional interface for an Analyzer that fixes files
 // itself and wants to say what it changed in the commit message.
