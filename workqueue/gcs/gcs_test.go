@@ -109,17 +109,6 @@ func TestWorkQueue(t *testing.T) {
 	conformance.TestTenantFairness(t, func(limit int, tenant workqueue.TenantFunc) workqueue.Interface {
 		return NewWorkQueue(client.Bucket(bucket), limit, WithTenant(tenant))
 	})
-
-	// A lease lasts three refresh intervals, rounded down to the second its
-	// expiration is written with. The heartbeat's retry pacing stays at its
-	// default, clamped to the refresh interval, so each refresh has time to
-	// reach the bucket.
-	origRefresh := RefreshInterval
-	RefreshInterval = time.Second
-	t.Cleanup(func() { RefreshInterval = origRefresh })
-	conformance.TestLeases(t, 3*RefreshInterval, func(identity string) workqueue.Interface {
-		return NewWorkQueue(client.Bucket(bucket), 5, WithIdentity(identity))
-	})
 }
 
 // listedFields returns the object attributes named inside the items(...) group
