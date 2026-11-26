@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package inmem
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -161,23 +160,5 @@ func TestWithoutTenantKeysAreNotTenantKeys(t *testing.T) {
 	}
 	if _, ok := qd[0].(workqueue.TenantKey); ok {
 		t.Errorf("queued key %q implements workqueue.TenantKey without WithTenant", qd[0].Name())
-	}
-}
-
-func TestStartReportsLostClaim(t *testing.T) {
-	wq := NewWorkQueue(10)
-	ctx := t.Context()
-	if err := wq.Queue(ctx, "key", workqueue.Options{}); err != nil {
-		t.Fatalf("Queue failed: %v", err)
-	}
-	_, qd, _, err := wq.Enumerate(ctx)
-	if err != nil {
-		t.Fatalf("Enumerate failed: %v", err)
-	}
-	if _, err := qd[0].Start(ctx); err != nil {
-		t.Fatalf("first Start failed: %v", err)
-	}
-	if _, err := qd[0].Start(ctx); !errors.Is(err, workqueue.ErrClaimLost) {
-		t.Errorf("second Start: got = %v, want = an error wrapping workqueue.ErrClaimLost", err)
 	}
 }

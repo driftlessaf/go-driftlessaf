@@ -7,6 +7,7 @@ package conformance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -371,6 +372,93 @@ func TestSemantics(t *testing.T, ctor func(int) workqueue.Interface) {
 			WorkInProgress: []string{"foo"},
 			Queued:         []string{"foo"},
 		})
+	})
+
+	ct.scenario("concurrent starts of one key: one claims it, the other loses the claim", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		// Two dispatchers listing the queue see the same queued key.
+		_, first := checkQueue(t, wq, ExpectedState{Queued: []string{"foo"}})
+		_, second := checkQueue(t, wq, ExpectedState{Queued: []string{"foo"}})
+
+		owned, err := first[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("first Start failed: %v", err)
+		}
+		if _, err := second[0].Start(ctx); !errors.Is(err, workqueue.ErrClaimLost) {
+			t.Errorf("second Start: got = %v, want = an error wrapping workqueue.ErrClaimLost", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{WorkInProgress: []string{"foo"}})
+
+		if err := owned.Complete(ctx); err != nil {
+			t.Fatalf("Complete failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+	})
+
+	ct.scenario("starting a key another dispatcher already completed loses the claim", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, first := checkQueue(t, wq, ExpectedState{Queued: []string{"foo"}})
+		_, second := checkQueue(t, wq, ExpectedState{Queued: []string{"foo"}})
+
+		owned, err := first[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("first Start failed: %v", err)
+		}
+		if err := owned.Complete(ctx); err != nil {
+			t.Fatalf("Complete failed: %v", err)
+		}
+		if _, err := second[0].Start(ctx); !errors.Is(err, workqueue.ErrClaimLost) {
+			t.Errorf("Start after completion: got = %v, want = an error wrapping workqueue.ErrClaimLost", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
+	})
+
+	ct.scenario("a key queued while it runs stays queued until the run settles", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd := checkQueue(t, wq, ExpectedState{Queued: []string{"foo"}})
+		owned, err := qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		// New input arrives while the key runs.
+		if err := wq.Queue(ctx, "foo", workqueue.Options{}); err != nil {
+			t.Fatalf("Queue failed: %v", err)
+		}
+		_, qd = checkQueue(t, wq, ExpectedState{
+			WorkInProgress: []string{"foo"},
+			Queued:         []string{"foo"},
+		})
+
+		// It cannot be claimed while the earlier run holds the key, and the
+		// failed claim must not drop the new input.
+		if _, err := qd[0].Start(ctx); !errors.Is(err, workqueue.ErrClaimLost) {
+			t.Errorf("Start while running: got = %v, want = an error wrapping workqueue.ErrClaimLost", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{
+			WorkInProgress: []string{"foo"},
+			Queued:         []string{"foo"},
+		})
+
+		// Once the run settles, the queued input is claimable.
+		if err := owned.Complete(ctx); err != nil {
+			t.Fatalf("Complete failed: %v", err)
+		}
+		_, qd = checkQueue(t, wq, ExpectedState{Queued: []string{"foo"}})
+		owned, err = qd[0].Start(ctx)
+		if err != nil {
+			t.Fatalf("Start after settle failed: %v", err)
+		}
+		if err := owned.Complete(ctx); err != nil {
+			t.Fatalf("Complete failed: %v", err)
+		}
+		_, _ = checkQueue(t, wq, ExpectedState{})
 	})
 
 	ct.scenario("start queue and requeue with priority", func(ctx context.Context, t *testing.T, wq workqueue.Interface) {
