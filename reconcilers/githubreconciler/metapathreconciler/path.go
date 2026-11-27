@@ -417,7 +417,8 @@ func (r *PRReconciler[Req, Resp, CB]) needsRefresh(ctx context.Context, cloneMgr
 // monitored packages mutate the worktree and return a Fixed diagnostic, while
 // the checker agent returns unfixed diagnostics without mutating it. An
 // informational Fixed diagnostic that changes nothing (e.g. image-main-package)
-// correctly counts as no change wanted.
+// correctly counts as no change wanted. An error wrapping ErrChangeWanted also
+// counts as a wanted change: the analyzer found the update before it failed.
 func (r *PRReconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *clonemanager.Manager, res *githubreconciler.Resource, ref string, depth int) (bool, error) {
 	lease, err := cloneMgr.LeaseRef(ctx, res, ref, clonemanager.WithCommitDepth(depth))
 	if err != nil {
@@ -434,6 +435,10 @@ func (r *PRReconciler[Req, Resp, CB]) revalidate(ctx context.Context, cloneMgr *
 		return false, fmt.Errorf("get worktree: %w", err)
 	}
 	diags, err := r.analyzer.Analyze(ctx, wt, []string{res.Path})
+	if errors.Is(err, ErrChangeWanted) {
+		clog.InfoContext(ctx, "Analyzer wants a change it could not apply on this ref", "ref", ref, "error", err)
+		return true, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("run analyzer: %w", err)
 	}
