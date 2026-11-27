@@ -532,13 +532,12 @@ func (m *Manager[T]) ociremoteOptions(ctx context.Context) []ociremote.Option {
 // has been written yet": a 404 on the subject lookup, or no matching bundle
 // referrers.
 func isMissing(err error) bool {
-	var terr *transport.Error
-	if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+	if terr, ok := errors.AsType[*transport.Error](err); ok && terr.StatusCode == http.StatusNotFound {
 		return true
 	}
 	if _, ok := errors.AsType[*cosign.ErrImageTagNotFound](err); ok {
 		return true
 	}
-	var noAtts *cosign.ErrNoMatchingAttestations
-	return errors.As(err, &noAtts)
+	_, ok := errors.AsType[*cosign.ErrNoMatchingAttestations](err)
+	return ok
 }
