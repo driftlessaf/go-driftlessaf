@@ -49,10 +49,10 @@ func TestTransportClassification(t *testing.T) {
 			client := &http.Client{Transport: NewTransport(nil)}
 			resp, err := client.Get(srv.URL)
 
-			var berr *Error
 			if tc.wantTransient {
 				require.Error(t, err)
-				require.True(t, errors.As(err, &berr), "transient status should surface as *Error")
+				berr, ok := errors.AsType[*Error](err)
+				require.True(t, ok, "transient status should surface as *Error")
 				require.Equal(t, tc.status, berr.StatusCode)
 				require.Positive(t, berr.RetryAfter)
 				return
@@ -71,8 +71,8 @@ func TestTransportError(t *testing.T) {
 	client := &http.Client{Transport: NewTransport(nil)}
 	err := get(t, client, srv.URL)
 
-	var berr *Error
-	require.True(t, errors.As(err, &berr), "transport error should surface as *Error")
+	berr, ok := errors.AsType[*Error](err)
+	require.True(t, ok, "transport error should surface as *Error")
 	require.Zero(t, berr.StatusCode)
 	require.Positive(t, berr.RetryAfter)
 	require.Error(t, berr.Err)
@@ -94,8 +94,8 @@ func TestTransportShortCircuits(t *testing.T) {
 
 	// The circuit is open: further requests never reach the server.
 	err := get(t, client, srv.URL)
-	var berr *Error
-	require.True(t, errors.As(err, &berr))
+	berr, ok := errors.AsType[*Error](err)
+	require.True(t, ok)
 	require.Zero(t, berr.StatusCode, "open circuit should not issue a request")
 	require.EqualValues(t, DefaultFailureThreshold, requests.Load())
 }
@@ -149,8 +149,8 @@ func TestTransportSuccessCloses(t *testing.T) {
 
 	status.Store(http.StatusServiceUnavailable)
 	for range DefaultFailureThreshold - 1 {
-		var berr *Error
-		require.True(t, errors.As(get(t, client, srv.URL), &berr))
+		berr, ok := errors.AsType[*Error](get(t, client, srv.URL))
+		require.True(t, ok)
 		require.NotZero(t, berr.StatusCode, "circuit should stay closed below the threshold")
 	}
 }
